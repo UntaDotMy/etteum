@@ -1,0 +1,30 @@
+<!DOCTYPE html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <link rel="icon" type="image/svg+xml" href="/etteum.svg" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    <meta name="color-scheme" content="dark light" />
+    <meta name="theme-color" content="#1e1e1e" media="(prefers-color-scheme: dark)" />
+    <meta name="theme-color" content="#f3f7f4" media="(prefers-color-scheme: light)" />
+    <title>Etteum Dashboard</title>
+    <script>
+      // No-flash theme: apply the saved theme before first paint. Dark is default.
+      (function () {
+        try {
+          var t = localStorage.getItem("poolprox-theme");
+          if (t === "light") {
+            document.documentElement.classList.add("light");
+            // Update theme-color for light mode
+            var metas = document.querySelectorAll('meta[name="theme-color"]');
+            if (metas.length > 0) metas[0].setAttribute("content", "#f3f7f4");
+          }
+        } catch (e) {}
+      })();
+    </script>
+  </head>
+  <body>
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

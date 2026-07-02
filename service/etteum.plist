@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.etteum.pool</string>
+
+    <key>ProgramArguments</key>
+    <array>
+        <string>/Users/%USER%/.bun/bin/bun</string>
+        <string>/Users/%USER%/etteum-pool/scripts/production.ts</string>
+    </array>
+
+    <key>WorkingDirectory</key>
+    <string>/Users/%USER%/etteum-pool</string>
+
+    <key>RunAtLoad</key>
+    <true/>
+
+    <key>KeepAlive</key>
+    <true/>
+
+    <key>StandardOutPath</key>
+    <string>/Users/%USER%/etteum-pool/logs/etteum.log</string>
+
+    <key>StandardErrorPath</key>
+    <string>/Users/%USER%/etteum-pool/logs/etteum-error.log</string>
+
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>NODE_ENV</key>
+        <string>production</string>
+        <key>PORT</key>
+        <string>1930</string>
+        <key>DASHBOARD_PORT</key>
+        <string>1931</string>
+    </dict>
+</dict>
+</plist>

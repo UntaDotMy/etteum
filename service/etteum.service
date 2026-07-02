@@ -1,0 +1,30 @@
+[Unit]
+Description=Etteum Pool Proxy Server
+After=network.target
+Wants=network.target
+
+[Service]
+Type=simple
+User=%I
+WorkingDirectory=%h/etteum-pool
+ExecStart=%h/.bun/bin/bun scripts/production.ts
+Restart=on-failure
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=etteum
+
+# Environment
+Environment=NODE_ENV=production
+Environment=PORT=1930
+Environment=DASHBOARD_PORT=1931
+
+# Security
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=read-only
+ReadWritePaths=%h/etteum-pool/data %h/etteum-pool/logs
+
+[Install]
+WantedBy=multi-user.target
