@@ -2,6 +2,8 @@
 
 **AI Proxy Pool** — Load balancing, auto-warmup, credit tracking, and model-aware routing across multiple AI providers.
 
+> This is a modified version of the original project by [priyo000](https://github.com/priyo000/etteum-pool).
+
 [![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
 [![Bun](https://img.shields.io/badge/Bun-1.x-000000?logo=bun)](https://bun.sh)
 [![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)](https://python.org)
