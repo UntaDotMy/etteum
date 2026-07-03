@@ -408,17 +408,28 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
 type ProviderLike = (typeof providers)[keyof typeof providers];
 
 /**
- * Run the kiro/kiro-pro overage probe. Mutates `health` in place when the probe
- * determines the account can still serve requests via PAYG overage.
+ * Run the kiro/kiro-pro overage probe, or the codex credit-override probe.
+ * Mutates `health` in place when the probe determines the account can still
+ * serve requests via PAYG overage (kiro) or pay-as-you-go credits (codex).
+ *
+ * Codex accounts report `overage.enabled` from healthCheck when their plan rate
+ * window is full but a credit balance keeps them usable. Without this probe,
+ * such an account would be benched as "exhausted" even though it can still
+ * bill credits — the same false-exhaustion problem kiro has with overage.
  */
 async function runKiroOverageProbe(provider: ProviderLike, account: Account, health: ProviderHealthResult): Promise<void> {
   if (health.kind !== "exhausted") return;
-  if (!account.provider.startsWith("kiro")) return;
   if (!health.quota?.overage?.enabled) return;
+
+  const isKiro = account.provider.startsWith("kiro");
+  const isCodex = account.provider === "codex";
+  if (!isKiro && !isCodex) return;
 
   try {
     const probeResult = await provider.chatCompletion(account, {
-      model: account.provider === "kiro-pro" ? "claude-sonnet-4.6" : "auto",
+      model: isKiro
+        ? (account.provider === "kiro-pro" ? "claude-sonnet-4.6" : "auto")
+        : "codex-auto",
       messages: [{ role: "user", content: "Say OK" }],
       max_tokens: 4,
     });

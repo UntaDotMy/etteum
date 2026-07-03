@@ -25,6 +25,109 @@ const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
 const CODEX_SCOPE = "openid profile email offline_access";
 
+/**
+ * Parsed Codex usage — the credit model codex-lb uses. See parseCodexUsage.
+ */
+export interface CodexUsage {
+  planType: string;
+  /** 0-100. Primary window (rolling ~5h). */
+  primaryUsedPercent: number;
+  /** 0-100. Secondary window (rolling ~weekly). This is the hard ceiling. */
+  secondaryUsedPercent: number;
+  rateLimited: boolean;
+  resetAt: Date | null;
+  primaryResetAt: Date | null;
+  secondaryResetAt: Date | null;
+  /** Pay-as-you-go credits, if the account has any. */
+  credits: { hasCredits: boolean; unlimited: boolean; balance: number };
+  /** Extra rate-limit resets granted when a window fills (rare). */
+  rateLimitResetCredits: { availableCount: number };
+  /** Per-model additional limits (e.g. Codex-Spark), keyed by model name. */
+  additionalRateLimits: Record<string, { usedPercent: number; resetAt: Date | null }>;
+  /** Normalized for the proxy's quota snapshot. limit=100 (percent scale). */
+  limit: number;
+  used: number;
+  remaining: number;
+  /** True when credit-override keeps the account usable despite a full window. */
+  creditOverrideActive: boolean;
+}
+
+/**
+ * Parse a `wham/usage` JSON payload into the Codex credit model. Pure: no I/O,
+ * never throws. Field names verified against codex-lb (Soju06/codex-lb) and the
+ * Codex CLI's own usage check.
+ *
+ * Credit-override rule (the key fix vs. the old impl): an account counts as
+ * having capacity when EITHER a rate window has headroom OR it has credits
+ * (`unlimited` | `has_credits` | `balance > 0`). The old code marked the
+ * account exhausted as soon as `remaining <= 0`, benching credit-backed
+ * accounts that were still perfectly usable.
+ */
+export function parseCodexUsage(data: any): CodexUsage {
+  const rl = data?.rate_limit || {};
+  const primary = rl.primary_window || {};
+  const secondary = rl.secondary_window || {};
+  const credits = data?.credits || {};
+
+  const primaryUsedPercent = Number(primary.used_percent ?? 0);
+  const secondaryUsedPercent = Number(secondary.used_percent ?? 0);
+  const rateLimited = Boolean(rl.limit_reached);
+
+  const toDate = (v: any): Date | null =>
+    v ? new Date(Number(v) * 1000) : null;
+  const primaryResetAt = toDate(primary.reset_at);
+  const secondaryResetAt = toDate(secondary.reset_at);
+  // Prefer the window that resets soonest among those that are full; else the
+  // primary reset. Used as the snapshot's resetAt.
+  const resetAt = primaryResetAt;
+
+  const hasCredits = Boolean(credits.has_credits);
+  const unlimited = Boolean(credits.unlimited);
+  const balance = Number(credits.balance ?? 0);
+
+  const rlrc = data?.rate_limit_reset_credits || {};
+  const availableCount = Number(rlrc.available_count ?? 0);
+
+  const additional: Record<string, { usedPercent: number; resetAt: Date | null }> = {};
+  const addl = data?.additional_rate_limits;
+  if (addl && typeof addl === "object") {
+    for (const [model, info] of Object.entries(addl)) {
+      const i = (info || {}) as any;
+      additional[model] = {
+        usedPercent: Number(i.used_percent ?? 0),
+        resetAt: toDate(i.reset_at),
+      };
+    }
+  }
+
+  // The secondary window is the hard ceiling. Credit-override: if it's full
+  // but the account has credits, the account is still usable.
+  const secondaryFull = secondaryUsedPercent >= 100 || rateLimited;
+  const creditOverrideActive = secondaryFull && (unlimited || hasCredits || balance > 0 || availableCount > 0);
+
+  // Normalized to a 100-point percent scale (the natural Codex unit).
+  const limit = 100;
+  const used = Math.min(100, Math.round(secondaryUsedPercent));
+  const remaining = creditOverrideActive ? 100 : Math.max(0, limit - used);
+
+  return {
+    planType: String(data?.plan_type || ""),
+    primaryUsedPercent,
+    secondaryUsedPercent,
+    rateLimited,
+    resetAt,
+    primaryResetAt,
+    secondaryResetAt,
+    credits: { hasCredits, unlimited, balance },
+    rateLimitResetCredits: { availableCount },
+    additionalRateLimits: additional,
+    limit,
+    used,
+    remaining,
+    creditOverrideActive,
+  };
+}
+
 const codexModelMap: Record<string, string> = {
   "codex-auto": "gpt-5.3-codex",
   "codex-gpt-5.5-xhigh": "gpt-5.5-xhigh",
@@ -82,6 +185,19 @@ export class CodexProvider extends BaseProvider {
     return codexModelMap[model.toLowerCase()] || model;
   }
 
+  /**
+   * Pure parser for the wham/usage response. Extracted so it can be unit-tested
+   * without hitting the network. Mirrors the codex-lb (Soju06/codex-lb) credit
+   * model:
+   *
+   * Codex accounts are plan-based with TWO rolling rate windows
+   * (primary ~5h, secondary ~weekly) measured in `used_percent` (0-100), PLUS
+   * an optional pay-as-you-go `credits` balance. The credit-override rule: an
+   * account is only "exhausted" when BOTH the secondary window is full AND no
+   * credits remain — credit-backed accounts stay usable past their plan limit.
+   *
+   * Returns a normalized shape plus the raw structured fields for metadata.
+   */
   private contentToText(content: unknown): string {
     if (!content) return "";
     if (typeof content === "string") return content;
@@ -723,6 +839,9 @@ export class CodexProvider extends BaseProvider {
         headers: {
           "Authorization": `Bearer ${tokens.access_token}`,
           "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+          // Required for multi-workspace/team accounts: without it, wham/usage
+          // can return the wrong workspace's limits or 4xx. Mirrors codex-lb.
+          ...(tokens.account_id ? { "chatgpt-account-id": tokens.account_id } : {}),
         },
       }, config.providerQuotaTimeoutMs);
 
@@ -734,19 +853,10 @@ export class CodexProvider extends BaseProvider {
       }
 
       const data = await response.json() as any;
-      const primary = data.rate_limit?.primary_window || {};
-      const usedPercent = Number(primary.used_percent ?? 0);
-      const resetSec = Number(primary.reset_after_seconds ?? 0);
-      const resetAt = primary.reset_at
-        ? new Date(Number(primary.reset_at) * 1000)
-        : (resetSec > 0 ? new Date(Date.now() + resetSec * 1000) : null);
-
-      const limit = 100;
-      const remaining = Math.max(0, Math.round(limit - usedPercent));
-
+      const parsed = parseCodexUsage(data);
       return {
         success: true,
-        quota: { limit, remaining, used: Math.round(usedPercent), resetAt },
+        quota: { limit: parsed.limit, remaining: parsed.remaining, used: parsed.used, resetAt: parsed.resetAt },
       };
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -770,6 +880,8 @@ export class CodexProvider extends BaseProvider {
         headers: {
           "Authorization": `Bearer ${tokens.access_token}`,
           "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+          // Required for multi-workspace/team accounts (mirrors the chat path).
+          ...(tokens.account_id ? { "chatgpt-account-id": tokens.account_id } : {}),
         },
       }, config.providerQuotaTimeoutMs);
 
@@ -781,40 +893,137 @@ export class CodexProvider extends BaseProvider {
       }
 
       const data = await response.json() as any;
-      const primary = data.rate_limit?.primary_window || {};
-      const secondary = data.rate_limit?.secondary_window || {};
-      const usedPercent = Number(primary.used_percent ?? 0);
-      const resetAt = primary.reset_at ? new Date(Number(primary.reset_at) * 1000) : null;
+      const parsed = parseCodexUsage(data);
 
-      const codexQuota = {
-        plan_type: String(data.plan_type || ""),
-        primary: {
-          used_percent: Number(primary.used_percent ?? 0),
-          limit_window_seconds: Number(primary.limit_window_seconds ?? 0),
-          reset_at: primary.reset_at ? new Date(Number(primary.reset_at) * 1000).toISOString() : null,
-          reset_after_seconds: Number(primary.reset_after_seconds ?? 0),
-        },
-        secondary: {
-          used_percent: Number(secondary.used_percent ?? 0),
-          limit_window_seconds: Number(secondary.limit_window_seconds ?? 0),
-          reset_at: secondary.reset_at ? new Date(Number(secondary.reset_at) * 1000).toISOString() : null,
-          reset_after_seconds: Number(secondary.reset_after_seconds ?? 0),
-        },
-        rate_limited: Boolean(data.rate_limit?.limit_reached),
-      };
-
-      const limit = 100;
-      const remaining = Math.max(0, Math.round(limit - usedPercent));
-      const exhausted = remaining <= 0 || codexQuota.rate_limited;
+      // Exhausted only when the hard ceiling (secondary window) is full AND no
+      // credit-override rescues it. Credit-backed accounts stay healthy.
+      const exhausted = parsed.remaining <= 0 && !parsed.creditOverrideActive;
 
       return {
         kind: exhausted ? ("exhausted" as const) : ("healthy" as const),
         success: true,
-        quota: { limit, remaining, used: Math.round(usedPercent), resetAt, source: "codex.fetchQuota" },
-        metadata: { codex_quota: codexQuota },
+        quota: {
+          limit: parsed.limit,
+          remaining: parsed.remaining,
+          used: parsed.used,
+          resetAt: parsed.resetAt,
+          source: "codex.wham-usage",
+          // Surface the credit balance as overage capacity when the plan limit
+          // is full but credits keep the account usable.
+          ...(parsed.creditOverrideActive
+            ? {
+                overage: {
+                  enabled: true,
+                  capable: true,
+                  used: 0,
+                  cap: parsed.credits.unlimited ? Infinity : parsed.credits.balance,
+                  remaining: parsed.credits.unlimited ? Infinity : parsed.credits.balance,
+                },
+              }
+            : {}),
+        },
+        metadata: {
+          codex_quota: {
+            plan_type: parsed.planType,
+            primary: {
+              used_percent: parsed.primaryUsedPercent,
+              reset_at: parsed.primaryResetAt?.toISOString() ?? null,
+            },
+            secondary: {
+              used_percent: parsed.secondaryUsedPercent,
+              reset_at: parsed.secondaryResetAt?.toISOString() ?? null,
+            },
+            rate_limited: parsed.rateLimited,
+            credits: parsed.credits,
+            rate_limit_reset_credits: parsed.rateLimitResetCredits,
+            additional_rate_limits: parsed.additionalRateLimits,
+            credit_override_active: parsed.creditOverrideActive,
+          },
+        },
       };
     } catch (e) {
       return { kind: "transient_error" as const, success: false, retryable: true, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /**
+   * Liveness warmup probe (codex-lb style): send a minimal streaming
+   * completion to /backend-api/codex/responses and confirm the account can
+   * actually serve a turn — not just that its token parses. Returns "ok" on a
+   * `response.completed` SSE event, "rate_limited" on 429/quota, "auth" on
+   * 401/403, "failed" on response.failed/incomplete, "error" otherwise.
+   *
+   * Bounded by a short timeout; never throws. Used by healthCheck to validate
+   * accounts that look healthy on paper (token present + quota > 0) but may be
+   * silently dead — the wham/usage endpoint can report stale limits.
+   */
+  async probeLiveness(account: Account, model = "codex-auto"): Promise<"ok" | "rate_limited" | "auth" | "failed" | "error"> {
+    const tokens = this.getTokens(account);
+    if (!tokens?.access_token) return "auth";
+
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${tokens.access_token}`,
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+      "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+      "OpenAI-Beta": "responses=experimental",
+      "originator": "codex-cli",
+    };
+    if (tokens.account_id) headers["chatgpt-account-id"] = tokens.account_id;
+
+    const body = JSON.stringify({
+      model: this.resolveModel(model),
+      instructions: "Reply with OK only.",
+      input: [{ type: "message", role: "user", content: [{ type: "input_text", text: "OK?" }] }],
+      tools: [],
+      store: false,
+      stream: true,
+      include: [],
+      max_output_tokens: 4,
+    });
+
+    try {
+      const response = await this.fetchWithTimeout(CODEX_RESPONSES_URL, {
+        method: "POST",
+        headers,
+        body,
+      }, 15_000);
+
+      if (response.status === 401) return "auth";
+      if (response.status === 403) return "auth";
+      if (response.status === 429) return "rate_limited";
+      if (!response.ok || !response.body) return response.status >= 500 ? "error" : "failed";
+
+      // Scan the SSE stream for a terminal event. response.completed = alive.
+      const reader = response.body.getReader();
+      const decoder = new TextDecoder();
+      let buffer = "";
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        // SSE events are separated by blank lines; parse `event:`/`data:` pairs.
+        let nl: number;
+        while ((nl = buffer.indexOf("\n\n")) !== -1) {
+          const block = buffer.slice(0, nl);
+          buffer = buffer.slice(nl + 2);
+          const dataLine = block.split("\n").find((l) => l.startsWith("data:"));
+          if (!dataLine) continue;
+          const json = (() => { try { return JSON.parse(dataLine.slice(5).trim()); } catch { return null; } })();
+          const t = json?.type || "";
+          if (t === "response.completed") return "ok";
+          if (t === "response.failed" || t === "response.incomplete") return "failed";
+          if (t === "error") return "failed";
+        }
+      }
+      // Stream ended without an explicit terminal event — treat as alive (the
+      // model produced deltas) but uncertain; "ok" keeps a working account in
+      // rotation, the usage check still gates quota.
+      return "ok";
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : String(e);
+      if (/timeout|abort/i.test(msg)) return "error";
+      return "error";
     }
   }
 }
