@@ -1463,11 +1463,21 @@ export class QoderProvider extends BaseProvider {
       ]);
       const whitelistBlocked = !!whitelistStatus && whitelistStatus !== "PASS" && WHITELIST_EXHAUSTED.has(whitelistStatus);
 
-      // Exhaustion = quota exceeded OR whitelist blocked. Note: for free
-      // (Community / personal_standard) accounts, total=0 + isQuotaExceeded=true
-      // IS real exhaustion — they have no credit balance to spend. The old
-      // "0/0 means unreported" assumption was wrong for isQuotaExceeded=true.
-      const exceeded = whitelistBlocked || data.isQuotaExceeded === true || (remaining < 0) || (remaining <= 0 && limit > 0);
+      // Paid-credit exhaustion: the account has no spendable credits for paid
+      // models. isQuotaExceeded=true on a zero-balance (Community) account means
+      // exactly this. BUT it does NOT mean the account is useless — qd-Lite
+      // (upstream "lite", price_factor 0) is always-free and works on
+      // zero-credit accounts (verified live). So we keep the account healthy
+      // (it can serve free models + any /activity promo buckets) and only flag
+      // paidCreditsExhausted so the pool/dashboard know paid models won't work.
+      const paidCreditsExhausted = data.isQuotaExceeded === true || remaining < 0 || (remaining <= 0 && limit > 0);
+
+      // The account is only truly exhausted (benched from the pool entirely)
+      // when it's administratively blocked, OR paid credits are exhausted AND
+      // it has no free-model capacity. qd-Lite is always free, so a valid-auth
+      // account always has at least free-model capacity — only whitelist
+      // blocking fully benches it.
+      const exceeded = whitelistBlocked;
       const quota = { limit, remaining, used, resetAt, source: "qoder.openapi" };
 
       result = {
@@ -1479,6 +1489,8 @@ export class QoderProvider extends BaseProvider {
           usageType: data.usageType || "",
           totalUsagePercentage: Number(data.totalUsagePercentage ?? 0),
           isQuotaExceeded: data.isQuotaExceeded === true,
+          paidCreditsExhausted,
+          freeModelAvailable: true, // qd-Lite is always free; verified live
           whitelistStatus: whitelistStatus ?? null,
           whitelistBlocked,
           ...(userStatus?.nickname ? { nickname: userStatus.nickname } : {}),

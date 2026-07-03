@@ -1213,20 +1213,24 @@ export default function Accounts() {
         count: number;
         plans: string[];
         quotaExceededCount: number;
+        paidExhaustedCount: number;
         whitelistBlockedCount: number;
+        freeModelCount: number;
         totalCredits: number;
         remainingCredits: number;
         promoBuckets: { model: string; remaining: number; total: number }[];
       } | undefined;
       if (provider === "qoder") {
         const plans = new Set<string>();
-        let qxCount = 0, wbCount = 0, totalSum = 0, remainingSum = 0;
+        let qxCount = 0, peCount = 0, wbCount = 0, fmCount = 0, totalSum = 0, remainingSum = 0;
         const promoMap = new Map<string, { remaining: number; total: number }>();
         for (const a of activeRows) {
           const m = (a.metadata || {}) as Record<string, any>;
           if (m.plan) plans.add(m.plan);
           if (m.isQuotaExceeded === true) qxCount++;
+          if (m.paidCreditsExhausted === true) peCount++;
           if (m.whitelistBlocked === true) wbCount++;
+          if (m.freeModelAvailable === true) fmCount++;
           const sq = m.serverQuota || {};
           if (typeof sq.limit === "number") totalSum += sq.limit;
           if (typeof sq.remaining === "number") remainingSum += sq.remaining;
@@ -1247,7 +1251,9 @@ export default function Accounts() {
             count: activeRows.length,
             plans: [...plans],
             quotaExceededCount: qxCount,
+            paidExhaustedCount: peCount,
             whitelistBlockedCount: wbCount,
+            freeModelCount: fmCount,
             totalCredits: totalSum,
             remainingCredits: remainingSum,
             promoBuckets: [...promoMap.entries()].map(([model, v]) => ({ model, remaining: v.remaining, total: v.total })),
@@ -1401,11 +1407,20 @@ export default function Accounts() {
                         </span>
                       </div>
                     )}
-                    {(qs.quotaExceededCount > 0 || qs.whitelistBlockedCount > 0) && (
-                      <div className={`flex justify-between text-xs ${allExceeded ? "text-[var(--error)]" : "text-[var(--warning)]"}`}>
-                        <span>Status</span>
+                    {/* Free-model (qd-Lite) capacity — these accounts can always
+                        serve the free model even with zero paid credits. */}
+                    {qs.freeModelCount > 0 && (
+                      <div className="flex justify-between text-xs text-[var(--success)]">
+                        <span className="text-[var(--muted-foreground)]">Free model</span>
+                        <span>{qs.freeModelCount}/{qs.count} acc can serve qd-Lite</span>
+                      </div>
+                    )}
+                    {/* Paid-credit state — distinct from blanket exhaustion. */}
+                    {(qs.paidExhaustedCount > 0 || qs.whitelistBlockedCount > 0) && (
+                      <div className={`flex justify-between text-xs ${qs.whitelistBlockedCount > 0 ? "text-[var(--error)]" : "text-[var(--warning)]"}`}>
+                        <span className="text-[var(--muted-foreground)]">Paid models</span>
                         <span>
-                          {qs.quotaExceededCount > 0 && `${qs.quotaExceededCount}/${qs.count} quota exceeded`}
+                          {qs.paidExhaustedCount > 0 && `${qs.paidExhaustedCount}/${qs.count} no credits`}
                           {qs.whitelistBlockedCount > 0 && ` · ${qs.whitelistBlockedCount} blocked`}
                         </span>
                       </div>

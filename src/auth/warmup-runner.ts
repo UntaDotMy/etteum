@@ -479,28 +479,16 @@ async function runQoderFalseExhaustionProbe(
 
   // Don't probe accounts that are GENUINELY dead — the false-exhaustion probe
   // exists to catch the server wrongly flagging a working account, not to
-  // resurrect accounts that truly have no capacity. Two cases to skip:
-  //   1. whitelistBlocked (NoLicense/AppDisable/LoginExpire/NoIpPermission/...) —
-  //      the account is administratively dead; a probe passing on a free basic
-  //      model wouldn't make paid models work.
-  //   2. isQuotaExceeded + zero credits + no per-model promo buckets — a free
-  //      (Community) account that's out of plan credits and has no promo quota
-  //      left. qd-Lite (the probe model) doesn't consume credits, so a passed
-  //      probe would misleadingly keep a credit-less account in rotation,
-  //      failing every real paid-model request.
+  // resurrect administratively-blocked ones. healthCheck only marks a Qoder
+  // account exhausted when whitelistBlocked (NoLicense/AppDisable/LoginExpire/
+  // NoIpPermission/...); a probe passing on a free model wouldn't unblock it.
+  // (Note: zero-credit Community accounts are NOT exhausted — qd-Lite is
+  // always-free and works without credits, so they stay healthy for free
+  // models. paidCreditsExhausted in metadata tracks the paid-model state.)
   const meta = (health.metadata || {}) as Record<string, any>;
   if (meta.whitelistBlocked === true) {
     health.metadata = { ...health.metadata, inferenceProbe: "skipped_whitelist_blocked" };
     return { ranProbe: false };
-  }
-  if (meta.isQuotaExceeded === true) {
-    const activity = meta.activityQuota;
-    const hasPromoBuckets = Array.isArray(activity?.activities) && activity.activities.length > 0;
-    const serverRemaining = Number(health.quota?.remaining ?? 0);
-    if (!hasPromoBuckets && serverRemaining <= 0) {
-      health.metadata = { ...health.metadata, inferenceProbe: "skipped_no_credits" };
-      return { ranProbe: false };
-    }
   }
 
   const prevWarmup = getWarmupMeta(account);
