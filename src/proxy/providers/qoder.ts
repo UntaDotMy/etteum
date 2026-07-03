@@ -1365,6 +1365,38 @@ export class QoderProvider extends BaseProvider {
     };
   }
 
+  /**
+   * Fetch /api/v3/user/status (COSY-signed) for the authoritative account
+   * whitelist state. The quota/usage endpoint reports credit balance + a
+   * coarse isQuotaExceeded flag, but NOT the whitelist reasons an account can
+   * be unusable while still holding credits: NoLicense, AppDisable,
+   * LoginExpire, NoIpPermission, etc. This catches those.
+   *
+   * Best-effort: returns null on any failure so healthCheck degrades to the
+   * quota/usage path. Mirrors the qoder2api / qodercli status check.
+   */
+  private async fetchUserStatus(tokens: QoderTokens): Promise<{
+    whitelistStatus?: string;
+    userType?: string;
+    nickname?: string;
+  } | null> {
+    try {
+      const resp = await bearerFetch(tokens, { url: USER_STATUS_URL, method: "GET" });
+      if (!resp.ok) return null;
+      const data: any = await resp.json().catch(() => null);
+      // Response shape: { code, data: { whitelistStatus, userType, nickname } }
+      // or flat { whitelistStatus, ... }. Be defensive.
+      const inner = (data && (data.data || data)) || {};
+      return {
+        whitelistStatus: typeof inner.whitelistStatus === "string" ? inner.whitelistStatus : undefined,
+        userType: typeof inner.userType === "string" ? inner.userType : undefined,
+        nickname: typeof inner.nickname === "string" ? inner.nickname : undefined,
+      };
+    } catch {
+      return null;
+    }
+  }
+
   override async healthCheck(account: Account): Promise<ProviderHealthResult> {
     const parsed = this.parseTokens(account);
     if (!parsed?.personalToken) {
@@ -1405,7 +1437,10 @@ export class QoderProvider extends BaseProvider {
       }
 
       const data = (await resp.json()) as {
-        userQuota?: { total?: number; used?: number; remaining?: number };
+        userType?: string;            // e.g. "personal_standard" (= Community/free)
+        usageType?: string;           // "credits"
+        totalUsagePercentage?: number;
+        userQuota?: { total?: number; used?: number; remaining?: number; percentage?: number; unit?: string };
         expiresAt?: number;
         isQuotaExceeded?: boolean;
       };
@@ -1415,17 +1450,39 @@ export class QoderProvider extends BaseProvider {
       const remaining = Number(data.userQuota?.remaining ?? Math.max(0, limit - used));
       const resetAt = data.expiresAt ? new Date(data.expiresAt) : undefined;
 
-      // 0/0 quota (limit=0, remaining=0) means the API doesn't report meaningful
-      // quota data — not that the account is truly exhausted. Only treat as
-      // exhausted if the API explicitly flags it OR remaining went negative OR
-      // there's a real quota (limit>0) that hit zero.
-      const exceeded = data.isQuotaExceeded === true || (remaining < 0) || (remaining <= 0 && limit > 0);
+      // ---- Authoritative whitelist state (catches exhaustion quota/usage misses) ----
+      // quota/usage reports credit balance + isQuotaExceeded, but NOT the
+      // whitelist reasons an account is unusable: NoLicense, AppDisable,
+      // LoginExpire, NoIpPermission, NoQuota, EXPIRED. These mean the account
+      // is dead even if it nominally holds credits.
+      const userStatus = await this.fetchUserStatus(tokens);
+      const whitelistStatus = userStatus?.whitelistStatus;
+      // PASS / undefined = healthy; anything else = the account is blocked.
+      const WHITELIST_EXHAUSTED = new Set([
+        "NoQuota", "EXPIRED", "NoLicense", "AppDisable", "LoginExpire", "NoIpPermission",
+      ]);
+      const whitelistBlocked = !!whitelistStatus && whitelistStatus !== "PASS" && WHITELIST_EXHAUSTED.has(whitelistStatus);
+
+      // Exhaustion = quota exceeded OR whitelist blocked. Note: for free
+      // (Community / personal_standard) accounts, total=0 + isQuotaExceeded=true
+      // IS real exhaustion — they have no credit balance to spend. The old
+      // "0/0 means unreported" assumption was wrong for isQuotaExceeded=true.
+      const exceeded = whitelistBlocked || data.isQuotaExceeded === true || (remaining < 0) || (remaining <= 0 && limit > 0);
       const quota = { limit, remaining, used, resetAt, source: "qoder.openapi" };
 
       result = {
         kind: exceeded ? "exhausted" : "healthy",
         success: true,
         quota,
+        metadata: {
+          plan: data.userType || userStatus?.userType || "",
+          usageType: data.usageType || "",
+          totalUsagePercentage: Number(data.totalUsagePercentage ?? 0),
+          isQuotaExceeded: data.isQuotaExceeded === true,
+          whitelistStatus: whitelistStatus ?? null,
+          whitelistBlocked,
+          ...(userStatus?.nickname ? { nickname: userStatus.nickname } : {}),
+        },
         ...(refreshed ? { tokens } : {}),
       };
     } catch (error) {

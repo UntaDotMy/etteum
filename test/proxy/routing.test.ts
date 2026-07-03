@@ -70,7 +70,10 @@ describe("getProviderForModel", () => {
   });
 
   test("codex gpt-5.5-xhigh alias uses codex metadata", () => {
-    expect(providers.codex.getModelInfo("gpt-5.5-xhigh")?.id).toBe("codex-gpt-5.5-xhigh");
+    // gpt-5.5-xhigh is a reasoning LEVEL on gpt-5.5, not a separate model, so
+    // the bare alias resolves to codex-gpt-5.5 (the real model). The codex-
+    // prefixed form still resolves to its own entry (legacy alias kept).
+    expect(providers.codex.getModelInfo("gpt-5.5-xhigh")?.id).toBe("codex-gpt-5.5");
     expect(providers.codex.getModelInfo("codex-gpt-5.5-xhigh")?.id).toBe("codex-gpt-5.5-xhigh");
     expect(providers.codex.getProviderCreditUnit("gpt-5.5-xhigh")).toBe("credit");
   });

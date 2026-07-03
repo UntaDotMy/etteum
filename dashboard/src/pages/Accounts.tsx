@@ -1204,6 +1204,57 @@ export default function Accounts() {
         if (anyBalance || codexCreditUnlimited) codexCreditBalance = balanceSum;
       }
 
+      // For qoder, aggregate the real credit state written by healthCheck into
+      // metadata: plan (userType, e.g. personal_standard=Community),
+      // isQuotaExceeded, whitelistStatus, and per-model promo buckets. The
+      // generic "Credits" line is meaningless for free Community accounts
+      // (0/0) — surface the real plan + exceeded flag instead.
+      let qoderStatus: {
+        count: number;
+        plans: string[];
+        quotaExceededCount: number;
+        whitelistBlockedCount: number;
+        totalCredits: number;
+        remainingCredits: number;
+        promoBuckets: { model: string; remaining: number; total: number }[];
+      } | undefined;
+      if (provider === "qoder") {
+        const plans = new Set<string>();
+        let qxCount = 0, wbCount = 0, totalSum = 0, remainingSum = 0;
+        const promoMap = new Map<string, { remaining: number; total: number }>();
+        for (const a of activeRows) {
+          const m = (a.metadata || {}) as Record<string, any>;
+          if (m.plan) plans.add(m.plan);
+          if (m.isQuotaExceeded === true) qxCount++;
+          if (m.whitelistBlocked === true) wbCount++;
+          const sq = m.serverQuota || {};
+          if (typeof sq.limit === "number") totalSum += sq.limit;
+          if (typeof sq.remaining === "number") remainingSum += sq.remaining;
+          const acts = m.activityQuota?.activities;
+          if (Array.isArray(acts)) {
+            for (const act of acts) {
+              const key = (act.modelKeys || []).join("/") || "promo";
+              const prev = promoMap.get(key);
+              promoMap.set(key, {
+                remaining: (prev?.remaining ?? 0) + Number(act.remaining ?? 0),
+                total: (prev?.total ?? 0) + Number(act.total ?? 0),
+              });
+            }
+          }
+        }
+        if (activeRows.length > 0) {
+          qoderStatus = {
+            count: activeRows.length,
+            plans: [...plans],
+            quotaExceededCount: qxCount,
+            whitelistBlockedCount: wbCount,
+            totalCredits: totalSum,
+            remainingCredits: remainingSum,
+            promoBuckets: [...promoMap.entries()].map(([model, v]) => ({ model, remaining: v.remaining, total: v.total })),
+          };
+        }
+      }
+
       return {
         provider,
         total: rows.length,
@@ -1216,6 +1267,7 @@ export default function Accounts() {
         codexWindows,
         codexCreditBalance,
         codexCreditUnlimited,
+        qoderStatus,
       };
     });
   }, [accounts]);
@@ -1320,6 +1372,66 @@ export default function Accounts() {
                     );
                   })}
                 </div>
+              ) : stat.provider === "qoder" && stat.qoderStatus ? (
+              // Qoder: real plan + quota-exceeded/whitelist state across accounts.
+              // Free Community accounts show 0/0 credits — surface the plan and
+              // exceeded flag, plus any per-model promo buckets, instead of the
+              // meaningless generic "Credits 0/0" line.
+              (() => {
+                const qs = stat.qoderStatus;
+                const planLabel = (p: string) =>
+                  p === "personal_standard" ? "Community" :
+                  p === "personal_pro" ? "Pro" :
+                  p === "team" ? "Team" : (p || "?");
+                const allExceeded = qs.quotaExceededCount >= qs.count && qs.count > 0;
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--muted-foreground)]">Plan</span>
+                      <span className="text-[var(--foreground)]">
+                        {qs.plans.length ? qs.plans.map(planLabel).join(", ") : "—"}
+                        <span className="text-[var(--muted-foreground)] ml-1">({qs.count} acc)</span>
+                      </span>
+                    </div>
+                    {qs.totalCredits > 0 && (
+                      <div className="flex justify-between text-xs">
+                        <span className="text-[var(--muted-foreground)]">Credits</span>
+                        <span className={allExceeded ? "text-[var(--error)]" : "text-[var(--foreground)]"}>
+                          {qs.remainingCredits.toFixed(1)} / {qs.totalCredits.toFixed(1)}
+                        </span>
+                      </div>
+                    )}
+                    {(qs.quotaExceededCount > 0 || qs.whitelistBlockedCount > 0) && (
+                      <div className={`flex justify-between text-xs ${allExceeded ? "text-[var(--error)]" : "text-[var(--warning)]"}`}>
+                        <span>Status</span>
+                        <span>
+                          {qs.quotaExceededCount > 0 && `${qs.quotaExceededCount}/${qs.count} quota exceeded`}
+                          {qs.whitelistBlockedCount > 0 && ` · ${qs.whitelistBlockedCount} blocked`}
+                        </span>
+                      </div>
+                    )}
+                    {qs.promoBuckets.length > 0 && (
+                      <div className="space-y-0">
+                        {qs.promoBuckets.map((b) => {
+                          const pct = b.total > 0 ? (b.remaining / b.total) * 100 : 0;
+                          const tone = b.remaining <= 0 ? "bg-[var(--error)]" : pct <= 10 ? "bg-[var(--error)]" : pct <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
+                          return (
+                            <div key={b.model}>
+                              <div className="flex items-center justify-between text-[10px]">
+                                <span className="text-[var(--foreground)] font-medium">{b.model}</span>
+                                <span className="text-[var(--muted-foreground)] shrink-0 ml-2">{b.remaining}/{b.total}</span>
+                              </div>
+                              <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+                                <div className={`h-full ${tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, pct))}%` }} />
+                              </div>
+                            </div>
+                          );
+                        })}
+                      </div>
+                    )}
+                  </div>
+                );
+              })()
               ) : stat.provider === "codex" ? (
               // Codex has no "credit balance" in the plan sense — it runs on
               // rolling rate windows (shown above). Only surface a real pay-as-
