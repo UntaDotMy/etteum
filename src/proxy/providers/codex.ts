@@ -129,12 +129,18 @@ export function parseCodexUsage(data: any): CodexUsage {
 }
 
 const codexModelMap: Record<string, string> = {
-  "codex-auto": "gpt-5.3-codex",
+  // `codex-auto` is the default fallback model and MUST resolve to one that
+  // works on ChatGPT-plan accounts (the common case). gpt-5.3-codex is rejected
+  // with "model is not supported when using Codex with a ChatGPT account", so
+  // route auto → gpt-5.5 (newest ChatGPT-tier model verified working).
+  "codex-auto": "gpt-5.5",
   "codex-gpt-5.5-xhigh": "gpt-5.5-xhigh",
   "gpt-5.5-xhigh": "gpt-5.5-xhigh",
   "codex-gpt-5.5": "gpt-5.5",
   "codex-gpt-5.4": "gpt-5.4",
-  "codex-gpt-5.3": "gpt-5.3-codex",
+  // gpt-5.3-codex is ChatGPT-account-incompatible; alias to gpt-5.5 so the
+  // explicit codex-gpt-5.3 id still serves a working model.
+  "codex-gpt-5.3": "gpt-5.5",
   "codex-gpt-5.2": "gpt-5.2",
 };
 
@@ -423,6 +429,13 @@ export class CodexProvider extends BaseProvider {
     if (tokens.account_id) headers["chatgpt-account-id"] = tokens.account_id;
 
     const { instructions, input } = this.buildPayload(request);
+    // Guard: if every message was dropped (e.g. system-only, or all-empty
+    // content), Codex's /responses rejects with 400 "must provide input /
+    // previous_response_id / prompt / conversation_id". Fail fast with a clear
+    // error instead of sending a guaranteed-to-fail request.
+    if (input.length === 0) {
+      throw new Error("Codex request has no input messages (all roles were empty or system-only).");
+    }
     const tools = this.normalizeTools(request.tools);
     const reasoning = this.buildReasoning(request);
     const body = {
