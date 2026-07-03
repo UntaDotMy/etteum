@@ -128,20 +128,38 @@ export function parseCodexUsage(data: any): CodexUsage {
   };
 }
 
+// Model map: proxy-facing `codex-*` ids → real Codex backend slugs.
+// Fetched live 2026-07-03 from https://chatgpt.com/backend-api/codex/models
+// ?client_version=1.0.18 (the same endpoint the Codex CLI uses). The backend
+// currently exposes exactly FOUR slugs: gpt-5.5, gpt-5.4, gpt-5.4-mini,
+// codex-auto-review — all 272k context, all vision-capable, all supporting
+// reasoning levels low/medium/high/xhigh. Older slugs (gpt-5.3-codex, gpt-5.2,
+// gpt-5.5-xhigh as a *model*) no longer exist and 400 on ChatGPT accounts.
+//
+// Note: "xhigh" is a REASONING LEVEL on gpt-5.5, not a separate model. Clients
+// that send `gpt-5.5-xhigh` are aliased to gpt-5.5 (the proxy sets reasoning
+// effort via the request, not the model name).
 const codexModelMap: Record<string, string> = {
-  // `codex-auto` is the default fallback model and MUST resolve to one that
-  // works on ChatGPT-plan accounts (the common case). gpt-5.3-codex is rejected
-  // with "model is not supported when using Codex with a ChatGPT account", so
-  // route auto → gpt-5.5 (newest ChatGPT-tier model verified working).
+  // Default fallback — newest frontier model, verified working on ChatGPT accounts.
   "codex-auto": "gpt-5.5",
-  "codex-gpt-5.5-xhigh": "gpt-5.5-xhigh",
-  "gpt-5.5-xhigh": "gpt-5.5-xhigh",
+  // Real models (live-fetched).
   "codex-gpt-5.5": "gpt-5.5",
+  "gpt-5.5": "gpt-5.5",
   "codex-gpt-5.4": "gpt-5.4",
-  // gpt-5.3-codex is ChatGPT-account-incompatible; alias to gpt-5.5 so the
-  // explicit codex-gpt-5.3 id still serves a working model.
+  "gpt-5.4": "gpt-5.4",
+  "codex-gpt-5.4-mini": "gpt-5.4-mini",
+  "gpt-5.4-mini": "gpt-5.4-mini",
+  "codex-auto-review": "codex-auto-review",
+  // Legacy aliases — these slugs no longer exist upstream; remap to gpt-5.5 so
+  // old configs/clients keep working instead of 400ing.
+  "codex-gpt-5.5-xhigh": "gpt-5.5",
+  "gpt-5.5-xhigh": "gpt-5.5",
   "codex-gpt-5.3": "gpt-5.5",
-  "codex-gpt-5.2": "gpt-5.2",
+  "codex-gpt-5.3-codex": "gpt-5.5",
+  "gpt-5.3-codex": "gpt-5.5",
+  "codex-gpt-5.2": "gpt-5.5",
+  "gpt-5.2": "gpt-5.5",
+  "gpt-5-codex": "gpt-5.5",
 };
 
 interface PendingToolCall {
@@ -164,18 +182,32 @@ export class CodexProvider extends BaseProvider {
     return m.startsWith("codex-") || m === "gpt-5-codex" || m === "gpt-5.5-xhigh";
   }
 
+  // Supported models — matches the live-fetched Codex backend (2026-07-03).
+  // 4 real slugs, all 272k context, vision-capable, reasoning low/med/high/xhigh.
+  // context_window verified upstream (was wrongly 200000 before).
   supportedModels: ModelInfo[] = applyModelSpecs([
-    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.015 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.3", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.2", object: "model", created: Date.now(), owned_by: "codex", context_window: 200000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
-  ], (m) => m.id.replace(/^codex-/, "").replace(/-xhigh$/, ""));
+    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.4-mini", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.005 / 1000, creditSource: "estimated" },
+    { id: "codex-auto-review", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    // Legacy alias kept so existing configs referencing it still resolve via
+    // codexModelMap (→ gpt-5.5). Not advertised as a distinct model.
+    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+  ], (m) => {
+    // Return undefined so applyModelSpecs does NOT override our verified
+    // 272k Codex context with the model-specs registry's API-tier value
+    // (gpt-5.5 there is 1M — that's the OpenAI API limit, not the Codex/
+    // ChatGPT-account limit, which is 272k per the live /codex/models fetch).
+    return undefined;
+  });
 
   override getModelInfo(model: string): ModelInfo | undefined {
     const normalized = model.toLowerCase();
-    if (normalized === "gpt-5.5-xhigh") return super.getModelInfo("codex-gpt-5.5-xhigh");
+    // gpt-5.5-xhigh is an alias for codex-gpt-5.5 (xhigh is a reasoning level,
+    // not a separate model). codex-auto is the default → gpt-5.5.
+    if (normalized === "gpt-5.5-xhigh") return super.getModelInfo("codex-gpt-5.5");
+    if (normalized === "codex-auto") return super.getModelInfo("codex-gpt-5.5");
     return super.getModelInfo(model);
   }
 
