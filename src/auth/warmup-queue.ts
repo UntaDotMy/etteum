@@ -45,6 +45,19 @@ class WarmupQueue {
   // Per-provider progress tracking (survives queue pruning)
   private progressByProvider: Record<string, { total: number; completed: number }> = {};
 
+  // Abort controller for the current "generation" of jobs. stop() aborts it,
+  // which (a) drops queued items + prevents retries and (b) signals every
+  // in-flight warmupAccount() to abort its provider HTTP call mid-flight.
+  // New enqueues after a stop lazily create a fresh controller so warmup can
+  // run again — stop is a one-shot cancel, not a permanent disable.
+  private stopController: AbortController | null = null;
+
+  /** The signal in-flight jobs should observe. Never null once work is running. */
+  private stopSignal(): AbortSignal {
+    if (!this.stopController) this.stopController = new AbortController();
+    return this.stopController.signal;
+  }
+
   async enqueue(accountId: number): Promise<void> {
     this.pruneTerminalItems();
     if (this.queue.some((item) => item.accountId === accountId && item.status !== "completed" && item.status !== "failed")) {
@@ -197,6 +210,41 @@ class WarmupQueue {
     broadcast({ type: "warmup_queue_cleared", data: {} });
   }
 
+  /**
+   * Stop warmup hard: drop every queued item, prevent retries of in-flight
+   * jobs, and abort all running provider HTTP calls mid-flight. Unlike
+   * clear() (which only drops queued items and lets running jobs finish),
+   * stop() cancels active work too. One-shot: subsequent enqueue() calls
+   * create a fresh stop controller, so warmup can be started again normally.
+   */
+  stop(): { dropped: number; active: number } {
+    // Count queued/retrying items we're about to drop.
+    const dropped = this.queue.filter(
+      (item) => item.status === "queued" || item.status === "retrying"
+    ).length;
+
+    // Mark queued/retrying as failed so the loop won't pick them up and the
+    // retry path won't resurrect them. In-flight (processing) items are left
+    // as-is — they'll be aborted via the signal and settle on their own.
+    for (const item of this.queue) {
+      if (item.status === "queued" || item.status === "retrying") {
+        item.status = "failed";
+      }
+    }
+
+    // Abort the current generation. In-flight jobs that observe the signal
+    // bail out of healthCheck/probes/DB-write. A fresh controller is created
+    // lazily on the next enqueue(), so warmup remains usable afterwards.
+    if (this.stopController) {
+      this.stopController.abort();
+    }
+    this.stopController = new AbortController();
+
+    this.progressByProvider = {};
+    broadcast({ type: "warmup_stopped", data: { dropped, active: this.activeJobs } });
+    return { dropped, active: this.activeJobs };
+  }
+
   setConcurrency(concurrency: number): void {
     // 0 = unbounded. No hard upper clamp — the cap is now governed by
     // config.warmupConcurrency / POOLPROX_WARMUP_CONCURRENCY so operators can
@@ -287,6 +335,12 @@ class WarmupQueue {
   }
 
   private async processItem(item: QueueItem): Promise<void> {
+    // Capture the stop signal at dispatch time. If stop() fires after this
+    // point, the in-flight warmupAccount() observes the abort and bails out.
+    // We snapshot the signal of the controller that's current right now; a
+    // later stop() creates a fresh controller, so it can't retroactively
+    // abort this job (only future ones).
+    const stopSignal = this.stopSignal();
     const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
     if (!account) {
       item.status = "failed";
@@ -320,12 +374,25 @@ class WarmupQueue {
     });
 
     try {
-      const result = await warmupAccount(account);
+      const result = await warmupAccount(account, stopSignal);
+
+      // Never retry a job that was cancelled by stop() — it would resurrect
+      // work the operator just asked to halt.
+      if (stopSignal.aborted) {
+        item.status = "failed";
+        return;
+      }
 
       if (result.retryable && item.retries < this.maxRetries) {
         item.retries++;
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
+        // Re-check abort after the backoff sleep — stop() may have fired while
+        // we were waiting. Don't re-queue a cancelled job.
+        if (stopSignal.aborted) {
+          item.status = "failed";
+          return;
+        }
         item.status = "queued";
         return;
       }
@@ -339,10 +406,19 @@ class WarmupQueue {
         provProgress.completed++;
       }
     } catch (error) {
+      // A cancellation abort surfaces here as an AbortError — don't retry it.
+      if (stopSignal.aborted) {
+        item.status = "failed";
+        return;
+      }
       if (item.retries < this.maxRetries) {
         item.retries++;
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
+        if (stopSignal.aborted) {
+          item.status = "failed";
+          return;
+        }
         item.status = "queued";
         return;
       }

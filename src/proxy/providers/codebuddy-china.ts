@@ -408,7 +408,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     return !!this.getApiKey(tokens || {} as CodeBuddyChinaTokens);
   }
 
-  async fetchQuota(account: Account): Promise<{
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null };
     error?: string;
@@ -420,7 +420,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     if (!apiKey) return { success: false, error: "No API key" };
 
     try {
-      const response = await this.fetchUserResource(tokens);
+      const response = await this.fetchUserResource(tokens, signal);
 
       if (!response.ok) {
         return { success: false, error: `HTTP ${response.status}` };
@@ -440,7 +440,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     }
   }
 
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const tokens = this.getTokens(account);
     const apiKey = this.getApiKey(tokens || {} as CodeBuddyChinaTokens);
     if (!apiKey) {
@@ -449,7 +449,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
     // Primary check: fetch real billing data via /v2/billing/meter/get-user-resource
     // This endpoint works with API key and gives us both auth validation AND real credit data.
-    const quota = await this.fetchQuota(account);
+    const quota = await this.fetchQuota(account, signal);
     if (quota.success && quota.quota) {
       // Billing API succeeded — but billing success does NOT mean the chat API works.
       // CodeBuddy China can return 403 {"code":11140,"msg":"request illegal"} on the
@@ -636,7 +636,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     return this.probeChatEndpoint(apiKey);
   }
 
-  private async fetchUserResource(tokens: CodeBuddyChinaTokens): Promise<Response> {
+  private async fetchUserResource(tokens: CodeBuddyChinaTokens, signal?: AbortSignal): Promise<Response> {
     const now = new Date();
     const endDate = new Date(now.getTime() + 365 * 20 * 24 * 60 * 60 * 1000);
     const payload = {
@@ -662,7 +662,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
       method: "POST",
       headers,
       body: JSON.stringify(payload),
-    }, config.providerQuotaTimeoutMs);
+    }, config.providerQuotaTimeoutMs, signal);
   }
 
   private parseResourceQuota(data: any): { limit: number; remaining: number; used: number } {

@@ -245,7 +245,7 @@ export class CanvaProvider extends BaseProvider {
 
   // ─── Quota ──────────────────────────────────────────────────────
 
-  async fetchQuota(account: Account): Promise<{
+  async fetchQuota(account: Account, _signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: ProviderQuotaSnapshot;
     error?: string;
@@ -283,7 +283,7 @@ export class CanvaProvider extends BaseProvider {
     return !!tokens?.caz;
   }
 
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, _signal?: AbortSignal): Promise<ProviderHealthResult> {
     const tokens = this.getTokens(account);
     if (!tokens?.caz) {
       return { kind: "missing_tokens", success: false, error: "No Canva CAZ token" };

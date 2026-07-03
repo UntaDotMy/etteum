@@ -669,7 +669,7 @@ function emitQoderDriftWarningIfAny(account: Account, health: ProviderHealthResu
 // Public entry point
 // ============================================================================
 
-export async function warmupAccount(account: Account): Promise<WarmupResult> {
+export async function warmupAccount(account: Account, signal?: AbortSignal): Promise<WarmupResult> {
   const provider = providers[account.provider as keyof typeof providers];
   if (!provider) {
     return {
@@ -681,6 +681,23 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
       status: "error",
       kind: "unsupported",
       error: `Provider not configured: ${account.provider}`,
+    };
+  }
+
+  // If the warmup was already stopped before this job started running, bail
+  // out without hitting the network or touching the DB.
+  if (signal?.aborted) {
+    return {
+      success: false,
+      accountId: account.id,
+      provider: account.provider,
+      email: account.email,
+      previousStatus: account.status,
+      status: account.status,
+      kind: "transient_error",
+      retryable: false,
+      error: "Warmup cancelled",
+      message: "Warmup cancelled before start",
     };
   }
 
@@ -707,7 +724,25 @@ export async function warmupAccount(account: Account): Promise<WarmupResult> {
     },
   });
 
-  const health: ProviderHealthResult = await provider.healthCheck(account);
+  const health: ProviderHealthResult = await provider.healthCheck(account, signal);
+
+  // The healthCheck is the long network call. If warmup was stopped mid-flight
+  // (signal aborted), skip the probes + DB write so we don't leave partial
+  // state or kick off extra inference calls for a job we're cancelling.
+  if (signal?.aborted) {
+    return {
+      success: false,
+      accountId: account.id,
+      provider: account.provider,
+      email: account.email,
+      previousStatus: account.status,
+      status: account.status,
+      kind: health.kind,
+      retryable: false,
+      error: "Warmup cancelled",
+      message: "Warmup cancelled mid-flight",
+    };
+  }
 
   // Probes — each may mutate `health` in place.
   await runKiroOverageProbe(provider, account, health);

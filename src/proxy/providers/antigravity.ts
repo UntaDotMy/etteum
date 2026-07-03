@@ -264,7 +264,7 @@ export class AntigravityProvider extends BaseProvider {
    * token set so we only call this once per account (re-bind on refresh).
    * Returns the live token set + usage, or throws on hard failure.
    */
-  private async ensureAuth(account: Account): Promise<{ tokens: AntigravityTokens; refreshed: boolean }> {
+  private async ensureAuth(account: Account, signal?: AbortSignal): Promise<{ tokens: AntigravityTokens; refreshed: boolean }> {
     let tokens = this.getTokens(account);
     if (!tokens?.refresh_token) throw new Error("No refresh_token");
     let refreshed = false;
@@ -275,7 +275,7 @@ export class AntigravityProvider extends BaseProvider {
       refreshed = true;
     }
     if (!tokens.project_id) {
-      const usage = await this.loadCodeAssist(tokens);
+      const usage = await this.loadCodeAssist(tokens, signal);
       if (usage.projectId) {
         tokens.project_id = usage.projectId;
         tokens.plan_type = usage.planType;
@@ -286,12 +286,12 @@ export class AntigravityProvider extends BaseProvider {
   }
 
   /** Call loadCodeAssist to bind projectId + read plan credits. Pure-parse via parseLoadCodeAssist. */
-  private async loadCodeAssist(tokens: AntigravityTokens): Promise<AntigravityUsage> {
+  private async loadCodeAssist(tokens: AntigravityTokens, signal?: AbortSignal): Promise<AntigravityUsage> {
     const resp = await this.fetchWithTimeout(AG_LOAD_CODEASSIST_URL, {
       method: "POST",
       headers: this.apiHeaders(tokens),
       body: JSON.stringify({ metadata: { ideType: "ANTIGRAVITY", platform: "PLATFORM_UNSPECIFIED", pluginType: "GEMINI" } }),
-    }, 15000);
+    }, 15000, signal);
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
       throw new Error(`loadCodeAssist HTTP ${resp.status}: ${text.slice(0, 200)}`);
@@ -312,11 +312,11 @@ export class AntigravityProvider extends BaseProvider {
     return !!tokens?.refresh_token;
   }
 
-  async fetchQuota(account: Account): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
     try {
-      const { tokens } = await this.ensureAuth(account);
+      const { tokens } = await this.ensureAuth(account, signal);
       // Re-query loadCodeAssist for fresh credit numbers (it's the credit source).
-      const usage = await this.loadCodeAssist(tokens);
+      const usage = await this.loadCodeAssist(tokens, signal);
       const limit = usage.monthlyPromptCredits;
       const remaining = usage.availablePromptCredits;
       return {
@@ -328,12 +328,12 @@ export class AntigravityProvider extends BaseProvider {
     }
   }
 
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const valid = await this.validateAccount(account);
     if (!valid) return { kind: "missing_tokens", success: false, error: "No refresh_token" };
     try {
-      const { tokens, refreshed } = await this.ensureAuth(account);
-      const usage = await this.loadCodeAssist(tokens);
+      const { tokens, refreshed } = await this.ensureAuth(account, signal);
+      const usage = await this.loadCodeAssist(tokens, signal);
       const limit = usage.monthlyPromptCredits;
       const remaining = usage.availablePromptCredits;
       const exhausted = remaining <= 0 && limit > 0;

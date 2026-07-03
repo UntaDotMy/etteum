@@ -237,7 +237,7 @@ export class YouMindProvider extends BaseProvider {
    * reported as `-1` (sentinel for "unlimited / unknown") so the warmup
    * runner won't flip the account to exhausted on a real positive limit.
    */
-  async fetchQuota(account: Account): Promise<{
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null };
     error?: string;
@@ -253,7 +253,7 @@ export class YouMindProvider extends BaseProvider {
           "x-api-key": apiKey,
         },
         body: "{}",
-      });
+      }, undefined, signal);
 
       if (resp.status === 401) {
         return { success: false, error: `expired: HTTP 401` };
@@ -974,13 +974,13 @@ export class YouMindProvider extends BaseProvider {
    * array on listBoards we could enrich metadata from. Keep it lean for
    * warmup hot path — fetchQuota already validates auth + liveness.
    */
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const apiKey = this.getApiKey(account);
     if (!apiKey) {
       return { kind: "missing_tokens", success: false, error: "No API key" };
     }
 
-    const quota = await this.fetchQuota(account);
+    const quota = await this.fetchQuota(account, signal);
     if (!quota.success) {
       const msg = quota.error || "quota check failed";
       if (/^expired:/i.test(msg)) {

@@ -339,7 +339,7 @@ export class KiroProvider extends BaseProvider {
     return !!(tokens?.access_token && tokens?.refresh_token);
   }
 
-  async fetchQuota(account: Account): Promise<{
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null };
     error?: string;
@@ -350,7 +350,7 @@ export class KiroProvider extends BaseProvider {
     }
 
     try {
-      const response = await this.fetchUsageLimits(tokens);
+      const response = await this.fetchUsageLimits(tokens, signal);
       if (!response.ok) {
         return { success: false, error: `HTTP ${response.status}` };
       }
@@ -363,7 +363,7 @@ export class KiroProvider extends BaseProvider {
     }
   }
 
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const tokens = this.getTokens(account);
     if (!tokens?.access_token || !tokens?.refresh_token) {
       return { kind: "missing_tokens", success: false, error: "Missing Kiro access or refresh token" };
@@ -378,7 +378,7 @@ export class KiroProvider extends BaseProvider {
 
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const response = await this.fetchUsageLimits(activeTokens);
+        const response = await this.fetchUsageLimits(activeTokens, signal);
 
         if ((response.status === 401 || response.status === 403) && attempt === 0) {
           const refresh = await this.refreshToken(account);
@@ -441,7 +441,7 @@ export class KiroProvider extends BaseProvider {
     return tokens.profile_arn || tokens.profileArn || "";
   }
 
-  private async fetchUsageLimits(tokens: KiroTokens): Promise<Response> {
+  private async fetchUsageLimits(tokens: KiroTokens, signal?: AbortSignal): Promise<Response> {
     const profileArn = this.getProfileArn(tokens);
     if (!profileArn) throw new Error("Missing Kiro profile ARN");
 
@@ -458,7 +458,7 @@ export class KiroProvider extends BaseProvider {
         "User-Agent": "KiroIDE/compatible pool-proxy/1.0.0",
         "x-amz-user-agent": "pool-proxy/1.0.0",
       },
-    }, config.providerQuotaTimeoutMs);
+    }, config.providerQuotaTimeoutMs, signal);
   }
 
   private parseUsageLimits(payload: unknown): ProviderQuotaSnapshot {

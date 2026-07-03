@@ -394,7 +394,7 @@ export class ByokProvider extends BaseProvider {
    *    cheapest possible request. 401 → expired, 429 → rate limited
    *    (key is valid, just throttled), 5xx → transient.
    */
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const tokens = this.parseTokens(account.tokens);
     if (!tokens?.base_url || !tokens?.models?.length) {
       return { kind: "missing_tokens", success: false, error: "No base_url or models configured" };
@@ -417,7 +417,7 @@ export class ByokProvider extends BaseProvider {
             "Authorization": `Bearer ${apiKey}`,
             ...tokens.headers,
           },
-        }, config.providerQuotaTimeoutMs);
+        }, config.providerQuotaTimeoutMs, signal);
 
         if (resp.status === 401) {
           return { kind: "session_expired", success: false, error: "BYOK key rejected (HTTP 401 — invalid or expired key)" };
@@ -458,7 +458,7 @@ export class ByokProvider extends BaseProvider {
             max_tokens: 1,
             messages: [{ role: "user", content: "hi" }],
           }),
-        }, config.providerQuotaTimeoutMs);
+        }, config.providerQuotaTimeoutMs, signal);
 
         if (resp.status === 401) {
           return { kind: "session_expired", success: false, error: "BYOK key rejected (HTTP 401 — invalid or expired key)" };
@@ -492,7 +492,7 @@ export class ByokProvider extends BaseProvider {
           max_tokens: 1,
           stream: false,
         }),
-      }, config.providerQuotaTimeoutMs);
+      }, config.providerQuotaTimeoutMs, signal);
 
       if (resp.status === 401) {
         return { kind: "session_expired", success: false, error: "BYOK key rejected (HTTP 401 — invalid or expired key)" };

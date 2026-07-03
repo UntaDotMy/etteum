@@ -2,9 +2,9 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import { clearAuthLogs, fetchAuthLogs, fetchAuthQueue, fetchWarmupQueue, loginAccount, loginAccounts, stopAllAccounts } from "@/lib/api";
+import { clearAuthLogs, fetchAuthLogs, fetchAuthQueue, fetchWarmupQueue, loginAccount, loginAccounts, stopAllAccounts, stopWarmup } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
-import { AlertTriangle, CheckCircle, ChevronDown, RefreshCw, RotateCcw, Trash2, Radio, StopCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle, ChevronDown, Loader2, RefreshCw, RotateCcw, Trash2, Radio, StopCircle } from "lucide-react";
 import { formatTimeID } from "@/lib/utils";
 
 interface AuthLog {
@@ -115,6 +115,7 @@ export default function BotLogs() {
   const [logs, setLogs] = useState<AuthLog[]>([]);
   const [queue, setQueue] = useState<any>(null);
   const [warmupQueue, setWarmupQueue] = useState<any>(null);
+  const [stoppingWarmup, setStoppingWarmup] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
   const perPage = 25;
@@ -224,6 +225,18 @@ export default function BotLogs() {
     await load().catch(() => {});
   }
 
+  async function handleStopWarmup() {
+    setStoppingWarmup(true);
+    try {
+      await stopWarmup();
+    } catch {
+      // best-effort — the queue stops server-side regardless of response errors
+    } finally {
+      setStoppingWarmup(false);
+      await load().catch(() => {});
+    }
+  }
+
   async function handleRetry(accountId?: number) {
     if (!accountId) return;
     await loginAccount(accountId);
@@ -250,6 +263,16 @@ export default function BotLogs() {
           <Badge variant={connected ? "success" : "secondary"}>{connected ? "Live" : "Disconnected"}</Badge>
           <Button variant="outline" size="sm" onClick={load}><RefreshCw className="w-4 h-4 mr-2" />Refresh</Button>
           <Button variant="destructive" size="sm" onClick={handleStopAll}><StopCircle className="w-4 h-4 mr-2" />Stop All</Button>
+          <Button
+            variant="destructive"
+            size="sm"
+            onClick={handleStopWarmup}
+            disabled={stoppingWarmup || (warmupRunning === 0 && warmupQueued === 0)}
+            title="Drop queued warmup jobs and abort in-flight provider calls"
+          >
+            {stoppingWarmup ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <StopCircle className="w-4 h-4 mr-2" />}
+            Stop WarmUp
+          </Button>
           <Button variant="outline" size="sm" onClick={handleClear}><Trash2 className="w-4 h-4 mr-2" />Clear</Button>
         </div>
       </div>

@@ -346,6 +346,22 @@ authRouter.delete("/warmup-queue", (c) => {
 });
 
 /**
+ * POST /api/auth/warmup-stop - Stop WarmUp hard: drop queue + abort in-flight
+ *
+ * Unlike DELETE /warmup-queue (which only drops queued items and lets running
+ * jobs finish), this cancels active provider HTTP calls mid-flight and
+ * prevents retries. One-shot: warmup can be started again normally afterwards.
+ */
+authRouter.post("/warmup-stop", (c) => {
+  const result = warmupQueue.stop();
+  return c.json({
+    message: `WarmUp stopped — dropped ${result.dropped} queued, ${result.active} in-flight aborted`,
+    dropped: result.dropped,
+    active: result.active,
+  });
+});
+
+/**
  * PUT /api/auth/warmup-queue/concurrency - Set WarmUp concurrency
  */
 authRouter.put("/warmup-queue/concurrency", async (c) => {

@@ -874,7 +874,7 @@ export class CodexProvider extends BaseProvider {
     return !!tokens?.access_token;
   }
 
-  async fetchQuota(account: Account): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
     const tokens = this.getTokens(account);
     if (!tokens?.access_token) return { success: false, error: "No access_token" };
 
@@ -888,7 +888,7 @@ export class CodexProvider extends BaseProvider {
           // can return the wrong workspace's limits or 4xx. Mirrors codex-lb.
           ...(tokens.account_id ? { "chatgpt-account-id": tokens.account_id } : {}),
         },
-      }, config.providerQuotaTimeoutMs);
+      }, config.providerQuotaTimeoutMs, signal);
 
       if (response.status === 401 || response.status === 403) {
         return { success: false, error: `expired: HTTP ${response.status}` };
@@ -908,7 +908,7 @@ export class CodexProvider extends BaseProvider {
     }
   }
 
-  override async healthCheck(account: Account) {
+  override async healthCheck(account: Account, signal?: AbortSignal) {
     const valid = await this.validateAccount(account);
     if (!valid) {
       return { kind: "missing_tokens" as const, success: false, error: "No valid tokens available" };
@@ -928,7 +928,7 @@ export class CodexProvider extends BaseProvider {
           // Required for multi-workspace/team accounts (mirrors the chat path).
           ...(tokens.account_id ? { "chatgpt-account-id": tokens.account_id } : {}),
         },
-      }, config.providerQuotaTimeoutMs);
+      }, config.providerQuotaTimeoutMs, signal);
 
       if (response.status === 401 || response.status === 403) {
         return { kind: "auth_error" as const, success: false, retryable: true, error: `expired: HTTP ${response.status}` };

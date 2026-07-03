@@ -399,7 +399,7 @@ export class AlibabaProvider extends BaseProvider {
     return apiKey.length > 0;
   }
 
-  async fetchQuota(account: Account): Promise<{
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null };
     error?: string;
@@ -419,11 +419,12 @@ export class AlibabaProvider extends BaseProvider {
       let totalPages = 1;
 
       while (pageNo <= totalPages) {
+        if (signal?.aborted) throw new Error("aborted");
         const url = `${QUOTAS_URL}?page_size=${PAGE_SIZE}&page_no=${pageNo}`;
         const response = await this.fetchWithTimeout(url, {
           method: "GET",
           headers: { "Authorization": `Bearer ${apiKey}` },
-        }, config.providerQuotaTimeoutMs);
+        }, config.providerQuotaTimeoutMs, signal);
 
         if (response.status === 401) return { success: false, error: "Invalid API key (401)" };
         if (!response.ok) {

@@ -201,6 +201,11 @@ export async function fetchWarmupQueue() {
   return fetchApi("/api/accounts/warmup-queue");
 }
 
+/** Stop warmup hard: drops queued items AND aborts in-flight provider calls. */
+export async function stopWarmup() {
+  return fetchApi("/api/auth/warmup-stop", { method: "POST" });
+}
+
 export async function fetchWarmupEvents(limit: number = 300) {
   return fetchApi(`/api/auth/warmup-events?limit=${clampLimit(limit, 300, 1, 1000)}`);
 }

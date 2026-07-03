@@ -150,7 +150,7 @@ export abstract class BaseProvider {
 
   abstract validateAccount(account: Account): Promise<boolean>;
 
-  abstract fetchQuota(account: Account): Promise<{
+  abstract fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
     quota?: {
       limit: number;
@@ -161,7 +161,7 @@ export abstract class BaseProvider {
     error?: string;
   }>;
 
-  async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const valid = await this.validateAccount(account);
     if (!valid) {
       return {
@@ -171,7 +171,7 @@ export abstract class BaseProvider {
       };
     }
 
-    const quota = await this.fetchQuota(account);
+    const quota = await this.fetchQuota(account, signal);
     if (!quota.success) {
       const error = quota.error || "Quota check failed";
       const unsupported = /not support|does not support/i.test(error);
@@ -271,10 +271,27 @@ export abstract class BaseProvider {
     }, 0);
   }
 
-  protected async fetchWithTimeout(url: string, init: RequestInit, timeoutMs = config.providerRequestTimeoutMs): Promise<Response> {
+  protected async fetchWithTimeout(
+    url: string,
+    init: RequestInit,
+    timeoutMs = config.providerRequestTimeoutMs,
+    signal?: AbortSignal,
+  ): Promise<Response> {
     const { getNextProxy, markProxySuccess, markProxyFail } = await import("../../services/proxy-pool");
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), timeoutMs);
+    // Link an external abort signal (e.g. warmup stop) so it fires immediately,
+    // not after the timeout elapses. Without this, a stopped warmup job would
+    // keep its in-flight HTTP open for up to providerRequestTimeoutMs (~120s).
+    let onAbort: (() => void) | null = null;
+    if (signal) {
+      if (signal.aborted) {
+        controller.abort();
+      } else {
+        onAbort = () => controller.abort();
+        signal.addEventListener("abort", onAbort, { once: true });
+      }
+    }
     const proxy = await getNextProxy("model");
     try {
       const response = await fetch(url, {
@@ -289,6 +306,7 @@ export abstract class BaseProvider {
       throw err;
     } finally {
       clearTimeout(timer);
+      if (onAbort && signal) signal.removeEventListener("abort", onAbort);
     }
   }
 }

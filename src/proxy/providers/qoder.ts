@@ -1302,7 +1302,7 @@ export class QoderProvider extends BaseProvider {
     }
   }
 
-  async fetchQuota(account: Account): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
+  async fetchQuota(account: Account, signal?: AbortSignal): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
     const parsed = this.parseTokens(account);
     if (!parsed?.personalToken) return { success: false, error: "No personalToken" };
 
@@ -1315,6 +1315,7 @@ export class QoderProvider extends BaseProvider {
       const resp = await fetch(QOTA_USAGE_URL, {
         method: "GET",
         headers: openApiHeaders(tokens.securityOauthToken),
+        signal,
       });
 
       if (resp.status === 401 || resp.status === 403) {
@@ -1397,7 +1398,7 @@ export class QoderProvider extends BaseProvider {
     }
   }
 
-  override async healthCheck(account: Account): Promise<ProviderHealthResult> {
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const parsed = this.parseTokens(account);
     if (!parsed?.personalToken) {
       return { kind: "missing_tokens", success: false, error: "No personalToken" };
@@ -1427,6 +1428,7 @@ export class QoderProvider extends BaseProvider {
       const resp = await fetch(QOTA_USAGE_URL, {
         method: "GET",
         headers: openApiHeaders(tokens.securityOauthToken),
+        signal,
       });
 
       if (resp.status === 401 || resp.status === 403) {

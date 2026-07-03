@@ -320,7 +320,7 @@ export default function Accounts() {
     scheduleReload();
   });
 
-  useWsEvent(["warmup_queue_cleared"], () => {
+  useWsEvent(["warmup_queue_cleared", "warmup_stopped"], () => {
     setWarmupProgress({});
   });
 
