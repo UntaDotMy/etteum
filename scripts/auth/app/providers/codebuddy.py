@@ -1781,6 +1781,8 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
         )
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("codebuddy")
         if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
             return {"stub": True}
 

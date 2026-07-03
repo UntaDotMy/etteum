@@ -53,6 +53,8 @@ class CanvaProviderAdapter(ProviderAdapter):
         )
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("canva")
         try:
             from browserforge.fingerprints import Screen
             from camoufox.async_api import AsyncCamoufox

@@ -32,17 +32,11 @@ import aiohttp
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import NonRetryableBatcherError, RetryableBatcherError
 from app.providers.base import NormalizedAccount, ProviderAdapter, ProviderResult
-# Reuse the proven Google-login + camoufox helpers from gitlab_duo.
-from app.providers.gitlab_duo import (
-    _click_consent_only,
-    _click_picker_continue,
-    _fill_google_email_step,
-    _fill_google_password_step,
-    _handle_google_interstitial,
-    _is_email_step,
-    _is_password_step,
-    _launch_camoufox,
-)
+# nodriver-based browser layer (replaces Camoufox). The Google-login state
+# machine is self-contained below — it no longer imports the stale gitlab_duo
+# helpers (those target Google's legacy #identifierNext UI which doesn't exist
+# on the current v3 signin). See memory: etteum-google-v3-login-mechanics.
+from app.providers.nodriver_browser import launch_browser, reap_orphan_nodriver_chrome
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -168,43 +162,193 @@ async def _load_code_assist(access_token: str) -> dict[str, Any]:
     }
 
 
-# ── Google login driver (reuses gitlab_duo helpers) ─────────────────────────
+# ── Google login driver (nodriver, poll-driven, DOM-aware) ──────────────────
+# Self-contained v3-signin state machine. No blind sleeps — every transition
+# polls the actual DOM state (visible buttons/inputs) and acts the instant the
+# target is present. Handles fresh-account speedbumps ("I understand") and the
+# OAuth consent ("Sign in"). Proven against tfatf1/2/3/4 accounts.
 
-async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 90) -> None:
-    """Drive accounts.google.com through email → password → consent until the
-    OAuth redirect fires (we leave accounts.google.com). Reuses the proven
-    step detectors + fillers + consent clickers from gitlab_duo."""
-    deadline = asyncio.get_event_loop().time() + deadline_s
-    last_url = ""
-    while asyncio.get_event_loop().time() < deadline:
+# JS that returns a readiness snapshot for a given set of expected conditions.
+_READY_JS = """(opts) => {
+  const out = {url: location.href, error: null, ready: false};
+  const e = document.querySelector('.o6cuMc, .EFflM, [role="alert"]');
+  if (e && e.textContent.trim()) out.error = e.textContent.trim().slice(0, 200);
+  let ok = true;
+  if (opts.url_contains) ok = ok && location.href.indexOf(opts.url_contains) !== -1;
+  if (opts.input_visible) {
+    const el = document.querySelector(opts.input_visible);
+    ok = ok && !!el && el.offsetParent !== null;
+  }
+  if (opts.button_text) {
+    const needle = opts.button_text.toLowerCase();
+    ok = ok && Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"]'))
+      .some(b => b.offsetParent !== null && (b.textContent || b.value || '').trim().toLowerCase() === needle);
+  }
+  out.ready = ok;
+  return out;
+}"""
+
+
+async def _wait_for(page: Any, opts: dict, timeout_s: float = 30.0) -> str | None:
+    """Poll _READY_JS until ready=True or timeout. Returns last error or 'timeout'."""
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
         try:
-            url = page.url
+            s = await page.evaluate(_READY_JS, opts)
+        except Exception:
+            await asyncio.sleep(0.05)
+            continue
+        if s.get("ready"):
+            return None
+        if s.get("error"):
+            return s["error"]
+        await asyncio.sleep(0.05)
+    return "timeout"
+
+
+async def _type_human(page: Any, selector: str, text: str, delay_ms: int = 60) -> None:
+    """Type char-by-char with realistic human pacing via the native
+    HTMLInputElement.value setter + composed InputEvent. Google's #identifierId /
+    #password inputs reject el.value= and Input.insertText; the native setter
+    bypasses the framework override. delay_ms + jitter per char = human-like."""
+    import random
+    setter_js = (
+        "(o) => {"
+        " const el = document.querySelector(o.selector);"
+        " if (!el) return false;"
+        " const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;"
+        " setter.call(el, o.value);"
+        " el.dispatchEvent(new InputEvent('input', {bubbles: true, composed: true}));"
+        " return el.value === o.value;"
+        " }"
+    )
+    for i in range(1, len(text) + 1):
+        await page.evaluate(setter_js, {"selector": selector, "value": text[:i]})
+        await asyncio.sleep(delay_ms / 1000 + random.uniform(0, 0.03))
+
+
+async def _fill_input(page: Any, selector: str, text: str, timeout_s: float = 15.0) -> bool:
+    """Focus + clear + type, waiting until the full value is present."""
+    import time as _time
+    loc = page.locator(selector)
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        try:
+            await loc._focus_via_cdp_click()
+            # clear
+            await page.evaluate(
+                f"(()=>{{const el=document.querySelector({json.dumps(selector)});if(el){{const s=Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype,'value').set;s.call(el,'');el.dispatchEvent(new InputEvent('input',{{bubbles:true,composed:true}}));}}}})()"
+            )
+            await _type_human(page, selector, text)
+            v = await page.evaluate(f"document.querySelector({json.dumps(selector)})?.value")
+            if v and len(v) >= len(text):
+                return True
+        except Exception:
+            pass
+        await asyncio.sleep(0.1)
+    return False
+
+
+async def _click_button(page: Any, text: str, timeout_s: float = 15.0) -> bool:
+    """Wait for a visible button with exact text (case-insensitive), scroll it
+    into view, then click with a REAL CDP mouse event at its center. Google's
+    Material buttons (VfPpkd-LgbsSe: 'Sign in', 'I understand', 'Next') ignore
+    JS el.click(); a trusted mousePressed/Released at the in-viewport center is
+    what fires them. The speedbump's 'I understand' sits below the fold —
+    scrollIntoView before reading the box. Falls back to JS click."""
+    from nodriver import cdp
+    needle = text.strip().lower()
+    import time as _time
+    deadline = _time.monotonic() + timeout_s
+    while _time.monotonic() < deadline:
+        box = await page.evaluate("""(t) => {
+            const b = Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"]'))
+              .find(b => b.offsetParent !== null && (b.textContent || b.value || '').trim().toLowerCase() === t);
+            if (!b) return null;
+            b.scrollIntoView({block: 'center', behavior: 'instant'});
+            const r = b.getBoundingClientRect();
+            if (r.width === 0 || r.height === 0) return null;
+            return {x: r.x + r.width/2, y: r.y + r.height/2};
+        }""", needle)
+        if box:
+            x, y = box["x"], box["y"]
+            try:
+                await page.tab.send(cdp.input_.dispatch_mouse_event(type_="mouseMoved", x=x, y=y))
+                await page.tab.send(cdp.input_.dispatch_mouse_event(type_="mousePressed", x=x, y=y, button=cdp.input_.MouseButton.LEFT, click_count=1))
+                await page.tab.send(cdp.input_.dispatch_mouse_event(type_="mouseReleased", x=x, y=y, button=cdp.input_.MouseButton.LEFT, click_count=1))
+                return True
+            except Exception:
+                pass
+            await page.evaluate("""(t) => { const b = Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"]')).find(b => b.offsetParent !== null && (b.textContent||b.value||'').trim().toLowerCase() === t); if (b) b.click(); }""", needle)
+            return True
+        await asyncio.sleep(0.05)
+    return False
+
+
+async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150) -> None:
+    """Drive accounts.google.com v3 signin: email → password → (speedbump) →
+    consent → redirect. Poll-driven (no blind sleeps), DOM-aware. Handles the
+    fresh-account Workspace ToS speedbump ('I understand') and the OAuth consent
+    ('Sign in'). Raises if the login doesn't complete in deadline_s."""
+    import time as _time
+
+    # 1. email page
+    e = await _wait_for(page, {"input_visible": "#identifierId", "button_text": "Next"}, timeout_s=20)
+    if e:
+        _debug(f"email page wait: {e}")
+    await _fill_input(page, "#identifierId", email)
+    await _click_button(page, "Next")
+
+    # 2. password page (may be slow to render; retry if timed out)
+    e = await _wait_for(page, {"url_contains": "challenge/pwd", "input_visible": 'input[name="Passwd"]', "button_text": "Next"}, timeout_s=45)
+    if e:
+        _debug(f"password page wait: {e}; re-filling email + Next")
+        await _fill_input(page, "#identifierId", email)
+        await _click_button(page, "Next")
+        await _wait_for(page, {"input_visible": 'input[name="Passwd"]'}, timeout_s=30)
+    # only fill if the password field is actually present
+    pwd_present = await page.evaluate("(()=>!!(document.querySelector('input[name=\"Passwd\"]')&&document.querySelector('input[name=\"Passwd\"]').offsetParent!==null))()")
+    if not pwd_present:
+        await _wait_for(page, {"input_visible": 'input[name="Passwd"]'}, timeout_s=15)
+    await _fill_input(page, 'input[name="Passwd"]', password)
+    await _click_button(page, "Next")
+
+    # 3. interstitial loop: click any known actionable button (speedbump/consent)
+    # until the OAuth redirect fires (we leave accounts.google.com) or deadline.
+    # 'Cancel' is intentionally NOT in the list — it aborts consent.
+    KNOWN_ACTIONS = [
+        "i understand", "sign in", "continue", "allow", "accept",
+        "agree", "got it", "ok", "next",
+    ]
+    deadline = _time.monotonic() + deadline_s
+    last_clicked = None
+    while _time.monotonic() < deadline:
+        try:
+            url = await page.evaluate("location.href")
         except Exception:
             url = ""
-        if url != last_url:
-            _debug(f"_drive_google_login: url={url}")
-            last_url = url
-        if "accounts.google.com" not in url:
+        if "accounts.google.com" not in (url or ""):
             return  # redirect to callback fired — done
         try:
-            if await _is_email_step(page):
-                await _fill_google_email_step(page, email)
-                await asyncio.sleep(1.5)
-                continue
-            if await _is_password_step(page):
-                await _fill_google_password_step(page, password)
-                await asyncio.sleep(1.5)
-                continue
-            # Interstitial / picker / consent — layered click.
-            if await _handle_google_interstitial(page):
-                continue
-            if await _click_picker_continue(page):
-                continue
-            if await _click_consent_only(page):
-                continue
-        except Exception as exc:
-            _debug(f"_drive_google_login: step error: {exc}")
-        await asyncio.sleep(1.0)
+            btns = await page.evaluate("""() => Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"]'))
+              .filter(b => b.offsetParent !== null)
+              .map(b => (b.textContent || b.value || '').trim().toLowerCase().slice(0, 40))
+              .filter(t => t.length > 0 && t.length <= 40)""")
+        except Exception:
+            await asyncio.sleep(0.3)
+            continue
+        for action in KNOWN_ACTIONS:
+            if action in btns:
+                if action == last_clicked:
+                    await asyncio.sleep(0.5)
+                _debug(f"interstitial click: {action}")
+                await _click_button(page, action, timeout_s=10)
+                last_clicked = action
+                await asyncio.sleep(1.0)  # let the page navigate
+                break
+        else:
+            await asyncio.sleep(0.3)
     raise RetryableBatcherError(ErrorCode.browser_unexpected_state, "Google login did not complete in time")
 
 
@@ -225,8 +369,13 @@ class AntigravityProviderAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
             raise NonRetryableBatcherError(ErrorCode.browser_start_failed, "Antigravity provider requires BATCHER_ENABLE_CAMOUFOX=true")
-        manager, browser, page = await _launch_camoufox()
-        return {"manager": manager, "browser": browser, "page": page}
+        # nodriver (replaces Camoufox). Headed by default — headless gets a
+        # hard 500 from Google on the password challenge. BATCHER_CAMOUFOX_HEADLESS
+        # is honored for ops continuity but should stay false for Google login.
+        headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
+        browser, page = await launch_browser(headless=headless)
+        page.set_default_timeout(45000)
+        return {"browser": browser, "page": page}
 
     async def authenticate(self, account: NormalizedAccount, session: Any) -> dict[str, Any]:
         page = session["page"]
@@ -319,14 +468,14 @@ class AntigravityProviderAdapter(ProviderAdapter):
 
     async def cleanup_session(self, session: Any) -> None:
         browser = session.get("browser")
-        manager = session.get("manager")
         if browser:
             try:
                 await browser.close()
             except Exception:
                 pass
-        if manager:
-            try:
-                await manager.__aexit__(None, None, None)
-            except Exception:
-                pass
+        # Safety net: reap any orphaned nodriver chrome by PID (only kills
+        # processes with the uc_<random> temp profile — never the user's Chrome).
+        try:
+            reap_orphan_nodriver_chrome()
+        except Exception:
+            pass

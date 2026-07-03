@@ -304,7 +304,12 @@ class CodexProviderAdapter(ProviderAdapter):
         if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
             return {"mode": "password", "stub": True}
 
-        try:
+        # Browser automation unavailable — Camoufox/Chromium removed; nodriver
+        # migration pending for codex (only 'antigravity' is migrated).
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("codex")
+
+        try:  # pragma: no cover — unreachable while browser automation is disabled
             from browserforge.fingerprints import Screen
             from camoufox.async_api import AsyncCamoufox
         except Exception as exc:

@@ -33,9 +33,49 @@ import asyncio
 import json
 import os
 import re
+import sys
 import time
 from typing import Any
 from urllib.parse import urlparse
+
+# Windows consoles default to a legacy charmap codec (cp1252) that cannot
+# encode characters like "→" (→). The OAuth state machine prints
+# `state→<state>` progress lines, and a UnicodeEncodeError there kills the
+# whole flow mid-login. Force stdout/stderr to UTF-8 (errors replaced) so no
+# non-ASCII string — in a debug line, page title, or URL — can ever crash the
+# provider. Safe on all platforms; a no-op where stdout is already UTF-8.
+for _stream in (sys.stdout, sys.stderr):
+    try:
+        _stream.reconfigure(encoding="utf-8", errors="replace")
+    except (AttributeError, ValueError):
+        # Older Python or a stream that doesn't support reconfigure — fall back
+        # to encoding-safe writes in _debug/_emit below.
+        pass
+
+
+def _safe_print(msg: str) -> None:
+    """Print that never raises on undecodable characters."""
+    try:
+        print(msg, flush=True)
+    except UnicodeEncodeError:
+        try:
+            print(msg.encode("utf-8", "replace").decode("utf-8", "replace"), flush=True)
+        except Exception:
+            pass
+
+
+def _debug(msg: str) -> None:
+    if os.getenv("BATCHER_DEBUG", "").lower() == "true":
+        _safe_print(f"[gitlab-duo-debug] {msg}")
+
+
+def _emit(payload: dict) -> None:
+    """Emit a JSON line to stdout — picked up by Bun runner.ts as a progress
+    event and streamed to the dashboard via WebSocket."""
+    try:
+        _safe_print(json.dumps(payload, ensure_ascii=True))
+    except (BrokenPipeError, UnicodeEncodeError):
+        pass
 
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import NonRetryableBatcherError, RetryableBatcherError
@@ -65,20 +105,6 @@ OTP_TIMEOUT_S = 180  # Gmail can take 30-60s to deliver; GitLab batches emails
 TRIAL_TIMEOUT_S = 30
 DUO_TOGGLE_TIMEOUT_S = 30
 PAT_TIMEOUT_S = 30
-
-
-def _debug(msg: str) -> None:
-    if os.getenv("BATCHER_DEBUG", "").lower() == "true":
-        print(f"[gitlab-duo-debug] {msg}", flush=True)
-
-
-def _emit(payload: dict) -> None:
-    """Emit a JSON line to stdout — picked up by Bun runner.ts as a progress
-    event and streamed to the dashboard via WebSocket."""
-    try:
-        print(json.dumps(payload), flush=True)
-    except BrokenPipeError:
-        pass
 
 
 def _progress(step: str, message: str, **extra: Any) -> None:
@@ -927,6 +953,12 @@ async def _wait_for_gitlab_post_oauth(page: Any, timeout_s: int = 90) -> str:
                 last_url = url
                 last_progress_at = time.monotonic()
             if "gitlab.com" in url and "accounts.google" not in url:
+                # Wait for Cloudflare to pass before returning
+                try:
+                    await _wait_past_cloudflare(page, timeout_s=30)
+                except Exception:
+                    # Cloudflare might not be present, continue
+                    pass
                 return url
 
             if "accounts.google.com" in url:
@@ -2270,6 +2302,8 @@ class GitLabDuoProviderAdapter(ProviderAdapter):
         )
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("gitlab-duo")
         if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
             raise NonRetryableBatcherError(
                 ErrorCode.browser_start_failed,

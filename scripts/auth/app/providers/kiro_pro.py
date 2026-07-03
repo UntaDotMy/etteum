@@ -40,6 +40,8 @@ class KiroProProviderAdapter(KiroProviderAdapter):
     name = "kiro-pro"
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("kiro-pro")
         engine = os.getenv("BATCHER_BROWSER_ENGINE", "chromium").lower()
 
         if engine == "chromium":
