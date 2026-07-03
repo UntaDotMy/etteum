@@ -66,6 +66,23 @@ interface Account {
   quotaLimit?: number;
   quotaRemaining?: number;
   tokens?: AlibabaQuotaTokens | null;
+  metadata?: Record<string, unknown> | null;
+}
+
+/** Codex wham/usage window shape stored in account.metadata.codex_quota. */
+interface CodexWindow {
+  used_percent: number;
+  reset_at: string | null;
+  reset_after_seconds?: number;
+  limit_window_seconds?: number;
+}
+interface CodexQuotaMeta {
+  plan_type?: string;
+  primary?: CodexWindow;
+  secondary?: CodexWindow;
+  rate_limited?: boolean;
+  credits?: { has_credits?: boolean; unlimited?: boolean; balance?: number };
+  credit_override_active?: boolean;
 }
 
 interface AlibabaModelQuota {
@@ -1145,6 +1162,36 @@ export default function Accounts() {
         }
       }
 
+      // For codex, aggregate the two rolling rate windows (primary ~5h,
+      // secondary ~weekly) across active accounts. Each account's healthCheck
+      // stores metadata.codex_quota with per-window used_percent + reset_at.
+      let codexWindows: { primaryAvg: number; secondaryAvg: number; count: number; primaryResetAt: string | null; secondaryResetAt: string | null; planTypes: string[] } | undefined;
+      if (provider === "codex") {
+        const windowAcc: { primary: number[]; secondary: number[]; primaryReset: string[]; secondaryReset: string[]; plans: Set<string> } = { primary: [], secondary: [], primaryReset: [], secondaryReset: [], plans: new Set() };
+        for (const a of activeRows) {
+          const cq = (a.metadata as { codex_quota?: CodexQuotaMeta } | null | undefined)?.codex_quota;
+          if (!cq) continue;
+          if (typeof cq.primary?.used_percent === "number") windowAcc.primary.push(cq.primary.used_percent);
+          if (typeof cq.secondary?.used_percent === "number") windowAcc.secondary.push(cq.secondary.used_percent);
+          if (cq.primary?.reset_at) windowAcc.primaryReset.push(cq.primary.reset_at);
+          if (cq.secondary?.reset_at) windowAcc.secondaryReset.push(cq.secondary.reset_at);
+          if (cq.plan_type) windowAcc.plans.add(cq.plan_type);
+        }
+        const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
+        // Earliest upcoming reset across accounts (the soonest any account recovers).
+        const earliest = (xs: string[]) => (xs.length ? xs.slice().sort()[0] : null);
+        if (windowAcc.primary.length || windowAcc.secondary.length) {
+          codexWindows = {
+            primaryAvg: avg(windowAcc.primary),
+            secondaryAvg: avg(windowAcc.secondary),
+            count: windowAcc.primary.length,
+            primaryResetAt: earliest(windowAcc.primaryReset),
+            secondaryResetAt: earliest(windowAcc.secondaryReset),
+            planTypes: [...windowAcc.plans],
+          };
+        }
+      }
+
       return {
         provider,
         total: rows.length,
@@ -1154,6 +1201,7 @@ export default function Accounts() {
         error: rows.filter((a) => a.status === "error").length,
         credits: { used: Math.max(0, quotaLimit - quotaRemaining), total: quotaLimit, remaining: quotaRemaining },
         modelQuotas: modelQuotasSum,
+        codexWindows,
       };
     });
   }, [accounts]);
@@ -1272,6 +1320,62 @@ export default function Accounts() {
                 />
               </div>
               ) : null}
+
+              {/* Codex rolling rate windows: 5h (primary) + weekly (secondary),
+                  aggregated across active accounts. The secondary is the hard
+                  ceiling; primary resets more often. */}
+              {stat.provider === "codex" && stat.codexWindows && (() => {
+                const w = stat.codexWindows;
+                const fmtReset = (iso: string | null) => {
+                  if (!iso) return "—";
+                  const d = new Date(iso);
+                  const diffMs = d.getTime() - Date.now();
+                  if (diffMs <= 0) return "now";
+                  const mins = Math.round(diffMs / 60000);
+                  if (mins < 60) return `${mins}m`;
+                  const hrs = Math.round(mins / 60);
+                  if (hrs < 48) return `${hrs}h`;
+                  return `${Math.round(hrs / 24)}d`;
+                };
+                const bar = (usedPct: number) => {
+                  const remaining = Math.max(0, 100 - usedPct);
+                  const tone = usedPct >= 100 ? "bg-[var(--error)]" : remaining <= 10 ? "bg-[var(--error)]" : remaining <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
+                  return { remaining, tone };
+                };
+                const p = bar(w.primaryAvg);
+                const s = bar(w.secondaryAvg);
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--muted-foreground)]">Rate windows <span className="opacity-60">({w.count} acc{w.count === 1 ? "" : "s"}{w.planTypes.length ? `, ${w.planTypes.join("/")}` : ""})</span></span>
+                    </div>
+                    {/* 5h primary window */}
+                    <div className="space-y-0">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-[var(--foreground)] font-medium">5h window</span>
+                        <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
+                          {p.remaining.toFixed(0)}% left · resets {fmtReset(w.primaryResetAt)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+                        <div className={`h-full ${p.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, p.remaining))}%` }} />
+                      </div>
+                    </div>
+                    {/* Weekly secondary window (hard ceiling) */}
+                    <div className="space-y-0">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-[var(--foreground)] font-medium">Weekly window</span>
+                        <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
+                          {s.remaining.toFixed(0)}% left · resets {fmtReset(w.secondaryResetAt)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+                        <div className={`h-full ${s.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, s.remaining))}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
 
               {/* WarmUp progress - shown while warmup is active */}
               {warmupProgress[stat.provider] && warmupProgress[stat.provider].total > 0 && (
