@@ -255,26 +255,64 @@ export async function applyUpdate(): Promise<{
   steps.push({ name: "migrate database", ok: migrateOk, detail: migrateOk ? undefined : migrateErr });
   // Migration failure is non-fatal for restart (schema may be unchanged).
 
-  // 4. Restart via supervisor
+  // 4. Restart. The running server must actually die so the port frees and the
+  // new code loads — "update" that doesn't restart leaves the old build serving.
+  // We spawn a DETACHED helper that outlives this process: it waits a couple
+  // seconds (so this HTTP response can flush), kills the current process tree,
+  // then relaunches production.ts and writes the new PID. The helper is
+  // platform-specific (powershell on Windows, bash elsewhere).
   const sup = detectSupervisor();
   const rc = restartCommand(sup);
+  const pidFile = path.join(projectRoot, ".etteum.pid");
+  // The PID file holds the top-level production.ts PID (the parent that owns
+  // src/index.ts + serve-dashboard.ts). Killing it with /T takes down the whole
+  // tree and frees the port. Fall back to this process's parent (production.ts)
+  // then this process if no PID file.
+  let topPid: number;
+  try {
+    const f = Bun.file(pidFile);
+    topPid = f.size > 0 ? Number(new TextDecoder().decode(f.bytesSync() ?? new Uint8Array()).trim()) : NaN;
+  } catch { topPid = NaN; }
+  if (!Number.isFinite(topPid)) topPid = process.ppid || process.pid;
+
   if (sup === "manual") {
-    // No supervisor: spawn a detached successor that re-launches after we exit,
-    // then signal shutdown. The successor waits briefly so this process can exit
-    // and free the port.
     const hint = manualRestartHint();
+    // Capture the ports the current server is bound to so the successor
+    // relaunches on the SAME ports (not the default 1930/1931, which may be
+    // held by another instance). production.ts reads PORT/DASHBOARD_PORT.
+    const port = process.env.PORT || "1930";
+    const dashPort = process.env.DASHBOARD_PORT || "1931";
     try {
-      const relaunch = process.platform === "win32"
-        ? `Start-Sleep -Seconds 2; & '${bun}' scripts/production.ts`
-        : `sleep 2 && '${bun}' scripts/production.ts`;
+      // Helper: sleep → kill the top-level PID tree → relaunch → write new PID.
+      // taskkill /T (win) / kill (unix) takes down production.ts AND its
+      // src/index.ts + dashboard children, freeing the port. Start-Process /
+      // nohup detaches the new server so it survives this process dying. Env
+      // vars (PORT/DASHBOARD_PORT/NODE_ENV) are set inline so the successor
+      // binds the same ports as the dying process.
+      const helper = process.platform === "win32"
+        ? `Start-Sleep -Seconds 3; ` +
+          `try { taskkill /PID ${topPid} /T /F 2>$null } catch {}; ` +
+          `Start-Sleep -Seconds 1; ` +
+          `$env:PORT='${port}'; $env:DASHBOARD_PORT='${dashPort}'; $env:NODE_ENV='production'; ` +
+          `$p = Start-Process -FilePath '${bun}' -ArgumentList 'scripts/production.ts','--skip-build' -WorkingDirectory '${projectRoot}' -PassThru -WindowStyle Hidden; ` +
+          `if ($p) { Set-Content -Path '${pidFile}' -Value $p.Id -NoNewline }`
+        : `sleep 3; ` +
+          `kill ${topPid} 2>/dev/null; ` +
+          `sleep 1; ` +
+          `cd '${projectRoot}' && PORT='${port}' DASHBOARD_PORT='${dashPort}' NODE_ENV=production nohup '${bun}' scripts/production.ts --skip-build > .etteum.log.stdout 2> .etteum.log.stderr & ` +
+          `echo $! > '${pidFile}'`;
       Bun.spawn({
-        cmd: process.platform === "win32" ? ["powershell", "-Command", relaunch] : ["bash", "-c", relaunch],
+        cmd: process.platform === "win32"
+          ? ["powershell", "-NoProfile", "-Command", helper]
+          : ["bash", "-c", helper],
         cwd: projectRoot,
         detached: true,
-        stdout: "ignore",
-        stderr: "ignore",
+        stdio: ["ignore", "ignore", "ignore"],
       });
-      steps.push({ name: "restart (manual: spawn successor)", ok: true, detail: "successor spawned; this process will exit" });
+      steps.push({ name: "restart (manual: kill + relaunch)", ok: true, detail: `successor scheduled on port ${port}; this process exits in ~3s` });
+      // Schedule our own exit so the port frees for the successor. The response
+      // is sent first; the helper kills the tree if the timer hasn't fired.
+      setTimeout(() => process.exit(0), 2500);
       return { ok: true, steps, restarted: true, supervisor: sup, manualCommand: hint };
     } catch (e: any) {
       steps.push({ name: "restart (manual)", ok: false, detail: e?.message || String(e) });
@@ -282,11 +320,12 @@ export async function applyUpdate(): Promise<{
     }
   }
 
-  // Supervised: the supervisor will respawn us after the restart command runs.
-  // Schedule the restart detached (so this process can respond before dying).
+  // Supervised (systemd / nssm / launchd): the supervisor restarts us. Run the
+  // restart command detached, then exit so the supervisor respawns new code.
   try {
     Bun.spawn({ cmd: rc.cmd, cwd: projectRoot, detached: true, stdout: "ignore", stderr: "ignore" });
     steps.push({ name: `restart (${rc.description})`, ok: true });
+    setTimeout(() => process.exit(0), 2000);
     return { ok: true, steps, restarted: true, supervisor: sup };
   } catch (e: any) {
     steps.push({ name: `restart (${rc.description})`, ok: false, detail: e?.message || String(e) });
