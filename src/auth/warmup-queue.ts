@@ -302,13 +302,18 @@ class WarmupQueue {
         if (!item) break;
         item.status = "processing";
         this.activeJobs++;
-        void this.processItem(item).finally(() => {
+        void this.processItem(item).finally(async () => {
           this.activeJobs--;
           // Wake the loop immediately if it's parked waiting for a slot.
           if (this.slotFreed) {
             const wake = this.slotFreed;
             this.slotFreed = null;
             wake();
+          }
+          // Add inter-job delay to prevent network saturation when warming 100+ accounts.
+          // This gives the network stack breathing room between probe requests.
+          if (config.warmupDelayMs > 0) {
+            await new Promise((resolve) => setTimeout(resolve, config.warmupDelayMs));
           }
           this.process();
         });

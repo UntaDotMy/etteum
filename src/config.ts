@@ -135,6 +135,10 @@ export const config = {
     const n = Number(raw);
     return Number.isFinite(n) && n >= 0 ? Math.floor(n) : 50;
   })(),
+  // Inter-request delay (ms) between warmup jobs completing and the next one
+  // starting. Prevents network saturation when warming 100+ accounts back-to-back.
+  // Default 100ms is conservative; raise for slower upstreams or constrained bandwidth.
+  warmupDelayMs: Number(process.env.POOLPROX_WARMUP_DELAY_MS) || 100,
   authProcessTimeoutMs: Number(process.env.POOLPROX_AUTH_PROCESS_TIMEOUT_MS) || 10 * 60 * 1000,
   providerRequestTimeoutMs: Number(process.env.POOLPROX_PROVIDER_REQUEST_TIMEOUT_MS) || 120_000,
   providerQuotaTimeoutMs: Number(process.env.POOLPROX_PROVIDER_QUOTA_TIMEOUT_MS) || 15_000,

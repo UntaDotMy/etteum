@@ -20,16 +20,66 @@ export function isBadUpstreamRequest(error?: string): boolean {
   );
 }
 
+/**
+ * Detect content moderation / content safety rejections from ANY upstream provider.
+ *
+ * This is the GLOBAL safety net: when any provider rejects a request because
+ * the input content triggered their content safety scanner, the error must be
+ * classified as "this request is bad, not the account". The router then throws
+ * immediately instead of retrying other accounts and marking them as error.
+ *
+ * Covers:
+ *   - Alibaba DashScope: data_inspection_failed, inappropriate content
+ *   - AWS Bedrock / Kiro: content_filter, sensitive content
+ *   - CodeBuddy: content policy, safety filter
+ *   - Anthropic direct: content_filter
+ *   - Generic: any 400 with content/moderation/safety/policy keywords
+ */
 export function isContentModerationError(error?: string): boolean {
   if (!error) return false;
+  const normalized = error.toLowerCase();
   return (
-    error.includes("敏感内容") ||
-    error.includes("sensitive content") ||
-    error.includes("系统检测到") ||
-    error.includes("content moderation") ||
-    error.includes("Content moderation") ||
+    // ── Generic patterns (all providers) ──────────────────────────────
     error.includes("content_filter") ||
-    error.includes("flagged as potentially sensitive")
+    error.includes("content filter") ||
+    error.includes("content moderation") ||
+    error.includes("content policy") ||
+    error.includes("content safety") ||
+    error.includes("safety filter") ||
+    error.includes("safety_policy") ||
+    error.includes("safety policy") ||
+    error.includes("flagged as potentially sensitive") ||
+    // ── Chinese-language moderation (Alibaba, Baidu, etc.) ────────────
+    error.includes("敏感内容") ||
+    error.includes("内容审核") ||
+    error.includes("内容安全") ||
+    error.includes("系统检测到") ||
+    error.includes("sensitive content") ||
+    // ── Alibaba DashScope specific ────────────────────────────────────
+    error.includes("data_inspection_failed") ||
+    error.includes("DataInspectionFailed") ||
+    error.includes("inappropriate content") ||
+    error.includes("data inspection failed") ||
+    // ── AWS Bedrock / Kiro ───────────────────────────────────────────
+    error.includes("input is not allowed") ||
+    error.includes("input was filtered") ||
+    error.includes("blocked by content") ||
+    error.includes("content policy violation") ||
+    // ── CodeBuddy / Tencent ──────────────────────────────────────────
+    error.includes("content security") ||
+    error.includes("text contains sensitive") ||
+    // ── Generic HTTP 400 content rejections ──────────────────────────
+    // Catch "HTTP 400: ...content..." patterns from any provider
+    (normalized.includes("400") && (
+      normalized.includes("content") ||
+      normalized.includes("moderation") ||
+      normalized.includes("safety") ||
+      normalized.includes("inspection") ||
+      normalized.includes("policy") ||
+      normalized.includes("inappropriate") ||
+      normalized.includes("blocked") ||
+      normalized.includes("filter")
+    ))
   );
 }
 
@@ -37,6 +87,9 @@ export function isContentModerationError(error?: string): boolean {
  * Errors that are caused by the request content itself, not the account.
  * These should NOT be retried with different accounts since the same content
  * will trigger the same error regardless of which account is used.
+ *
+ * GLOBAL: applies to all providers. The router throws immediately on these
+ * instead of calling pool.markError() or pool.markExhausted().
  */
 export function isNonAccountRequestError(error?: string): boolean {
   if (!error) return false;
@@ -52,6 +105,8 @@ export function isNonAccountRequestError(error?: string): boolean {
  * These include network issues, timeouts, rate limits, upstream server errors,
  * and bad-request errors that are caused by the request format (not the account).
  * Account stays "active" but error is logged.
+ *
+ * GLOBAL: applies to all providers.
  */
 export function isTransientError(error?: string): boolean {
   if (!error) return false;
@@ -88,7 +143,10 @@ export function isTransientError(error?: string): boolean {
     // Bad request format (not account issue — request content caused it)
     normalized.includes("parse message failed") ||
     normalized.includes("invalid request") ||
+    // HTTP status codes in any format: "(400)", "HTTP 400:", "status 400", etc.
+    // Previously only matched "(400)" which missed "HTTP 400:" (Alibaba format).
     normalized.includes("(400)") ||
+    normalized.includes("http 400") ||
     // Stream errors (temporary)
     normalized.includes("stream error") ||
     normalized.includes("stream read timeout") ||

@@ -672,6 +672,19 @@ export class AlibabaProvider extends BaseProvider {
       await db.update(accounts).set({ tokens: quotaTokens as unknown }).where(eq(accounts.id, account.id));
     }
 
+    // Calculate aggregate quota across all models
+    let totalLimit = 0;
+    let totalRemaining = 0;
+    let totalUsed = 0;
+    
+    for (const modelQuota of Object.values(tokens)) {
+      if (modelQuota.limit > 0) {
+        totalLimit += modelQuota.limit;
+        totalRemaining += modelQuota.remaining;
+        totalUsed += Math.max(0, modelQuota.limit - modelQuota.remaining);
+      }
+    }
+
     // Determine overall health
     const allExhausted = Object.keys(tokens).length > 0 &&
       Object.values(tokens).every((t) => t.remaining <= 0);
@@ -680,7 +693,12 @@ export class AlibabaProvider extends BaseProvider {
       return {
         kind: "exhausted",
         success: true,
-        quota: { limit: -1, remaining: 0, used: 0, source: "alibaba.probe" },
+        quota: { 
+          limit: totalLimit || -1, 
+          remaining: 0, 
+          used: totalUsed, 
+          source: "alibaba.probe" 
+        },
         message: "All models exhausted",
       };
     }
@@ -688,8 +706,13 @@ export class AlibabaProvider extends BaseProvider {
     return {
       kind: "healthy",
       success: true,
-      quota: undefined,
-      metadata: { modelQuotas: tokens },
+      quota: totalLimit > 0 ? {
+        limit: totalLimit,
+        remaining: totalRemaining,
+        used: totalUsed,
+        source: "alibaba.aggregate"
+      } : undefined,
+      metadata: { modelQuotas: tokens, queryableModels },
     };
   }
 
@@ -839,7 +862,9 @@ export class AlibabaProvider extends BaseProvider {
     }
     if (!response.ok) {
       const text = await response.text().catch(() => "");
-      return { success: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}` };
+      // Use 500 chars to ensure error codes like "data_inspection_failed"
+      // aren't truncated (200 was too short for some DashScope error bodies).
+      return { success: false, error: `HTTP ${response.status}: ${text.slice(0, 500)}` };
     }
 
     // Check if response is SSE (some dashscope versions return SSE even with stream:false)
@@ -1070,12 +1095,23 @@ export class AlibabaProvider extends BaseProvider {
     if (request.tools) body.tools = request.tools;
     if (request.tool_choice) body.tool_choice = request.tool_choice;
 
-    // DashScope thinking config — uses enable_thinking + thinking_budget (not reasoning_effort)
+    // DashScope thinking config — uses enable_thinking + thinking_budget.
     // Docs: https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-dashscope
-    if (request.thinking || request.reasoning_effort) {
+    //
+    // CRITICAL: Only enable thinking when the client explicitly requests it
+    // via `thinking`. Do NOT enable it for `reasoning_effort` alone — that's
+    // an OpenAI/Anthropic concept handled by the transform layer. If we enable
+    // thinking here but the client didn't ask for it, the model returns
+    // `reasoning_content` which leaks into the visible output text (the
+    // Anthropic transform only wraps it in a thinking block when
+    // `request.thinking` is truthy).
+    if (request.thinking) {
       body.enable_thinking = true;
       // thinking_budget: cap reasoning tokens (default 4096 if not specified)
-      body.thinking_budget = 4096;
+      const budget = (request.thinking as any)?.budget_tokens;
+      body.thinking_budget = Number.isFinite(Number(budget)) && Number(budget) > 0
+        ? Number(budget)
+        : 4096;
     }
   }
 }

@@ -196,14 +196,21 @@ export async function routeRequest(
 
       // Handle quota exhaustion (402 / 403 without PAYG).
       //
-      // Trust upstream: if the provider reports quota exhausted, mark it
-      // and move on. For Qoder, the next warmup tick will re-fetch
-      // /activity and /quota/usage and flip the account back to active
-      // automatically if Qoder reports remaining > 0 again. We accept the
-      // occasional false-exhaust (lifted within one warmup cycle) in
-      // exchange for never serving a known-bad account on retry.
+      // For Alibaba: mark the specific model as exhausted (remove from queryableModels)
+      // but keep the account active so other models can still be queried.
+      // For other providers: mark the entire account as exhausted.
       if (result.quotaExhausted) {
-        await pool.markExhausted(account.id);
+        if (providerName === "alibaba") {
+          // Alibaba: per-model exhaustion is already handled by the provider
+          // (setModelQuotaToZero called in chatCompletion). Just invalidate
+          // the pool cache so the next request picks a different account for
+          // this model.
+          pool.invalidate(providerName);
+          lastError = result.error || "Quota exhausted for this model";
+          continue;
+        } else {
+          await pool.markExhausted(account.id);
+        }
         lastError = result.error || "Quota exhausted";
         continue; // Try next account
       }
@@ -278,8 +285,18 @@ export async function routeRequest(
       }
 
       // Generic error - check if transient (network/timeout) or permanent
+      // For Alibaba: model-specific errors (quota, unpurchased) should not
+      // mark the entire account as error - just skip this model.
       if (isTransientError(result.error || "")) {
         await pool.markTransientFailure(account.id, result.error || "Transient error");
+      } else if (providerName === "alibaba" && (
+        result.error?.includes("not activated") ||
+        result.error?.includes("not purchased") ||
+        result.error?.includes("Free quota exhausted") ||
+        result.error?.includes("quota has been exhausted")
+      )) {
+        // Alibaba model-specific error: invalidate pool but don't mark account as error
+        pool.invalidate(providerName);
       } else {
         await pool.markError(account.id, result.error || "Unknown error");
       }
