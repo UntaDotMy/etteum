@@ -392,9 +392,9 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   // Guard: providers that use API keys / PATs (not browser login) should
   // never reach the Python auth script — it doesn't know about them and will
   // return "Provider X not found in result".
-  const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "antigravity"]);
+  const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind"]);
   if (NON_LOGINABLE.has(provider)) {
-    const errorMsg = `${provider} accounts use API keys / refresh tokens, not browser login — re-add the token instead`;
+    const errorMsg = `${provider} accounts use API keys, not browser login — re-add the key instead`;
     await markAccountError(account.id, errorMsg);
     const log = addAuthLog({
       type: "login_failed",

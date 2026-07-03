@@ -73,7 +73,7 @@ class LoginQueue {
     // youmind uses sk-ym- API keys. Queueing them for browser login would
     // spawn the Python script which doesn't know about them → "Provider X
     // not found in result" error.
-    const nonLoginable = new Set(["byok", "codebuddy-china", "youmind", "antigravity"]);
+    const nonLoginable = new Set(["byok", "codebuddy-china", "youmind"]);
 
     const pendingAccounts = await db
       .select()
@@ -142,7 +142,7 @@ class LoginQueue {
     // Use all login-capable providers (excludes byok which is key-based, not
     // browser-login). codebuddy-china also uses static API keys (no login).
     const loginProviders = config.providers.filter(
-      (p) => p !== "byok" && p !== "codebuddy-china" && p !== "youmind" && p !== "antigravity",
+      (p) => p !== "byok" && p !== "codebuddy-china" && p !== "youmind",
     );
     const items: BulkAddItem[] = credentials.map((c) => ({
       ...c,

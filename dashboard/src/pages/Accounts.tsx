@@ -785,6 +785,9 @@ export default function Accounts() {
     if (provider === "youmind") {
       setAddMode("pat");
     }
+    if (provider === "antigravity") {
+      setAddMode("bulk");
+    }
     setAddDialogProvider(provider);
   }
 
@@ -2099,6 +2102,18 @@ export default function Accounts() {
               <button onClick={() => setAddMode("pat")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "pat" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >API Key (sk-ym-...)</button>
+            </div>
+          ) : addDialogProvider === "antigravity" ? (
+            <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
+              <button onClick={() => setAddMode("bulk")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "bulk" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >Bulk (Email|Pass)</button>
+              <button onClick={() => setAddMode("single")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "single" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >Single</button>
+              <button onClick={() => setAddMode("apikey")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "apikey" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >Refresh Token</button>
             </div>
           ) : addDialogProvider === "codebuddy-china" ? (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
