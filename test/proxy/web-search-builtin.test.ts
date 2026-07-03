@@ -33,13 +33,14 @@ describe("duckduckgo lite HTML parsing", () => {
   test("extracts title, url, and snippet from organic results", () => {
     const results = parseDuckDuckGoLite(sampleHtml);
     expect(results.length).toBe(3); // 2 organic + 1 sponsored-as-uddg (parser doesn't filter sponsored by class)
-    expect(results[0]).toEqual({
+    const [r0, r1] = results;
+    expect(r0).toEqual({
       url: "https://example.com/news",
       title: "Breaking News",
       snippet: "The latest breaking news & updates",
     });
-    expect(results[1].url).toBe("https://foo.com/bar");
-    expect(results[1].title).toBe("Foo Bar");
+    expect(r1?.url).toBe("https://foo.com/bar");
+    expect(r1?.title).toBe("Foo Bar");
   });
 
   test("returns empty array for malformed/empty HTML", () => {
@@ -60,14 +61,15 @@ describe("searxng result mapping", () => {
     };
     const results = mapSearxngResults(fakeJson);
     expect(results.length).toBe(3);
-    expect(results[0]).toEqual({
+    const [r0, , r2] = results;
+    expect(r0).toEqual({
       url: "https://a.com",
       title: "A",
       snippet: "snip A",
       pageAge: "2026-01-01",
     });
-    expect(results[2].snippet).toBeUndefined();
-    expect(results[2].pageAge).toBeUndefined();
+    expect(r2?.snippet).toBeUndefined();
+    expect(r2?.pageAge).toBeUndefined();
   });
 
   test("returns empty array for malformed payload", () => {
@@ -98,10 +100,11 @@ describe("brave html parsing", () => {
   test("extracts external urls + titles, skips brave-internal hosts", () => {
     const results = parseBraveHtml(sampleHtml);
     expect(results.length).toBe(3);
-    expect(results[0].url).toBe("https://en.wikipedia.org/wiki/Claude_(AI)");
-    expect(results[0].title).toBe("Claude (AI) - Wikipedia");
-    expect(results[0].snippet).toContain("large language models");
-    expect(results[1].url).toBe("https://claude.ai/");
+    const [r0, r1] = results;
+    expect(r0?.url).toBe("https://en.wikipedia.org/wiki/Claude_(AI)");
+    expect(r0?.title).toBe("Claude (AI) - Wikipedia");
+    expect(r0?.snippet).toContain("large language models");
+    expect(r1?.url).toBe("https://claude.ai/");
     // Brave-internal link (brave.com/about) must be excluded.
     expect(results.find((r) => r.url.includes("brave.com"))).toBeUndefined();
   });
@@ -109,7 +112,7 @@ describe("brave html parsing", () => {
   test("dedupes repeated urls", () => {
     const html = `<a href="https://dup.com">First title</a><a href="https://dup.com">Second title</a>`;
     expect(parseBraveHtml(html).length).toBe(1);
-    expect(parseBraveHtml(html)[0].title).toBe("First title");
+    expect(parseBraveHtml(html)[0]?.title).toBe("First title");
   });
 
   test("skips anchors with no real title text", () => {
@@ -139,14 +142,15 @@ describe("ddg instant-answer api mapping", () => {
     };
     const results = mapDdgApiResults(payload);
     expect(results.length).toBe(3);
-    expect(results[0]).toEqual({
+    const [r0, r1, r2] = results;
+    expect(r0).toEqual({
       url: "https://en.wikipedia.org/wiki/Claude_(language_model)",
       title: "Claude (language model)",
       snippet: "Claude is a series of LLMs by Anthropic.",
     });
-    expect(results[1].url).toBe("https://duckduckgo.com/Reasoning_model");
-    expect(results[1].title).toBe("Reasoning model"); // Text split on " - "
-    expect(results[2].url).toBe("https://example.com/sub"); // nested Topics
+    expect(r1?.url).toBe("https://duckduckgo.com/Reasoning_model");
+    expect(r1?.title).toBe("Reasoning model"); // Text split on " - "
+    expect(r2?.url).toBe("https://example.com/sub"); // nested Topics
   });
 
   test("returns empty when no abstract and no related topics", () => {
@@ -170,10 +174,11 @@ describe("wikipedia api mapping", () => {
     };
     const results = mapWikipediaResults(payload);
     expect(results.length).toBe(2);
-    expect(results[0].url).toBe("https://en.wikipedia.org/?curid=75879512");
-    expect(results[0].title).toBe("Claude (AI)");
-    expect(results[0].snippet).toBe("Claude is developed by Anthropic."); // span tags stripped
-    expect(results[1].url).toBe("https://en.wikipedia.org/?curid=6201236");
+    const [r0, r1] = results;
+    expect(r0?.url).toBe("https://en.wikipedia.org/?curid=75879512");
+    expect(r0?.title).toBe("Claude (AI)");
+    expect(r0?.snippet).toBe("Claude is developed by Anthropic."); // span tags stripped
+    expect(r1?.url).toBe("https://en.wikipedia.org/?curid=6201236");
   });
 
   test("returns empty for malformed payload", () => {
@@ -191,13 +196,13 @@ describe("extractWebSearchConfig", () => {
       .toEqual({ present: true, maxUses: 3 });
   });
 
-  test("defaults max_uses to 5 when absent", () => {
+  test("defaults max_uses to 50 when absent", () => {
     expect(extractWebSearchConfig([{ type: "web_search_20260318" }]))
-      .toEqual({ present: true, maxUses: 5 });
+      .toEqual({ present: true, maxUses: 50 });
   });
 
-  test("clamps to hard cap of 10", () => {
-    expect(extractWebSearchConfig([{ type: "web_search_20250305", max_uses: 99 }]).maxUses).toBe(10);
+  test("clamps to hard cap of 50", () => {
+    expect(extractWebSearchConfig([{ type: "web_search_20250305", max_uses: 99 }]).maxUses).toBe(50);
   });
 
   test("returns absent for no web_search tool", () => {
@@ -411,10 +416,10 @@ describe("runWebSearchLoopStreaming", () => {
       // server_tool_use + web_search_tool_result blocks present.
       const stuStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "server_tool_use");
       expect(stuStart).toBeDefined();
-      expect(stuStart.data.content_block.name).toBe("web_search");
+      expect(stuStart?.data.content_block?.name).toBe("web_search");
       const wtrStart = events.find((e) => e.event === "content_block_start" && e.data.content_block?.type === "web_search_tool_result");
       expect(wtrStart).toBeDefined();
-      expect(wtrStart.data.content_block.tool_use_id).toBe(stuStart.data.content_block.id);
+      expect(wtrStart?.data.content_block?.tool_use_id).toBe(stuStart?.data.content_block?.id);
 
       // Text deltas span both iterations (forwarded live).
       const text = events
@@ -426,7 +431,7 @@ describe("runWebSearchLoopStreaming", () => {
 
       // Final message_delta stop_reason is end_turn.
       const md = events.find((e) => e.event === "message_delta");
-      expect(md.data.delta.stop_reason).toBe("end_turn");
+      expect(md?.data.delta.stop_reason).toBe("end_turn");
 
       expect(call).toBe(2);
     } finally {

@@ -48,10 +48,11 @@ describe("model-specs registry", () => {
       { id: "cb-enowx", object: "model", created: 0, owned_by: "codebuddy" } as ModelInfo, // not in registry
     ];
     const out = applyModelSpecs(models, (m) => m.id.replace(/^cb-/, ""));
-    expect(out[0].context_window).toBe(400_000);
-    expect(out[0].max_output).toBe(131_072);
+    const [known, unknown] = out;
+    expect(known?.context_window).toBe(400_000);
+    expect(known?.max_output).toBe(131_072);
     // Unknown model is passed through unchanged.
-    expect(out[1].context_window).toBeUndefined();
+    expect(unknown?.context_window).toBeUndefined();
   });
 
   test("the registry is non-empty and covers all major families", () => {

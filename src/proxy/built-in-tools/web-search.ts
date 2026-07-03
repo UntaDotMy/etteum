@@ -53,7 +53,9 @@ export interface WebSearchOutcome {
 }
 
 const SEARCH_TIMEOUT_MS = 10_000;
-const MAX_RESULTS = 5;
+// MediaWiki `list=search` requires a numeric srlimit (server caps at 500). Other
+// backends return all organic results uncapped; only Wikipedia needs a ceiling.
+const WIKIPEDIA_SRLIMIT = 50;
 const BROWSER_UA =
   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
@@ -85,7 +87,7 @@ export async function searchWeb(query: string): Promise<WebSearchOutcome> {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
     try {
-      const results = (await backend.search(query.trim(), controller.signal)).slice(0, MAX_RESULTS);
+      const results = await backend.search(query.trim(), controller.signal);
       if (results.length > 0) {
         return { results, backend: backend.name };
       }
@@ -178,7 +180,6 @@ export function parseBraveHtml(html: string): WebSearchResult[] {
     if (!url || seen.has(url) || !title || title.length < 3) continue;
     seen.add(url);
     results.push({ url, title, snippet: snippetNear(html, m.index ?? 0, title) });
-    if (results.length >= MAX_RESULTS * 2) break; // collect a few extra, slice later
   }
   return results;
 }
@@ -235,12 +236,10 @@ export function mapDdgApiResults(data: any): WebSearchResult[] {
   // RelatedTopics can contain nested topic objects or disambiguation groups.
   const topics: any[] = Array.isArray(data.RelatedTopics) ? data.RelatedTopics : [];
   for (const t of topics) {
-    if (results.length >= MAX_RESULTS) break;
     if (t?.Text && t?.FirstURL) {
       results.push({ url: t.FirstURL, title: t.Text.split(" - ")[0] || t.Text, snippet: t.Text });
     } else if (Array.isArray(t?.Topics)) {
       for (const sub of t.Topics) {
-        if (results.length >= MAX_RESULTS) break;
         if (sub?.Text && sub?.FirstURL) {
           results.push({ url: sub.FirstURL, title: sub.Text.split(" - ")[0] || sub.Text, snippet: sub.Text });
         }
@@ -255,7 +254,7 @@ export function mapDdgApiResults(data: any): WebSearchResult[] {
 export const wikipediaBackend: WebSearchBackend = {
   name: "wikipedia",
   async search(query, signal) {
-    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${MAX_RESULTS}&srprop=snippet`;
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${WIKIPEDIA_SRLIMIT}&srprop=snippet`;
     const res = await fetch(url, {
       headers: { Accept: "application/json", "User-Agent": BROWSER_UA },
       signal,
@@ -316,21 +315,28 @@ export function parseDuckDuckGoLite(html: string): WebSearchResult[] {
   const links: { url: string; title: string }[] = [];
   let m: RegExpExecArray | null;
   while ((m = linkRe.exec(html)) !== null) {
-    const url = decodeDdgUrl(m[1]);
-    const title = stripTags(m[2]).trim();
+    const href = m[1];
+    const rawTitle = m[2];
+    if (href === undefined || rawTitle === undefined) continue;
+    const url = decodeDdgUrl(href);
+    const title = stripTags(rawTitle).trim();
     if (url && title) links.push({ url, title });
   }
 
   const snippets: string[] = [];
   while ((m = snippetRe.exec(html)) !== null) {
-    const s = stripTags(m[1]).trim();
+    const raw = m[1];
+    if (raw === undefined) continue;
+    const s = stripTags(raw).trim();
     if (s) snippets.push(s);
   }
 
   for (let i = 0; i < links.length; i++) {
+    const link = links[i];
+    if (!link) continue;
     results.push({
-      url: links[i].url,
-      title: links[i].title,
+      url: link.url,
+      title: link.title,
       snippet: snippets[i],
     });
   }

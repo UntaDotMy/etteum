@@ -297,7 +297,9 @@ test("anthropicToOpenAI: tool_result with is_error flag", () => {
   console.log("is_error tool_result:", JSON.stringify(result.messages, null, 2));
 
   expect(result.messages[1]!.role).toBe("tool");
-  expect(result.messages[1]!.content).toBe("Command failed");
+  // is_error tool results carry a [tool_error] prefix (see anthropic.ts:185).
+  // Matches the assertion in test/proxy/anthropic-transform.test.ts.
+  expect(result.messages[1]!.content).toBe("[tool_error] Command failed");
 });
 
 // ─────────────────────────────────────────────────────────────────────────────

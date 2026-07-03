@@ -514,7 +514,7 @@ function anthropicMessageToOpenAIMessages(message: AnthropicMessage): ChatComple
   if (message.role === "assistant" && toolCalls.length > 0) {
     out.push({
       role: "assistant",
-      content: text || null,
+      content: text || "",
       tool_calls: toolCalls,
     });
     return out;

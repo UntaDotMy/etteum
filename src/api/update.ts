@@ -295,7 +295,7 @@ export async function applyUpdate(): Promise<{
   let topPid: number;
   try {
     const f = Bun.file(pidFile);
-    topPid = f.size > 0 ? Number(new TextDecoder().decode(f.bytesSync() ?? new Uint8Array()).trim()) : NaN;
+    topPid = f.size > 0 ? Number((await f.text()).trim()) : NaN;
   } catch { topPid = NaN; }
   if (!Number.isFinite(topPid)) topPid = process.ppid || process.pid;
 

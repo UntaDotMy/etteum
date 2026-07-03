@@ -230,7 +230,9 @@ export const config = {
   // web_search_tool_result blocks. Works on install with zero config.
   webSearchEnabled: process.env.WEB_SEARCH_ENABLED !== "false",
   searxngUrl: process.env.SEARXNG_URL || "",
-  webSearchMaxUses: Number(process.env.WEB_SEARCH_MAX_USES) || 5,
+  // Per-turn search ceiling (default 50). Agent-driven: the model decides how
+  // many searches; this bounds cost/abuse. Override via WEB_SEARCH_MAX_USES.
+  webSearchMaxUses: Number(process.env.WEB_SEARCH_MAX_USES) || 50,
   // ── Build identity (computed once at startup) ─────────────────────────────
   buildVersion: buildInfo.version,
   buildCommit: buildInfo.commit,

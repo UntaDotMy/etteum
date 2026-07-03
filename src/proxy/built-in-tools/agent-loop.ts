@@ -27,8 +27,10 @@ import { searchWeb, type WebSearchResult } from "./web-search";
 import { config } from "../../config";
 
 const WEB_SEARCH_FN_NAME = "web_search";
-const DEFAULT_MAX_USES = 5;
-const HARD_MAX_USES = 10;
+// Agent-driven: high ceiling, not a low fixed cap. Bounds cost/abuse; the 2-min
+// overall timeout is the other backstop. Override default via WEB_SEARCH_MAX_USES.
+const DEFAULT_MAX_USES = 50;
+const HARD_MAX_USES = 50;
 const OVERALL_TIMEOUT_MS = 120_000;
 const HEARTBEAT_MS = 10_000;
 
@@ -56,21 +58,35 @@ function webSearchSystemInstruction(maxUses: number): string {
   return [
     "You have access to a `web_search` tool. Use it whenever the user's request depends on current, changing, or recent information (news, prices, events, people, products).",
     "Do NOT search for stable knowledge (math, science fundamentals, coding concepts, creative writing).",
-    `You may search at most ${maxUses} times in this turn. After receiving search results, synthesize a final answer with citations to the result URLs.`,
+    "You decide how many searches this turn needs: search as many times as is genuinely useful, and stop as soon as you have enough information to answer well.",
+    `There is a hard ceiling of ${maxUses} searches per turn as a backstop. Each search returns all results the backend finds — read them before searching again.`,
+    "After receiving search results, synthesize a final answer with citations to the result URLs.",
   ].join(" ");
 }
 
-/** Detect a web_search_* server tool and read its max_uses (if any). */
+/**
+ * Detect a web_search_* server tool and read its max_uses (if any). When the
+ * request omits max_uses, fall back to config.webSearchMaxUses (the
+ * WEB_SEARCH_MAX_USES env var) so the operator — not a hardcoded constant —
+ * controls the ceiling. Always clamped to HARD_MAX_USES.
+ */
 export function extractWebSearchConfig(
   tools: any[] | undefined,
 ): { present: boolean; maxUses: number } {
   if (!Array.isArray(tools)) return { present: false, maxUses: 0 };
   for (const t of tools) {
     if (t && typeof t === "object" && typeof t.type === "string" && t.type.startsWith("web_search_")) {
-      const max = Number(t.max_uses);
+      const fromReq = Number(t.max_uses);
+      const fromCfg = config.webSearchMaxUses;
+      // Resolution order: request max_uses, then env var, then default. Each
+      // must be a positive finite number; malformed values fall through.
+      const max =
+        (Number.isFinite(fromReq) && fromReq > 0) ? fromReq
+        : (Number.isFinite(fromCfg) && fromCfg > 0) ? fromCfg
+        : DEFAULT_MAX_USES;
       return {
         present: true,
-        maxUses: Number.isFinite(max) && max > 0 ? Math.min(max, HARD_MAX_USES) : DEFAULT_MAX_USES,
+        maxUses: Math.min(Math.max(1, Math.floor(max)), HARD_MAX_USES),
       };
     }
   }
@@ -128,10 +144,11 @@ function prependSystemInstruction(
   messages: ChatCompletionRequest["messages"],
   instr: string,
 ): ChatCompletionRequest["messages"] {
-  if (messages.length > 0 && messages[0].role === "system") {
-    const sys = typeof messages[0].content === "string" ? messages[0].content : "";
+  const first = messages[0];
+  if (first && first.role === "system") {
+    const sys = typeof first.content === "string" ? first.content : "";
     const merged = sys ? `${sys}\n\n${instr}` : instr;
-    return [{ ...messages[0], content: merged }, ...messages.slice(1)];
+    return [{ ...first, content: merged }, ...messages.slice(1)];
   }
   return [{ role: "system", content: instr }, ...messages];
 }

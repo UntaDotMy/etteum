@@ -9,7 +9,6 @@ import {
 import type { Account } from "../../db/schema";
 import { decrypt } from "../../utils/crypto";
 import { normalizeMessagesToOpenAI } from "../transforms/anthropic";
-import { normalizeMessagesToOpenAI, normalizeToolsToOpenAI } from "../transforms/anthropic";
 import { applyModelSpecs } from "../model-specs";
 
 // ============================================================================
@@ -488,7 +487,7 @@ export class YouMindProvider extends BaseProvider {
   ): Record<string, unknown> {
     const body: Record<string, unknown> = {
       model: def.upstream,
-      messages: this.normalizeMessagesForOpenAI(request.messages),
+      messages: normalizeMessagesToOpenAI(request.messages),
       stream,
     };
 

@@ -126,6 +126,7 @@ export interface ProviderResult {
   rateLimited?: boolean; // 429 rate-limit (temporary, don't mark exhausted)
   banned?: boolean; // 403 — account is banned/restricted, not an auth issue
   tokens?: unknown; // New tokens after refresh (if refreshed during request)
+  metadata?: Record<string, unknown>; // Provider-specific diagnostics (e.g. upstream error text)
 }
 
 export abstract class BaseProvider {

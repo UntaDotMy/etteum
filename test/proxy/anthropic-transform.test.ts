@@ -214,9 +214,9 @@ describe("openAIToAnthropic response mapping", () => {
       req,
     );
     const tu = out.content.find((b: any) => b.type === "tool_use");
-    expect(typeof tu.id).toBe("string");
-    expect(tu.id.startsWith("toolu_")).toBe(true);
-    expect(tu.id.length).toBeGreaterThan("toolu_".length);
+    expect(typeof tu?.id).toBe("string");
+    expect(tu?.id?.startsWith("toolu_")).toBe(true);
+    expect((tu?.id?.length ?? 0)).toBeGreaterThan("toolu_".length);
   });
 });
 
@@ -291,7 +291,10 @@ describe("anthropic tool_result normalization (Fix #5, #6)", () => {
       m.role === "user" && Array.isArray(m.content) && m.content.some((b: any) => b.type === "image_url"),
     );
     expect(userImg).toBeDefined();
-    expect(userImg.content.find((b: any) => b.type === "image_url").image_url.url).toBe("https://x/img.png");
+    const imgBlock = Array.isArray(userImg?.content)
+      ? userImg.content.find((b: any) => b.type === "image_url")
+      : undefined;
+    expect(imgBlock?.image_url?.url).toBe("https://x/img.png");
   });
 });
 

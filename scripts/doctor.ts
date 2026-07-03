@@ -29,8 +29,8 @@ const ROOT = resolve(import.meta.dir, "..");
 const IS_WIN = platform() === "win32";
 const checks: Check[] = [];
 
-function pushOk(name: string, message: string) {
-  checks.push({ name, severity: "ok", message });
+function pushOk(name: string, message: string, fix?: string) {
+  checks.push({ name, severity: "ok", message, fix });
 }
 function pushWarn(name: string, message: string, fix?: string) {
   checks.push({ name, severity: "warn", message, fix });
