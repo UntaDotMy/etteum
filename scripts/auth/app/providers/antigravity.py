@@ -54,8 +54,11 @@ AG_CLIENT_SECRET = "GOCSPX" + "-" + "K58FWR486LdLJ1mLB8sXC4z6qDAf"
 AG_TOKEN_URL = "https://oauth2.googleapis.com/token"
 AG_AUTHORIZE_URL = "https://accounts.google.com/o/oauth2/v2/auth"
 AG_LOAD_CODEASSIST_URL = "https://cloudcode-pa.googleapis.com/v1internal:loadCodeAssist"
-# Scopes: openid+email+profile for identity, offline_access for refresh_token.
-AG_SCOPE = "openid email profile offline_access"
+# Google OAuth scopes. NOTE: do NOT include `offline_access` — Google rejects it
+# with "invalid_scope" (it's an OIDC scope, not a Google scope). The refresh_token
+# is obtained via access_type=offline in the authorize URL, not via a scope.
+# Use the explicit googleapis.com userinfo URLs (the form Google's validator accepts).
+AG_SCOPE = "openid https://www.googleapis.com/auth/userinfo.email https://www.googleapis.com/auth/userinfo.profile"
 DEFAULT_CALLBACK_PORT = int(os.getenv("ANTIGRAVITY_CALLBACK_PORT", "1463"))
 REDIRECT_PATH = "/auth/callback"
 
