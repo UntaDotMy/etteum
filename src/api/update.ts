@@ -20,7 +20,31 @@ import { config } from "../config";
 import path from "path";
 
 const projectRoot = path.resolve(import.meta.dir, "../..");
-const FETCH_BRANCH = "main";
+
+// The default branch to compare against for updates. Historically hardcoded to
+// "main", but this repo's default branch is "master" (origin/HEAD -> master),
+// which made the checker compare local master against a stale origin/main and
+// always report a bogus "update available". Resolve the real default branch
+// from origin/HEAD at runtime, with a hard fallback chain, so it survives
+// upstream renames and never crashes if origin/HEAD is unset.
+let _fetchBranch: string | null = null;
+function fetchBranch(): string {
+  if (_fetchBranch) return _fetchBranch;
+  const r = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+  if (r.ok && r.out.startsWith("refs/remotes/origin/")) {
+    _fetchBranch = r.out.slice("refs/remotes/origin/".length);
+    return _fetchBranch;
+  }
+  // origin/HEAD unset — fall back to whichever remote branch actually exists.
+  for (const cand of ["main", "master"]) {
+    if (git(["rev-parse", "--verify", `origin/${cand}`]).ok) {
+      _fetchBranch = cand;
+      return _fetchBranch;
+    }
+  }
+  _fetchBranch = "main"; // last resort; matches the historical default
+  return _fetchBranch;
+}
 
 // ── git helpers ────────────────────────────────────────────────────────────
 
@@ -56,13 +80,13 @@ export function readLocalCommit(): string | null {
 
 /** Read the upstream (origin/main) commit hash from the local refs (no network). */
 export function readRemoteCommit(): string | null {
-  const r = git(["rev-parse", `origin/${FETCH_BRANCH}`]);
+  const r = git(["rev-parse", `origin/${fetchBranch()}`]);
   return r.ok ? r.out : null;
 }
 
-/** Fetch origin/main to refresh the remote ref. Bounded by a timeout. */
+/** Fetch origin/<default-branch> to refresh the remote ref. Bounded by a timeout. */
 export function fetchOrigin(): { ok: boolean; err: string } {
-  const r = git(["fetch", "origin", FETCH_BRANCH, "--no-tags"]);
+  const r = git(["fetch", "origin", fetchBranch(), "--no-tags"]);
   return { ok: r.ok, err: r.err };
 }
 
@@ -92,7 +116,7 @@ export function computeStatus(force = false): StatusResult {
   }
 
   const currentVersion = readVersionLabel();
-  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out || FETCH_BRANCH;
+  const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out || fetchBranch();
   const local = readLocalCommit();
 
   if (!local) {
@@ -211,7 +235,7 @@ export async function applyUpdate(): Promise<{
   const bun = process.env.BUN_EXECUTABLE_PATH || "bun";
 
   // 1. git pull
-  const pull = git(["pull", "origin", FETCH_BRANCH, "--no-rebase"]);
+  const pull = git(["pull", "origin", fetchBranch(), "--no-rebase"]);
   steps.push({ name: "git pull", ok: pull.ok, detail: pull.ok ? pull.out.slice(0, 300) : pull.err.slice(0, 300) });
   if (!pull.ok) {
     return { ok: false, steps, restarted: false, supervisor: detectSupervisor() };
