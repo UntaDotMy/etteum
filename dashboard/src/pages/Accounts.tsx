@@ -46,7 +46,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba";
+type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity";
 
 type ByokFormKey = {
   id?: number;
@@ -97,7 +97,7 @@ interface AlibabaQuotaTokens {
   updatedAt: string;
 }
 
-const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "alibaba"];
+const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "alibaba", "antigravity"];
 
 /** Providers that authenticate with static API keys / PATs — no browser login. */
 const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "alibaba"]);
@@ -108,6 +108,7 @@ function labelProvider(provider: string) {
   if (provider === "codebuddy-china") return "CodeBuddy CN";
   if (provider === "codex") return "Codex";
   if (provider === "qoder") return "Qoder";
+  if (provider === "antigravity") return "Antigravity";
   if (provider === "gitlab-duo") return "GitLab Duo";
   if (provider === "youmind") return "YouMind";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
@@ -147,6 +148,8 @@ export default function Accounts() {
   const [codebuddyChinaApiKey, setCodebuddyChinaApiKey] = useState("");
   const [codebuddyChinaBulkApiKeys, setCodebuddyChinaBulkApiKeys] = useState("");
   const [codebuddyChinaBusy, setCodebuddyChinaBusy] = useState(false);
+  const [antigravityBulkTokens, setAntigravityBulkTokens] = useState("");
+  const [antigravityBusy, setAntigravityBusy] = useState(false);
   const [alibabaBulkApiKeys, setAlibabaBulkApiKeys] = useState("");
   const [alibabaBusy, setAlibabaBusy] = useState(false);
   const [loginPendingDialog, setLoginPendingDialog] = useState(false);
@@ -552,6 +555,26 @@ export default function Accounts() {
       await load();
     } catch (err) { showError(err); }
     finally { setCodebuddyChinaBusy(false); }
+  }
+
+  async function handleAntigravityBulkTokens() {
+    const text = antigravityBulkTokens.trim();
+    if (!text) { showError(new Error("Paste Antigravity refresh tokens")); return; }
+    setAntigravityBusy(true);
+    try {
+      const res = await fetchApi<any>("/api/accounts", {
+        method: "POST",
+        body: JSON.stringify({ provider: "antigravity", refreshTokens: text }),
+      });
+      const msg = res.skipped > 0
+        ? `Added ${res.count} Antigravity account(s), skipped ${res.skipped} duplicate(s)`
+        : `Added ${res.count} Antigravity account(s) successfully`;
+      showSuccess(msg);
+      setAntigravityBulkTokens("");
+      setAddDialogProvider(null);
+      await load();
+    } catch (err) { showError(err); }
+    finally { setAntigravityBusy(false); }
   }
 
   async function handleAlibabaBulkApiKey() {
@@ -2223,6 +2246,32 @@ ck_xyz789ghi012..."
                 <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={codebuddyChinaBusy}>Cancel</Button>
                 <Button onClick={handleCodeBuddyChinaBulkApiKey} disabled={codebuddyChinaBusy || !codebuddyChinaBulkApiKeys.trim()}>
                   {codebuddyChinaBusy ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Importing...</>) : "Add Accounts"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {addMode === "apikey" && addDialogProvider === "antigravity" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">Refresh Tokens (one per line)</label>
+                <textarea
+                  value={antigravityBulkTokens}
+                  onChange={(e) => setAntigravityBulkTokens(e.target.value)}
+                  className="mt-1 w-full h-40 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
+                  placeholder="1//0gYK...
+1//0gZA...
+1//0gZB..."
+                  disabled={antigravityBusy}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  Paste one or more Antigravity (Google OAuth) refresh tokens, one per line. Each is exchanged for an access token and bound to a project on first warmup. Models: <code>ag-gemini-3-pro</code>, <code>ag-gemini-3-pro-high</code>, <code>ag-gemini-3-flash</code>.
+                </p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={antigravityBusy}>Cancel</Button>
+                <Button onClick={handleAntigravityBulkTokens} disabled={antigravityBusy || !antigravityBulkTokens.trim()}>
+                  {antigravityBusy ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Importing...</>) : "Add Accounts"}
                 </Button>
               </div>
             </div>

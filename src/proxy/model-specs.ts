@@ -96,6 +96,11 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // ── Google Gemini — ai.google.dev ──
   "gemini-2.5-pro":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-2.5-flash":       { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  // Gemini 3 — served via Antigravity (Cloud Code Assist). Context/output per
+  // Google's Gemini 3 docs; verified model slugs via Antigravity fetchAvailableModels.
+  "gemini-3-pro":           { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3-pro-high":      { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3-flash":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
 };
 
 /**

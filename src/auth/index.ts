@@ -14,10 +14,11 @@ import { config } from "../config";
 export const authRouter = new Hono();
 
 /** Providers that support browser-based login via the Python auth script.
- *  Excludes key-based providers (byok, codebuddy-china, youmind) that
- *  authenticate via API key / PAT paste, not browser automation. */
+ *  Excludes key-based providers (byok, codebuddy-china, youmind, alibaba,
+ *  antigravity) that authenticate via API key / PAT / refresh-token paste,
+ *  not browser automation. */
 const LOGINABLE_PROVIDERS = config.providers.filter(
-  (p) => p !== "byok" && p !== "codebuddy-china" && p !== "youmind" && p !== "alibaba"
+  (p) => p !== "byok" && p !== "codebuddy-china" && p !== "youmind" && p !== "alibaba" && p !== "antigravity"
 ) as string[];
 
 function clampNumber(value: string | undefined, fallback: number, min: number, max: number): number {

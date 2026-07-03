@@ -1478,12 +1478,13 @@ accountsRouter.get("/:id", async (c) => {
  */
 accountsRouter.post("/", async (c) => {
   const body = await c.req.json<{
-    provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba";
+    provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity";
     email?: string;
     password?: string;
     personalToken?: string;
     apiKey?: string; // YouMind sk-ym-... key
     apiKeys?: string; // CodeBuddy China bulk: newline-separated ck_... keys
+    refreshTokens?: string; // Antigravity bulk: newline-separated Google OAuth refresh_tokens
     tokens?: Record<string, unknown>;
     status?: "active" | "pending";
     browserEngine?: string;
@@ -1652,6 +1653,64 @@ accountsRouter.post("/", async (c) => {
 
     pool.invalidate("codebuddy-china" as any);
     broadcast({ type: "account_created", data: { provider: "codebuddy-china", count: created.length } });
+
+    return c.json({
+      success: true,
+      count: created.length,
+      skipped: skippedCount,
+      accounts: created,
+    }, 201);
+  }
+
+  // Antigravity bulk onboarding: newline-separated Google OAuth refresh_tokens.
+  // Each is exchanged for an access_token + bound to a projectId via
+  // loadCodeAssist on first use (warmup). Email is derived from the Google
+  // account info if available, else a synthetic label. No browser automation.
+  if (body.provider === "antigravity" && body.refreshTokens) {
+    const tokens = body.refreshTokens
+      .split("\n")
+      .map((t: string) => t.trim())
+      .filter((t: string) => t.length > 0);
+
+    if (tokens.length === 0) {
+      return c.json({ error: "refreshTokens is empty" }, 400);
+    }
+
+    const created: Array<{ id: number; email: string }> = [];
+    const existingTokens = new Set(
+      (await db.select({ password: accounts.password }).from(accounts)
+        .where(eq(accounts.provider, "antigravity"))
+      ).map((r) => r.password)
+    );
+    const existingCount = existingTokens.size;
+    let skippedCount = 0;
+
+    for (let i = 0; i < tokens.length; i++) {
+      const rt = tokens[i]!;
+      const encryptedRt = encrypt(rt);
+      if (existingTokens.has(encryptedRt)) { skippedCount++; continue; }
+
+      const email = `antigravity-account-${existingCount + i + 1 - skippedCount}`;
+      const tokenSet = JSON.stringify({ refresh_token: rt });
+
+      const inserted = await db.insert(accounts).values({
+        provider: "antigravity",
+        email,
+        password: encryptedRt,
+        status: "active",
+        tokens: tokenSet,
+        quotaLimit: -1,
+        quotaRemaining: -1,
+        lastLoginAt: new Date(),
+      }).returning();
+
+      if (inserted[0]) {
+        created.push({ id: inserted[0].id, email });
+      }
+    }
+
+    pool.invalidate("antigravity" as any);
+    broadcast({ type: "account_created", data: { provider: "antigravity", count: created.length } });
 
     return c.json({
       success: true,
