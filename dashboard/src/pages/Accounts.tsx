@@ -1165,9 +1165,15 @@ export default function Accounts() {
       // For codex, aggregate the two rolling rate windows (primary ~5h,
       // secondary ~weekly) across active accounts. Each account's healthCheck
       // stores metadata.codex_quota with per-window used_percent + reset_at.
+      // Also surface the summed pay-as-you-go credit balance (if any account
+      // has one) — the real "credit" number, not the old fake 99/100.
       let codexWindows: { primaryAvg: number; secondaryAvg: number; count: number; primaryResetAt: string | null; secondaryResetAt: string | null; planTypes: string[] } | undefined;
+      let codexCreditBalance: number | undefined;
+      let codexCreditUnlimited = false;
       if (provider === "codex") {
         const windowAcc: { primary: number[]; secondary: number[]; primaryReset: string[]; secondaryReset: string[]; plans: Set<string> } = { primary: [], secondary: [], primaryReset: [], secondaryReset: [], plans: new Set() };
+        let balanceSum = 0;
+        let anyBalance = false;
         for (const a of activeRows) {
           const cq = (a.metadata as { codex_quota?: CodexQuotaMeta } | null | undefined)?.codex_quota;
           if (!cq) continue;
@@ -1176,6 +1182,11 @@ export default function Accounts() {
           if (cq.primary?.reset_at) windowAcc.primaryReset.push(cq.primary.reset_at);
           if (cq.secondary?.reset_at) windowAcc.secondaryReset.push(cq.secondary.reset_at);
           if (cq.plan_type) windowAcc.plans.add(cq.plan_type);
+          if (cq.credits?.unlimited) codexCreditUnlimited = true;
+          if (typeof cq.credits?.balance === "number" && cq.credits.balance > 0) {
+            balanceSum += cq.credits.balance;
+            anyBalance = true;
+          }
         }
         const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
         // Earliest upcoming reset across accounts (the soonest any account recovers).
@@ -1190,6 +1201,7 @@ export default function Accounts() {
             planTypes: [...windowAcc.plans],
           };
         }
+        if (anyBalance || codexCreditUnlimited) codexCreditBalance = balanceSum;
       }
 
       return {
@@ -1202,6 +1214,8 @@ export default function Accounts() {
         credits: { used: Math.max(0, quotaLimit - quotaRemaining), total: quotaLimit, remaining: quotaRemaining },
         modelQuotas: modelQuotasSum,
         codexWindows,
+        codexCreditBalance,
+        codexCreditUnlimited,
       };
     });
   }, [accounts]);
@@ -1306,6 +1320,22 @@ export default function Accounts() {
                     );
                   })}
                 </div>
+              ) : stat.provider === "codex" ? (
+              // Codex has no "credit balance" in the plan sense — it runs on
+              // rolling rate windows (shown above). Only surface a real pay-as-
+              // you-go credit balance if one exists; never the fake 99/100.
+              (() => {
+                const bal = stat.codexCreditBalance;
+                if (bal == null) return null;
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--muted-foreground)]">Credit balance {stat.codexCreditUnlimited ? "(unlimited)" : ""}</span>
+                      <span className="text-[var(--foreground)]">${bal.toFixed(2)}</span>
+                    </div>
+                  </div>
+                );
+              })()
               ) : stat.total > 0 && stat.provider !== "alibaba" ? (
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs">
