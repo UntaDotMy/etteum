@@ -1,7 +1,51 @@
 import path from "path";
-import { existsSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 
 const projectRoot = path.resolve(import.meta.dir, "..");
+
+/**
+ * Resolve the running build's version + commit for /api/health, /api/info, and
+ * the update-check feature. Computed ONCE at startup via git (synchronous —
+ * cheap, runs only at boot). Falls back gracefully when this isn't a git clone
+ * (e.g. a tarball install) or git is missing: version = package.json, commit =
+ * "unknown". Never throws.
+ */
+function resolveBuildInfo(): { version: string; commit: string } {
+  const pkgVersion = (() => {
+    try {
+      const pkg = JSON.parse(readFileSync(path.join(projectRoot, "package.json"), "utf8"));
+      return pkg.version || "0.0.0";
+    } catch {
+      return "0.0.0";
+    }
+  })();
+
+  const git = (args: string[]): string | null => {
+    try {
+      const r = Bun.spawnSync({
+        cmd: ["git", ...args],
+        cwd: projectRoot,
+        stdout: "pipe",
+        stderr: "pipe",
+      });
+      if (r.exitCode !== 0) return null;
+      return new TextDecoder().decode(r.stdout).trim() || null;
+    } catch {
+      return null;
+    }
+  };
+
+  // `git describe --tags --always` returns the nearest tag (e.g. v1.2.3) or,
+  // when no tags exist, the short commit hash. Either way it's a useful label.
+  const described = git(["describe", "--tags", "--always"]);
+  const commit = git(["rev-parse", "HEAD"]) ?? "unknown";
+  return {
+    version: described || pkgVersion,
+    commit,
+  };
+}
+
+const buildInfo = resolveBuildInfo();
 
 /**
  * Resolve the Python interpreter path.
@@ -187,6 +231,9 @@ export const config = {
   webSearchEnabled: process.env.WEB_SEARCH_ENABLED !== "false",
   searxngUrl: process.env.SEARXNG_URL || "",
   webSearchMaxUses: Number(process.env.WEB_SEARCH_MAX_USES) || 5,
+  // ── Build identity (computed once at startup) ─────────────────────────────
+  buildVersion: buildInfo.version,
+  buildCommit: buildInfo.commit,
 } as const;
 
 export type Config = typeof config;

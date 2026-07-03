@@ -543,6 +543,42 @@ export async function deleteProxy(id: number) {
   return fetchApi(`/api/proxy-pool/pool/${id}`, { method: "DELETE" });
 }
 
+// ── Updates ────────────────────────────────────────────────────────────────
+
+export interface UpdateStatus {
+  currentCommit: string | null;
+  latestCommit: string | null;
+  updateAvailable: boolean;
+  currentVersion: string;
+  branch: string;
+  lastCheckedAt: string | null;
+  error?: string;
+}
+
+export interface ApplyStep {
+  name: string;
+  ok: boolean;
+  detail?: string;
+}
+
+export interface ApplyResult {
+  ok: boolean;
+  steps: ApplyStep[];
+  restarted: boolean;
+  supervisor: string;
+  manualCommand?: string;
+}
+
+export async function fetchUpdateStatus(force = false): Promise<{ data: UpdateStatus }> {
+  const q = force ? "?force=1" : "";
+  return fetchApi(`/api/update/status${q}`, { timeoutMs: 30_000 });
+}
+
+export async function applyUpdate(): Promise<{ data: ApplyResult }> {
+  // The apply can take a while (git pull + dashboard build + migrate).
+  return fetchApi("/api/update/apply", { method: "POST", timeoutMs: 180_000 });
+}
+
 export async function clearProxyPool() {
   return fetchApi("/api/proxy-pool/pool", { method: "DELETE" });
 }

@@ -2,13 +2,17 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Save, RefreshCw, Zap, Flame, Globe, Wand2 } from "lucide-react";
+import { Save, RefreshCw, Zap, Flame, Globe, Wand2, Download, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import {
   fetchSettings,
   updateSettings,
   fetchProviderList,
   fetchAutoWarmupStatus,
+  fetchUpdateStatus,
+  applyUpdate,
   type AutoWarmupStatus,
+  type UpdateStatus,
+  type ApplyResult,
 } from "@/lib/api";
 import { useApi } from "@/hooks/useApi";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
@@ -56,6 +60,61 @@ export default function Settings() {
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
   const { message, setMessage } = useTimedMessage<string>(null, 3000);
+
+  // ── Update awareness ──────────────────────────────────────────────────────
+  const [updateStatus, setUpdateStatus] = useState<UpdateStatus | null>(null);
+  const [checkingUpdate, setCheckingUpdate] = useState(false);
+  const [applying, setApplying] = useState(false);
+  const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
+
+  async function checkUpdate(force = false) {
+    setCheckingUpdate(true);
+    try {
+      const res = await fetchUpdateStatus(force);
+      setUpdateStatus(res.data);
+    } catch {
+      // Non-fatal — leave previous status.
+    } finally {
+      setCheckingUpdate(false);
+    }
+  }
+
+  async function runUpdate() {
+    if (!confirm("Apply the update now? This will git pull, rebuild the dashboard, run migrations, and restart the server. The dashboard will briefly go offline.")) return;
+    setApplying(true);
+    setApplyResult(null);
+    try {
+      const res = await applyUpdate();
+      setApplyResult(res.data);
+      if (res.data.restarted) {
+        // Wait for the server to come back, then reload.
+        setMessage("Update applied — restarting…");
+        setTimeout(() => pollForRestart(), 2500);
+      }
+    } catch (e: any) {
+      setApplyResult({ ok: false, steps: [], restarted: false, supervisor: "manual", manualCommand: e?.message || "Update request failed" });
+    } finally {
+      setApplying(false);
+    }
+  }
+
+  async function pollForRestart(attempt = 0) {
+    if (attempt > 20) { setMessage("Restart taking long — refresh manually."); return; }
+    try {
+      await fetchUpdateStatus(true);
+      // Server is back — reload the page to pick up new dashboard assets.
+      window.location.reload();
+    } catch {
+      setTimeout(() => pollForRestart(attempt + 1), 2000);
+    }
+  }
+
+  // Check on load + hourly. Cheap: status is cached 5 min server-side.
+  useEffect(() => {
+    checkUpdate();
+    const id = setInterval(() => checkUpdate(), 60 * 60 * 1000);
+    return () => clearInterval(id);
+  }, []);
 
   const providerListApi = useApi<{ data: string[] }>(fetchProviderList, []);
 
@@ -135,6 +194,113 @@ export default function Settings() {
           {message}
         </div>
       )}
+
+      {/* ── Updates ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <Download className="w-5 h-5" /> Software Update
+          </CardTitle>
+          <CardDescription>
+            Check for and install the latest version from the repository.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-3">
+          <div className="flex flex-wrap items-center gap-3 text-sm">
+            <span className="text-[var(--muted-foreground)]">
+              Current: <span className="font-mono text-[var(--foreground)]">{updateStatus?.currentVersion ?? "—"}</span>
+            </span>
+            {updateStatus?.currentCommit && (
+              <span className="text-xs text-[var(--muted-foreground)] font-mono">
+                ({updateStatus.currentCommit.slice(0, 7)})
+              </span>
+            )}
+            <Button variant="outline" size="sm" onClick={() => checkUpdate(true)} disabled={checkingUpdate || applying}>
+              {checkingUpdate ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <RefreshCw className="w-4 h-4 mr-2" />}
+              Check for updates
+            </Button>
+            {updateStatus?.lastCheckedAt && (
+              <span className="text-xs text-[var(--muted-foreground)]">
+                checked {new Date(updateStatus.lastCheckedAt).toLocaleTimeString()}
+              </span>
+            )}
+          </div>
+
+          {updateStatus?.error && (
+            <div className="flex items-start gap-2 rounded-md bg-[var(--warning)]/10 p-3 text-sm text-[var(--warning)]">
+              <AlertCircle className="w-4 h-4 mt-0.5 shrink-0" />
+              <span className="font-mono text-xs">{updateStatus.error}</span>
+            </div>
+          )}
+
+          {updateStatus?.updateAvailable && (
+            <div className="flex flex-col gap-3 rounded-md border border-[var(--primary)]/30 bg-[var(--primary)]/5 p-4 sm:flex-row sm:items-center sm:justify-between">
+              <div className="flex items-start gap-2 text-sm">
+                <AlertCircle className="w-4 h-4 mt-0.5 shrink-0 text-[var(--primary)]" />
+                <div>
+                  <div className="font-medium text-[var(--foreground)]">Update available</div>
+                  <div className="text-xs text-[var(--muted-foreground)] font-mono">
+                    {updateStatus.currentCommit?.slice(0, 7)} → {updateStatus.latestCommit?.slice(0, 7)}
+                  </div>
+                </div>
+              </div>
+              <Button size="sm" onClick={runUpdate} disabled={applying}>
+                {applying ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+                {applying ? "Updating…" : "Update now"}
+              </Button>
+            </div>
+          )}
+
+          {updateStatus && !updateStatus.updateAvailable && !updateStatus.error && (
+            <div className="flex items-center gap-2 text-sm text-[var(--muted-foreground)]">
+              <CheckCircle2 className="w-4 h-4 text-[var(--success)]" />
+              You're on the latest version.
+            </div>
+          )}
+
+          {applyResult && (
+            <div className="space-y-2 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 p-3">
+              <div className="text-sm font-medium flex items-center gap-2">
+                {applyResult.ok ? (
+                  <CheckCircle2 className="w-4 h-4 text-[var(--success)]" />
+                ) : (
+                  <AlertCircle className="w-4 h-4 text-[var(--destructive)]" />
+                )}
+                {applyResult.ok ? "Update applied" : "Update failed"}
+              </div>
+              {applyResult.steps.length > 0 && (
+                <ul className="space-y-1 text-xs font-mono">
+                  {applyResult.steps.map((s, i) => (
+                    <li key={i} className="flex items-start gap-2">
+                      <span className={s.ok ? "text-[var(--success)]" : "text-[var(--destructive)]"}>
+                        {s.ok ? "✓" : "✗"}
+                      </span>
+                      <span className="text-[var(--muted-foreground)]">
+                        {s.name}{s.detail ? ` — ${s.detail.slice(0, 120)}` : ""}
+                      </span>
+                    </li>
+                  ))}
+                </ul>
+              )}
+              {applyResult.restarted && (
+                <div className="text-xs text-[var(--muted-foreground)]">
+                  Restarting via {applyResult.supervisor}… the dashboard will reload automatically.
+                </div>
+              )}
+              {applyResult.manualCommand && !applyResult.restarted && (
+                <div className="space-y-1">
+                  <div className="text-xs text-[var(--warning)]">
+                    Automatic restart unavailable ({applyResult.supervisor}). Run this to finish:
+                  </div>
+                  <pre className="text-xs font-mono bg-[var(--background)] border border-[var(--border)] rounded p-2 overflow-x-auto whitespace-pre-wrap">
+                    {applyResult.manualCommand}
+                  </pre>
+                </div>
+              )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       <div className="grid gap-6 lg:grid-cols-2">
         {/* Load Balancing */}

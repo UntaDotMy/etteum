@@ -178,7 +178,8 @@ app.route("/api/auth", authRouter); // /api/auth/login, /api/auth/queue
 app.get("/api/info", (c) => {
   return c.json({
     name: "pool-proxy",
-    version: "1.0.0",
+    version: config.buildVersion,
+    commit: config.buildCommit,
     status: "running",
     endpoints: {
       proxy: "/v1/chat/completions",
