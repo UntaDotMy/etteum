@@ -2,18 +2,31 @@
  * Built-in web_search backend.
  *
  * Anthropic's `web_search_*` server tool normally executes on Anthropic's
- * servers. We shim it: the proxy runs the search locally with an open-source
+ * servers. We shim it: the proxy runs the search locally with a free, keyless
  * backend and returns Anthropic-shaped `web_search_tool_result` blocks so
  * clients (Claude Code) render native search results.
  *
- * Backends (pluggable, zero-config default):
- *   1. SearXNG (optional, robust) — when SEARXNG_URL is set, query
+ * Backends (cascading, zero-config default — first non-empty wins):
+ *   0. SearXNG (optional, robust) — when SEARXNG_URL is set, query
  *      `?q=...&format=json`. Self-hosted, keyless.
- *   2. DuckDuckGo Lite (default, zero-config) — HTML parse of
- *      `https://lite.duckduckgo.com/lite/?q=...`. No key, no service.
+ *   1. Brave Search HTML (default primary) — server-rendered results scraped
+ *      from `https://search.brave.com/search?q=...`. Free, keyless, and
+ *      reachable from China-routed networks where DuckDuckGo is blocked.
+ *   2. DuckDuckGo Instant Answer API — `https://api.duckduckgo.com/?q=...&format=json`.
+ *      Keyless; the `api.` host is reachable even when `lite.duckduckgo.com`
+ *      (HTML) is blocked. Returns entity abstracts + related topics, not a
+ *      general SERP — used as a fallback for factual/entity queries.
+ *   3. Wikipedia MediaWiki API — `en.wikipedia.org/w/api.php?...&list=search`.
+ *      Keyless, always reachable; encyclopedia-only, last-resort factual fallback.
+ *   4. DuckDuckGo Lite HTML — kept for non-China deployments where lite.duckduckgo.com
+ *      is reachable; never the first choice because it is blocked on some networks.
  *
  * Result shape maps to Anthropic `web_search_result` blocks:
  *   { type:"web_search_result", url, title, page_age?, encrypted_content? }
+ *
+ * Failures are NOT swallowed silently: searchWeb returns an `error` field when
+ * every backend was unreachable, so the agent loop can surface an error tool
+ * result to the model instead of looping on empty results.
  */
 
 import { config } from "../../config";
@@ -30,33 +43,66 @@ export interface WebSearchBackend {
   search(query: string, signal?: AbortSignal): Promise<WebSearchResult[]>;
 }
 
+/** Outcome of a search: results, and an error string if every backend failed. */
+export interface WebSearchOutcome {
+  results: WebSearchResult[];
+  /** Set when all backends were unreachable/errored (distinct from "0 results"). */
+  error?: string;
+  /** Which backend produced the results, for diagnostics. */
+  backend?: string;
+}
+
 const SEARCH_TIMEOUT_MS = 10_000;
 const MAX_RESULTS = 5;
+const BROWSER_UA =
+  "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36";
 
-/** Choose the active backend at call time (SearXNG wins if configured). */
-function activeBackend(): WebSearchBackend {
-  if (config.searxngUrl) return searxngBackend;
-  return duckduckgoBackend;
+/**
+ * Ordered cascade of backends. SearXNG wins first when configured; otherwise we
+ * try Brave (general SERP, China-reachable) → DDG API (entity answers) →
+ * Wikipedia (factual) → DDG Lite (non-China fallback). First non-empty wins.
+ */
+function backendCascade(): WebSearchBackend[] {
+  const chain: WebSearchBackend[] = [];
+  if (config.searxngUrl) chain.push(searxngBackend);
+  chain.push(braveBackend, duckduckgoApiBackend, wikipediaBackend, duckduckgoBackend);
+  return chain;
 }
 
 /**
- * Public entry: run a web search. Bounded by result count + a 10s timeout.
- * Never throws — returns an empty array on failure so the agent loop can
- * inject a graceful error tool_result instead of crashing.
+ * Public entry: run a web search. Tries backends in order; first non-empty
+ * result set wins. Bounded by result count + a 10s timeout per backend.
+ *
+ * Returns { results, error? }. `error` is set ONLY when every backend threw or
+ * returned nothing AND at least one backend errored (network/timeout) — this
+ * distinguishes "search unavailable" from "genuinely no results", so the agent
+ * loop can tell the user instead of looping on empty.
  */
-export async function searchWeb(query: string): Promise<WebSearchResult[]> {
-  if (!query?.trim()) return [];
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
-  try {
-    const backend = activeBackend();
-    const results = await backend.search(query.trim(), controller.signal);
-    return results.slice(0, MAX_RESULTS);
-  } catch {
-    return [];
-  } finally {
-    clearTimeout(timer);
+export async function searchWeb(query: string): Promise<WebSearchOutcome> {
+  if (!query?.trim()) return { results: [] };
+  const seenErrors: string[] = [];
+  for (const backend of backendCascade()) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), SEARCH_TIMEOUT_MS);
+    try {
+      const results = (await backend.search(query.trim(), controller.signal)).slice(0, MAX_RESULTS);
+      if (results.length > 0) {
+        return { results, backend: backend.name };
+      }
+      // Empty-but-no-throw: try the next backend. (DDG API legitimately returns
+      // empty for non-entity queries; that's not a failure.)
+    } catch (err) {
+      seenErrors.push(`${backend.name}: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      clearTimeout(timer);
+    }
   }
+  // Every backend returned empty. If some errored, flag it so the caller can
+  // surface "search unavailable" rather than "no results exist".
+  if (seenErrors.length > 0) {
+    return { results: [], error: `All search backends failed — ${seenErrors.join("; ")}` };
+  }
+  return { results: [] };
 }
 
 // ── SearXNG backend ───────────────────────────────────────────────────────
@@ -89,7 +135,150 @@ export function mapSearxngResults(data: any): WebSearchResult[] {
     }));
 }
 
-// ── DuckDuckGo Lite backend (zero-config default) ─────────────────────────
+// ── Brave Search HTML backend (default primary; free, keyless, China-reachable) ─
+
+export const braveBackend: WebSearchBackend = {
+  name: "brave",
+  async search(query, signal) {
+    const url = `https://search.brave.com/search?q=${encodeURIComponent(query)}`;
+    const res = await fetch(url, {
+      headers: {
+        Accept: "text/html,application/xhtml+xml",
+        "Accept-Language": "en-US,en;q=0.9",
+        "User-Agent": BROWSER_UA,
+      },
+      signal,
+    });
+    if (!res.ok) return [];
+    const html = await res.text();
+    return parseBraveHtml(html);
+  },
+};
+
+/**
+ * Parse Brave Search HTML. Brave server-renders organic results: each result is
+ * an anchor whose `href` is the real external URL (not a redirect), wrapped in
+ * a `result`/`snippet` container. We extract external (non-brave.com) links
+ * with their anchor text as the title, then best-effort match a nearby snippet.
+ *
+ * Markup drifts; we degrade to an empty array on any structural surprise and
+ * never throw — the cascade then tries the next backend.
+ */
+export function parseBraveHtml(html: string): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  // Organic anchors: <a ... href="https://external/..." ...>visible text</a>.
+  // Skip brave.com / brave internal hosts. Anchor text becomes the title.
+  const anchorRe = /<a[^>]*\bhref="(https?:\/\/(?!search\.brave\.com|brave\.com|cdn\.brave\.com|bravesoftware\.com|hackerone\.com\/brave|status\.brave\.app)[^"]+)"[^>]*>([\s\S]*?)<\/a>/gi;
+  const seen = new Set<string>();
+  let m: RegExpExecArray | null;
+  while ((m = anchorRe.exec(html)) !== null) {
+    const url = m[1];
+    const title = stripTags(m[2] ?? "").trim();
+    // Skip nav/utility anchors with no real title text or a seen/duplicate url.
+    if (!url || seen.has(url) || !title || title.length < 3) continue;
+    seen.add(url);
+    results.push({ url, title, snippet: snippetNear(html, m.index ?? 0, title) });
+    if (results.length >= MAX_RESULTS * 2) break; // collect a few extra, slice later
+  }
+  return results;
+}
+
+/**
+ * Best-effort snippet extraction: find a <p> or text node within ~600 chars
+ * after the result anchor. Brave wraps snippets in <p class="snippet ..."> or a
+ * nearby <div>. We grab the first text-bearing paragraph after the anchor.
+ */
+function snippetNear(html: string, anchorIndex: number, title: string): string | undefined {
+  const window = html.slice(anchorIndex, anchorIndex + 800);
+  const pRe = /<(?:p|div)[^>]*class="[^"]*(?:snippet|description|text)[^"]*"[^>]*>([\s\S]*?)<\/(?:p|div)>/i;
+  const sm = pRe.exec(window);
+  if (sm) {
+    const s = stripTags(sm[1] ?? "").trim();
+    if (s && s !== title) return s.slice(0, 280);
+  }
+  return undefined;
+}
+
+// ── DuckDuckGo Instant Answer API backend (keyless entity answers) ──────────
+
+export const duckduckgoApiBackend: WebSearchBackend = {
+  name: "duckduckgo-api",
+  async search(query, signal) {
+    const url = `https://api.duckduckgo.com/?q=${encodeURIComponent(query)}&format=json&no_html=1&no_redirect=1&skip_disambig=1`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": BROWSER_UA },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json().catch(() => ({}));
+    return mapDdgApiResults(data);
+  },
+};
+
+/**
+ * Map a DuckDuckGo Instant Answer API payload to WebSearchResult[]. DDG IA
+ * returns an abstract (AbstractText/AbstractURL) plus RelatedTopics. This is
+ * NOT a general SERP — it answers entity/factual queries (e.g. "Claude AI") and
+ * returns empty for news/arbitrary queries. That empty case is legitimate, not
+ * an error, so the cascade continues to the next backend.
+ */
+export function mapDdgApiResults(data: any): WebSearchResult[] {
+  const results: WebSearchResult[] = [];
+  if (!data || typeof data !== "object") return results;
+  if (data.AbstractText && data.AbstractURL) {
+    results.push({
+      url: data.AbstractURL,
+      title: data.Heading || data.AbstractURL,
+      snippet: data.AbstractText,
+    });
+  }
+  // RelatedTopics can contain nested topic objects or disambiguation groups.
+  const topics: any[] = Array.isArray(data.RelatedTopics) ? data.RelatedTopics : [];
+  for (const t of topics) {
+    if (results.length >= MAX_RESULTS) break;
+    if (t?.Text && t?.FirstURL) {
+      results.push({ url: t.FirstURL, title: t.Text.split(" - ")[0] || t.Text, snippet: t.Text });
+    } else if (Array.isArray(t?.Topics)) {
+      for (const sub of t.Topics) {
+        if (results.length >= MAX_RESULTS) break;
+        if (sub?.Text && sub?.FirstURL) {
+          results.push({ url: sub.FirstURL, title: sub.Text.split(" - ")[0] || sub.Text, snippet: sub.Text });
+        }
+      }
+    }
+  }
+  return results;
+}
+
+// ── Wikipedia MediaWiki API backend (keyless factual fallback) ──────────────
+
+export const wikipediaBackend: WebSearchBackend = {
+  name: "wikipedia",
+  async search(query, signal) {
+    const url = `https://en.wikipedia.org/w/api.php?action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json&srlimit=${MAX_RESULTS}&srprop=snippet`;
+    const res = await fetch(url, {
+      headers: { Accept: "application/json", "User-Agent": BROWSER_UA },
+      signal,
+    });
+    if (!res.ok) return [];
+    const data: any = await res.json().catch(() => ({}));
+    return mapWikipediaResults(data);
+  },
+};
+
+/** Map a MediaWiki search payload to WebSearchResult[]. Encyclopedia-only. */
+export function mapWikipediaResults(data: any): WebSearchResult[] {
+  const hits = data?.query?.search;
+  if (!Array.isArray(hits)) return [];
+  return hits.map((h: any) => ({
+    url: `https://en.wikipedia.org/?curid=${h.pageid}`,
+    title: h.title,
+    // MediaWiki returns snippet with <span class="searchmatch"> highlights; strip tags.
+    snippet: typeof h.snippet === "string" ? stripTags(h.snippet) : undefined,
+  }));
+}
+
+// ── DuckDuckGo Lite HTML backend (non-China fallback) ───────────────────────
 
 export const duckduckgoBackend: WebSearchBackend = {
   name: "duckduckgo",
@@ -99,8 +288,7 @@ export const duckduckgoBackend: WebSearchBackend = {
       headers: {
         Accept: "text/html",
         // DDG serves lite HTML to a basic UA; mimic a browser to avoid blocks.
-        "User-Agent":
-          "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0 Safari/537.36",
+        "User-Agent": BROWSER_UA,
       },
       signal,
     });

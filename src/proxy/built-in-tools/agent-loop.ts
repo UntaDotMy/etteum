@@ -203,7 +203,8 @@ export async function runWebSearchLoopNonStreaming(
 
     // Execute the search.
     const input = parseWebSearchInput(wsCall.function?.arguments || "");
-    const results = await searchWeb(input.query);
+    const outcome = await searchWeb(input.query);
+    const results = outcome.results;
     searches++;
     const serverToolUseId = newId("srvtoolu");
     searchBlocks.push({
@@ -221,6 +222,12 @@ export async function runWebSearchLoopNonStreaming(
     });
 
     // Append the model's tool_use + our tool_result to the working messages.
+    // On backend failure (outcome.error), tell the model the search service is
+    // unavailable so it stops retrying and informs the user — instead of looping
+    // on empty results as if no information exists.
+    const toolResultContent = outcome.error
+      ? JSON.stringify({ error: "web_search_unavailable", message: outcome.error })
+      : JSON.stringify(results.map((r) => ({ url: r.url, title: r.title, snippet: r.snippet ?? "" })));
     messages = [
       ...messages,
       {
@@ -231,7 +238,7 @@ export async function runWebSearchLoopNonStreaming(
       {
         role: "tool",
         tool_call_id: wsCall.id || serverToolUseId,
-        content: JSON.stringify(results.map((r) => ({ url: r.url, title: r.title, snippet: r.snippet ?? "" }))),
+        content: toolResultContent,
       },
     ];
   }
@@ -463,7 +470,8 @@ export function runWebSearchLoopStreaming(
           // Execute the search and emit server_tool_use + web_search_tool_result.
           searches++;
           const input = parseWebSearchInput(wsCall.args);
-          const results = await searchWeb(input.query);
+          const outcome = await searchWeb(input.query);
+          const results = outcome.results;
           closeTextBlock(controller);
 
           const serverToolUseId = newId("srvtoolu");
@@ -493,6 +501,11 @@ export function runWebSearchLoopStreaming(
           controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
 
           // Append the model's turn + tool_result to the working conversation.
+          // On backend failure (outcome.error), tell the model the search service
+          // is unavailable so it stops retrying and informs the user.
+          const toolResultContent = outcome.error
+            ? JSON.stringify({ error: "web_search_unavailable", message: outcome.error })
+            : JSON.stringify(results.map((r) => ({ url: r.url, title: r.title, snippet: r.snippet ?? "" })));
           const allCalls = [...toolCallAccum.values()].map((c) => ({
             id: c.id,
             type: "function",
@@ -504,7 +517,7 @@ export function runWebSearchLoopStreaming(
             {
               role: "tool",
               tool_call_id: wsCall.id || serverToolUseId,
-              content: JSON.stringify(results.map((r) => ({ url: r.url, title: r.title, snippet: r.snippet ?? "" }))),
+              content: toolResultContent,
             },
           ];
         }

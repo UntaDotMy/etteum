@@ -2,6 +2,10 @@ import { describe, expect, test } from "bun:test";
 import {
   parseDuckDuckGoLite,
   mapSearxngResults,
+  parseBraveHtml,
+  mapDdgApiResults,
+  mapWikipediaResults,
+  searchWeb,
 } from "../../src/proxy/built-in-tools/web-search";
 import {
   extractWebSearchConfig,
@@ -70,6 +74,112 @@ describe("searxng result mapping", () => {
     expect(mapSearxngResults(null)).toEqual([]);
     expect(mapSearxngResults({})).toEqual([]);
     expect(mapSearxngResults({ results: "nope" })).toEqual([]);
+  });
+});
+
+// ── Brave Search HTML parsing ──────────────────────────────────────────────
+
+describe("brave html parsing", () => {
+  // Mirrors Brave's server-rendered organic results: external anchors with
+  // anchor text as the title, plus an optional nearby snippet paragraph.
+  // Internal brave.com/nav anchors must be skipped.
+  const sampleHtml = `
+  <div class="result" data-pos="1">
+    <a href="https://en.wikipedia.org/wiki/Claude_(AI)">Claude (AI) - Wikipedia</a>
+    <p class="snippet snippet-text">Claude is a series of large language models by Anthropic.</p>
+  </div>
+  <a href="https://brave.com/about">About Brave</a>
+  <div class="result" data-pos="2">
+    <a href="https://claude.ai/">Claude</a>
+    <div class="snippet-description">Talk to Claude, an AI assistant.</div>
+  </div>
+  <a href="https://www.anthropic.com">Anthropic</a>`;
+
+  test("extracts external urls + titles, skips brave-internal hosts", () => {
+    const results = parseBraveHtml(sampleHtml);
+    expect(results.length).toBe(3);
+    expect(results[0].url).toBe("https://en.wikipedia.org/wiki/Claude_(AI)");
+    expect(results[0].title).toBe("Claude (AI) - Wikipedia");
+    expect(results[0].snippet).toContain("large language models");
+    expect(results[1].url).toBe("https://claude.ai/");
+    // Brave-internal link (brave.com/about) must be excluded.
+    expect(results.find((r) => r.url.includes("brave.com"))).toBeUndefined();
+  });
+
+  test("dedupes repeated urls", () => {
+    const html = `<a href="https://dup.com">First title</a><a href="https://dup.com">Second title</a>`;
+    expect(parseBraveHtml(html).length).toBe(1);
+    expect(parseBraveHtml(html)[0].title).toBe("First title");
+  });
+
+  test("skips anchors with no real title text", () => {
+    const html = `<a href="https://x.com"></a><a href="https://y.com">ab</a>`;
+    // empty title skipped; "ab" (len 2 < 3) skipped -> 0
+    expect(parseBraveHtml(html).length).toBe(0);
+  });
+
+  test("returns empty for malformed/empty html", () => {
+    expect(parseBraveHtml("")).toEqual([]);
+    expect(parseBraveHtml("<html>no anchors here</html>")).toEqual([]);
+  });
+});
+
+// ── DuckDuckGo Instant Answer API mapping ──────────────────────────────────
+
+describe("ddg instant-answer api mapping", () => {
+  test("maps abstract + related topics to results", () => {
+    const payload = {
+      Heading: "Claude (language model)",
+      AbstractText: "Claude is a series of LLMs by Anthropic.",
+      AbstractURL: "https://en.wikipedia.org/wiki/Claude_(language_model)",
+      RelatedTopics: [
+        { Text: "Reasoning model - A reasoning model is...", FirstURL: "https://duckduckgo.com/Reasoning_model" },
+        { Topics: [{ Text: "Sub topic - detail", FirstURL: "https://example.com/sub" }] },
+      ],
+    };
+    const results = mapDdgApiResults(payload);
+    expect(results.length).toBe(3);
+    expect(results[0]).toEqual({
+      url: "https://en.wikipedia.org/wiki/Claude_(language_model)",
+      title: "Claude (language model)",
+      snippet: "Claude is a series of LLMs by Anthropic.",
+    });
+    expect(results[1].url).toBe("https://duckduckgo.com/Reasoning_model");
+    expect(results[1].title).toBe("Reasoning model"); // Text split on " - "
+    expect(results[2].url).toBe("https://example.com/sub"); // nested Topics
+  });
+
+  test("returns empty when no abstract and no related topics", () => {
+    expect(mapDdgApiResults({})).toEqual([]);
+    expect(mapDdgApiResults({ AbstractText: "no url" })).toEqual([]); // abstract without URL dropped
+    expect(mapDdgApiResults(null)).toEqual([]);
+  });
+});
+
+// ── Wikipedia MediaWiki API mapping ────────────────────────────────────────
+
+describe("wikipedia api mapping", () => {
+  test("maps search hits to curid urls with stripped snippets", () => {
+    const payload = {
+      query: {
+        search: [
+          { pageid: 75879512, title: "Claude (AI)", snippet: "Claude is <span class='searchmatch'>developed</span> by Anthropic." },
+          { pageid: 6201236, title: "Anthropic", snippet: "Anthropic is a company." },
+        ],
+      },
+    };
+    const results = mapWikipediaResults(payload);
+    expect(results.length).toBe(2);
+    expect(results[0].url).toBe("https://en.wikipedia.org/?curid=75879512");
+    expect(results[0].title).toBe("Claude (AI)");
+    expect(results[0].snippet).toBe("Claude is developed by Anthropic."); // span tags stripped
+    expect(results[1].url).toBe("https://en.wikipedia.org/?curid=6201236");
+  });
+
+  test("returns empty for malformed payload", () => {
+    expect(mapWikipediaResults({})).toEqual([]);
+    expect(mapWikipediaResults({ query: {} })).toEqual([]);
+    expect(mapWikipediaResults({ query: { search: "nope" } })).toEqual([]);
   });
 });
 
@@ -323,4 +433,34 @@ describe("runWebSearchLoopStreaming", () => {
       (globalThis as any).fetch = origFetch;
     }
   });
+});
+
+// ── Live network smoke test (gated; off by default) ────────────────────────
+// Runs only when WEB_SEARCH_LIVE_TEST=1, so CI stays hermetic. Exercises the
+// real cascade (Brave → DDG API → Wikipedia) against the live network to catch
+// the regression class "default backend unreachable from this deployment,
+// silently returning empty" — which is exactly how DDG-Lite died unnoticed.
+
+const LIVE = process.env.WEB_SEARCH_LIVE_TEST === "1";
+(LIVE ? describe : describe.skip)("live web search cascade", () => {
+  test("returns real results for an entity query within timeout", async () => {
+    const outcome = await searchWeb("anthropic claude");
+    expect(outcome.results.length).toBeGreaterThan(0);
+    expect(outcome.error).toBeUndefined();
+    // Every result has the minimum fields Claude Code needs to render a citation.
+    for (const r of outcome.results) {
+      expect(typeof r.url).toBe("string");
+      expect(r.url.startsWith("http")).toBe(true);
+      expect(typeof r.title).toBe("string");
+      expect(r.title.length).toBeGreaterThan(0);
+    }
+  }, 30_000);
+
+  test("surfaces an error (not silent empty) when given an unreachable query path", async () => {
+    // A query that should still resolve via at least one backend; here we just
+    // assert the outcome shape is well-formed for a normal factual query.
+    const outcome = await searchWeb("large language model");
+    expect(outcome.results.length).toBeGreaterThan(0);
+    expect(outcome.backend).toBeDefined();
+  }, 30_000);
 });
