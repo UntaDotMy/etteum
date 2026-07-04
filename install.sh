@@ -486,12 +486,14 @@ setup_python_venv() {
   fi
 
   info "Upgrading pip..."
-  retry "$pip" install --upgrade pip wheel >/dev/null 2>&1 || warn "pip upgrade failed (continuing)"
+  # --no-input: never block on an interactive prompt (keyring, conflict).
+  # --progress-bar off: clean log output (the bar breaks in piped/curl installs).
+  retry "$pip" install --no-input --progress-bar off --upgrade pip wheel || warn "pip upgrade failed (continuing)"
 
   info "Installing Python packages (this may take a minute)..."
-  if ! retry "$pip" install -r scripts/auth/requirements.txt; then
+  if ! retry "$pip" install --no-input --progress-bar off -r scripts/auth/requirements.txt; then
     err "pip install failed"
-    info "Try manually: $pip install -r scripts/auth/requirements.txt"
+    info "Try manually: $pip install --no-input -r scripts/auth/requirements.txt"
     info "If you're behind a corporate proxy, set HTTPS_PROXY before re-running."
     exit 1
   fi
@@ -505,11 +507,24 @@ setup_python_venv() {
 
   step "Installing nodriver Chrome (this can take a few minutes)"
   info "nodriver will download a compatible Chrome/Chromium on first launch..."
-  if retry "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
-    ok "nodriver Chrome installed"
+  # Bounded timeout: nodriver.start() launches a real Chrome and can stall on a
+  # slow download or a hung launch. Never let it block the installer forever —
+  # if it doesn't complete in ~120s, move on (Chrome auto-downloads on first use).
+  if command -v timeout >/dev/null 2>&1; then
+    if retry timeout 120 "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
+      ok "nodriver Chrome installed"
+    else
+      warn "nodriver Chrome pre-download failed or timed out — it will auto-download on first use"
+      info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+    fi
   else
-    warn "nodriver Chrome pre-download failed — it will auto-download on first use"
-    info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+    # No `timeout` (rare on some macOS/BusyBox) — run unbounded but still non-fatal.
+    if retry "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
+      ok "nodriver Chrome installed"
+    else
+      warn "nodriver Chrome pre-download failed — it will auto-download on first use"
+      info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+    fi
   fi
 
   # ── Cleanup: remove old camoufox/playwright/chromium if present ──

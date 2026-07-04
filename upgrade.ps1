@@ -145,12 +145,25 @@ Ok "Migrations complete"
 
 # 8. Rebuild Python venv (if needed)
 Step "Checking Python venv..."
-$venvPy = Join-Path $ProjectDir "scripts\auth\.venv\Scripts\python.exe"
-$venvPyLinux = Join-Path $ProjectDir "scripts\auth\.venv\bin\python"
-if (-not (Test-Path $venvPy) -and -not (Test-Path $venvPyLinux)) {
+# Auto-detect the venv python — a venv created on Windows has Scripts\python.exe,
+# on Linux/macOS it has bin/python. Don't assume the current OS matches the venv
+# layout. Mirrors src/config.ts resolvePythonPath.
+$venvDir = Join-Path $ProjectDir "scripts\auth\.venv"
+$venvPy = $null
+foreach ($cand in @((Join-Path $venvDir "Scripts\python.exe"), (Join-Path $venvDir "bin\python"), (Join-Path $venvDir "bin\python3"))) {
+    if (Test-Path $cand) { $venvPy = $cand; break }
+}
+if (-not $venvPy) {
     Info "Rebuilding Python venv..."
-    & python -m venv (Join-Path $ProjectDir "scripts\auth\.venv") 2>&1 | Out-Null
-    & $venvPy -m pip install -r (Join-Path $ProjectDir "scripts\auth\requirements.txt") 2>&1 | Out-Null
+    # Pick a python to build the venv with — prefer the one on PATH.
+    $hostPy = if ($env:PYTHON_PATH) { $env:PYTHON_PATH } else { "python" }
+    & $hostPy -m venv $venvDir 2>&1 | Out-Null
+    # Re-detect the venv python after creation (layout depends on the host OS).
+    foreach ($cand in @((Join-Path $venvDir "Scripts\python.exe"), (Join-Path $venvDir "bin\python"), (Join-Path $venvDir "bin\python3"))) {
+        if (Test-Path $cand) { $venvPy = $cand; break }
+    }
+    if (-not $venvPy) { Fail "Failed to create Python venv. Try manually: python -m venv $venvDir" }
+    & $venvPy -m pip install --no-input --progress-bar off -r (Join-Path $ProjectDir "scripts\auth\requirements.txt") 2>&1 | Out-Null
     Ok "Python venv rebuilt"
 } else {
     Ok "Python venv OK"

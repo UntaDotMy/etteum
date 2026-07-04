@@ -471,20 +471,22 @@ function Setup-PythonVenv {
     }
 
     Info "Upgrading pip..."
+    # --no-input: never block on an interactive prompt (keyring, conflict).
+    # --progress-bar off: clean log output (the bar breaks in piped installs).
     if ($usePipModule) {
-        Retry-Action -Action { & $venvPy -m pip install --upgrade pip wheel 2>&1 | Out-Null }
+        Retry-Action -Action { & $venvPy -m pip install --no-input --progress-bar off --upgrade pip wheel 2>&1 | Out-Null }
     } else {
-        Retry-Action -Action { & $venvPip install --upgrade pip wheel 2>&1 | Out-Null }
+        Retry-Action -Action { & $venvPip install --no-input --progress-bar off --upgrade pip wheel 2>&1 | Out-Null }
     }
 
     Info "Installing Python packages (this may take a minute)..."
     if ($usePipModule) {
-        Retry-Action -Action { & $venvPy -m pip install -r "scripts\auth\requirements.txt" }
+        Retry-Action -Action { & $venvPy -m pip install --no-input --progress-bar off -r "scripts\auth\requirements.txt" }
     } else {
-        Retry-Action -Action { & $venvPip install -r "scripts\auth\requirements.txt" }
+        Retry-Action -Action { & $venvPip install --no-input --progress-bar off -r "scripts\auth\requirements.txt" }
     }
     if ($LASTEXITCODE -ne 0) {
-        Fail "pip install failed. Try manually: $venvPip install -r scripts\auth\requirements.txt"
+        Fail "pip install failed. Try manually: $venvPy -m pip install --no-input -r scripts\auth\requirements.txt"
     }
     Ok "Python deps installed"
 
@@ -496,28 +498,46 @@ function Setup-PythonVenv {
 
     Step "Installing nodriver Chrome (this can take a few minutes)"
     Info "nodriver will download a compatible Chrome/Chromium on first launch..."
-    try {
-        Retry-Action -Action { & $venvPy -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>$null }
-        Ok "nodriver Chrome installed"
-    } catch {
-        Warn "nodriver Chrome pre-download failed — it will auto-download on first use"
+    # Bounded timeout: nodriver.start() launches a real Chrome and can stall on
+    # a slow download or a hung launch. Never let it block the installer forever
+    # — if it doesn't complete in ~120s, move on (Chrome auto-downloads later).
+    # PowerShell has no builtin `timeout`; run it as a job with a watchdog.
+    $nodriverJob = Start-Job -ScriptBlock {
+        param($py)
+        & $py -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>$null
+    } -ArgumentList $venvPy
+    if (Wait-Job -Job $nodriverJob -Timeout 120) {
+        Receive-Job -Job $nodriverJob 2>&1 | Out-Null
+        if ($nodriverJob.State -eq "Completed") {
+            Ok "nodriver Chrome installed"
+        } else {
+            Warn "nodriver Chrome pre-download failed — it will auto-download on first use"
+            Info "  Manual: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+        }
+    } else {
+        Warn "nodriver Chrome pre-download timed out (>120s) — it will auto-download on first use"
         Info "  Manual: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
     }
+    Remove-Job -Job $nodriverJob -Force 2>$null
 
     # ── Cleanup: remove old camoufox/playwright if present ──
     Step "Cleaning up old browser engines (camoufox/playwright)..."
+    # Use 'python -m pip' when pip.exe is missing (usePipModule=true) — calling
+    # $venvPip directly would fail silently on venvs that only have python -m pip.
     try {
         & $venvPy -c "import camoufox" 2>$null
         if ($LASTEXITCODE -eq 0) {
             Info "Removing camoufox package..."
-            & $venvPip uninstall -y camoufox 2>&1 | Out-Null
+            if ($usePipModule) { & $venvPy -m pip uninstall -y --no-input camoufox 2>&1 | Out-Null }
+            else { & $venvPip uninstall -y --no-input camoufox 2>&1 | Out-Null }
         }
     } catch {}
     try {
         & $venvPy -c "import playwright" 2>$null
         if ($LASTEXITCODE -eq 0) {
             Info "Removing playwright package..."
-            & $venvPip uninstall -y playwright 2>&1 | Out-Null
+            if ($usePipModule) { & $venvPy -m pip uninstall -y --no-input playwright 2>&1 | Out-Null }
+            else { & $venvPip uninstall -y --no-input playwright 2>&1 | Out-Null }
         }
     } catch {}
     # Remove cached playwright browsers
