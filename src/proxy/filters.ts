@@ -101,6 +101,87 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
 
   // Remove "powered by Claude" / "powered by Anthropic" patterns
 
+  // Replace Claude Code identity with neutral AI assistant
+  {
+    id: "replace_claude_code_identity",
+    pattern: "You are Claude Code[,\\s]",
+    replacement: "You are an AI assistant",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace Claude model family references with generic AI
+  {
+    id: "replace_claude_model_refs",
+    pattern: "Claude (?:5|Opus|Sonnet|Haiku|Fable)",
+    replacement: "AI",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace Claude Code availability with neutral term
+  {
+    id: "replace_claude_code_availability",
+    pattern: "Claude Code is available",
+    replacement: "This AI assistant is available",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace Fast mode for Claude with neutral term
+  {
+    id: "replace_fast_mode_claude",
+    pattern: "Fast mode for Claude",
+    replacement: "Fast mode for AI",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace claude.ai URLs with neutral placeholder
+  {
+    id: "replace_claude_ai_urls",
+    pattern: "claude\\.ai",
+    replacement: "ai-assistant.dev",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace .claude file paths with .agents
+  {
+    id: "replace_claude_paths",
+    pattern: "\\.claude[/\\\\]",
+    replacement: ".agents/",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace CLAUDE.md with agents.md
+  {
+    id: "replace_claude_md_refs",
+    pattern: "CLAUDE\\.md",
+    replacement: "agents.md",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace generic "Claude" with "AI"
+  {
+    id: "replace_claude_general",
+    pattern: "\\bClaude\\b",
+    replacement: "AI",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace "Anthropic" with "AI provider"
+  {
+    id: "replace_anthropic_general",
+    pattern: "\\bAnthropic\\b",
+    replacement: "AI provider",
+    is_active: true,
+    is_regex: true,
+  },
+  // Replace camelCase "claude" identifiers (claudeMd, claudeHome, etc.)
+  {
+    id: "replace_claude_camelcase",
+    pattern: "claude([A-Z])",
+    replacement: "agent$1",
+    is_active: true,
+    is_regex: true,
+  },
+
 
   // ═══════════════════════════════════════════════════════════════════════════
   // PHASE 2: Exact string rules — catch any remaining known literal patterns
