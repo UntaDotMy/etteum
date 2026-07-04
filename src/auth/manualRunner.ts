@@ -25,6 +25,7 @@ import { handleCardResult } from "../api/vcc";
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Account } from "../db/schema";
+import { registerSession, updateFrame, updatePhase, deleteSession, updateChallenge } from "./browserSession";
 
 // Active manual-login sessions: accountId → session handle. Lets the dashboard
 // look up the running process to submit a challenge answer or cancel.
@@ -127,6 +128,9 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
   const session: ManualSession = { accountId: account.id, proc, stdinWriter, cancelSignalFile, provider };
   activeSessions.set(account.id, session);
 
+  // Track the browser session ID emitted by the Python script (for the frame viewer).
+  let browserSessionId: string | null = null;
+
   const startLog = addAuthLog({
     type: "login_progress",
     accountId: account.id,
@@ -154,7 +158,38 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
         if (!line) continue;
         let event: any;
         try { event = JSON.parse(line); } catch { continue; }
-        finalResult = handleManualEvent(event, account, finalResult);
+        // Handle frame/phase/session events (for the browser frame viewer).
+        if (event.type === "session" && event.sessionId) {
+          browserSessionId = event.sessionId;
+          registerSession({
+            sessionId: event.sessionId,
+            accountId: account.id,
+            email: account.email,
+            provider: "antigravity",
+            phase: "launching",
+            lastMessage: "Starting...",
+            lastFrame: "",
+            lastFrameFormat: "jpeg",
+            lastFrameTime: 0,
+            challenge: null,
+            terminal: false,
+            proc,
+            stdinWriter,
+            cancelSignalFile,
+            startedAt: Date.now(),
+          });
+          continue;
+        }
+        if (event.type === "frame" && browserSessionId) {
+          updateFrame(browserSessionId, event.base64, event.format || "jpeg");
+          continue;  // don't broadcast frames via WS (too heavy)
+        }
+        if (event.type === "phase" && browserSessionId) {
+          updatePhase(browserSessionId, event.phase, event.message || "");
+          broadcast({ type: "login_progress", data: { id: account.id, accountId: account.id, email: account.email, provider: "antigravity", step: "phase", message: event.message, phase: event.phase } });
+          continue;
+        }
+        finalResult = handleManualEvent(event, account, finalResult, browserSessionId);
       }
     }
   } catch {
@@ -166,6 +201,12 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
 
   await proc.exited;
   activeSessions.delete(account.id);
+  if (browserSessionId) {
+    updatePhase(browserSessionId, "failed", "Session ended");
+    // Keep the session in the registry for a short while so the frontend can
+    // show the final frame + "Browser frame ended with the session." message.
+    setTimeout(() => deleteSession(browserSessionId!), 10000);
+  }
   try { unlinkSync(cancelSignalFile); } catch {}
 
   // Apply the final result if we got one (mirrors loginAccount's success path).
@@ -190,7 +231,7 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
  * Map one stdout event from antigravity_manual_login.py to dashboard broadcasts.
  * Returns the latest result-shaped event seen (applied by the caller at end).
  */
-function handleManualEvent(event: any, account: Account, prevResult: any): any {
+function handleManualEvent(event: any, account: Account, prevResult: any, browserSessionId: string | null = null): any {
   const provider = "antigravity";
   if (event.type === "progress") {
     const log = addAuthLog({
@@ -205,9 +246,18 @@ function handleManualEvent(event: any, account: Account, prevResult: any): any {
     return prevResult;
   }
   if (event.type === "manual_challenge") {
+    // Store the challenge in the browser session registry (for the frame viewer).
+    if (browserSessionId) {
+      updateChallenge(browserSessionId, {
+        image_base64: event.challenge_image_base64 || "",
+        image_format: event.challenge_image_format || "jpeg",
+        prompt: event.prompt || "Type the characters",
+        seq: event.challenge_seq || 1,
+      });
+    }
     // Forward the challenge to the dashboard — it renders the CAPTCHA image +
-    // a text input. The user's answer comes back via POST /api/accounts/:id/challenge-answer
-    // → submitManualChallengeAnswer → this script's stdin.
+    // a text input. The user's answer comes back via POST /api/browser-session/:sid/captcha
+    // → forwardInput → this script's stdin.
     const log = addAuthLog({
       type: "login_progress",
       accountId: account.id,
