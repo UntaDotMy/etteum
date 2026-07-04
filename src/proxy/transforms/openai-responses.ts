@@ -492,7 +492,14 @@ export function chatStreamToResponsesStream(
   let lastModel = model;
   let messageItemEmitted = false;
   const messageItemId = "msg_" + responseId.slice(5);
+  const reasoningItemId = "rs_" + responseId.slice(5);
   const toolCallItemIds: string[] = [];
+  let reasoningAccum = "";
+  let reasoningItemEmitted = false;
+  // Output indices follow the OpenAI ordering: reasoning (if any) -> message ->
+  // function calls. Assigned lazily as each item opens.
+  let reasoningOutputIndex = -1;
+  let messageOutputIndex = -1;
   let buffer = "";
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
@@ -559,32 +566,60 @@ export function chatStreamToResponsesStream(
             const choice = chunk.choices?.[0];
             const delta = choice?.delta;
             if (delta) {
+              // Reasoning / thinking. Providers emit delta.reasoning_content
+              // (alibaba, codebuddy, kiro, codex, qoder). Map to the canonical
+              // response.reasoning_summary_text.* events + a reasoning output
+              // item, which precedes the message item in the output order.
+              const reasoningDelta =
+                typeof (delta as any).reasoning_content === "string" ? (delta as any).reasoning_content :
+                typeof (delta as any).reasoning === "string" ? (delta as any).reasoning :
+                typeof (delta as any).thinking === "string" ? (delta as any).thinking : "";
+              if (reasoningDelta.length > 0) {
+                if (!reasoningItemEmitted) {
+                  reasoningItemEmitted = true;
+                  reasoningOutputIndex = 0;
+                  emit("response.output_item.added", {
+                    output_index: 0,
+                    item: { id: reasoningItemId, type: "reasoning", status: "in_progress", summary: [], content: [] },
+                  });
+                  emit("response.reasoning_summary_part.added", {
+                    output_index: 0, item_id: reasoningItemId, summary_index: 0,
+                    part: { type: "summary_text", text: "" },
+                  });
+                }
+                reasoningAccum += reasoningDelta;
+                emit("response.reasoning_summary_text.delta", {
+                  output_index: 0, item_id: reasoningItemId, summary_index: 0,
+                  delta: reasoningDelta,
+                });
+              }
               if (typeof delta.content === "string" && delta.content.length > 0) {
                 if (!messageItemEmitted) {
                   messageItemEmitted = true;
+                  messageOutputIndex = reasoningItemEmitted ? 1 : 0;
                   emit("response.output_item.added", {
-                    output_index: 0,
+                    output_index: messageOutputIndex,
                     item: { id: messageItemId, type: "message", role: "assistant", status: "in_progress", content: [] },
                   });
                   emit("response.content_part.added", {
-                    output_index: 0, content_index: 0, item_id: messageItemId,
+                    output_index: messageOutputIndex, content_index: 0, item_id: messageItemId,
                     part: { type: "output_text", text: "" },
                   });
                 }
                 textAccum += delta.content;
                 emit("response.output_text.delta", {
-                  output_index: 0, content_index: 0, item_id: messageItemId,
+                  output_index: messageOutputIndex, content_index: 0, item_id: messageItemId,
                   delta: delta.content, logprobs: [],
                 });
               }
               if (Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
                   const idx = typeof tc.index === "number" ? tc.index : 0;
+                  const outputIndex = (reasoningItemEmitted ? 1 : 0) + (messageItemEmitted ? 1 : 0) + idx;
                   let entry = toolCalls.find((t) => t.index === idx);
                   if (!entry) {
                     entry = { index: idx, arguments: "" };
                     toolCalls.push(entry);
-                    const outputIndex = 1 + idx;
                     const itemId = "fc_" + responseId.slice(5) + "_" + idx;
                     toolCallItemIds[idx] = itemId;
                     emit("response.output_item.added", {
@@ -601,7 +636,7 @@ export function chatStreamToResponsesStream(
                   if (typeof tc.function?.arguments === "string") {
                     entry.arguments += tc.function.arguments;
                     emit("response.function_call_arguments.delta", {
-                      output_index: 1 + idx, item_id: toolCallItemIds[idx],
+                      output_index: outputIndex, item_id: toolCallItemIds[idx],
                       delta: tc.function.arguments,
                     });
                   }
@@ -622,17 +657,35 @@ export function chatStreamToResponsesStream(
         }
 
         // Close the message item if it was opened.
+        // Close the reasoning item if it was opened (before the message close).
+        if (reasoningItemEmitted) {
+          emit("response.reasoning_summary_text.done", {
+            output_index: reasoningOutputIndex, item_id: reasoningItemId, summary_index: 0,
+            text: reasoningAccum,
+          });
+          emit("response.reasoning_summary_part.done", {
+            output_index: reasoningOutputIndex, item_id: reasoningItemId, summary_index: 0,
+            part: { type: "summary_text", text: reasoningAccum },
+          });
+          emit("response.output_item.done", {
+            output_index: reasoningOutputIndex,
+            item: {
+              id: reasoningItemId, type: "reasoning", status: "completed",
+              summary: [{ type: "summary_text", text: reasoningAccum }], content: [],
+            },
+          });
+        }
         if (messageItemEmitted) {
           emit("response.output_text.done", {
-            output_index: 0, content_index: 0, item_id: messageItemId,
+            output_index: messageOutputIndex, content_index: 0, item_id: messageItemId,
             text: textAccum, logprobs: [],
           });
           emit("response.content_part.done", {
-            output_index: 0, content_index: 0, item_id: messageItemId,
+            output_index: messageOutputIndex, content_index: 0, item_id: messageItemId,
             part: { type: "output_text", text: textAccum },
           });
           emit("response.output_item.done", {
-            output_index: 0,
+            output_index: messageOutputIndex,
             item: {
               id: messageItemId, type: "message", role: "assistant", status: "completed",
               content: [{ type: "output_text", text: textAccum }],
@@ -641,7 +694,7 @@ export function chatStreamToResponsesStream(
         }
         // Close tool-call items.
         for (const tc of toolCalls) {
-          const outputIndex = 1 + tc.index;
+          const outputIndex = (reasoningItemEmitted ? 1 : 0) + (messageItemEmitted ? 1 : 0) + tc.index;
           const itemId = toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index;
           emit("response.function_call_arguments.done", {
             output_index: outputIndex, item_id: itemId, arguments: tc.arguments,
@@ -661,6 +714,7 @@ export function chatStreamToResponsesStream(
         // OpenAI SDK accepts either; we send the full output for clients that
         // don't assemble from intermediate events.
         const output: ResponsesOutputItem[] = [];
+        if (reasoningItemEmitted) output.push({ type: "reasoning", id: reasoningItemId, status: "completed", summary: [{ type: "summary_text", text: reasoningAccum }], content: [] });
         if (messageItemEmitted) output.push({ type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] });
         for (const tc of toolCalls) output.push({ type: "function_call", id: toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
         const usage: ResponsesUsage = finalUsage ?? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };

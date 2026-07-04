@@ -387,4 +387,55 @@ describe("chatStreamToResponsesStream", () => {
     const completedIdx = events.findIndex((e) => e.event === "response.completed");
     expect(completedIdx).toBe(events.length - 1);
   });
+
+  test("reasoning (delta.reasoning_content) → reasoning item at output_index 0, before message", async () => {
+    const chunks = [
+      { id: "c1", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { reasoning_content: "Thinking" }, finish_reason: null }] },
+      { id: "c2", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { content: "Answer" }, finish_reason: null }] },
+      { id: "c3", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ];
+    const meta = newResponsesResponseMeta();
+    const stream = chatStreamToResponsesStream(chatChunksToStream(chunks), "gpt-5", meta.id, meta.createdAt);
+    const events = await decodeResponsesSse(stream);
+    const names = events.map((e) => e.event);
+
+    // Reasoning lifecycle present.
+    expect(names).toContain("response.reasoning_summary_text.delta");
+    expect(names).toContain("response.reasoning_summary_text.done");
+    // Reasoning output item at index 0, message at index 1.
+    const reasonAdded = events.find((e) => e.event === "response.output_item.added" && e.data.item.type === "reasoning")!;
+    expect(reasonAdded.data.output_index).toBe(0);
+    const msgAdded = events.find((e) => e.event === "response.output_item.added" && e.data.item.type === "message")!;
+    expect(msgAdded.data.output_index).toBe(1);
+    // Reasoning text accumulated in the .done event.
+    const reasonDone = events.find((e) => e.event === "response.reasoning_summary_text.done")!;
+    expect(reasonDone.data.text).toBe("Thinking");
+    // Final completed output has reasoning first, then message.
+    const completed = events[events.length - 1].data;
+    expect(completed.response.output[0].type).toBe("reasoning");
+    expect(completed.response.output[0].summary[0].text).toBe("Thinking");
+    expect(completed.response.output[1].type).toBe("message");
+    // Sequence still monotonic.
+    const seqs = events.map((e) => e.data.sequence_number);
+    expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => i));
+  });
+
+  test("tool calls get correct output_index after reasoning + message", async () => {
+    const chunks = [
+      { id: "c1", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { reasoning_content: "hmm" }, finish_reason: null }] },
+      { id: "c2", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { content: "ok" }, finish_reason: null }] },
+      { id: "c3", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "f", arguments: "{}" } }] }, finish_reason: "tool_calls" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ];
+    const meta = newResponsesResponseMeta();
+    const stream = chatStreamToResponsesStream(chatChunksToStream(chunks), "gpt-5", meta.id, meta.createdAt);
+    const events = await decodeResponsesSse(stream);
+    // reasoning=0, message=1, function_call=2 — and the delta/done for the
+    // function call must all agree on output_index 2.
+    const fcAdded = events.find((e) => e.event === "response.output_item.added" && e.data.item.type === "function_call")!;
+    expect(fcAdded.data.output_index).toBe(2);
+    const fcDelta = events.find((e) => e.event === "response.function_call_arguments.delta")!;
+    expect(fcDelta.data.output_index).toBe(2);
+    const fcDone = events.find((e) => e.event === "response.output_item.done" && e.data.item.type === "function_call")!;
+    expect(fcDone.data.output_index).toBe(2);
+  });
 });
