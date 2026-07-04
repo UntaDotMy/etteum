@@ -105,6 +105,8 @@ export function useApiCache<T>(
   keyRef.current = key;
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  const revalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isRevalidatingRef = useRef(false);
 
   // Stable revalidation — uses fetcherRef to avoid re-creating the callback
   // every time the fetcher identity changes (which would retrigger useEffect).
@@ -204,12 +206,31 @@ export function useApiCache<T>(
     return () => document.removeEventListener('visibilitychange', handleFocus);
   }, [key, revalidateOnFocus, isStale, revalidate]);
 
-  // Invalidate on WebSocket events
+  // Invalidate on WebSocket events — debounced to batch rapid updates
   useWsEvent(wsEvents, () => {
-    if (key) {
-      revalidate();
+    if (!key) return;
+    
+    // Clear any pending revalidation
+    if (revalidateTimerRef.current) {
+      clearTimeout(revalidateTimerRef.current);
     }
+    
+    // Schedule revalidation after 300ms of inactivity
+    // This batches multiple WebSocket events into a single fetch
+    revalidateTimerRef.current = setTimeout(() => {
+      revalidateTimerRef.current = null;
+      revalidate();
+    }, 300);
   });
+  
+  // Cleanup timer on unmount
+  useEffect(() => {
+    return () => {
+      if (revalidateTimerRef.current) {
+        clearTimeout(revalidateTimerRef.current);
+      }
+    };
+  }, []);
 
   // Manual mutation function
   const mutate = useCallback(async (newData?: T) => {
