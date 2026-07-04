@@ -5,7 +5,7 @@ import { Button } from "@/components/ui/button";
 import { clearAuthLogs, fetchAuthLogs, fetchAuthQueue, fetchWarmupQueue, loginAccount, loginAccounts, stopAllAccounts, stopWarmup } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
 import { useApiCache } from "@/hooks/useApiCache";
-import { AlertTriangle, CheckCircle, ChevronDown, Loader2, RefreshCw, RotateCcw, Trash2, Radio, StopCircle } from "lucide-react";
+import { AlertTriangle, CheckCircle, ChevronDown, Loader2, RefreshCw, RotateCcw, Trash2, Radio, StopCircle, Globe } from "lucide-react";
 import { formatTimeID } from "@/lib/utils";
 
 interface AuthLog {
@@ -117,6 +117,9 @@ export default function BotLogs() {
   const [stoppingWarmup, setStoppingWarmup] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  // Live in-memory raw console: the most recent browser-surface events
+  // (browser_host, manual_challenge, progress) — cleared by "Clear live console".
+  const [liveConsole, setLiveConsole] = useState<AuthLog[]>([]);
   const perPage = 25;
   const queueRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsStatus = useWsStatus();
@@ -191,6 +194,13 @@ export default function BotLogs() {
       data,
     };
     setLogs((current) => mergeLogs(current, [log]));
+    // Push browser-surface events to the live console (raw, in-memory, clearable).
+    if (log.step === "browser_host" || log.step === "manual_challenge" || msg.type === "login_progress" || msg.type === "queue_processing") {
+      setLiveConsole((current) => {
+        const next = [...current, log];
+        return next.length > 200 ? next.slice(next.length - 200) : next;
+      });
+    }
     scheduleQueueRefresh();
   });
 
@@ -331,7 +341,7 @@ export default function BotLogs() {
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--foreground)]">Login Logs</h1>
+          <h1 className="text-2xl font-bold text-[var(--foreground)]">Browser Log</h1>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
             Live progress for auto-login bot, including failed accounts.
           </p>
@@ -353,6 +363,41 @@ export default function BotLogs() {
           <Button variant="outline" size="sm" onClick={handleClear}><Trash2 className="w-4 h-4 mr-2" />Clear</Button>
         </div>
       </div>
+
+      {/* Live console — raw in-memory browser-surface events (browser_host,
+          manual_challenge, progress). "Clear live console" empties this buffer. */}
+      <Card>
+        <CardHeader>
+          <div className="flex items-center justify-between">
+            <div>
+              <CardTitle className="text-base flex items-center gap-2"><Radio className="w-4 h-4 text-[var(--primary)]" />Browser surface</CardTitle>
+              <p className="text-xs text-[var(--muted-foreground)] mt-1">Click and type to forward input into the browser. Live raw events below; solve CAPTCHAs in the popup modal.</p>
+            </div>
+            <Button variant="outline" size="sm" onClick={() => setLiveConsole([])} disabled={liveConsole.length === 0}>
+              <Trash2 className="w-4 h-4 mr-2" />Clear live console
+            </Button>
+          </div>
+        </CardHeader>
+        <CardContent>
+          {liveConsole.length === 0 ? (
+            <p className="py-6 text-center text-sm text-[var(--muted-foreground)]">No active browser session. Start a manual add or an automation batch to see live events.</p>
+          ) : (
+            <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-xs">
+              {[...liveConsole].reverse().map((log, i) => (
+                <div key={`${log.id}-${i}`} className="flex items-center gap-2">
+                  <span className="text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
+                  {log.step === "browser_host" && <Globe className="h-3 w-3 text-[var(--primary)]" />}
+                  {log.step === "manual_challenge" && <AlertTriangle className="h-3 w-3 text-[var(--warning)]" />}
+                  <span className={log.step === "browser_host" ? "text-[var(--primary)]" : log.step === "manual_challenge" ? "text-[var(--warning)]" : "text-[var(--foreground)]"}>
+                    {log.step || log.type}
+                  </span>
+                  <span className="flex-1 truncate text-[var(--muted-foreground)]">{log.message}</span>
+                </div>
+              ))}
+            </div>
+          )}
+        </CardContent>
+      </Card>
 
       {!queue && !logsRes ? (
         <div className="flex items-center justify-center py-20">
@@ -402,7 +447,7 @@ export default function BotLogs() {
       )}
 
       <Card className="border-[var(--border)]">
-        <CardHeader><CardTitle className="text-base">Login Progress</CardTitle></CardHeader>
+        <CardHeader><CardTitle className="text-base">Browser Sessions</CardTitle></CardHeader>
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <table className="w-full">
@@ -433,6 +478,12 @@ export default function BotLogs() {
                           {processStatusLabel(process) === "success" && <CheckCircle className="w-4 h-4 text-[var(--success)]" />}
                           {processStatusLabel(process) === "error" && <AlertTriangle className="w-4 h-4 text-[var(--error)]" />}
                           {processStatusLabel(process) !== "success" && processStatusLabel(process) !== "error" && (process.latest.type === "login_progress" || process.latest.type === "queue_processing" || process.latest.type === "warmup_processing") && <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />}
+                          {/* Live browser location (the reference design-style) — latest browser_host event for this session. */}
+                          {(() => {
+                            const host = [...process.events].reverse().find((e) => e.step === "browser_host")?.message;
+                            if (!host || processStatusLabel(process) === "success" || processStatusLabel(process) === "error") return null;
+                            return <span className="inline-flex items-center gap-1 rounded bg-[var(--primary)]/10 px-1.5 py-0.5 text-xs text-[var(--primary)]"><Radio className="w-3 h-3" />{host.replace("Browser at ", "")}</span>;
+                          })()}
                           <span className="min-w-0 flex-1 truncate">{process.latest.error || process.latest.message || "-"}</span>
                           <span className="shrink-0 text-xs text-[var(--muted-foreground)]">{process.events.length} steps</span>
                           <ChevronDown className={`h-4 w-4 shrink-0 transition-transform ${expanded === process.key ? "rotate-180" : ""}`} />

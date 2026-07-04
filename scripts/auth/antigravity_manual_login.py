@@ -1,14 +1,14 @@
 #!/usr/bin/env python3
 """Antigravity manual login — visible nodriver 'frame' + dashboard challenge UX.
 
-Ports enowxai's manual-login pattern (qoder_manual_login.py / qoder_common.py)
+Ports the reference design's manual-login pattern (the manual-login script / the shared manual-login helpers)
 to etteum antigravity, on nodriver (NOT Camoufox — Google detects Camoufox).
 
 What this is:
   A VISIBLE (headless=False) nodriver Chrome window opens — that window IS the
   'frame'. The script drives Google OAuth (email → password → consent) and
-  streams line-JSON events to stdout in the enowxai shape so the etteum
-  dashboard can render them like enowxai's browser log:
+  streams line-JSON events to stdout in the the reference design shape so the etteum
+  dashboard can render them like the reference design's browser log:
     - progress (step=browser_launch|browser_host|email_step|password_step|...)
     - manual_challenge (CAPTCHA image as base64 + prompt) — the dashboard shows
       a modal; the user types the answer; it round-trips back here via stdin
@@ -16,8 +16,8 @@ What this is:
     - result ({"antigravity":{success,credentials,quota,error}})
     - error
 
-The TS side spawns this script (mirroring enowxai's Go server spawning
-qoder_manual_login.py) with --cancel-signal-file; if that file appears, we
+The TS side spawns this script (mirroring the reference design's Go server spawning
+the manual-login script) with --cancel-signal-file; if that file appears, we
 abort cleanly. The final result event is mapped by runner.ts applyProviderResult.
 
 This is ADDITIVE: it does not replace login.py (single-account direct path) or
@@ -62,7 +62,7 @@ from app.providers.nodriver_browser import launch_browser
 
 
 def emit(data: dict) -> None:
-    """Emit one JSON event line to stdout (enowxai shape, read by runner.ts)."""
+    """Emit one JSON event line to stdout (the reference design shape, read by runner.ts)."""
     try:
         print(json.dumps(data), flush=True)
     except BrokenPipeError:
@@ -78,7 +78,7 @@ def cancelled(cancel_signal_file: str) -> bool:
 
 
 async def emit_browser_host(page: Any) -> None:
-    """Report which host the browser is currently on (enowxai browser_host)."""
+    """Report which host the browser is currently on (the reference design browser_host)."""
     try:
         url = await page.evaluate("location.href") or ""
     except Exception:
@@ -95,7 +95,7 @@ async def emit_browser_host(page: Any) -> None:
 
 async def capture_captcha_image(page: Any) -> "tuple[str, str]":
     """Capture the Google text-CAPTCHA image as (base64, format).
-    Mirrors enowxai _capture_google_text_captcha_image. Returns ("", "") if none.
+    Mirrors the reference design _capture_google_text_captcha_image. Returns ("", "") if none.
     """
     try:
         info = await page.evaluate("""() => {

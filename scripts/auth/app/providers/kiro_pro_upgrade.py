@@ -1,7 +1,5 @@
 """
 Kiro Pro Upgrade — Generate Stripe URL + Autopay with VCC.
-
-Ported from enowxai reference (kiro_login_upgrade.py + kiro_autopay.py).
 """
 
 from __future__ import annotations

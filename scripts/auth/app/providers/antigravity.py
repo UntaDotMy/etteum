@@ -75,7 +75,7 @@ def _debug(msg: str) -> None:
         print(f"[antigravity-debug] {msg}", flush=True)
 
 
-# ── Headed relaunch (mirrors 9router's relaunchAsHeaded) ────────────────────
+# ── Headed relaunch (mirrors the reference design's the headed-relaunch pattern) ────────────────────
 #
 # When a headless worker hits a step Google won't let automation past
 # (text CAPTCHA, "verify it's you", an interstitial we can't click through),
@@ -124,7 +124,7 @@ async def relaunch_as_headed(page: Any, headless_browser: Any, reason: str = "ma
     over cookies, and navigate to the current URL. Returns (new_page,
     new_browser) on success, or None if the relaunch failed.
 
-    Mirrors 9router's relaunchAsHeaded (kiroBulkImportManager.js): grab
+    Mirrors the reference design's the headed-relaunch pattern (the bulk-import manager): grab
     storageState (here: cookies via CDP), close the old headless browser,
     launch a headed one, inject cookies, goto the last URL. The caller is
     responsible for re-driving the login flow on the returned page and for
@@ -695,7 +695,7 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
             captcha_info = {"detected": False}
         if captcha_info.get("detected"):
             # In headless mode with a session, escalate to a visible framed
-            # window (9router relaunchAsHeaded) so the user can solve ANY
+            # window (the reference design the headed-relaunch pattern) so the user can solve ANY
             # manual step, not just type a CAPTCHA. Falls back to the tkinter
             # popup only if no session / relaunch fails.
             if is_headless and session is not None:

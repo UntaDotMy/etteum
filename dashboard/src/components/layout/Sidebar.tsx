@@ -22,6 +22,8 @@ import {
   ChevronLeft,
   ChevronRight,
   MessageSquare,
+  Zap,
+  MonitorSmartphone,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
@@ -44,6 +46,7 @@ const navSections: NavSection[] = [
     items: [
       { label: "Dashboard", path: "/", icon: LayoutDashboard },
       { label: "Accounts", path: "/accounts", icon: Users },
+      { label: "Automation", path: "/automation", icon: Zap },
       { label: "Models", path: "/models", icon: Cpu },
     ],
   },
@@ -70,7 +73,7 @@ const navSections: NavSection[] = [
     items: [
       { label: "Requests", path: "/requests", icon: Activity },
       { label: "Analytics", path: "/analytics", icon: BarChart3 },
-      { label: "Login Logs", path: "/bot-logs", icon: Bot },
+      { label: "Browser Log", path: "/bot-logs", icon: MonitorSmartphone },
       { label: "Usage", path: "/usage", icon: BarChart3 },
     ],
   },

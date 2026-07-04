@@ -132,7 +132,7 @@ export default function Accounts() {
   const [instantTokens, setInstantTokens] = useState("");
   const [cookieValue, setCookieValue] = useState("");
   const [bulkText, setBulkText] = useState("");
-  const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey">("bulk");
+  const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey">("single");
   const [bulkBrowserEngine, setBulkBrowserEngine] = useState("nodriver");
   const [bulkHeadless, setBulkHeadless] = useState(true);
   const [bulkConcurrency, setBulkConcurrency] = useState(3);
@@ -2413,49 +2413,18 @@ sk-ws-H.zzzzzzzz..."
             </div>
           )}
 
-          {/* Bulk mode (all providers) */}
+          {/* Bulk mode — moved to the Automation tab. Add here is manual single-account only. */}
           {addMode === "bulk" && (
             <div className="space-y-4">
-              {addDialogProvider === "gitlab-duo" && (
-                <div className="rounded-md border border-[var(--success)]/40 bg-[var(--success)]/10 p-3 text-xs text-[var(--foreground)] space-y-1">
-                  <div><strong>Bot otomasi GitLab Duo aktif.</strong> Alurnya: Google OAuth → konfirmasi OTP via Gmail web → form Welcome → Free Trial Singapore → toggle Duo experiment → generate PAT (<code>poolprox3-duo</code>) → simpan ke akun.</div>
-                  <div className="text-[var(--muted-foreground)]">⏱ Estimasi 4–6 menit per akun. <strong>Concurrency=1 disarankan</strong> agar Gmail tidak rate-limit. Pakai akun Gmail tanpa 2FA.</div>
+              <div className="rounded-md border border-[var(--primary)]/40 bg-[var(--primary)]/5 p-4 text-sm space-y-2">
+                <div className="font-medium">Bulk import moved to the Automation tab</div>
+                <div className="text-[var(--muted-foreground)]">
+                  Adding accounts here is now <strong>manual single-account</strong> only (a visible browser frame for antigravity).
+                  For bulk batch login (paste many email|password, pick concurrency, run N frames), use the <strong>Automation</strong> tab.
                 </div>
-              )}
-              <div>
-                <label className="text-sm text-[var(--foreground)]">Accounts (email|password per baris)</label>
-                <textarea
-                  value={bulkText}
-                  onChange={(e) => setBulkText(e.target.value)}
-                  className="mt-1 w-full h-40 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
-                  placeholder={"email@example.com|password123\nanother@example.com|pass456"}
-                />
-              </div>
-              <div>
-                <label className="text-sm text-[var(--foreground)]">Browser Engine</label>
-                <select value={bulkBrowserEngine} onChange={(e) => setBulkBrowserEngine(e.target.value)} className="mt-1 w-full h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
-                  <option value="nodriver">nodriver (default)</option>
-                </select>
-              </div>
-              <div className="flex gap-4">
-                <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
-                  <input type="checkbox" checked={bulkHeadless} onChange={(e) => setBulkHeadless(e.target.checked)} className="h-4 w-4 rounded border-[var(--border)]" />
-                  Run browser headless
-                </label>
-                <div className="flex items-center gap-2">
-                  <label className="text-sm text-[var(--foreground)]">Concurrent:</label>
-                  <select value={bulkConcurrency} onChange={(e) => setBulkConcurrency(Number(e.target.value))} className="h-8 w-16 rounded-md border border-[var(--border)] bg-[var(--background)] px-2 text-sm text-[var(--foreground)]">
-                    <option value={1}>1</option>
-                    <option value={2}>2</option>
-                    <option value={3}>3</option>
-                    <option value={5}>5</option>
-                    <option value={10}>10</option>
-                  </select>
+                <div className="pt-1">
+                  <Button size="sm" onClick={() => { setAddDialogProvider(null); navigate("/automation"); }}>Go to Automation →</Button>
                 </div>
-              </div>
-              <div className="flex justify-end gap-2">
-                <Button variant="outline" onClick={() => setAddDialogProvider(null)}>Cancel</Button>
-                <Button onClick={handleBulkImport}>Import & Login</Button>
               </div>
             </div>
           )}

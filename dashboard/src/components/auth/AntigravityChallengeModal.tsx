@@ -24,7 +24,7 @@ interface ChallengeData {
  * the running script via POST /api/accounts/:id/challenge-answer; Cancel writes
  * the cancel-signal-file via POST /api/accounts/:id/cancel-manual.
  *
- * Mirrors enowxai's manual-challenge modal UX.
+ * Mirrors the reference design's manual-challenge modal UX.
  */
 export function AntigravityChallengeModal() {
   const [challenge, setChallenge] = useState<ChallengeData | null>(null);

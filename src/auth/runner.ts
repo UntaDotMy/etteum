@@ -622,7 +622,7 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
  * Run the Python login script for a SINGLE provider.
  * Uses ENOWX_ALLOWED_PROVIDERS env to filter to just the needed provider.
  *
- * The enowxai login.py script accepts:
+ * The the reference design login.py script accepts:
  *   --email <email> --password <password>
  *
  * And uses env vars:

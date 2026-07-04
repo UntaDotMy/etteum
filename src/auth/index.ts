@@ -117,7 +117,7 @@ authRouter.post("/login-bulk", async (c) => {
  * Body: { accounts: [{ email, password }], providers?: ["kiro","codebuddy","canva"] }
  *
  * This creates DB entries for each email × provider combination,
- * then queues them all for login via the enowxai bot.
+ * then queues them all for login via the auth bot.
  */
 authRouter.post("/bulk-add", async (c) => {
   const body = await c.req.json<{
