@@ -92,6 +92,32 @@ try {
     ])
   );
 
+
+  // Disable the brand-neutralization tier (Claude->[AI-ASSISTANT],
+  // [AI-LAB-B]->[AI-LAB-B], [AI-LAB-A]->[AI-LAB-A], ...). Per user request:
+  // brand names must pass through verbatim, no rewriting at all. Only
+  // telemetry stripping + identity-line neutralization remain active.
+  // Rules stay in the DB (is_active=false); re-enable via dashboard.
+  await db.update(filterRules).set({ isActive: false }).where(
+    inArray(filterRules.ruleId, [
+    "neutralize_anthropic",
+    "neutralize_anthropic_lower",
+    "neutralize_claude_code",
+    "neutralize_claude_code_lower",
+    "neutralize_openai",
+    "neutralize_openai_lower",
+    "neutralize_chatgpt",
+    "neutralize_chatgpt_lower",
+    "neutralize_gemini",
+    "neutralize_gemini_lower",
+    "neutralize_google_ai",
+    "neutralize_google_ai_lower",
+    "neutralize_llama",
+    "neutralize_llama_lower",
+    "neutralize_meta_ai",
+    "neutralize_meta_ai_lower",
+    ])
+  );
   await loadFilterCache();
 } catch (e) {
   console.error("[DB] Filter rules seed/load skipped:", e instanceof Error ? e.message : e);

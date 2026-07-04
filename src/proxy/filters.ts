@@ -2,22 +2,20 @@
  * Content filter system for removing patterns that trigger content moderation.
  * Based on enowxai's pudidil filter template system.
  *
- * General (one rule set for every provider). Two kinds of rules only:
- *   - sanitize:  strip vendor telemetry (billing headers, cc_* hashes, claude-code
- *                GitHub URLs). These are removal of instrumentation, never user
- *                content, so they cannot degrade the model.
- *   - neutralize: rewrite vendor brand names to bracketed tokens (e.g. "Claude"
- *                -> "[AI-ASSISTANT]", "[AI-LAB-A]" -> "[AI-LAB-A]"). Neutralizes
- *                identity without breaking tool calls, code, or file paths.
+ * General (one rule set for every provider). Only sanitization rules remain:
+ *   - strip vendor telemetry (billing headers, cc_* hashes, claude-code GitHub
+ *     URLs, cc_entrypoint / cc_version).
+ *   - neutralize vendor identity boilerplate lines (feedback lines, "You are
+ *     <vendor>" identity, Cursor/Windsurf/[AI-LAB-A]-CLI agent identity).
  *
- * IMPORTANT: there is intentionally NO word-rewrite tier. Earlier rules rewrote
- * common technical words (terminate, access, modify, tool, device, threat, ...)
- * to moderation-neutral synonyms; that mangled tool-call arguments, tool results,
- * commands, and file paths, which broke Codex tool execution ("dumb" tool calls).
- * Those rules remain in the DB with is_active=false so they can be re-enabled
- * per-provider from the dashboard, but they do NOT run by default. Nothing is
- * dropped from user content: instructions, system prompt, harness, tool calls,
- * and tool results pass through verbatim.
+ * IMPORTANT: there is NO brand-neutralization tier and NO word-rewrite tier.
+ * Brand names (Claude, [AI-LAB-B], [AI-LAB-A], [AI-CHAT], [AI-LAB-C], [AI-LAB-D],
+ * [AI-MODEL], [AI-LAB-E], ...) pass through VERBATIM. Common technical words
+ * (terminate, access, modify, tool, device, threat, ...) also pass through
+ * verbatim. Both tiers were removed because they mangled tool calls, code, file
+ * paths, and tool results. The deactivated rules stay in the DB (is_active=false)
+ * so they can be re-enabled per-provider from the dashboard; they are NOT in
+ * this fallback const. Nothing in user content is dropped or rewritten.
  */
 
 export interface FilterRule {
@@ -113,125 +111,6 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     is_active: true,
     is_regex: false,
   },
-  {
-    id: "neutralize_anthropic",
-    pattern: "Anthropic",
-    replacement: "[AI-LAB-A]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_anthropic_lower",
-    pattern: "anthropic",
-    replacement: "[ai-lab-a]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_claude_code",
-    pattern: "Claude Code",
-    replacement: "[AI-ASSISTANT]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_claude_code_lower",
-    pattern: "claude code",
-    replacement: "[ai-assistant]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_openai",
-    pattern: "OpenAI",
-    replacement: "[AI-LAB-B]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_openai_lower",
-    pattern: "openai",
-    replacement: "[ai-lab-b]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_chatgpt",
-    pattern: "ChatGPT",
-    replacement: "[AI-CHAT]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_chatgpt_lower",
-    pattern: "chatgpt",
-    replacement: "[ai-chat]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_gemini",
-    pattern: "Gemini",
-    replacement: "[AI-LAB-C]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_gemini_lower",
-    pattern: "gemini",
-    replacement: "[ai-lab-c]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_google_ai",
-    pattern: "Google AI",
-    replacement: "[AI-LAB-D]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_google_ai_lower",
-    pattern: "google ai",
-    replacement: "[ai-lab-d]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_llama",
-    pattern: "Llama",
-    replacement: "[AI-MODEL]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_llama_lower",
-    pattern: "llama",
-    replacement: "[ai-model]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_meta_ai",
-    pattern: "Meta AI",
-    replacement: "[AI-LAB-E]",
-    is_active: true,
-    is_regex: false,
-  },
-  {
-    id: "neutralize_meta_ai_lower",
-    pattern: "meta ai",
-    replacement: "[ai-lab-e]",
-    is_active: true,
-    is_regex: false,
-  },
-  // ═══════════════════════════════════════════════════════════════════════════
-  // Word-rewrite tier REMOVED (was: terminate->terminate, access->access,
-  // modify->modify, tool->tool, device->device, threat->threat, ...). Those
-  // rewrites broke tool calls and mangled code. Kept in the DB as
-  // is_active=false; re-enable via dashboard only if a specific provider needs
-  // them. They are deliberately NOT in this fallback const.
-  // ═══════════════════════════════════════════════════════════════════════════
 ];
 
 import { getFilterRulesCached } from "./filter-cache";
