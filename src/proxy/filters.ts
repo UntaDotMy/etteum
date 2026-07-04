@@ -11,7 +11,39 @@ export interface FilterRule {
   replacement: string;
   is_active: boolean;
   is_regex: boolean;
+  /**
+   * `structural` (default): telemetry/identity-removal safe to run for every
+   *   provider (billing headers, cc_* hashes, claude-code GitHub URLs). Never
+   *   mangles legitimate user content.
+   * `identity`: over-broad rewrites (Claude->AI, CLAUDE.md->agents.md,
+   *   claude([A-Z])->agent$1, ...) that exist ONLY to shield China providers'
+   *   content moderation. Running these for non-China providers degrades the
+   *   model (rewrites user code, docs, camelCase identifiers) for no benefit.
+   */
+  scope?: "structural" | "identity";
 }
+
+/** Filter scope requested by the caller. `undefined` = run every rule. */
+export type FilterScope = "structural" | "identity" | undefined;
+
+/**
+ * Rule ids that belong to the "identity" tier (over-broad rewrites that only
+ * China providers need). Kept as a set so DB-backed rules (which have no scope
+ * column) can still be gated by id. Keep in sync with the `scope: "identity"`
+ * tags on PUDIDIL_FILTERS below.
+ */
+const IDENTITY_RULE_IDS = new Set([
+  "replace_claude_code_identity",
+  "replace_claude_model_refs",
+  "replace_claude_code_availability",
+  "replace_fast_mode_claude",
+  "replace_claude_ai_urls",
+  "replace_claude_paths",
+  "replace_claude_md_refs",
+  "replace_claude_general",
+  "replace_anthropic_general",
+  "replace_claude_camelcase",
+]);
 
 export const PUDIDIL_FILTERS: FilterRule[] = [
   // ═══════════════════════════════════════════════════════════════════════════
@@ -108,7 +140,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "You are an AI assistant",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace Claude model family references with generic AI
   {
     id: "replace_claude_model_refs",
@@ -116,7 +149,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "AI",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace Claude Code availability with neutral term
   {
     id: "replace_claude_code_availability",
@@ -124,7 +158,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "This AI assistant is available",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace Fast mode for Claude with neutral term
   {
     id: "replace_fast_mode_claude",
@@ -132,7 +167,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "Fast mode for AI",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace claude.ai URLs with neutral placeholder
   {
     id: "replace_claude_ai_urls",
@@ -140,7 +176,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "ai-assistant.dev",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace .claude file paths with .agents
   {
     id: "replace_claude_paths",
@@ -148,7 +185,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: ".agents/",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace CLAUDE.md with agents.md
   {
     id: "replace_claude_md_refs",
@@ -156,7 +194,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "agents.md",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace generic "Claude" with "AI"
   {
     id: "replace_claude_general",
@@ -164,7 +203,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "AI",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace "Anthropic" with "AI provider"
   {
     id: "replace_anthropic_general",
@@ -172,7 +212,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "AI provider",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
   // Replace camelCase "claude" identifiers (claudeMd, claudeHome, etc.)
   {
     id: "replace_claude_camelcase",
@@ -180,7 +221,8 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     replacement: "agent$1",
     is_active: true,
     is_regex: true,
-  },
+     scope: "identity",
+ },
 
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -218,15 +260,22 @@ import { getFilterRulesCached } from "./filter-cache";
  * Apply pudidil filters to a string. Reads rules from in-memory cache (DB-backed).
  * Falls back to PUDIDIL_FILTERS const if cache is empty (pre-boot).
  */
-export function applyPudidilFilters(content: string): string {
+export function applyPudidilFilters(content: string, scope: FilterScope = undefined): string {
   let filtered = content;
   const cached = getFilterRulesCached();
   const rules = cached.length > 0
-    ? cached.map((r) => ({ pattern: r.pattern, replacement: r.replacement, is_active: r.isActive, is_regex: r.isRegex }))
+    ? cached.map((r) => ({ id: r.ruleId, pattern: r.pattern, replacement: r.replacement, is_active: r.isActive, is_regex: r.isRegex, scope: (r as any).scope }))
     : PUDIDIL_FILTERS;
 
   for (const rule of rules) {
     if (!rule.is_active) continue;
+    // Resolve the rule's effective scope: explicit scope wins, else derive
+    // from the rule id (DB-backed rules have no scope column), else structural.
+    const ruleScope = rule.scope ?? (rule.id && IDENTITY_RULE_IDS.has(rule.id) ? "identity" : "structural");
+    // Scope gating: if a scope was requested, skip rules whose effective scope
+    // does not match. Rules with no scope default to "structural" (run always).
+    if (scope === "structural" && ruleScope === "identity") continue;
+    if (scope === "identity" && ruleScope !== "identity") continue;
 
     if (rule.is_regex) {
       try {
