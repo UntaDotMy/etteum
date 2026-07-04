@@ -52,6 +52,46 @@ try {
     "remove_claude_code_mention",
   ]));
 
+
+  // Disable the word-rewrite tier (the rules that rewrote common technical
+  // words like {terminate, access, modify, tool, device, threat, ...} to
+  // moderation-neutral synonyms). That tier mangled tool-call arguments,
+  // tool results, commands, and file paths, which broke Codex tool
+  // execution ("dumb" tool calls). Rules stay in the DB (is_active=false)
+  // so they can be re-enabled per-provider from the dashboard; nothing is
+  // deleted. The rule_ids below are the true upstream ids.
+  await db.update(filterRules).set({ isActive: false }).where(
+    inArray(filterRules.ruleId, [
+    "neutralize_kill",
+    "neutralize_kill_upper",
+    "neutralize_kill_allcaps",
+    "neutralize_exploit",
+    "neutralize_exploit_upper",
+    "neutralize_attack",
+    "neutralize_attack_upper",
+    "neutralize_attacker",
+    "neutralize_attacker_upper",
+    "neutralize_hack",
+    "neutralize_hack_upper",
+    "neutralize_weapon",
+    "neutralize_weapon_upper",
+    "neutralize_bomb",
+    "neutralize_bomb_upper",
+    "neutralize_terror",
+    "neutralize_terror_upper",
+    "neutralize_suicide",
+    "neutralize_suicide_upper",
+    "neutralize_violence",
+    "neutralize_violence_upper",
+    "neutralize_political",
+    "neutralize_political_upper",
+    "neutralize_kill_regex",
+    "neutralize_exploit_regex",
+    "neutralize_attack_regex",
+    "neutralize_hack_regex",
+    ])
+  );
+
   await loadFilterCache();
 } catch (e) {
   console.error("[DB] Filter rules seed/load skipped:", e instanceof Error ? e.message : e);

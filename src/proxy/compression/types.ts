@@ -102,7 +102,7 @@ export const DEFAULT_DCP_WHITELIST = ["Read", "Glob", "Grep", "LS", "WebFetch"];
 
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   rtk: {
-    enabled: true,
+    enabled: false,
     maxToolChars: 4000,
     keepLastNTurnsFull: 2,
     smartTruncate: true,
@@ -116,14 +116,14 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     level: "lite",
   },
   cacheMarkers: {
-    enabled: true,
+    enabled: false,
     providerOverrides: { codex: false },
   },
   imageDedupe: {
-    enabled: true,
+    enabled: false,
   },
   tsc: {
-    enabled: true,
+    enabled: false,
     stripSchemaWhitespace: true,
     trimDescriptions: true,
     dropSchemaMeta: true,

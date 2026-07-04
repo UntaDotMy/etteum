@@ -542,7 +542,8 @@ describe("compressRequest — orchestrator", () => {
     const cfg = {
       ...DEFAULT_COMPRESSION_CONFIG,
       dcp: { enabled: true, whitelist: ["Read"] },
-      rtk: { ...DEFAULT_COMPRESSION_CONFIG.rtk, maxToolChars: 1000, keepLastNTurnsFull: 1 },
+      rtk: { ...DEFAULT_COMPRESSION_CONFIG.rtk, enabled: true, maxToolChars: 1000, keepLastNTurnsFull: 1 },
+      cacheMarkers: { enabled: true, providerOverrides: {} },
     };
     const { request, stats } = compressRequest(req, cfg);
     expect(stats.saved).toBeGreaterThan(1000);

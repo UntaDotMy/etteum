@@ -1,7 +1,7 @@
 import type { ChatCompletionRequest, ProviderResult } from "./providers/base";
 import { providers, getAllModels, type ProviderName } from "./providers/registry";
 import { isNonAccountRequestError, isTransientError } from "./errors";
-import { applyPudidilFilters, type FilterScope } from "./filters";
+import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
 import type { Account } from "../db/schema";
 import {
@@ -33,18 +33,16 @@ function requestHasImages(request: ChatCompletionRequest): boolean {
  * Strips Claude Code identity, billing headers, and other patterns
  * that trigger content moderation on upstream providers.
  */
-const IDENTITY_FILTER_PROVIDERS = new Set(["codebuddy", "codebuddy-china", "alibaba"]);
-
 function sanitizeRequest(request: ChatCompletionRequest, providerName?: string): ChatCompletionRequest {
+  void providerName;
   const sanitized = { ...request };
-  const scope: FilterScope = providerName && IDENTITY_FILTER_PROVIDERS.has(providerName) ? undefined : "structural";
 
   sanitized.messages = request.messages.map((msg) => {
     // Normalize "developer" role → "system" (OpenAI's newer alias that
     // upstream providers like CodeWhisperer/CodeBuddy reject with HTTP 400).
     const role = (msg.role as string) === "developer" ? "system" : msg.role;
     if (typeof msg.content === "string") {
-      return { ...msg, role, content: applyPudidilFilters(msg.content, scope) };
+      return { ...msg, role, content: applyPudidilFilters(msg.content) };
     }
     if (Array.isArray(msg.content)) {
       return {
@@ -52,18 +50,18 @@ function sanitizeRequest(request: ChatCompletionRequest, providerName?: string):
         role,
         content: (msg.content as any[]).map((block) => {
           if (block?.type === "text" && typeof block.text === "string") {
-            return { ...block, text: applyPudidilFilters(block.text, scope) };
+            return { ...block, text: applyPudidilFilters(block.text) };
           }
           if (block?.type === "tool_result") {
             if (typeof block.content === "string") {
-              return { ...block, content: applyPudidilFilters(block.content, scope) };
+              return { ...block, content: applyPudidilFilters(block.content) };
             }
             if (Array.isArray(block.content)) {
               return {
                 ...block,
                 content: block.content.map((inner: any) =>
                   inner?.type === "text" && typeof inner.text === "string"
-                    ? { ...inner, text: applyPudidilFilters(inner.text, scope) }
+                    ? { ...inner, text: applyPudidilFilters(inner.text) }
                     : inner
                 ),
               };
@@ -83,7 +81,7 @@ function sanitizeRequest(request: ChatCompletionRequest, providerName?: string):
           ...tool,
           function: {
             ...tool.function,
-            description: applyPudidilFilters(tool.function.description, scope),
+            description: applyPudidilFilters(tool.function.description),
           },
         };
       }
