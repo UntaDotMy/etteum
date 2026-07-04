@@ -334,4 +334,44 @@ describe("chatStreamToResponsesStream", () => {
     expect(events[events.length - 1].event).toBe("response.completed");
     expect(events[events.length - 1].data.output[0].content[0].text).toBe("x");
   });
+
+  test("source errors mid-stream → emits response.failed as terminal event and closes cleanly", async () => {
+    // A stream that emits one delta then errors on the next read.
+    const errorStream = new ReadableStream<Uint8Array>({
+      start(controller) {
+        const encoder = new TextEncoder();
+        controller.enqueue(encoder.encode(
+          "data: " + JSON.stringify({ id: "c1", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { content: "par" }, finish_reason: null }] }) + "\n\n"
+        ));
+        // Error on the next read.
+        setTimeout(() => controller.error(new Error("upstream blew up")), 0);
+      },
+    });
+    const meta = newResponsesResponseMeta();
+    const stream = chatStreamToResponsesStream(errorStream, "gpt-5", meta.id, meta.createdAt);
+    const events = await decodeResponsesSse(stream);
+    const names = events.map((e) => e.event);
+
+    // The delta we did get is surfaced.
+    expect(names).toContain("response.output_text.delta");
+    // Terminal event is response.failed (NOT response.completed), and it is last.
+    expect(names[names.length - 1]).toBe("response.failed");
+    expect(names).not.toContain("response.completed");
+    const failed = events[events.length - 1].data;
+    expect(failed.status).toBe("failed");
+    expect(failed.error.type).toBe("api_error");
+    expect(failed.error.message).toContain("upstream blew up");
+  });
+
+  test("terminal event is always last — completed never followed by another event", async () => {
+    const chunks = [
+      { id: "c1", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { content: "done" }, finish_reason: null }] },
+      { id: "c2", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: {}, finish_reason: "stop" }], usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 } },
+    ];
+    const meta = newResponsesResponseMeta();
+    const stream = chatStreamToResponsesStream(chatChunksToStream(chunks), "gpt-5", meta.id, meta.createdAt);
+    const events = await decodeResponsesSse(stream);
+    const completedIdx = events.findIndex((e) => e.event === "response.completed");
+    expect(completedIdx).toBe(events.length - 1);
+  });
 });
