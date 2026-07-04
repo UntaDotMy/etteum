@@ -172,6 +172,9 @@ temp_*.json
 # HuggingFace model cache
 scripts/auth/models/
 
+# Reference repos (cloned third-party code for study, not etteum source)
+refer/
+
 # =============================================================================
 # AI Tools & Personal Config
 # =============================================================================
