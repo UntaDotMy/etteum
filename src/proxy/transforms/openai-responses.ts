@@ -399,13 +399,16 @@ export function chatResponseToResponses(
       });
     }
 
-    // Function calls → function_call output items.
+    // Function calls → function_call output items. The item id MUST be
+    // "fc_" + call_id (canonical OpenAI shape) so the SDK can correlate the
+    // call with the function_call_output the client sends back next turn.
     if (Array.isArray(msg.tool_calls)) {
       for (const tc of msg.tool_calls) {
+        const callId = tc.id ?? `call_${makeResponseId().slice(5)}`;
         output.push({
           type: "function_call",
-          id: `fc_${makeResponseId().slice(5)}`,
-          call_id: tc.id ?? `call_${makeResponseId().slice(5)}`,
+          id: `fc_${callId}`,
+          call_id: callId,
           name: tc.function?.name ?? "",
           arguments: tc.function?.arguments ?? "",
           status: "completed",
@@ -620,13 +623,17 @@ export function chatStreamToResponsesStream(
                   if (!entry) {
                     entry = { index: idx, arguments: "" };
                     toolCalls.push(entry);
-                    const itemId = "fc_" + responseId.slice(5) + "_" + idx;
+                    // call_id: prefer the upstream tool_call id; synthesize a
+                    // stable one if missing. item.id = "fc_" + call_id (canonical).
+                    const callId = tc.id ?? `call_${responseId.slice(5)}_${idx}`;
+                    const itemId = `fc_${callId}`;
+                    entry.id = callId;
                     toolCallItemIds[idx] = itemId;
                     emit("response.output_item.added", {
                       output_index: outputIndex,
                       item: {
                         id: itemId, type: "function_call", status: "in_progress",
-                        call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + idx,
+                        call_id: callId,
                         name: tc.function?.name ?? "", arguments: "",
                       },
                     });
@@ -695,7 +702,8 @@ export function chatStreamToResponsesStream(
         // Close tool-call items.
         for (const tc of toolCalls) {
           const outputIndex = (reasoningItemEmitted ? 1 : 0) + (messageItemEmitted ? 1 : 0) + tc.index;
-          const itemId = toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index;
+          const callId = tc.id ?? `call_${responseId.slice(5)}_${tc.index}`;
+          const itemId = `fc_${callId}`;
           emit("response.function_call_arguments.done", {
             output_index: outputIndex, item_id: itemId, arguments: tc.arguments,
           });
@@ -703,7 +711,7 @@ export function chatStreamToResponsesStream(
             output_index: outputIndex,
             item: {
               id: itemId, type: "function_call", status: "completed",
-              call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index,
+              call_id: callId,
               name: tc.name ?? "", arguments: tc.arguments,
             },
           });
@@ -716,7 +724,10 @@ export function chatStreamToResponsesStream(
         const output: ResponsesOutputItem[] = [];
         if (reasoningItemEmitted) output.push({ type: "reasoning", id: reasoningItemId, status: "completed", summary: [{ type: "summary_text", text: reasoningAccum }], content: [] });
         if (messageItemEmitted) output.push({ type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] });
-        for (const tc of toolCalls) output.push({ type: "function_call", id: toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
+        for (const tc of toolCalls) {
+          const callId = tc.id ?? `call_${responseId.slice(5)}_${tc.index}`;
+          output.push({ type: "function_call", id: `fc_${callId}`, call_id: callId, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
+        }
         const usage: ResponsesUsage = finalUsage ?? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
         emit("response.completed", {
           response: { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "completed", output, usage },
