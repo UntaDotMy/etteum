@@ -195,7 +195,7 @@ export default function BotLogs() {
     return [...map.values()];
   }, [failed]);
   const processes = useMemo(() => {
-    return logsToProcesses(logs).filter((process) => {
+    const logProcesses = logsToProcesses(logs).filter((process) => {
       // Exclude pending items that haven't started processing yet
       if (process.events.length === 1) {
         const type = process.events[0].type;
@@ -203,7 +203,73 @@ export default function BotLogs() {
       }
       return true;
     });
-  }, [logs]);
+
+    // Add active accounts from queue that don't have log events yet
+    const activeAccounts = queue?.activeAccounts || [];
+    const existingIds = new Set(logProcesses.map(p => p.key.split('-')[0]));
+    
+    for (const account of activeAccounts) {
+      if (!existingIds.has(String(account.id))) {
+        logProcesses.push({
+          key: `${account.id}-${account.provider || 'unknown'}`,
+          operation: 'login',
+          latest: {
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            type: 'queue_processing',
+            accountId: account.id,
+            email: account.email,
+            provider: account.provider,
+            message: 'Processing...',
+          },
+          events: [{
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            type: 'queue_processing',
+            accountId: account.id,
+            email: account.email,
+            provider: account.provider,
+            message: 'Processing...',
+          }],
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    // Add queued accounts
+    const queuedAccounts = queue?.queuedAccounts || [];
+    for (const account of queuedAccounts) {
+      if (!existingIds.has(String(account.id))) {
+        logProcesses.push({
+          key: `${account.id}-${account.provider || 'unknown'}`,
+          operation: 'login',
+          latest: {
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            type: 'queue_added',
+            accountId: account.id,
+            email: account.email,
+            provider: account.provider,
+            message: 'Queued',
+          },
+          events: [{
+            id: Date.now(),
+            timestamp: new Date().toISOString(),
+            type: 'queue_added',
+            accountId: account.id,
+            email: account.email,
+            provider: account.provider,
+            message: 'Queued',
+          }],
+          startedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        });
+      }
+    }
+
+    return logProcesses;
+  }, [logs, queue]);
   const running = Number(queue?.active || 0);
   const queued = Number(queue?.queued || 0);
   const warmupRunning = Number(warmupQueue?.active || 0);

@@ -246,8 +246,27 @@ authRouter.post("/import", async (c) => {
 /**
  * GET /api/auth/queue - Get queue status
  */
-authRouter.get("/queue", (c) => {
-  return c.json(loginQueue.getStatus());
+authRouter.get("/queue", async (c) => {
+  const status = loginQueue.getStatus();
+  
+  // Fetch account details for active and queued accounts
+  const activeAccounts = status.activeAccountIds?.length 
+    ? await db.select({ id: accounts.id, email: accounts.email, provider: accounts.provider })
+        .from(accounts)
+        .where(inArray(accounts.id, status.activeAccountIds))
+    : [];
+  
+  const queuedAccounts = status.queuedAccountIds?.length
+    ? await db.select({ id: accounts.id, email: accounts.email, provider: accounts.provider })
+        .from(accounts)
+        .where(inArray(accounts.id, status.queuedAccountIds))
+    : [];
+  
+  return c.json({
+    ...status,
+    activeAccounts,
+    queuedAccounts,
+  });
 });
 
 /**

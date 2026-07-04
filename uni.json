@@ -1,0 +1,7 @@
+{
+  "message": "Not Found",
+  "documentation_url": "https://docs.github.com/rest",
+  "status": "404"
+}gh: Not Found (HTTP 404)
+"exit:1"
+-rw-r--r-- 1 HP 197121 140 Jul  3 09:54 uni.json
