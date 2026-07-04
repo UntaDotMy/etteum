@@ -17,7 +17,7 @@ import {
 } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
-import { useWsEvent } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 
 type LbMethod = "round_robin" | "sequential" | "least_inflight";
 type ApiFormat = "openai" | "anthropic" | "auto";
@@ -51,8 +51,6 @@ function lbLabel(method?: string) {
 export default function ByokAccountList() {
   const { prefix } = useParams<{ prefix: string }>();
   const navigate = useNavigate();
-  const [provider, setProvider] = useState<ByokProvider | null>(null);
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [testingKey, setTestingKey] = useState<number | null>(null);
   const [revealingKey, setRevealingKey] = useState<string | null>(null);
@@ -67,28 +65,41 @@ export default function ByokAccountList() {
     keys: [emptyKey()] as KeyDraft[],
   });
 
-  function showSuccess(text: string) { setMessage(text); setError(null); }
-  function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
+  // SWR cache for BYOK providers
+  const { data: byokData, mutate } = useApiCache<{ providers: ByokProvider[] }>(
+    "byok-providers",
+    () => fetchByokProviders(),
+    {
+      staleTime: 5000,
+      wsEvents: ["byok_created", "byok_updated", "byok_deleted", "account_status", "account_deleted"],
+    }
+  );
 
-  async function load() {
-    if (!prefix) return;
-    setLoading(true);
-    try {
-      const res = await fetchByokProviders();
-      const found = (res.providers || []).find((p) => p.label === prefix);
-      if (!found) {
-        setProvider(null);
-        setError(`BYOK provider "${prefix}" not found`);
-        return;
-      }
-      setProvider(found);
+  // Derive provider from cached data
+  const provider = useMemo(() => {
+    if (!byokData?.providers || !prefix) return null;
+    return byokData.providers.find((p) => p.label === prefix) || null;
+  }, [byokData, prefix]);
+
+  // Error if provider not found
+  useEffect(() => {
+    if (byokData && !provider && prefix) {
+      setError(`BYOK provider "${prefix}" not found`);
+    } else {
+      setError(null);
+    }
+  }, [byokData, provider, prefix]);
+
+  // Sync provider data to form when provider changes
+  useEffect(() => {
+    if (provider) {
       setForm({
-        base_url: found.base_url || "",
-        format: found.format || "auto",
-        load_balancing_method: found.load_balancing_method || "round_robin",
-        models: (found.models || []).join(", "),
-        keys: (found.keys && found.keys.length > 0)
-          ? found.keys.map((key) => ({
+        base_url: provider.base_url || "",
+        format: provider.format || "auto",
+        load_balancing_method: provider.load_balancing_method || "round_robin",
+        models: (provider.models || []).join(", "),
+        keys: (provider.keys && provider.keys.length > 0)
+          ? provider.keys.map((key) => ({
               id: key.id,
               label: key.label,
               key: MASK,
@@ -98,15 +109,8 @@ export default function ByokAccountList() {
             }))
           : [emptyKey()],
       });
-    } catch (err) {
-      showError(err);
-    } finally {
-      setLoading(false);
     }
-  }
-
-  useEffect(() => { load(); }, [prefix]);
-  useWsEvent(["byok_created", "byok_updated", "byok_deleted", "account_status", "account_deleted"], load);
+  }, [provider]);
 
   const models = useMemo(() => form.models.split(",").map((m) => m.trim()).filter(Boolean), [form.models]);
   const activeKeyCount = form.keys.filter((k) => k.enabled && k.status !== "error").length;
@@ -159,6 +163,9 @@ export default function ByokAccountList() {
     setForm((current) => ({ ...current, keys: [...current.keys, emptyKey(current.keys.length)] }));
   }
 
+  function showSuccess(text: string) { setMessage(text); setError(null); }
+  function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
+
   async function removeKey(index: number) {
     const key = form.keys[index];
     if (!key) return;
@@ -167,7 +174,7 @@ export default function ByokAccountList() {
       try {
         await deleteAccount(key.id);
         showSuccess(`Deleted key ${key.label}`);
-        await load();
+        await mutate();
       } catch (err) { showError(err); }
       return;
     }
@@ -204,7 +211,7 @@ export default function ByokAccountList() {
         api_keys: apiKeys,
       });
       showSuccess("BYOK provider saved");
-      await load();
+      await mutate();
     } catch (err) {
       showError(err);
     } finally {
@@ -219,7 +226,7 @@ export default function ByokAccountList() {
     try {
       await toggleAccountEnabled(key.id, next);
       showSuccess(next ? `Enabled ${key.label}` : `Disabled ${key.label}`);
-      await load();
+      await mutate();
     } catch (err) {
       updateKey(index, { enabled: key.enabled });
       showError(err);
@@ -233,7 +240,7 @@ export default function ByokAccountList() {
       const res = await testByokProvider(key.id);
       if (res.success) showSuccess(`✓ ${key.label} OK${res.latency_ms ? ` · ${res.latency_ms}ms` : ""}`);
       else showError(new Error(res.error || "Connection test failed"));
-      await load();
+      await mutate();
     } catch (err) {
       showError(err);
     } finally {
@@ -247,7 +254,7 @@ export default function ByokAccountList() {
     }
   }
 
-  if (loading && !provider) {
+  if (!byokData && !provider) {
     return <div className="flex h-64 items-center justify-center text-sm text-[var(--muted-foreground)]">Loading BYOK provider...</div>;
   }
 
@@ -266,7 +273,7 @@ export default function ByokAccountList() {
           </div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => mutate()}>
             <RefreshCw className="w-4 h-4 mr-2" /> Refresh
           </Button>
           <Button variant="outline" size="sm" onClick={testAll} disabled={testingKey !== null || form.keys.every((k) => !k.id)}>

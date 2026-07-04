@@ -7,7 +7,7 @@ import { Input } from "@/components/ui/input";
 import { ArrowLeft, Search, Trash2, RefreshCw, RotateCcw, ExternalLink, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle2, XCircle, Key, Copy } from "lucide-react";
 import { formatDateTimeID } from "@/lib/utils";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
-import { useWsEvent } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 import {
   bulkDeleteAccounts,
   deleteAccount,
@@ -353,9 +353,7 @@ type SortDir = "asc" | "desc";
 export default function AccountList() {
   const { provider } = useParams<{ provider: string }>();
   const navigate = useNavigate();
-  const [accounts, setAccounts] = useState<Account[]>([]);
   const [search, setSearch] = useState("");
-  const [loading, setLoading] = useState(true);
   const [page, setPage] = useState(1);
   const perPage = 25;
   const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 4000);
@@ -365,6 +363,17 @@ export default function AccountList() {
   const [sortDir, setSortDir] = useState<SortDir>("asc");
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
+
+  // SWR cache for accounts - instant load, background revalidation
+  const { data: accountsRes, mutate } = useApiCache<{ data: Account[] }>(
+    "accounts",
+    () => fetchAccounts() as Promise<{ data: Account[] }>,
+    {
+      staleTime: 5000,
+      wsEvents: ["account_status", "account_updated", "account_created", "account_deleted", "accounts_updated"],
+    }
+  );
+  const accounts = useMemo(() => (accountsRes?.data || []).filter((a) => a.provider === provider), [accountsRes?.data, provider]);
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -382,37 +391,23 @@ export default function AccountList() {
       : <ArrowDown className="w-3 h-3 ml-1" />;
   }
 
-  async function load() {
-    setLoading(true);
-    try {
-      const res = await fetchAccounts() as { data: Account[] };
-      setAccounts((res.data || []).filter((a) => a.provider === provider));
-    } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => { load(); }, [provider]);
-
   function showSuccess(text: string) { setTimedMessage(text); setError(null); }
   function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
 
   async function handleWarmup(id: number) {
-    try { await warmupAccount(id); showSuccess(`WarmUp queued #${id}`); await load(); } catch (err) { showError(err); }
+    try { await warmupAccount(id); showSuccess(`WarmUp queued #${id}`); await mutate(); } catch (err) { showError(err); }
   }
 
   async function handleWarmupAll() {
     try {
       const res = await warmupAllAccounts({ providers: [provider!], statuses: ["active", "exhausted", "error"] }) as any;
       showSuccess(res.message || "WarmUp All queued.");
-      await load();
+      await mutate();
     } catch (err) { showError(err); }
   }
 
   async function handleLogin(id: number) {
-    try { await loginAccount(id); showSuccess(`Login queued #${id}`); await load(); } catch (err) { showError(err); }
+    try { await loginAccount(id); showSuccess(`Login queued #${id}`); await mutate(); } catch (err) { showError(err); }
   }
 
   const [revealedKey, setRevealedKey] = useState<{ id: number; key: string } | null>(null);
@@ -449,7 +444,7 @@ export default function AccountList() {
     if (ids.length === 0) return;
     await loginAccounts(ids);
     showSuccess(`Queued ${ids.length} error accounts for retry.`);
-    await load();
+    await mutate();
   }
 
   async function handleDelete(id: number) {
@@ -463,7 +458,7 @@ export default function AccountList() {
         next.delete(id);
         return next;
       });
-      await load();
+      await mutate();
     } catch (err) { showError(err); }
   }
 
@@ -485,7 +480,7 @@ export default function AccountList() {
       const res = await bulkDeleteAccounts(ids);
       showSuccess(`Deleted ${res.deleted} account(s)${res.notFound.length ? ` · ${res.notFound.length} not found` : ""}`);
       setSelectedIds(new Set());
-      await load();
+      await mutate();
     } catch (err) {
       showError(err);
     } finally {
@@ -495,28 +490,22 @@ export default function AccountList() {
 
   async function handleToggle(id: number, currentEnabled: boolean) {
     const next = !currentEnabled;
-    setAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, enabled: next } : a)));
     try {
       await toggleAccountEnabled(id, next);
       showSuccess(next ? `Aktifkan #${id}` : `Non-aktifkan #${id}`);
+      await mutate();
     } catch (err) {
-      setAccounts((prev) => prev.map((a) => (a.id === id ? { ...a, enabled: currentEnabled } : a)));
       showError(err);
     }
   }
 
   async function handleToggleAll(enabled: boolean) {
     if (!provider) return;
-    const prev = accounts.map((a) => ({ id: a.id, enabled: a.enabled !== false }));
-    setAccounts((prev) => prev.map((a) => ({ ...a, enabled })));
     try {
       const res = await toggleAllAccounts(provider, enabled);
       showSuccess(enabled ? `Aktifkan ${res.count} akun ${labelProvider(provider)}` : `Non-aktifkan ${res.count} akun ${labelProvider(provider)}`);
+      await mutate();
     } catch (err) {
-      setAccounts((list) => list.map((a) => {
-        const orig = prev.find((p) => p.id === a.id);
-        return orig ? { ...a, enabled: orig.enabled } : a;
-      }));
       showError(err);
     }
   }
@@ -611,7 +600,7 @@ export default function AccountList() {
           </div>
         </div>
         <div className="flex gap-2 flex-wrap">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => mutate()}>
             <RefreshCw className="w-4 h-4 mr-2" /> Refresh
           </Button>
           <Button variant="outline" size="sm" onClick={handleWarmupAll}>
@@ -637,13 +626,6 @@ export default function AccountList() {
           {message || error}
         </div>
       )}
-
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
-        </div>
-      ) : (
-      <>
 
       {/* Search & Filter */}
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center">
@@ -825,7 +807,7 @@ export default function AccountList() {
                   </Fragment>
                 );
                 })}
-                {!loading && filtered.length === 0 && (
+                {filtered.length === 0 && (
                   <tr><td colSpan={7} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No accounts found</td></tr>
                 )}
               </tbody>
@@ -845,8 +827,6 @@ export default function AccountList() {
           )}
         </CardContent>
       </Card>
-      </>
-      )}
     </div>
   );
 }

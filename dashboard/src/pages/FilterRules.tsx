@@ -1,10 +1,10 @@
-import { useState, useEffect, useCallback } from "react";
+import { useState, useCallback } from "react";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Filter, Plus, Trash2, Power, PowerOff, Pencil, X } from "lucide-react";
 import { fetchApi } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
-import { useWsEvent } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 
 interface FilterRule {
   id: number;
@@ -35,25 +35,19 @@ interface RuleFormState {
 const emptyForm: RuleFormState = { id: null, pattern: "", replacement: "", isRegex: true, isActive: true };
 
 export default function FilterRules() {
-  const [data, setData] = useState<FilterListResponse>({ count: 0, activeCount: 0, rules: [] });
-  const [loading, setLoading] = useState(true);
   const [form, setForm] = useState<RuleFormState | null>(null);
   const { message, setMessage } = useTimedMessage<string>(null, 3000);
 
-  const load = useCallback(async () => {
-    try {
-      const result = await fetchApi<FilterListResponse>("/api/filters");
-      setData(result);
-    } catch {
-      setData({ count: 0, activeCount: 0, rules: [] });
-    } finally {
-      setLoading(false);
+  const { data, mutate } = useApiCache<FilterListResponse>(
+    "filter-rules",
+    async () => fetchApi<FilterListResponse>("/api/filters"),
+    {
+      staleTime: 5000,
+      wsEvents: ["filter_rules_updated"],
     }
-  }, []);
+  );
 
-  useEffect(() => { load(); }, [load]);
-
-  useWsEvent(["filter_rules_updated"], load);
+  const filterData = data || { count: 0, activeCount: 0, rules: [] };
 
   const handleToggle = async (rule: FilterRule) => {
     try {
@@ -61,7 +55,7 @@ export default function FilterRules() {
         method: "PATCH",
         body: JSON.stringify({ isActive: !rule.isActive }),
       });
-      load();
+      await mutate();
     } catch (e: any) {
       setMessage(e.message || "Failed to toggle rule");
     }
@@ -72,7 +66,7 @@ export default function FilterRules() {
     try {
       await fetchApi(`/api/filters/${rule.id}`, { method: "DELETE" });
       setMessage("Rule deleted");
-      load();
+      await mutate();
     } catch (e: any) {
       setMessage(e.message || "Failed to delete rule");
     }
@@ -109,7 +103,7 @@ export default function FilterRules() {
         setMessage("Rule updated");
       }
       setForm(null);
-      load();
+      await mutate();
     } catch (e: any) {
       setMessage(e.message || "Save failed");
     }
@@ -128,7 +122,7 @@ export default function FilterRules() {
         </div>
         <div className="flex flex-wrap items-center gap-2">
           <span className="text-sm text-[var(--muted-foreground)]">
-            {data.activeCount}/{data.count} active
+            {filterData.activeCount}/{filterData.count} active
           </span>
           <Button size="sm" onClick={() => setForm({ ...emptyForm })}>
             <Plus className="w-3 h-3 mr-1" />
@@ -203,17 +197,15 @@ export default function FilterRules() {
         <CardHeader>
           <CardTitle className="text-base flex items-center gap-2">
             <Filter className="w-4 h-4" />
-            Rules ({data.count})
+            Rules ({filterData.count})
           </CardTitle>
         </CardHeader>
         <CardContent>
-          {loading ? (
-            <p className="text-sm text-[var(--muted-foreground)]">Loading...</p>
-          ) : data.rules.length === 0 ? (
+          {filterData.rules.length === 0 ? (
             <p className="text-sm text-[var(--muted-foreground)]">No rules. Click Add Rule to create one.</p>
           ) : (
             <div className="space-y-2">
-              {data.rules.map((rule) => (
+              {filterData.rules.map((rule) => (
                 <div
                   key={rule.id}
                   className="flex items-center justify-between px-4 py-3 rounded-md bg-[var(--secondary)]"

@@ -31,7 +31,7 @@ import {
   type IntegrationModelDTO,
 } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
-import { useWsEvent } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 import { ClientCard } from "@/components/integration/ClientCard";
 
 // Claude Code only ever calls these three model classes.
@@ -189,7 +189,6 @@ export default function Integration() {
     { id: string; owned_by: string }[]
   >([]);
   const [apiKey, setApiKey] = useState("");
-  const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [applying, setApplying] = useState(false);
   const [clients, setClients] = useState<ClientMetaDTO[]>([]);
@@ -211,46 +210,59 @@ export default function Integration() {
     kilo: "kp-sonnet-4.6",
   });
 
-  const load = useCallback(async () => {
-    try {
-      const [data, keyRes] = await Promise.all([
-        fetchIntegration(),
-        fetchApiKey().catch(() => null),
-      ]);
-      setEnabled(data.enabled);
-      setModels(data.models || []);
+  // SWR cache for integration data
+  const { data: integrationData, mutate: mutateIntegration } = useApiCache(
+    "integration",
+    () => fetchIntegration(),
+    {
+      staleTime: 10000,
+      wsEvents: ["model_mappings_updated"],
+    }
+  );
+
+  // SWR cache for API key
+  const { data: apiKeyData } = useApiCache(
+    "api-key",
+    () => fetchApiKey().catch(() => null),
+    { staleTime: 30000 }
+  );
+
+  // SWR cache for clients
+  const { data: clientsData, mutate: mutateClients } = useApiCache(
+    "integration-clients",
+    () => fetchIntegrationClients(),
+    { staleTime: 10000 }
+  );
+
+  // Sync integration data to local state when it loads/changes
+  useEffect(() => {
+    if (integrationData) {
+      setEnabled(integrationData.enabled);
+      setModels(integrationData.models || []);
 
       const next: Record<string, string> = {};
       for (const slot of CLAUDE_CODE_SLOTS) {
-        const found = (data.mappings || []).find(
-          (m) => m.sourcePattern.toLowerCase() === slot.source
+        const found = (integrationData.mappings || []).find(
+          (m: any) => m.sourcePattern.toLowerCase() === slot.source
         );
         next[slot.source] = found?.targetModel || "";
       }
       setTargets(next);
-      if (keyRes?.key) setApiKey(keyRes.key);
-    } catch (e: any) {
-      setMessage(e.message || "Failed to load integration settings");
-    } finally {
-      setLoading(false);
     }
-  }, [setMessage]);
+  }, [integrationData]);
 
-  const loadClients = useCallback(async () => {
-    try {
-      const data = await fetchIntegrationClients();
-      setClients(data.clients || []);
-      setIntegrationModels(data.models || []);
-    } catch (e: any) {
-      console.error("Failed to load clients:", e);
-    }
-  }, []);
-
+  // Sync API key to local state
   useEffect(() => {
-    load();
-    loadClients();
-  }, [load, loadClients]);
-  useWsEvent(["model_mappings_updated"], load);
+    if (apiKeyData?.key) setApiKey(apiKeyData.key);
+  }, [apiKeyData]);
+
+  // Sync clients data to local state
+  useEffect(() => {
+    if (clientsData) {
+      setClients(clientsData.clients || []);
+      setIntegrationModels(clientsData.models || []);
+    }
+  }, [clientsData]);
 
   const handleSave = async () => {
     setSaving(true);
@@ -286,12 +298,12 @@ export default function Integration() {
 
   const handleApplyClient = async (clientId: string, model: string) => {
     await applyClientConfig(clientId, baseUrl, model);
-    await loadClients();
+    await mutateClients();
   };
 
   const handleRestoreClient = async (clientId: string) => {
     await restoreClientConfig(clientId);
-    await loadClients();
+    await mutateClients();
   };
 
   return (
@@ -392,7 +404,7 @@ export default function Integration() {
               </CardTitle>
             </CardHeader>
             <CardContent>
-              {loading ? (
+              {!integrationData ? (
                 <p className="text-sm text-[var(--muted-foreground)]">Loading...</p>
               ) : (
                 <div className="space-y-3">

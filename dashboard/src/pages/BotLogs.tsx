@@ -4,6 +4,7 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { clearAuthLogs, fetchAuthLogs, fetchAuthQueue, fetchWarmupQueue, loginAccount, loginAccounts, stopAllAccounts, stopWarmup } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 import { AlertTriangle, CheckCircle, ChevronDown, Loader2, RefreshCw, RotateCcw, Trash2, Radio, StopCircle } from "lucide-react";
 import { formatTimeID } from "@/lib/utils";
 
@@ -113,43 +114,57 @@ function logsToProcesses(logs: AuthLog[]): ProcessLog[] {
 
 export default function BotLogs() {
   const [logs, setLogs] = useState<AuthLog[]>([]);
-  const [queue, setQueue] = useState<any>(null);
-  const [warmupQueue, setWarmupQueue] = useState<any>(null);
   const [stoppingWarmup, setStoppingWarmup] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  const [loading, setLoading] = useState(true);
   const perPage = 25;
   const queueRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsStatus = useWsStatus();
   const connected = wsStatus === "open";
 
-  async function load() {
-    const [logRes, queueRes] = await Promise.all([
-      fetchAuthLogs(300) as Promise<{ data: AuthLog[] }>,
-      fetchAuthQueue().catch(() => null),
-    ]);
-    // Filter out all warmup logs - Login Logs only shows login operations
-    setLogs((current) => mergeLogs(current, (logRes.data || []).filter((log) => !log.type.startsWith("warmup_"))));
-    setQueue(queueRes);
-    setLoading(false);
-  }
+  // SWR cache for queue status - instant load, background revalidation
+  const { data: queue, mutate: mutateQueue } = useApiCache(
+    "botlogs-queue",
+    () => fetchAuthQueue().catch(() => null),
+    { staleTime: 2000, wsEvents: ["queue_added", "queue_processing", "queue_complete", "queue_cleared"] }
+  );
 
-  const refreshQueues = useCallback(async () => {
-    const queueRes = await fetchAuthQueue().catch(() => null);
-    setQueue(queueRes);
-  }, []);
+  // SWR cache for warmup queue
+  const { data: warmupQueue } = useApiCache(
+    "botlogs-warmup-queue",
+    () => fetchWarmupQueue().catch(() => null),
+    { staleTime: 3000, wsEvents: ["warmup_queue_added", "warmup_complete", "warmup_stopped"] }
+  );
+
+  // SWR cache for initial auth logs
+  const { data: logsRes, mutate: mutateLogs } = useApiCache<{ data: AuthLog[] }>(
+    "botlogs-logs",
+    () => fetchAuthLogs(300) as Promise<{ data: AuthLog[] }>,
+    { staleTime: 5000, wsEvents: liveTypes }
+  );
+
+  // Merge cached logs into local state when cache loads
+  useEffect(() => {
+    if (logsRes?.data) {
+      const filtered = (logsRes.data || []).filter((log) => !log.type.startsWith("warmup_"));
+      setLogs((current) => mergeLogs(current, filtered));
+    }
+  }, [logsRes]);
+
+  // Refresh function for manual reload
+  async function load() {
+    await Promise.all([mutateQueue(), mutateLogs()]);
+  }
 
   const scheduleQueueRefresh = useCallback(() => {
     if (queueRefreshTimerRef.current) return;
     queueRefreshTimerRef.current = setTimeout(() => {
       queueRefreshTimerRef.current = null;
-      refreshQueues();
+      mutateQueue();
     }, 300);
-  }, [refreshQueues]);
+  }, [mutateQueue]);
 
   useEffect(() => {
-    load().catch(() => {});
     return () => {
       if (queueRefreshTimerRef.current) {
         clearTimeout(queueRefreshTimerRef.current);
@@ -162,12 +177,6 @@ export default function BotLogs() {
     // Skip all warmup events - Login Logs only shows login operations
     if (msg.type.startsWith("warmup_")) return;
 
-    if (msg.type === "queue_complete") {
-      setQueue((current: any) => ({ ...(current || {}), ...(msg.data || {}), queued: 0, active: 0, processing: false }));
-    }
-    if (msg.type === "queue_cleared") {
-      setQueue((current: any) => ({ ...(current || {}), queued: 0, active: 0, processing: false }));
-    }
     const data = msg.data || {};
     const log: AuthLog = {
       id: data.logId || data.id || Date.now(),
@@ -345,7 +354,7 @@ export default function BotLogs() {
         </div>
       </div>
 
-      {loading ? (
+      {!queue && !logsRes ? (
         <div className="flex items-center justify-center py-20">
           <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
         </div>
