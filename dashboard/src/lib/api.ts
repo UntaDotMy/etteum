@@ -484,6 +484,19 @@ export async function stopAllAccounts() {
   return fetchApi("/api/auth/stop-all", { method: "POST" });
 }
 
+/** Submit a manual-challenge answer (e.g. CAPTCHA) to a running antigravity manual login. */
+export async function submitChallengeAnswer(accountId: number, answer: string) {
+  return fetchApi(`/api/accounts/${accountId}/challenge-answer`, {
+    method: "POST",
+    body: JSON.stringify({ answer }),
+  });
+}
+
+/** Cancel a running antigravity manual login (visible-frame) session. */
+export async function cancelManualLogin(accountId: number) {
+  return fetchApi(`/api/accounts/${accountId}/cancel-manual`, { method: "POST" });
+}
+
 export async function importAccounts(text: string, providers: string[], options?: { headless?: boolean; concurrency?: number; browserEngine?: string }) {
   return fetchApi("/api/auth/import", {
     method: "POST",

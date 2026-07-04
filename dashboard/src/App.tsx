@@ -2,6 +2,7 @@ import { lazy, Suspense, useState, useEffect } from "react";
 import { Routes, Route } from "react-router-dom";
 import Layout from "./components/layout/Layout";
 import Login from "./pages/Login";
+import { AntigravityChallengeModal } from "./components/auth/AntigravityChallengeModal";
 import { isAuthenticated, validateApiKey, logout } from "./lib/api";
 
 const Dashboard = lazy(() => import("./pages/Dashboard"));
@@ -67,6 +68,7 @@ export default function App() {
 
   return (
     <Suspense fallback={<RouteFallback />}>
+      <AntigravityChallengeModal />
       <Routes>
         <Route element={<Layout onLogout={handleLogout} />}>
           <Route path="/" element={<Dashboard />} />
