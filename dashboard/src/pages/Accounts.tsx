@@ -127,13 +127,13 @@ export default function Accounts() {
   const [settingsMap, setSettingsMap] = useState<Record<string, string>>({});
   const [now, setNow] = useState<number>(Date.now());
 
-  const [addForm, setAddForm] = useState({ email: "", password: "", provider: "kiro" as Provider, browserEngine: "camoufox", headless: false });
+  const [addForm, setAddForm] = useState({ email: "", password: "", provider: "kiro" as Provider, browserEngine: "nodriver", headless: false });
   const [addDialogProvider, setAddDialogProvider] = useState<Provider | null>(null);
   const [instantTokens, setInstantTokens] = useState("");
   const [cookieValue, setCookieValue] = useState("");
   const [bulkText, setBulkText] = useState("");
   const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey">("bulk");
-  const [bulkBrowserEngine, setBulkBrowserEngine] = useState("camoufox");
+  const [bulkBrowserEngine, setBulkBrowserEngine] = useState("nodriver");
   const [bulkHeadless, setBulkHeadless] = useState(true);
   const [bulkConcurrency, setBulkConcurrency] = useState(3);
   const [codexOauthBusy, setCodexOauthBusy] = useState(false);
@@ -404,7 +404,7 @@ export default function Accounts() {
       const payload: any = { email: addForm.email, password: addForm.password, provider: addDialogProvider, headless: addForm.headless, browserEngine: addForm.browserEngine };
       await createAccount(payload);
       showSuccess("Account added and bot login started.");
-      setAddForm({ email: "", password: "", provider: "kiro", browserEngine: "camoufox", headless: false });
+      setAddForm({ email: "", password: "", provider: "kiro", browserEngine: "nodriver", headless: false });
       setAddDialogProvider(null);
       await load();
       navigate("/bot-logs");
@@ -2424,8 +2424,7 @@ sk-ws-H.zzzzzzzz..."
               <div>
                 <label className="text-sm text-[var(--foreground)]">Browser Engine</label>
                 <select value={bulkBrowserEngine} onChange={(e) => setBulkBrowserEngine(e.target.value)} className="mt-1 w-full h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
-                  <option value="camoufox">Camoufox (Anti-detect, default)</option>
-                  <option value="chromium">Chromium (Playwright)</option>
+                  <option value="nodriver">nodriver (default)</option>
                 </select>
               </div>
               <div className="flex gap-4">
@@ -2471,8 +2470,7 @@ sk-ws-H.zzzzzzzz..."
               <div>
                 <label className="text-sm text-[var(--foreground)]">Browser Engine</label>
                 <select value={addForm.browserEngine} onChange={(e) => setAddForm({ ...addForm, browserEngine: e.target.value })} className="mt-1 w-full h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
-                  <option value="camoufox">Camoufox (Anti-detect, default)</option>
-                  <option value="chromium">Chromium (Playwright)</option>
+                  <option value="nodriver">nodriver (default)</option>
                 </select>
               </div>
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">

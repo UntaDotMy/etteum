@@ -367,11 +367,8 @@ class AntigravityProviderAdapter(ProviderAdapter):
         return NormalizedAccount(provider="antigravity", identifier=email, secret=password, raw=raw_line)
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            raise NonRetryableBatcherError(ErrorCode.browser_start_failed, "Antigravity provider requires BATCHER_ENABLE_CAMOUFOX=true")
-        # nodriver (replaces Camoufox). Headed by default — headless gets a
-        # hard 500 from Google on the password challenge. BATCHER_CAMOUFOX_HEADLESS
-        # is honored for ops continuity but should stay false for Google login.
+        # nodriver is the default engine. Headed by default — headless gets a
+        # hard 500 from Google on the password challenge.
         headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
         browser, page = await launch_browser(headless=headless)
         page.set_default_timeout(45000)

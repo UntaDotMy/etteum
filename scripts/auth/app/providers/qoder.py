@@ -146,62 +146,6 @@ class QoderProviderAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         from app.providers.browser_utils import raise_browser_unavailable
         raise_browser_unavailable("qoder")
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            raise RetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                "qoder requires camoufox (set BATCHER_ENABLE_CAMOUFOX=true)",
-            )
-
-        try:
-            from browserforge.fingerprints import Screen
-            from camoufox.async_api import AsyncCamoufox
-        except Exception as exc:
-            raise RetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                f"camoufox import failed: {exc}",
-            ) from exc
-
-        camoufox_kwargs: dict[str, Any] = {
-            "headless": os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true",
-            "os": "windows",
-            "block_webrtc": True,
-            "humanize": False,
-            "screen": Screen(max_width=1920, max_height=1080),
-        }
-
-        from app.proxy_pool import get_next_proxy
-
-        proxy_url = get_next_proxy() or ""
-        if proxy_url:
-            parsed = urlparse(proxy_url)
-            proxy_cfg: dict[str, Any] = {
-                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-            }
-            if parsed.username:
-                proxy_cfg["username"] = parsed.username
-            if parsed.password:
-                proxy_cfg["password"] = parsed.password
-            camoufox_kwargs["proxy"] = proxy_cfg
-            camoufox_kwargs["geoip"] = True
-
-        try:
-            manager = AsyncCamoufox(**camoufox_kwargs)
-            browser = await manager.__aenter__()
-            page = await browser.new_page()
-            page.set_default_timeout(120000)
-            await page.goto(QODER_SIGN_IN_URL, wait_until="domcontentloaded", timeout=30000)
-        except Exception as exc:
-            raise RetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                f"camoufox launch failed: {exc}",
-            ) from exc
-
-        return {
-            "manager": manager,
-            "browser": browser,
-            "page": page,
-            "proxy_url": proxy_url or None,
-        }
 
     async def authenticate(
         self, account: NormalizedAccount, session: Any

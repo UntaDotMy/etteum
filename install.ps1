@@ -16,7 +16,7 @@
 #   $env:ETTEUM_YES = "1"     Skip confirmation (CI / unattended)
 #   $env:ETTEUM_BRANCH        Branch to clone (default: main)
 #   $env:ETTEUM_NO_CLI = "1"  Skip the etteum CLI in ~\.local\bin
-#   $env:ETTEUM_SKIP_BROWSERS = "1"  Skip Playwright/Camoufox download
+#   $env:ETTEUM_SKIP_BROWSERS = "1"  Skip nodriver Chrome download
 
 #Requires -Version 5.1
 
@@ -96,14 +96,14 @@ function Show-Summary {
     $needsBun = -not (Have bun)
 
     $hasRealPython = $false
-    foreach ($cand in @("python3.12","python3.11","python3.10","python","python3")) {
+    foreach ($cand in @("python3.13","python3.12","python3.11","python3.10","python","python3")) {
         if (Have $cand) {
             if (-not (Test-RealPython $cand)) { continue }
             try {
                 $v = & $cand -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
                 if ($v) {
                     $p = $v.Trim().Split('.')
-                    if ([int]$p[0] -eq 3 -and [int]$p[1] -ge 10 -and [int]$p[1] -le 12) { $hasRealPython = $true; break }
+                    if ([int]$p[0] -eq 3 -and [int]$p[1] -ge 10) { $hasRealPython = $true; break }
                 }
             } catch {}
         }
@@ -120,8 +120,7 @@ function Show-Summary {
     $items += "  • Node.js dependencies         ~200 MB"; $totalSize += 200
     $items += "  • Python packages (venv)       ~150 MB"; $totalSize += 150
     if ($env:ETTEUM_SKIP_BROWSERS -ne "1") {
-        $items += "  • Playwright Chromium          ~175 MB"; $totalSize += 175
-        $items += "  • Camoufox browser             ~150 MB"; $totalSize += 150
+        $items += "  • nodriver Chrome              ~200 MB"; $totalSize += 200
     }
     $items += "  • Dashboard build              ~50 MB";  $totalSize += 50
 
@@ -252,8 +251,7 @@ function Ensure-Bun {
 
 function Ensure-Python {
     $script:PythonBin = $null
-    # Skip Python 3.13+ — camoufox depends on lxml which has no 3.13 wheels yet
-    foreach ($cand in @("python3.12","python3.11","python3.10","python","python3")) {
+    foreach ($cand in @("python3.13","python3.12","python3.11","python3.10","python","python3")) {
         if (Have $cand) {
             if (-not (Test-RealPython $cand)) {
                 Warn "$cand looks like the Microsoft Store stub — skipping"
@@ -263,7 +261,7 @@ function Ensure-Python {
                 $ver = & $cand -c "import sys;print('%d.%d'%sys.version_info[:2])" 2>$null
                 if ($ver) {
                     $parts = $ver.Trim().Split('.')
-                    if ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 10 -and [int]$parts[1] -le 12) {
+                    if ([int]$parts[0] -eq 3 -and [int]$parts[1] -ge 10) {
                         $script:PythonBin = $cand
                         Ok "Python $ver found ($cand)"
                         return
@@ -420,11 +418,32 @@ function Install-NodeDeps {
 }
 
 function Setup-PythonVenv {
-    $venv = Join-Path "scripts" "auth" ".venv"
-    $venvPip = Join-Path $venv "Scripts" "pip.exe"
-    $venvPy  = Join-Path $venv "Scripts" "python.exe"
+    $venv = "scripts\auth\.venv"
+    $venvPy  = "$venv\Scripts\python.exe"
+    $venvPip = "$venv\Scripts\pip.exe"
+    $usePipModule = $false  # Fallback to 'python -m pip' if pip.exe missing
 
     Step "Setting up Python venv at $venv"
+
+    # Check if venv exists and is functional
+    $venvFunctional = $false
+    if (Test-Path $venvPy) {
+        try {
+            $venvCheck = & $venvPy -c "import sys; print(sys.executable)" 2>&1
+            if ($LASTEXITCODE -eq 0) {
+                $venvFunctional = $true
+            }
+        } catch {
+            # python.exe doesn't work
+        }
+    }
+
+    if (-not $venvFunctional) {
+        if (Test-Path $venv) {
+            Warn "Python venv is broken — recreating..."
+            Remove-Item -Recurse -Force $venv
+        }
+    }
 
     if (-not (Test-Path $venv)) {
         Info "Creating virtual environment..."
@@ -438,43 +457,82 @@ function Setup-PythonVenv {
         Fail "Python venv created but $venvPy not found! Try deleting $venv and re-running the installer."
     }
     if (-not (Test-Path $venvPip)) {
-        Fail "Python venv created but pip not found at $venvPip. Try deleting $venv and re-running."
+        # pip.exe might not exist, but python -m pip should work
+        try {
+            $pipCheck = & $venvPy -m pip --version 2>&1
+            if ($LASTEXITCODE -ne 0) {
+                Fail "Neither pip.exe nor 'python -m pip' found. Try deleting $venv and re-running."
+            }
+            $usePipModule = $true
+            Ok "Using python -m pip (pip.exe not found)"
+        } catch {
+            Fail "pip not available. Try deleting $venv and re-running."
+        }
     }
 
     Info "Upgrading pip..."
-    & $venvPip install --upgrade pip wheel 2>&1 | Out-Null
+    if ($usePipModule) {
+        Retry-Action -Action { & $venvPy -m pip install --upgrade pip wheel 2>&1 | Out-Null }
+    } else {
+        Retry-Action -Action { & $venvPip install --upgrade pip wheel 2>&1 | Out-Null }
+    }
 
     Info "Installing Python packages (this may take a minute)..."
-    Retry-Action -Action { & $venvPip install -r (Join-Path "scripts" "auth" "requirements.txt") }
+    if ($usePipModule) {
+        Retry-Action -Action { & $venvPy -m pip install -r "scripts\auth\requirements.txt" }
+    } else {
+        Retry-Action -Action { & $venvPip install -r "scripts\auth\requirements.txt" }
+    }
     if ($LASTEXITCODE -ne 0) {
         Fail "pip install failed. Try manually: $venvPip install -r scripts\auth\requirements.txt"
     }
     Ok "Python deps installed"
 
     if ($env:ETTEUM_SKIP_BROWSERS -eq "1") {
-        Warn "ETTEUM_SKIP_BROWSERS=1 — skipping Playwright/Camoufox download."
-        Warn "  Auth bot will fail until you run: $venvPy -m playwright install chromium && $venvPy -m camoufox fetch"
+        Warn "ETTEUM_SKIP_BROWSERS=1 — skipping nodriver Chrome download."
+        Warn "  Auth bot will fail until you run: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
         return
     }
 
-    Step "Installing browsers (Playwright + Camoufox — this can take a few minutes)"
-    Info "Installing Playwright Chromium..."
+    Step "Installing nodriver Chrome (this can take a few minutes)"
+    Info "nodriver will download a compatible Chrome/Chromium on first launch..."
     try {
-        Retry-Action -Action { & $venvPy -m playwright install chromium }
-        Ok "Playwright Chromium installed"
+        Retry-Action -Action { & $venvPy -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>$null }
+        Ok "nodriver Chrome installed"
     } catch {
-        Warn "Playwright Chromium install failed (re-run later)"
-        Info "  Manual: $venvPy -m playwright install chromium"
+        Warn "nodriver Chrome pre-download failed — it will auto-download on first use"
+        Info "  Manual: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
     }
 
-    Info "Fetching Camoufox browser..."
+    # ── Cleanup: remove old camoufox/playwright if present ──
+    Step "Cleaning up old browser engines (camoufox/playwright)..."
     try {
-        Retry-Action -Action { & $venvPy -m camoufox fetch }
-        Ok "Camoufox browser installed"
-    } catch {
-        Warn "Camoufox fetch failed (re-run later)"
-        Info "  Manual: $venvPy -m camoufox fetch"
+        & $venvPy -c "import camoufox" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Info "Removing camoufox package..."
+            & $venvPip uninstall -y camoufox 2>&1 | Out-Null
+        }
+    } catch {}
+    try {
+        & $venvPy -c "import playwright" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Info "Removing playwright package..."
+            & $venvPip uninstall -y playwright 2>&1 | Out-Null
+        }
+    } catch {}
+    # Remove cached playwright browsers
+    $pwCache = Join-Path $env:LOCALAPPDATA "ms-playwright"
+    if (Test-Path $pwCache) {
+        Info "Removing Playwright browser cache ($pwCache)..."
+        Remove-Item -Recurse -Force $pwCache
     }
+    # Remove cached camoufox browsers
+    $cfCache = Join-Path $env:LOCALAPPDATA "camoufox"
+    if (Test-Path $cfCache) {
+        Info "Removing Camoufox browser cache ($cfCache)..."
+        Remove-Item -Recurse -Force $cfCache
+    }
+    Ok "Old browser engines cleaned up"
 }
 
 function Build-Dashboard {

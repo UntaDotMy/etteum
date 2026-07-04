@@ -249,45 +249,6 @@ class YepAPIAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         from app.providers.browser_utils import raise_browser_unavailable
         raise_browser_unavailable("yepapi")
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            return {"stub": True}
-
-        try:
-            from browserforge.fingerprints import Screen
-            from camoufox.async_api import AsyncCamoufox
-
-            camoufox_kwargs: dict[str, Any] = {
-                "headless": os.getenv("BATCHER_CAMOUFOX_HEADLESS", "true").lower() == "true",
-                "os": "windows",
-                "block_webrtc": True,
-                "humanize": False,
-                "screen": Screen(max_width=1920, max_height=1080),
-            }
-            proxy_url = os.getenv("BATCHER_PROXY_URL", "")
-            if proxy_url:
-                parsed = urlparse(proxy_url)
-                proxy_cfg: dict[str, Any] = {"server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"}
-                if parsed.username:
-                    proxy_cfg["username"] = parsed.username
-                if parsed.password:
-                    proxy_cfg["password"] = parsed.password
-                camoufox_kwargs["proxy"] = proxy_cfg
-                camoufox_kwargs["geoip"] = True
-
-            manager = AsyncCamoufox(**camoufox_kwargs)
-            browser = await manager.__aenter__()
-            page = await browser.new_page()
-            page.set_default_timeout(30000)
-
-            await page.goto(YEPAPI_LOGIN_URL, wait_until="domcontentloaded", timeout=20000)
-            await asyncio.sleep(2)
-
-            await page.locator('button:has-text("Google")').first.click()
-            await asyncio.sleep(3)
-
-            return {"stub": False, "manager": manager, "browser": browser, "page": page}
-        except Exception as exc:
-            raise RetryableBatcherError(ErrorCode.browser_start_failed, str(exc) or "camoufox bootstrap failed") from exc
 
     async def authenticate(self, account: NormalizedAccount, session: Any) -> dict[str, Any]:
         if session is None or session.get("stub"):

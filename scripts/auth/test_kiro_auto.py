@@ -28,7 +28,6 @@ async def main():
     print("⏳ This will attempt full login flow...\n")
     
     # Set environment
-    os.environ["BATCHER_ENABLE_CAMOUFOX"] = "true"
     os.environ["BATCHER_CAMOUFOX_HEADLESS"] = "false"
     os.environ["BATCHER_KIRO_AUTH_DEBUG"] = "true"
     

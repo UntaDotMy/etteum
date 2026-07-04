@@ -1,15 +1,17 @@
-"""Inspect the GitLab welcome form HTML structure to find the right
-selectors for the role/objective dropdowns. Reuses the existing logged-in
-session from a manual run.
+"""Inspect the GitLab welcome form HTML structure.
+
+DEPRECATED: This script uses Camoufox which has been removed.
+Migrate to nodriver before using.
 
 Usage:
     .venv/bin/python debug_welcome_form.py <email> <password>
 """
 from __future__ import annotations
-import asyncio, os, sys, time
-from pathlib import Path
-from camoufox.async_api import AsyncCamoufox
-from browserforge.fingerprints import Screen
+import sys
+
+print("ERROR: This debug script uses Camoufox which has been removed.", file=sys.stderr)
+print("Migrate to nodriver before using this script.", file=sys.stderr)
+sys.exit(1)
 
 DEBUG_DIR = Path("/tmp/duo-debug")
 DEBUG_DIR.mkdir(parents=True, exist_ok=True)

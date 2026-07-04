@@ -381,7 +381,6 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
  *
  * And uses env vars:
  *   ENOWX_ALLOWED_PROVIDERS=kiro,codebuddy,canva (comma-separated)
- *   BATCHER_ENABLE_CAMOUFOX=true (for browser automation)
  *   BATCHER_CAMOUFOX_HEADLESS=true
  *   BATCHER_PROXY_URL=<proxy>
  *   BATCHER_CONCURRENT=1
@@ -463,7 +462,6 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           ...process.env,
           ENOWX_ALLOWED_PROVIDERS: provider,
           PYTHONUNBUFFERED: "1",
-          BATCHER_ENABLE_CAMOUFOX: "true",
           BATCHER_CAMOUFOX_HEADLESS: headless ? "true" : "false",
           DISPLAY: process.env.DISPLAY || ":0",
           WAYLAND_DISPLAY: process.env.WAYLAND_DISPLAY || "",
@@ -899,7 +897,6 @@ export async function loginAllProviders(
         env: {
           ...process.env,
           ENOWX_ALLOWED_PROVIDERS: "kiro,kiro-pro,codebuddy,canva,codex",
-          BATCHER_ENABLE_CAMOUFOX: "true",
           BATCHER_CAMOUFOX_HEADLESS: config.headless ? "true" : "false",
           BATCHER_PROXY_URL: proxyUrlForAuth || config.proxyUrl || "",
           HTTP_PROXY: proxyUrlForAuth || config.proxyUrl || "",

@@ -17,7 +17,7 @@
 #   ETTEUM_YES=1      Skip confirmation prompts (for CI / unattended installs)
 #   ETTEUM_BRANCH     Branch to clone (default: main)
 #   ETTEUM_NO_CLI=1   Skip the ~/.local/bin/etteum symlink
-#   ETTEUM_SKIP_BROWSERS=1  Skip Playwright/Camoufox download (needed for auth bot)
+#   ETTEUM_SKIP_BROWSERS=1  Skip nodriver Chrome download (needed for auth bot)
 
 set -euo pipefail
 
@@ -96,7 +96,7 @@ show_summary() {
   have bun || { needs_bun=true; items+=("  • Bun runtime                  ~50 MB"); ((total_size += 50)); }
 
   local has_python=false
-  # Check for Python 3.10-3.12 (skip 3.13 — camoufox/lxml has no 3.13 wheels)
+  # Check for Python 3.10-3.13
   for cand in python3.12 python3.11 python3.10 python3 python3.13; do
     if have "$cand"; then
       local _v major minor
@@ -115,10 +115,8 @@ show_summary() {
   items+=("  • Python packages (venv)       ~150 MB")
   ((total_size += 150))
   if [[ "${ETTEUM_SKIP_BROWSERS:-0}" != "1" ]]; then
-    items+=("  • Playwright Chromium          ~175 MB")
-    ((total_size += 175))
-    items+=("  • Camoufox browser             ~150 MB")
-    ((total_size += 150))
+    items+=("  • nodriver Chrome              ~200 MB")
+    ((total_size += 200))
   fi
   items+=("  • Dashboard build              ~50 MB")
   ((total_size += 50))
@@ -248,14 +246,13 @@ ensure_bun() {
 }
 
 ensure_python() {
-  # Skip Python 3.13+ — camoufox depends on lxml which has no 3.13 wheels yet
-  for cand in python3.12 python3.11 python3.10 python3 python3.13; do
+  for cand in python3.13 python3.12 python3.11 python3.10 python3; do
     if have "$cand"; then
       PYTHON_BIN="$cand"
       local ver major minor
       ver=$("$cand" -c 'import sys;print("%d.%d"%sys.version_info[:2])' 2>/dev/null || echo "0.0")
       IFS=. read -r major minor <<<"$ver"
-      if [[ "$major" -ge 3 && "$minor" -ge 10 && "$minor" -le 12 ]]; then
+      if [[ "$major" -ge 3 && "$minor" -ge 10 ]]; then
         ok "Python $ver found ($cand)"
         return
       fi
@@ -459,6 +456,14 @@ setup_python_venv() {
   step "Setting up Python venv at $venv_dir"
   ensure_venv_module
 
+  # Check if venv exists but has stale paths (moved repo)
+  if [[ -f "$venv_python" ]]; then
+    if ! "$venv_python" -c "import sys" 2>/dev/null; then
+      warn "Python venv has stale paths (repo moved?) — recreating..."
+      rm -rf "$venv_dir"
+    fi
+  fi
+
   if [[ ! -d "$venv_dir" ]]; then
     info "Creating virtual environment..."
     if ! "$PYTHON_BIN" -m venv "$venv_dir"; then
@@ -493,27 +498,43 @@ setup_python_venv() {
   ok "Python deps installed"
 
   if [[ "${ETTEUM_SKIP_BROWSERS:-0}" == "1" ]]; then
-    warn "ETTEUM_SKIP_BROWSERS=1 — skipping Playwright/Camoufox download."
-    warn "  Auth bot will fail until you run: $venv_python -m playwright install chromium && $venv_python -m camoufox fetch"
+    warn "ETTEUM_SKIP_BROWSERS=1 — skipping nodriver Chrome download."
+    warn "  Auth bot will fail until you run: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
     return
   fi
 
-  step "Installing browsers (Playwright + Camoufox — this can take a few minutes)"
-  info "Installing Playwright Chromium..."
-  if retry "$venv_python" -m playwright install chromium; then
-    ok "Playwright Chromium installed"
+  step "Installing nodriver Chrome (this can take a few minutes)"
+  info "nodriver will download a compatible Chrome/Chromium on first launch..."
+  if retry "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
+    ok "nodriver Chrome installed"
   else
-    warn "Playwright Chromium install failed (you can re-run later)"
-    info "  Manual: $venv_python -m playwright install chromium"
+    warn "nodriver Chrome pre-download failed — it will auto-download on first use"
+    info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
   fi
 
-  info "Fetching Camoufox browser..."
-  if retry "$venv_python" -m camoufox fetch; then
-    ok "Camoufox browser installed"
-  else
-    warn "Camoufox fetch failed (you can re-run later)"
-    info "  Manual: $venv_python -m camoufox fetch"
+  # ── Cleanup: remove old camoufox/playwright/chromium if present ──
+  step "Cleaning up old browser engines (camoufox/playwright)..."
+  if "$venv_python" -c "import camoufox" 2>/dev/null; then
+    info "Removing camoufox package..."
+    "$pip" uninstall -y camoufox >/dev/null 2>&1 || true
   fi
+  if "$venv_python" -c "import playwright" 2>/dev/null; then
+    info "Removing playwright package..."
+    "$pip" uninstall -y playwright >/dev/null 2>&1 || true
+  fi
+  # Remove cached playwright browsers
+  local pw_cache="${HOME}/.cache/ms-playwright"
+  if [[ -d "$pw_cache" ]]; then
+    info "Removing Playwright browser cache (~$pw_cache)..."
+    rm -rf "$pw_cache"
+  fi
+  # Remove cached camoufox browsers
+  local cf_cache="${HOME}/.local/share/camoufox"
+  if [[ -d "$cf_cache" ]]; then
+    info "Removing Camoufox browser cache (~$cf_cache)..."
+    rm -rf "$cf_cache"
+  fi
+  ok "Old browser engines cleaned up"
 }
 
 build_dashboard() {

@@ -52,7 +52,7 @@ The installer takes you from a clean machine to a running proxy in one shot:
 4. ✅ Generates a random `ENCRYPTION_KEY` and a fresh `API_KEY` in `.env`
 5. ✅ Installs JS deps (root + dashboard) via Bun
 6. ✅ Creates a Python venv and installs requirements
-7. ✅ Downloads **Playwright Chromium** + **Camoufox** browsers
+7. ✅ Downloads **nodriver Chrome** browser
 8. ✅ Builds the dashboard for production
 9. ✅ Runs database migrations
 10. ✅ Symlinks the `etteum` CLI into `~/.local/bin`
@@ -188,7 +188,7 @@ DASHBOARD_PORT=1931          # Dashboard port
 API_KEY=...                  # Auto-generated; clients send as Bearer
 ENCRYPTION_KEY=...           # Auto-generated; encrypts stored tokens
 DATABASE_PATH=./data/poolprox3.db
-BROWSER_ENGINE=camoufox      # or chromium
+# BROWSER_ENGINE=nodriver    # (deprecated, nodriver is now the default)
 HEADLESS=true
 ```
 
@@ -200,7 +200,7 @@ HEADLESS=true
 | `ENCRYPTION_KEY`  | auto-generated       | Encrypts saved tokens               |
 | `DATABASE_PATH`   | `./data/poolprox3.db`| SQLite database location            |
 | `PYTHON_PATH`     | auto-detect          | Override venv Python                |
-| `BROWSER_ENGINE`  | `camoufox`           | `camoufox` or `chromium`            |
+| `BROWSER_ENGINE`  | `nodriver`           | (deprecated) nodriver is now the default |
 | `PROXY_URL`       | empty                | Outbound proxy for the auth bot     |
 
 ---
@@ -255,11 +255,10 @@ etteum doctor
 ### Common fixes
 
 <details>
-<summary><b>Playwright / Camoufox not installed</b></summary>
+<summary><b>nodriver Chrome not installed</b></summary>
 
 ```bash
-scripts/auth/.venv/bin/python -m playwright install chromium
-scripts/auth/.venv/bin/python -m camoufox fetch
+scripts/auth/.venv/bin/python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'
 ```
 </details>
 

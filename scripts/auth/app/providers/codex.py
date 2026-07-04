@@ -301,98 +301,9 @@ class CodexProviderAdapter(ProviderAdapter):
         if secret_kind == "refresh_token":
             return {"mode": "refresh_token", "stub": True}
 
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            return {"mode": "password", "stub": True}
-
-        # Browser automation unavailable — Camoufox/Chromium removed; nodriver
-        # migration pending for codex (only 'antigravity' is migrated).
+        # Browser automation unavailable — nodriver migration pending for codex.
         from app.providers.browser_utils import raise_browser_unavailable
         raise_browser_unavailable("codex")
-
-        try:  # pragma: no cover — unreachable while browser automation is disabled
-            from browserforge.fingerprints import Screen
-            from camoufox.async_api import AsyncCamoufox
-        except Exception as exc:
-            raise RetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                f"camoufox import failed: {exc}",
-            ) from exc
-
-        verifier, challenge = _generate_pkce_pair()
-        oauth_state = secrets.token_urlsafe(24)
-        callback_state = _CallbackState()
-
-        port = DEFAULT_CALLBACK_PORT
-        srv = _start_callback_server(callback_state, oauth_state, port)
-        bound_port = srv.server_address[1]
-        redirect_uri = f"http://localhost:{bound_port}{REDIRECT_PATH}"
-
-        params = {
-            "client_id": CODEX_CLIENT_ID,
-            "redirect_uri": redirect_uri,
-            "response_type": "code",
-            "scope": CODEX_SCOPE,
-            "connection": "email",
-            "prompt": "login",
-            "screen_hint": "login",
-            "state": oauth_state,
-            "code_challenge": challenge,
-            "code_challenge_method": "S256",
-            "id_token_add_organizations": "true",
-            "codex_cli_simplified_flow": "true",
-            "originator": "codex_cli_rs",
-        }
-        authorize_url = f"{CODEX_AUTHORIZE_URL}?{urlencode(params)}"
-
-        camoufox_kwargs: dict[str, Any] = {
-            "headless": os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true",
-            "os": "windows",
-            "block_webrtc": True,
-            "humanize": False,
-            "screen": Screen(max_width=1920, max_height=1080),
-        }
-
-        proxy_url = os.getenv("BATCHER_PROXY_URL", "")
-        if proxy_url:
-            parsed = urlparse(proxy_url)
-            proxy_cfg: dict[str, Any] = {
-                "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-            }
-            if parsed.username:
-                proxy_cfg["username"] = parsed.username
-            if parsed.password:
-                proxy_cfg["password"] = parsed.password
-            camoufox_kwargs["proxy"] = proxy_cfg
-            camoufox_kwargs["geoip"] = True
-
-        try:
-            manager = AsyncCamoufox(**camoufox_kwargs)
-            browser = await manager.__aenter__()
-            page = await browser.new_page()
-            page.set_default_timeout(120000)
-            await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
-        except Exception as exc:
-            try:
-                srv.shutdown()
-            except Exception:
-                pass
-            raise RetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                f"camoufox launch failed: {exc}",
-            ) from exc
-
-        return {
-            "mode": "password",
-            "stub": False,
-            "manager": manager,
-            "browser": browser,
-            "page": page,
-            "callback_server": srv,
-            "callback_state": callback_state,
-            "oauth_state": oauth_state,
-            "verifier": verifier,
-            "redirect_uri": redirect_uri,
-        }
 
     async def authenticate(
         self, account: NormalizedAccount, session: Any

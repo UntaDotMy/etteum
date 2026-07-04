@@ -153,7 +153,7 @@ function checkPython() {
 function checkPyPackages() {
   const venvPy = venvPython();
   if (!venvPy) return;
-  const required = ["camoufox", "playwright", "aiohttp", "httpx", "cbor2", "pydantic"];
+  const required = ["nodriver", "aiohttp", "httpx", "cbor2", "pydantic"];
   for (const pkg of required) {
     const r = run(venvPy, ["-c", `import ${pkg}`]);
     if (!r.ok) {
@@ -172,32 +172,15 @@ function checkBrowsers() {
   const venvPy = venvPython();
   if (!venvPy) return;
 
-  // Playwright Chromium
-  const pw = run(venvPy, [
-    "-c",
-    "from playwright.sync_api import sync_playwright;\n"
-    + "with sync_playwright() as p:\n"
-    + "  print(p.chromium.executable_path)",
-  ]);
-  if (pw.ok && pw.stdout.trim() && existsSync(pw.stdout.trim())) {
-    pushOk("Playwright Chromium", "installed");
+  // nodriver Chrome
+  const nd = run(venvPy, ["-c", "import nodriver; print('ok')"]);
+  if (nd.ok) {
+    pushOk("nodriver", "installed");
   } else {
     pushFail(
-      "Playwright Chromium",
-      "Browser binary missing",
-      `Run: ${venvPy} -m playwright install chromium`,
-    );
-  }
-
-  // Camoufox
-  const cf = run(venvPy, ["-c", "import camoufox.utils as u; print(u.installed_verstr() or '')"]);
-  if (cf.ok && cf.stdout.trim()) {
-    pushOk("Camoufox browser", `installed (${cf.stdout.trim()})`);
-  } else {
-    pushFail(
-      "Camoufox browser",
-      "Browser not fetched",
-      `Run: ${venvPy} -m camoufox fetch`,
+      "nodriver",
+      "Not installed",
+      `Run: ${venvPipHint()} install nodriver`,
     );
   }
 }
@@ -418,7 +401,7 @@ function autoFix() {
   const vpy = venvPython()!;
 
   // ── 2. Python packages ──────────────────────────────────────────────
-  const required = ["camoufox", "playwright", "aiohttp", "httpx", "cbor2", "pydantic"];
+  const required = ["nodriver", "aiohttp", "httpx", "cbor2", "pydantic"];
   const missingPkgs = required.filter(pkg => !run(vpy, ["-c", `import ${pkg}`]).ok);
   if (missingPkgs.length > 0) {
     process.stdout.write(`  \x1b[33m! Installing ${missingPkgs.length} missing packages...\x1b[0m\n`);
@@ -431,18 +414,11 @@ function autoFix() {
     }
   }
 
-  // ── 3. Playwright Chromium ──────────────────────────────────────────
-  const pw = run(vpy, ["-c", "from playwright.sync_api import sync_playwright;\nwith sync_playwright() as p:\n  print(p.chromium.executable_path)"]);
-  if (!(pw.ok && pw.stdout.trim() && existsSync(pw.stdout.trim()))) {
-    process.stdout.write("  \x1b[33m! Installing Playwright Chromium...\x1b[0m\n");
-    runFix(vpy, ["-m", "playwright", "install", "chromium"], "playwright install chromium", 300);
-  }
-
-  // ── 4. Camoufox browser ─────────────────────────────────────────────
-  const cf = run(vpy, ["-c", "import camoufox.utils as u; print(u.installed_verstr() or '')"]);
-  if (!(cf.ok && cf.stdout.trim())) {
-    process.stdout.write("  \x1b[33m! Fetching Camoufox browser...\x1b[0m\n");
-    runFix(vpy, ["-m", "camoufox", "fetch"], "camoufox fetch", 300);
+  // ── 3. nodriver Chrome ──────────────────────────────────────────
+  const nd = run(vpy, ["-c", "import nodriver"]);
+  if (!nd.ok) {
+    process.stdout.write("  \x1b[33m! Installing nodriver...\x1b[0m\n");
+    runFix(pipPath, ["install", "nodriver>=0.50"], "pip install nodriver", 300);
   }
 
   console.log("");

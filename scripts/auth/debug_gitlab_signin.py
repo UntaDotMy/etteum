@@ -1,22 +1,19 @@
 """
-Standalone debug for GitLab sign-in stage. Runs Camoufox headful, navigates
-to /users/sign_in, polls every 1s, AND tries to click the Turnstile checkbox
-with humanized mouse movement when detected.
+Standalone debug for GitLab sign-in stage.
+
+DEPRECATED: This script uses Camoufox which has been removed.
+Migrate to nodriver before using.
 
 Usage:
     .venv/bin/python debug_gitlab_signin.py
 """
 from __future__ import annotations
 
-import asyncio
-import os
-import random
 import sys
-import time
-from pathlib import Path
 
-from camoufox.async_api import AsyncCamoufox
-from browserforge.fingerprints import Screen
+print("ERROR: This debug script uses Camoufox which has been removed.", file=sys.stderr)
+print("Migrate to nodriver before using this script.", file=sys.stderr)
+sys.exit(1)
 
 DEBUG_DIR = Path("/tmp/duo-debug")
 DEBUG_DIR.mkdir(parents=True, exist_ok=True)

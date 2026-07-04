@@ -67,10 +67,10 @@ check("Python venv", Boolean(venvPy), `Re-run installer to rebuild venv. Looked 
 
 // 6. Python imports
 if (venvPy && existsSync(venvPy)) {
-  const pyImport = spawnSync(venvPy, ["-c", "import camoufox, playwright, aiohttp, httpx, cbor2, pydantic"], { encoding: "utf8" });
+  const pyImport = spawnSync(venvPy, ["-c", "import nodriver, aiohttp, httpx, cbor2, pydantic"], { encoding: "utf8" });
   const pipHint = venvPy.replace(/python(?:3)?(?:\.exe)?$/, "pip");
   check(
-    "Python packages (camoufox/playwright/aiohttp/httpx/cbor2/pydantic)",
+    "Python packages (nodriver/aiohttp/httpx/cbor2/pydantic)",
     pyImport.status === 0,
     `Run: ${pipHint} install -r scripts/auth/requirements.txt`,
   );

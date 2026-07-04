@@ -2755,13 +2755,13 @@ accountsRouter.post("/:id/open-panel", async (c) => {
   }
 
   try {
-    const { chromium } = await import("playwright");
-    const browser = await chromium.launch({ headless: false });
-    const context = await browser.newContext();
+    // Use nodriver to open a headed Chrome browser
+    const nodriverMod = await import("nodriver");
+    const browser = await nodriverMod.start({ headless: false });
 
     if (account.provider.startsWith("kiro")) {
       if (!tokens.refresh_token) {
-        await browser.close();
+        await browser.stop();
         return c.json({ error: "No refresh token available" }, 400);
       }
 
@@ -2773,7 +2773,7 @@ accountsRouter.post("/:id/open-panel", async (c) => {
       });
 
       if (!refreshResp.ok) {
-        await browser.close();
+        await browser.stop();
         return c.json({ error: `Token refresh failed: ${refreshResp.status}` }, 500);
       }
 
@@ -2784,14 +2784,12 @@ accountsRouter.post("/:id/open-panel", async (c) => {
       };
 
       const accessToken = refreshData.accessToken;
-      const refreshToken = refreshData.refreshToken || tokens.refresh_token;
       const profileArn = tokens.profile_arn || tokens.profileArn || refreshData.profileArn || "";
 
-      // Extract userId from getUsageLimits response (cached in metadata or from profileArn)
+      // Extract userId from getUsageLimits response
       const meta = (account.metadata || {}) as Record<string, unknown>;
       let userId = (meta.kiroUserId as string) || "";
       if (!userId) {
-        // Try to fetch userId from getUsageLimits
         try {
           const url = new URL("https://q.us-east-1.amazonaws.com/getUsageLimits");
           url.searchParams.set("origin", "AI_EDITOR");
@@ -2811,26 +2809,33 @@ accountsRouter.post("/:id/open-panel", async (c) => {
         } catch { /* ignore */ }
       }
 
-      await context.addCookies([
-        { name: "AccessToken", value: accessToken || "", domain: "app.kiro.dev", path: "/" },
-        { name: "RefreshToken", value: refreshToken, domain: "app.kiro.dev", path: "/" },
-        { name: "UserId", value: userId, domain: "app.kiro.dev", path: "/" },
-        { name: "Idp", value: "Google", domain: "app.kiro.dev", path: "/" },
-      ]);
+      // Set cookies via nodriver CDP
+      const page = browser.pages[0] || await browser.get("about:blank");
+      await page.send("Network.setCookie", {
+        name: "AccessToken", value: accessToken || "", domain: "app.kiro.dev", path: "/",
+      });
+      await page.send("Network.setCookie", {
+        name: "RefreshToken", value: tokens.refresh_token, domain: "app.kiro.dev", path: "/",
+      });
+      if (userId) {
+        await page.send("Network.setCookie", {
+          name: "UserId", value: userId, domain: "app.kiro.dev", path: "/",
+        });
+      }
+      await page.send("Network.setCookie", {
+        name: "Idp", value: "Google", domain: "app.kiro.dev", path: "/",
+      });
 
-      const page = await context.newPage();
-      await page.goto("https://app.kiro.dev/settings/account");
-
+      await page.navigate("https://app.kiro.dev/settings/account");
       return c.json({ success: true, message: `Browser opened for ${account.email}` });
+
     } else if (account.provider === "qoder") {
-      // Qoder: inject stored web cookies
       const webCookie = tokens.web_cookie as string | undefined;
       if (!webCookie) {
-        await browser.close();
+        await browser.stop();
         return c.json({ error: "No web_cookie available for Qoder account" }, 400);
       }
 
-      // Parse cookie string into array
       const cookies = webCookie.split("; ").map((pair) => {
         const idx = pair.indexOf("=");
         if (idx === -1) return null;
@@ -2839,47 +2844,35 @@ accountsRouter.post("/:id/open-panel", async (c) => {
         return { name, value };
       }).filter((c): c is { name: string; value: string } => c !== null);
 
-      // Filter to qoder.com-relevant cookies and add domain
       const qoderCookies = cookies
         .filter((c) => {
-          // Include qoder-specific cookies
-          if (c.name.startsWith("qoder_") || c.name === "tfstk" || c.name === "cbc" || c.name === "test_cookie") {
-            return true;
-          }
-          // Include tracking cookies
-          if (c.name.startsWith("_ga") || c.name.startsWith("_gcl") || c.name.startsWith("_nb")) {
-            return true;
-          }
-          // Include other misc cookies
-          if (c.name === "OTZ" || c.name.startsWith("_c_")) {
-            return true;
-          }
+          if (c.name.startsWith("qoder_") || c.name === "tfstk" || c.name === "cbc" || c.name === "test_cookie") return true;
+          if (c.name.startsWith("_ga") || c.name.startsWith("_gcl") || c.name.startsWith("_nb")) return true;
+          if (c.name === "OTZ" || c.name.startsWith("_c_")) return true;
           return false;
-        })
-        .map((c) => ({
-          name: c.name,
-          value: c.value,
-          domain: "qoder.com",
-          path: "/",
-        }));
+        });
 
       if (qoderCookies.length === 0) {
-        await browser.close();
+        await browser.stop();
         return c.json({ error: "No valid Qoder cookies found in web_cookie" }, 400);
       }
 
-      await context.addCookies(qoderCookies);
+      const page = browser.pages[0] || await browser.get("about:blank");
+      for (const cookie of qoderCookies) {
+        await page.send("Network.setCookie", {
+          name: cookie.name, value: cookie.value, domain: "qoder.com", path: "/",
+        });
+      }
 
-      const page = await context.newPage();
-      await page.goto("https://qoder.com/account/profile");
-
+      await page.navigate("https://qoder.com/account/profile");
       return c.json({
         success: true,
         message: `Browser opened for ${account.email}`,
         cookiesInjected: qoderCookies.length,
       });
+
     } else {
-      await browser.close();
+      await browser.stop();
       return c.json({
         error: `Open panel not supported for provider: ${account.provider}`,
       }, 400);

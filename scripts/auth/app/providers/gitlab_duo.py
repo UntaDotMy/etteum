@@ -117,54 +117,7 @@ def _progress(step: str, message: str, **extra: Any) -> None:
 # Browser launch
 # ---------------------------------------------------------------------------
 
-async def _launch_camoufox() -> tuple[Any, Any, Any]:
-    """Launch a fresh Camoufox session with anti-bot fingerprint and (optional)
-    proxy. Returns (manager, browser, page).
-
-    Each call returns an isolated browser → no profile/cookie leak between
-    accounts when the queue runs them in parallel.
-    """
-    try:
-        from browserforge.fingerprints import Screen
-        from camoufox.async_api import AsyncCamoufox
-    except Exception as exc:
-        raise RetryableBatcherError(
-            ErrorCode.browser_start_failed,
-            f"camoufox import failed: {exc}",
-        ) from exc
-
-    camoufox_kwargs: dict[str, Any] = {
-        "headless": os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true",
-        "os": "windows",
-        "block_webrtc": True,
-        "humanize": False,
-        "screen": Screen(max_width=1920, max_height=1080),
-    }
-
-    proxy_url = os.getenv("BATCHER_PROXY_URL", "").strip()
-    if proxy_url:
-        parsed = urlparse(proxy_url)
-        proxy_cfg: dict[str, Any] = {
-            "server": f"{parsed.scheme}://{parsed.hostname}:{parsed.port}"
-        }
-        if parsed.username:
-            proxy_cfg["username"] = parsed.username
-        if parsed.password:
-            proxy_cfg["password"] = parsed.password
-        camoufox_kwargs["proxy"] = proxy_cfg
-        camoufox_kwargs["geoip"] = True
-
-    try:
-        manager = AsyncCamoufox(**camoufox_kwargs)
-        browser = await manager.__aenter__()
-        page = await browser.new_page()
-        page.set_default_timeout(NAV_TIMEOUT_S * 1000)
-        return manager, browser, page
-    except Exception as exc:
-        raise RetryableBatcherError(
-            ErrorCode.browser_start_failed,
-            f"camoufox launch failed: {exc}",
-        ) from exc
+# _launch_camoufox removed — nodriver migration pending
 
 
 # ---------------------------------------------------------------------------
@@ -2304,37 +2257,6 @@ class GitLabDuoProviderAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         from app.providers.browser_utils import raise_browser_unavailable
         raise_browser_unavailable("gitlab-duo")
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            raise NonRetryableBatcherError(
-                ErrorCode.browser_start_failed,
-                "GitLab Duo provider requires BATCHER_ENABLE_CAMOUFOX=true",
-            )
-
-        manager, browser, page = await _launch_camoufox()
-        try:
-            # IMPORTANT: navigate to /users/sign_up (NOT /users/sign_in).
-            # sign_in is fronted by Cloudflare Managed Challenge with
-            # interactive Turnstile that bots cannot reliably auto-solve.
-            # sign_up is whitelisted and exposes the same Google OAuth button.
-            await page.goto(SIGN_UP_URL, wait_until="domcontentloaded", timeout=30000)
-            _progress("cf_check", "Waiting for sign-up form to render…")
-            await _wait_past_cloudflare(page)
-        except Exception:
-            try:
-                await browser.close()
-            except Exception:
-                pass
-            try:
-                await manager.__aexit__(None, None, None)
-            except Exception:
-                pass
-            raise
-
-        return {
-            "manager": manager,
-            "browser": browser,
-            "page": page,
-        }
 
     async def authenticate(
         self, account: NormalizedAccount, session: Any

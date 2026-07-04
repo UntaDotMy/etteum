@@ -16,11 +16,7 @@ import aiohttp
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import NonRetryableBatcherError, RetryableBatcherError
 from app.providers.base import NormalizedAccount, ProviderAdapter
-from app.providers.browser_utils import (
-    OAUTH_FIREFOX_PREFS,
-    build_camoufox_kwargs,
-    is_browser_crash,
-)
+# camoufox imports removed — nodriver migration pending
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
@@ -1783,132 +1779,11 @@ class CodeBuddyProviderAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         from app.providers.browser_utils import raise_browser_unavailable
         raise_browser_unavailable("codebuddy")
-        if os.getenv("BATCHER_ENABLE_CAMOUFOX", "false").lower() != "true":
-            return {"stub": True}
-
-        try:
-            timeout = aiohttp.ClientTimeout(total=20)
-            async with _make_session(timeout, CLI_HEADERS) as client:
-                async with client.post(
-                    CODEBUDDY_STATE_ENDPOINT, json={}, proxy=_req_proxy(client)
-                ) as resp:
-                    if resp.status >= 500:
-                        raise RetryableBatcherError(
-                            ErrorCode.http_5xx,
-                            f"codebuddy auth/state server error ({resp.status})",
-                        )
-                    if resp.status == 429:
-                        raise RetryableBatcherError(
-                            ErrorCode.http_429, "codebuddy auth/state rate limited"
-                        )
-                    if resp.status != 200:
-                        body = await resp.text()
-                        raise NonRetryableBatcherError(
-                            ErrorCode.provider_unsupported_response,
-                            f"codebuddy auth/state rejected request ({resp.status}): {body[:120]}",
-                        )
-
-                    payload = await resp.json()
-
-            if payload.get("code") != 0:
-                raise RetryableBatcherError(
-                    ErrorCode.auth_temporary_failure,
-                    f"codebuddy auth/state returned code={payload.get('code')}",
-                )
-
-            data = payload.get("data") or {}
-            state = str(data.get("state") or "").strip()
-            auth_url = str(data.get("authUrl") or "").strip()
-            if not state or not auth_url:
-                raise NonRetryableBatcherError(
-                    ErrorCode.provider_unsupported_response,
-                    "codebuddy auth/state missing state or authUrl",
-                )
-
-            from camoufox.async_api import AsyncCamoufox
-
-            camoufox_kwargs = build_camoufox_kwargs(
-                proxy_url=_get_proxy_url() or "",
-                default_timeout=30000,
-                disable_coop=True,
-                firefox_user_prefs=OAUTH_FIREFOX_PREFS,
-            )
-            timeout_ms = camoufox_kwargs.pop("_default_timeout")
-            manager = AsyncCamoufox(**camoufox_kwargs)
-            browser = await manager.__aenter__()
-            page = await browser.new_page()
-            page.set_default_timeout(timeout_ms)
-            await page.goto(auth_url, wait_until="domcontentloaded", timeout=45000)
-
-            return {
-                "stub": False,
-                "manager": manager,
-                "browser": browser,
-                "page": page,
-                "state": state,
-                "auth_url": auth_url,
-                "auth_started_at": time.time(),
-                "account": account.identifier,
-            }
-        except aiohttp.ServerTimeoutError as exc:
-            raise RetryableBatcherError(
-                ErrorCode.network_timeout, "codebuddy auth/state timeout"
-            ) from exc
-        except aiohttp.ClientConnectionError as exc:
-            raise RetryableBatcherError(
-                ErrorCode.network_connection_error,
-                "codebuddy auth/state connection error",
-            ) from exc
 
     async def _restart_browser_page(self, session: dict) -> Any:
         """Restart browser page after a crash. Returns new page or raises."""
-        browser = session.get("browser")
-        auth_url = session.get("auth_url", "")
-        if not browser or not auth_url:
-            raise RetryableBatcherError(
-                ErrorCode.browser_unexpected_state,
-                "cannot restart browser — missing browser or auth_url",
-            )
-        try:
-            # Try to create a new page from existing browser
-            page = await browser.new_page()
-            page.set_default_timeout(30000)
-            await page.goto(auth_url, wait_until="domcontentloaded", timeout=45000)
-            session["page"] = page
-            _codebuddy_auth_debug("browser page restarted successfully (new page from existing browser)")
-            return page
-        except Exception:
-            pass
-
-        # Browser itself is dead — need full restart
-        _codebuddy_auth_debug("browser process dead — performing full restart")
-        manager = session.get("manager")
-        if manager:
-            try:
-                await manager.__aexit__(None, None, None)
-            except Exception:
-                pass
-
-        from camoufox.async_api import AsyncCamoufox
-
-        camoufox_kwargs = build_camoufox_kwargs(
-            proxy_url=_get_proxy_url() or "",
-            default_timeout=15000,
-            disable_coop=True,
-            firefox_user_prefs=OAUTH_FIREFOX_PREFS,
-        )
-        timeout_ms = camoufox_kwargs.pop("_default_timeout")
-        new_manager = AsyncCamoufox(**camoufox_kwargs)
-        new_browser = await new_manager.__aenter__()
-        page = await new_browser.new_page()
-        page.set_default_timeout(timeout_ms)
-        await page.goto(auth_url, wait_until="domcontentloaded", timeout=25000)
-
-        session["manager"] = new_manager
-        session["browser"] = new_browser
-        session["page"] = page
-        _codebuddy_auth_debug("full browser restart completed")
-        return page
+        from app.providers.browser_utils import raise_browser_unavailable
+        raise_browser_unavailable("codebuddy")
 
     async def authenticate(
         self, account: NormalizedAccount, session: Any

@@ -1,4 +1,4 @@
-# Browser automation: nodriver (replaces Camoufox + Playwright/Chromium).
+# Browser automation: nodriver (default engine).
 # Only the `antigravity` provider is migrated to nodriver so far; the other
 # browser providers are disabled (see app.providers.browser_utils.raise_browser_unavailable).
 nodriver>=0.50
