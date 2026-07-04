@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useCallback, useState } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
@@ -6,7 +6,7 @@ import { Search, RefreshCw } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { fetchRequests, fetchRequestDetail } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
-import { useWsEvent } from "@/hooks/useWebSocket";
+import { useApiCache } from "@/hooks/useApiCache";
 
 interface RequestLog {
   id: number;
@@ -65,14 +65,24 @@ function labelProvider(provider: string) {
 }
 
 export default function Requests() {
-  const [logs, setLogs] = useState<RequestLog[]>([]);
   const [search, setSearch] = useState("");
   const [provider, setProvider] = useState("all");
-  const [loading, setLoading] = useState(true);
   const [selected, setSelected] = useState<RequestLog | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
   const [page, setPage] = useState(1);
   const perPage = 25;
+
+  // SWR cache: instant load, background revalidation
+  const cacheKey = `requests-${provider}`;
+  const { data: logsRes, mutate } = useApiCache<{ data: RequestLog[] }>(
+    cacheKey,
+    () => fetchRequests(1, 100, provider) as Promise<{ data: RequestLog[] }>,
+    {
+      staleTime: 5000,
+      wsEvents: ["request_log"],
+    }
+  );
+  const logs = logsRes?.data || [];
 
   /**
    * Open the detail drawer for a row. The list endpoint omits the heavy
@@ -96,32 +106,16 @@ export default function Requests() {
     }
   }
 
-  async function load() {
-    setLoading(true);
-    try {
-      const res = await fetchRequests(1, 100, provider) as { data: RequestLog[] };
-      setLogs(res.data || []);
-    } catch {
-      setLogs([]);
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  useEffect(() => {
-    load();
+  // Reset page when provider or search changes
+  const handleProviderChange = useCallback((value: string) => {
+    setProvider(value);
     setPage(1);
-  }, [provider]);
+  }, []);
 
-  useEffect(() => {
+  const handleSearchChange = useCallback((value: string) => {
+    setSearch(value);
     setPage(1);
-  }, [search]);
-
-  useWsEvent(["request_log"], (msg) => {
-    if (msg.type === "request_log") {
-      setLogs((current) => [msg.data as RequestLog, ...current].slice(0, 100));
-    }
-  });
+  }, []);
 
   const filtered = logs.filter((req) => {
     const q = search.toLowerCase();
@@ -142,23 +136,18 @@ export default function Requests() {
             Recent API request logs from PostgreSQL
           </p>
         </div>
-        <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+        <Button variant="outline" size="sm" onClick={() => mutate()}>
           <RefreshCw className="w-4 h-4 mr-2" /> Refresh
         </Button>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
-        </div>
-      ) : (
       <>
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted-foreground)]" />
-          <Input value={search} onChange={(e) => setSearch(e.target.value)} placeholder="Search requests..." className="pl-9" />
+          <Input value={search} onChange={(e) => handleSearchChange(e.target.value)} placeholder="Search requests..." className="pl-9" />
         </div>
-        <select value={provider} onChange={(e) => setProvider(e.target.value)} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
+        <select value={provider} onChange={(e) => handleProviderChange(e.target.value)} className="h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
           <option value="all">All Providers</option>
           <option value="kiro">Kiro</option>
           <option value="codebuddy">CodeBuddy</option>
@@ -195,7 +184,7 @@ export default function Requests() {
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{req.accountEmail || (req.accountId ? `#${req.accountId}` : "-")}</td>
                   </tr>
                 ))}
-                {!loading && filtered.length === 0 && (
+                {filtered.length === 0 && (
                   <tr><td colSpan={8} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No request logs yet</td></tr>
                 )}
               </tbody>
@@ -278,7 +267,6 @@ export default function Requests() {
         </div>
       )}
       </>
-      )}
     </div>
   );
 }
