@@ -4,7 +4,7 @@
  * manual_challenge round-trip (CAPTCHA image → dashboard modal → user's answer
  * → script stdin).
  *
- * This mirrors how enowxai's Go server spawns qoder_manual_login.py: the script
+ * This mirrors how the reference design's Go server spawns the manual-login script: the script
  * emits progress / manual_challenge / result / error events on stdout; the
  * server forwards them to the dashboard and writes the user's challenge answer
  * back to the script's stdin.

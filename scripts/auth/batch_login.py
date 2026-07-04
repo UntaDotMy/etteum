@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Multi-provider bulk login — N concurrent workers, one Chrome window each.
 
-Phase 2 of the 9router concurrency migration: this is the Python-side
+Phase 2 of the the reference design concurrency migration: this is the Python-side
 concurrency authority for the QUEUE path. The TS LoginQueue
 (src/auth/queue.ts) spawns ONE batch_login.py process per batch and streams
 per-account line-JSON events back; TS maps each event to the existing DB /
@@ -44,7 +44,7 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-# Concurrency bounds — match TS LoginQueue (1..10) and 9router (1..8). Use the
+# Concurrency bounds — match TS LoginQueue (1..10) and the reference design (1..8). Use the
 # TS bounds since this replaces the TS queue: min 1, max 10.
 MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 10

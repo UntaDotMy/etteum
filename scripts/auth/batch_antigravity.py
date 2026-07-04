@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """Antigravity bulk import — N concurrent nodriver workers, one Chrome window each.
 
-This is the Python-side concurrency layer for antigravity, mirroring 9router's
-worker-queue model (kiroBulkImportManager.js): a shared account queue, N async
+This is the Python-side concurrency layer for antigravity, mirroring the reference design's
+worker-queue model (the bulk-import manager): a shared account queue, N async
 workers each launching its own browser, accounts pulled one-at-a-time so none
 is processed twice. The TS LoginQueue (src/auth/queue.ts) is left untouched for
 the other providers — this runner is antigravity-only and additive.
@@ -45,7 +45,7 @@ from app.errors.exceptions import BatcherError, NonRetryableBatcherError, Retrya
 from app.providers.antigravity import AntigravityProviderAdapter
 from app.providers.base import NormalizedAccount
 
-# Concurrency bounds — match 9router's Kiro bulk-import defaults (1..8, default 4).
+# Concurrency bounds — match the reference design's Kiro bulk-import defaults (1..8, default 4).
 MIN_CONCURRENCY = 1
 MAX_CONCURRENCY = 8
 DEFAULT_CONCURRENCY = 4
