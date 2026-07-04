@@ -8,17 +8,67 @@ interface CacheEntry<T> {
 }
 
 type CacheStore = Map<string, CacheEntry<any>>;
-type InvalidateHandler = (key: string) => void;
 
 const cache: CacheStore = new Map();
-const subscribers = new Set<InvalidateHandler>();
 
 // Default stale time: 5 seconds
 const DEFAULT_STALE_TIME = 5000;
 
 /**
+ * Fast structural comparison — checks if two values are "the same" for
+ * rendering purposes. Handles primitives, arrays, and plain objects
+ * up to 2 levels deep. Avoids re-render flicker when the API returns
+ * an identical response on revalidation.
+ */
+function isDeepEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  if (a == null || b == null) return a === b;
+  if (typeof a !== typeof b) return false;
+  if (typeof a !== 'object') return false;
+
+  if (Array.isArray(a) && Array.isArray(b)) {
+    if (a.length !== b.length) return false;
+    for (let i = 0; i < a.length; i++) {
+      if (a[i] !== b[i]) {
+        // One level deeper for arrays of objects
+        if (typeof a[i] === 'object' && typeof b[i] === 'object') {
+          if (!isDeepEqual(a[i], b[i])) return false;
+        } else {
+          return false;
+        }
+      }
+    }
+    return true;
+  }
+
+  if (Array.isArray(a) || Array.isArray(b)) return false;
+
+  const keysA = Object.keys(a as Record<string, unknown>);
+  const keysB = Object.keys(b as Record<string, unknown>);
+  if (keysA.length !== keysB.length) return false;
+
+  for (const key of keysA) {
+    const valA = (a as Record<string, unknown>)[key];
+    const valB = (b as Record<string, unknown>)[key];
+    if (valA !== valB) {
+      if (typeof valA === 'object' && typeof valB === 'object' && valA != null && valB != null) {
+        if (!isDeepEqual(valA, valB)) return false;
+      } else {
+        return false;
+      }
+    }
+  }
+  return true;
+}
+
+/**
  * SWR-style data fetching hook with caching and background revalidation.
  * 
+ * - Returns cached data instantly on mount (no flicker, no scroll reset)
+ * - Revalidates in background when data is stale
+ * - Skips re-render when revalidated data is structurally identical
+ * - Invalidates on WebSocket events
+ *
  * @param key - Unique cache key (e.g., 'accounts', 'dashboard-stats')
  * @param fetcher - Async function to fetch data
  * @param options - Configuration options
@@ -41,62 +91,70 @@ export function useApiCache<T>(
     wsEvents = [],
   } = options;
 
+  // Initialize from cache synchronously — this is the key to no-flicker.
+  // On first render we already have data, so React never shows an empty state.
   const [data, setData] = useState<T | null>(() => {
     if (!key) return null;
-    const cached = cache.get(key);
-    return cached?.data ?? null;
+    return cache.get(key)?.data ?? null;
   });
   const [error, setError] = useState<Error | null>(null);
   const [isValidating, setIsValidating] = useState(false);
-  
+
   const mountedRef = useRef(true);
   const keyRef = useRef(key);
   keyRef.current = key;
+  const fetcherRef = useRef(fetcher);
+  fetcherRef.current = fetcher;
 
-  // Revalidation function
+  // Stable revalidation — uses fetcherRef to avoid re-creating the callback
+  // every time the fetcher identity changes (which would retrigger useEffect).
   const revalidate = useCallback(async () => {
-    if (!keyRef.current) return;
-    
     const cacheKey = keyRef.current;
+    if (!cacheKey) return;
+
     setIsValidating(true);
-    
-    // Update cache entry to show validating state
+
     const existing = cache.get(cacheKey);
     if (existing) {
       cache.set(cacheKey, { ...existing, isValidating: true });
     }
 
     try {
-      const result = await fetcher();
-      
-      if (mountedRef.current) {
-        // Update cache
-        cache.set(cacheKey, {
-          data: result,
-          timestamp: Date.now(),
-          isValidating: false,
-        });
-        
+      const result = await fetcherRef.current();
+
+      if (!mountedRef.current) return;
+
+      // CRITICAL: only update state if data actually changed.
+      // This prevents the flicker and scroll reset that happens when
+      // React re-renders with a "new" object that is structurally identical.
+      const prev = cache.get(cacheKey)?.data;
+      const changed = !isDeepEqual(prev, result);
+
+      cache.set(cacheKey, {
+        data: result,
+        timestamp: Date.now(),
+        isValidating: false,
+      });
+
+      if (changed) {
         setData(result);
-        setError(null);
-        setIsValidating(false);
       }
+      setError(null);
+      setIsValidating(false);
     } catch (err) {
-      if (mountedRef.current) {
-        const error = err instanceof Error ? err : new Error(String(err));
-        setError(error);
-        setIsValidating(false);
-        
-        // Update cache to not be validating anymore
-        const existing = cache.get(cacheKey);
-        if (existing) {
-          cache.set(cacheKey, { ...existing, isValidating: false });
-        }
+      if (!mountedRef.current) return;
+
+      const error = err instanceof Error ? err : new Error(String(err));
+      setError(error);
+      setIsValidating(false);
+
+      const existing = cache.get(cacheKey);
+      if (existing) {
+        cache.set(cacheKey, { ...existing, isValidating: false });
       }
     }
-  }, [fetcher]);
+  }, []);
 
-  // Check if data is stale
   const isStale = useCallback(() => {
     if (!keyRef.current) return true;
     const cached = cache.get(keyRef.current);
@@ -107,23 +165,22 @@ export function useApiCache<T>(
   // Initial fetch on mount
   useEffect(() => {
     mountedRef.current = true;
-    
+
     if (!key || !revalidateOnMount) return;
 
     const cached = cache.get(key);
     const now = Date.now();
-    
-    // If we have fresh data, use it immediately
+
+    // Fresh cache → use immediately, no fetch needed
     if (cached && now - cached.timestamp <= staleTime) {
       setData(cached.data);
       setIsValidating(false);
       return;
     }
 
-    // If we have stale data, show it but revalidate in background
+    // Stale cache → show stale data immediately, fetch in background
     if (cached) {
       setData(cached.data);
-      setIsValidating(true);
     }
 
     revalidate();
@@ -131,9 +188,9 @@ export function useApiCache<T>(
     return () => {
       mountedRef.current = false;
     };
-  }, [key, revalidate, staleTime, revalidateOnMount]);
+  }, [key, staleTime, revalidateOnMount, revalidate]);
 
-  // Revalidate on focus
+  // Revalidate on tab focus
   useEffect(() => {
     if (!revalidateOnFocus || !key) return;
 
@@ -149,7 +206,7 @@ export function useApiCache<T>(
 
   // Invalidate on WebSocket events
   useWsEvent(wsEvents, () => {
-    if (key && isStale()) {
+    if (key) {
       revalidate();
     }
   });
@@ -157,9 +214,8 @@ export function useApiCache<T>(
   // Manual mutation function
   const mutate = useCallback(async (newData?: T) => {
     if (!keyRef.current) return;
-    
+
     if (newData !== undefined) {
-      // Optimistic update
       cache.set(keyRef.current, {
         data: newData,
         timestamp: Date.now(),
@@ -167,7 +223,6 @@ export function useApiCache<T>(
       });
       setData(newData);
     } else {
-      // Revalidate
       await revalidate();
     }
   }, [revalidate]);
@@ -185,7 +240,6 @@ export function useApiCache<T>(
  */
 export function invalidateCache(key: string) {
   cache.delete(key);
-  subscribers.forEach(handler => handler(key));
 }
 
 /**
@@ -196,7 +250,7 @@ export function clearCache() {
 }
 
 /**
- * Pre-populate cache with data (useful for SSR or optimistic updates)
+ * Pre-populate cache with data
  */
 export function setCacheData<T>(key: string, data: T) {
   cache.set(key, {
