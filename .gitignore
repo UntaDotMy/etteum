@@ -231,6 +231,7 @@ service-account.json
 FIXES_SUMMARY.md
 IMPLEMENTATION_COMPLETE.md
 WARMUP_FIXES.md
+FIXES_APPLIED.md
 
 # =============================================================================
 # Docker (if not committed)

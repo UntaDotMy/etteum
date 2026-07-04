@@ -19,24 +19,28 @@ const DEFAULT_STALE_TIME = 5000;
  * rendering purposes. Handles primitives, arrays, and plain objects
  * up to 2 levels deep. Avoids re-render flicker when the API returns
  * an identical response on revalidation.
+ *
+ * Handles numeric coercion: "123" == 123 (common API inconsistency)
  */
 function isDeepEqual(a: unknown, b: unknown): boolean {
   if (a === b) return true;
   if (a == null || b == null) return a === b;
+
+  // Handle numeric coercion: "123" vs 123
+  if (typeof a === 'number' && typeof b === 'string') {
+    return !isNaN(Number(b)) && a === Number(b);
+  }
+  if (typeof a === 'string' && typeof b === 'number') {
+    return !isNaN(Number(a)) && Number(a) === b;
+  }
+
   if (typeof a !== typeof b) return false;
   if (typeof a !== 'object') return false;
 
   if (Array.isArray(a) && Array.isArray(b)) {
     if (a.length !== b.length) return false;
     for (let i = 0; i < a.length; i++) {
-      if (a[i] !== b[i]) {
-        // One level deeper for arrays of objects
-        if (typeof a[i] === 'object' && typeof b[i] === 'object') {
-          if (!isDeepEqual(a[i], b[i])) return false;
-        } else {
-          return false;
-        }
-      }
+      if (!isDeepEqual(a[i], b[i])) return false;
     }
     return true;
   }
@@ -48,15 +52,10 @@ function isDeepEqual(a: unknown, b: unknown): boolean {
   if (keysA.length !== keysB.length) return false;
 
   for (const key of keysA) {
-    const valA = (a as Record<string, unknown>)[key];
-    const valB = (b as Record<string, unknown>)[key];
-    if (valA !== valB) {
-      if (typeof valA === 'object' && typeof valB === 'object' && valA != null && valB != null) {
-        if (!isDeepEqual(valA, valB)) return false;
-      } else {
-        return false;
-      }
-    }
+    if (!isDeepEqual(
+      (a as Record<string, unknown>)[key],
+      (b as Record<string, unknown>)[key]
+    )) return false;
   }
   return true;
 }
@@ -115,6 +114,8 @@ export function useApiCache<T>(
     const cacheKey = keyRef.current;
     if (!cacheKey) return;
 
+    // Don't update isValidating state - it causes unnecessary re-renders
+    // Just update the cache silently
     const existing = cache.get(cacheKey);
     if (existing) {
       cache.set(cacheKey, { ...existing, isValidating: true });
