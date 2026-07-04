@@ -227,22 +227,53 @@ const server = Bun.serve({
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
-    // WebSocket Responses API (OpenAI Realtime-style). Same auth as the
-    // HTTP /v1/* endpoints (Authorization: Bearer or x-api-key). Tagged via
-    // data.kind so the shared websocketHandler can dispatch to the proxy
-    // handler instead of the dashboard handler.
-    if (url.pathname === "/v1/responses" || url.pathname === "/backend-api/codex/responses") {
+    // WebSocket Responses API (OpenAI Realtime-style). Same auth as the HTTP
+    // /v1/* endpoints (Authorization: Bearer or x-api-key). Tagged via data.kind
+    // so the shared websocketHandler can dispatch to the proxy handler instead
+    // of the dashboard handler.
+    //
+    // Path matching tolerates a trailing slash. Only GET requests with an
+    // Upgrade: websocket header are accepted as WS; a plain GET to this path
+    // returns 426 (so it does NOT fall through to the dashboard SPA).
+    const isResponsesPath =
+      url.pathname === "/v1/responses" ||
+      url.pathname === "/v1/responses/" ||
+      url.pathname === "/backend-api/codex/responses" ||
+      url.pathname === "/backend-api/codex/responses/";
+    const wantsWebSocket =
+      req.method === "GET" &&
+      req.headers.get("upgrade")?.toLowerCase() === "websocket";
+    if (isResponsesPath && wantsWebSocket) {
       const authHeader = req.headers.get("Authorization");
       const xApiKey = req.headers.get("x-api-key");
       const token = authHeader?.replace("Bearer ", "") || xApiKey || null;
       if (!token || !(await isValidApiKey(token))) {
         return new Response("Unauthorized", { status: 401 });
       }
+      // Bun auto-negotiates Sec-WebSocket-Protocol; we just tag the socket.
       const upgraded = server.upgrade(req, {
-        data: { kind: "responses-proxy", path: url.pathname },
+        data: { kind: "responses-proxy", path: url.pathname.replace(/\/$/, "") },
       });
       if (upgraded) return undefined;
+      // server.upgrade returned false — log the handshake headers so this is
+      // debuggable (usual cause: a reverse proxy stripping Upgrade/Connection).
+      console.warn(
+        "[WS] /v1/responses upgrade rejected. upgrade=",
+        req.headers.get("upgrade"),
+        "connection=",
+        req.headers.get("connection"),
+        "hasKey=",
+        !!req.headers.get("sec-websocket-key"),
+        "version=",
+        req.headers.get("sec-websocket-version"),
+      );
       return new Response("WebSocket upgrade failed", { status: 400 });
+    }
+    if (isResponsesPath) {
+      return new Response("This endpoint requires a WebSocket upgrade", {
+        status: 426,
+        headers: { Upgrade: "websocket" },
+      });
     }
 
     // Try Hono routes first (API, proxy, etc.)
