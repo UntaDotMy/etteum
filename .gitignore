@@ -245,6 +245,25 @@ FIXES_SUMMARY.md
 IMPLEMENTATION_COMPLETE.md
 WARMUP_FIXES.md
 FIXES_APPLIED.md
+MODEL_GROUPS_IMPLEMENTATION.md
+PLAN_nodriver_migration.md
+
+# =============================================================================
+# Antigravity auth — debug/iteration artifacts (ag_full.py is the kept PoC)
+# =============================================================================
+# Throwaway stepping/snapshot scripts that fed into ag_full.py:
+scripts/auth/ag_dom.py
+scripts/auth/ag_drive.py
+scripts/auth/ag_one.py
+scripts/auth/ag_probe_stall.py
+scripts/auth/ag_step.py
+scripts/auth/ag_step1.py
+scripts/auth/run_gitlab_duo_only.py
+# Debug screenshots:
+scripts/auth/ag_*.png
+scripts/auth/screenshots/
+# Captured OAuth tokens — SECRET, never commit:
+scripts/auth/ag_tokens.json
 
 # =============================================================================
 # Docker (if not committed)
