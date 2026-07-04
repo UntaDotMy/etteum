@@ -282,7 +282,8 @@ function finalizeNonStreaming(response: any, request: AnthropicMessagesRequest, 
     content.push(sb.server_tool_use);
     content.push(sb.web_search_tool_result);
   }
-  if (reasoning) content.push({ type: "text", text: reasoning });
+  // When thinking is not enabled, discard reasoning_content completely.
+  // Do NOT add it to the text output - that's the leak we're fixing.
   if (text) content.push({ type: "text", text });
   for (const call of toolCalls) {
     let input = call?.function?.arguments || {};

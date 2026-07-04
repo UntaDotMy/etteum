@@ -152,12 +152,25 @@ test/codex_direct.ts
 /test-*.mjs
 /test-*.js
 /test-*.py
+/test-*.ps1
 test-compat.out
 report.*.json
 *.png
 *.jpg
 *.jpeg
 *.gif
+
+# Debug query scripts
+check-*.ts
+query-*.ts
+query_*.sql
+
+# Temporary debug files
+temp_*.txt
+temp_*.json
+
+# HuggingFace model cache
+scripts/auth/models/
 
 # =============================================================================
 # AI Tools & Personal Config
