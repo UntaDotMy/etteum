@@ -299,9 +299,20 @@ describe("chatStreamToResponsesStream", () => {
     expect(names[names.length - 1]).toBe("response.completed");
 
     const completed = events[events.length - 1].data;
-    expect(completed.status).toBe("completed");
-    expect(completed.output[0].content[0].text).toBe("Hello!");
-    expect(completed.usage.total_tokens).toBe(6);
+    // Canonical shape: data.type == event name, data.response wraps the object.
+    expect(completed.type).toBe("response.completed");
+    expect(completed.response.status).toBe("completed");
+    expect(completed.response.output[0].content[0].text).toBe("Hello!");
+    expect(completed.response.usage.total_tokens).toBe(6);
+    // Every event must carry a monotonic sequence_number (the OpenAI SDK parser
+    // requires it; missing it causes "stream closed before response.completed").
+    const seqs = events.map((e) => e.data.sequence_number);
+    expect(seqs).toEqual(Array.from({ length: seqs.length }, (_, i) => i));
+    // Every event's data.type matches its SSE event: field.
+    for (const e of events) expect(e.data.type).toBe(e.event);
+    // response.created wraps the response object too.
+    expect(events[0].data.type).toBe("response.created");
+    expect(events[0].data.response.id).toBe(meta.id);
   });
 
   test("emits function_call argument deltas + done for tool-call stream", async () => {
@@ -319,9 +330,10 @@ describe("chatStreamToResponsesStream", () => {
     expect(names).toContain("response.function_call_arguments.done");
     expect(names).toContain("response.output_item.done");
     const completed = events[events.length - 1].data;
-    expect(completed.status).toBe("completed");
-    expect(completed.output[0].type).toBe("function_call");
-    expect(completed.output[0].arguments).toBe('{"q":"sf"}');
+    expect(completed.type).toBe("response.completed");
+    expect(completed.response.status).toBe("completed");
+    expect(completed.response.output[0].type).toBe("function_call");
+    expect(completed.response.output[0].arguments).toBe('{"q":"sf"}');
   });
 
   test("handles [DONE] sentinel without error", async () => {
@@ -332,7 +344,7 @@ describe("chatStreamToResponsesStream", () => {
     const stream = chatStreamToResponsesStream(chatChunksToStream(chunks), "gpt-5", meta.id, meta.createdAt);
     const events = await decodeResponsesSse(stream);
     expect(events[events.length - 1].event).toBe("response.completed");
-    expect(events[events.length - 1].data.output[0].content[0].text).toBe("x");
+    expect(events[events.length - 1].data.response.output[0].content[0].text).toBe("x");
   });
 
   test("source errors mid-stream → emits response.failed as terminal event and closes cleanly", async () => {
@@ -358,9 +370,10 @@ describe("chatStreamToResponsesStream", () => {
     expect(names[names.length - 1]).toBe("response.failed");
     expect(names).not.toContain("response.completed");
     const failed = events[events.length - 1].data;
-    expect(failed.status).toBe("failed");
-    expect(failed.error.type).toBe("api_error");
-    expect(failed.error.message).toContain("upstream blew up");
+    expect(failed.type).toBe("response.failed");
+    expect(failed.response.status).toBe("failed");
+    expect(failed.response.error.type).toBe("api_error");
+    expect(failed.response.error.message).toContain("upstream blew up");
   });
 
   test("terminal event is always last — completed never followed by another event", async () => {

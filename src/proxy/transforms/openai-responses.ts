@@ -496,24 +496,28 @@ export function chatStreamToResponsesStream(
   let buffer = "";
   let heartbeat: ReturnType<typeof setInterval> | null = null;
   let closed = false;
+  // Monotonic sequence number the OpenAI SDK parser uses to detect gaps/aborts.
+  let seq = 0;
+  const nextSeq = () => seq++;
 
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = chatStream.getReader();
       const decoder = new TextDecoder();
-      const emit = (event: string, data: unknown) => {
+      // Emit a canonical OpenAI Responses SSE event. The JSON `data` MUST
+      // include `type` (the SDK parses data.type, not the SSE event: field)
+      // and `sequence_number` (monotonic across the whole response). Shape
+      // verified against codex-lb's reference fixtures.
+      const emit = (eventType: string, payload: Record<string, unknown>) => {
         if (closed) return;
-        controller.enqueue(ssePack(event, data));
+        const data = { type: eventType, sequence_number: nextSeq(), ...payload };
+        controller.enqueue(ssePack(eventType, data));
       };
-      const responseSkeleton = (status: string) => ({
-        id: responseId, object: "response", created_at: createdAt, model: lastModel, status, output: [], usage: null,
-      });
       const stopHeartbeat = () => {
         if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
       };
 
-      // Keep the connection alive during long upstream reasoning turns
-      // (matches the pattern in the anthropic streaming transform). SSE
+      // Keep the connection alive during long upstream reasoning turns. SSE
       // comment frames are ignored by clients but keep the wire warm.
       heartbeat = setInterval(() => {
         if (closed) return;
@@ -521,8 +525,13 @@ export function chatStreamToResponsesStream(
       }, 15000);
 
       try {
-        emit("response.created", responseSkeleton("in_progress"));
-        emit("response.in_progress", responseSkeleton("in_progress"));
+        // response.created wraps the response object under `response`.
+        const responseObj = (status: string) => ({
+          id: responseId, object: "response", created_at: createdAt,
+          model: lastModel, status, output: [] as any[], usage: null as any,
+        });
+        emit("response.created", { response: responseObj("in_progress") });
+        emit("response.in_progress", { response: responseObj("in_progress") });
 
         while (true) {
           const { done, value } = await reader.read();
@@ -553,11 +562,20 @@ export function chatStreamToResponsesStream(
               if (typeof delta.content === "string" && delta.content.length > 0) {
                 if (!messageItemEmitted) {
                   messageItemEmitted = true;
-                  emit("response.output_item.added", { output_index: 0, item: { type: "message", id: messageItemId, status: "in_progress", role: "assistant", content: [] } });
-                  emit("response.content_part.added", { item_id: messageItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
+                  emit("response.output_item.added", {
+                    output_index: 0,
+                    item: { id: messageItemId, type: "message", role: "assistant", status: "in_progress", content: [] },
+                  });
+                  emit("response.content_part.added", {
+                    output_index: 0, content_index: 0, item_id: messageItemId,
+                    part: { type: "output_text", text: "" },
+                  });
                 }
                 textAccum += delta.content;
-                emit("response.output_text.delta", { item_id: messageItemId, output_index: 0, content_index: 0, delta: delta.content });
+                emit("response.output_text.delta", {
+                  output_index: 0, content_index: 0, item_id: messageItemId,
+                  delta: delta.content, logprobs: [],
+                });
               }
               if (Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
@@ -569,13 +587,23 @@ export function chatStreamToResponsesStream(
                     const outputIndex = 1 + idx;
                     const itemId = "fc_" + responseId.slice(5) + "_" + idx;
                     toolCallItemIds[idx] = itemId;
-                    emit("response.output_item.added", { output_index: outputIndex, item: { type: "function_call", id: itemId, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + idx, name: tc.function?.name ?? "", arguments: "", status: "in_progress" } });
+                    emit("response.output_item.added", {
+                      output_index: outputIndex,
+                      item: {
+                        id: itemId, type: "function_call", status: "in_progress",
+                        call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + idx,
+                        name: tc.function?.name ?? "", arguments: "",
+                      },
+                    });
                   }
                   if (tc.id && !entry.id) entry.id = tc.id;
                   if (tc.function?.name && !entry.name) entry.name = tc.function.name;
                   if (typeof tc.function?.arguments === "string") {
                     entry.arguments += tc.function.arguments;
-                    emit("response.function_call_arguments.delta", { item_id: toolCallItemIds[idx], output_index: 1 + idx, delta: tc.function.arguments });
+                    emit("response.function_call_arguments.delta", {
+                      output_index: 1 + idx, item_id: toolCallItemIds[idx],
+                      delta: tc.function.arguments,
+                    });
                   }
                 }
               }
@@ -595,29 +623,57 @@ export function chatStreamToResponsesStream(
 
         // Close the message item if it was opened.
         if (messageItemEmitted) {
-          emit("response.output_text.done", { item_id: messageItemId, output_index: 0, content_index: 0, text: textAccum });
-          emit("response.content_part.done", { item_id: messageItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: textAccum, annotations: [] } });
-          emit("response.output_item.done", { output_index: 0, item: { type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] } });
+          emit("response.output_text.done", {
+            output_index: 0, content_index: 0, item_id: messageItemId,
+            text: textAccum, logprobs: [],
+          });
+          emit("response.content_part.done", {
+            output_index: 0, content_index: 0, item_id: messageItemId,
+            part: { type: "output_text", text: textAccum },
+          });
+          emit("response.output_item.done", {
+            output_index: 0,
+            item: {
+              id: messageItemId, type: "message", role: "assistant", status: "completed",
+              content: [{ type: "output_text", text: textAccum }],
+            },
+          });
         }
         // Close tool-call items.
         for (const tc of toolCalls) {
           const outputIndex = 1 + tc.index;
           const itemId = toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index;
-          emit("response.function_call_arguments.done", { item_id: itemId, output_index: outputIndex, arguments: tc.arguments });
-          emit("response.output_item.done", { output_index: outputIndex, item: { type: "function_call", id: itemId, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" } });
+          emit("response.function_call_arguments.done", {
+            output_index: outputIndex, item_id: itemId, arguments: tc.arguments,
+          });
+          emit("response.output_item.done", {
+            output_index: outputIndex,
+            item: {
+              id: itemId, type: "function_call", status: "completed",
+              call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index,
+              name: tc.name ?? "", arguments: tc.arguments,
+            },
+          });
         }
+
+        // Terminal event. The Codex backend shape uses output:[] in the
+        // terminal response (real items arrived via output_item.done). The
+        // OpenAI SDK accepts either; we send the full output for clients that
+        // don't assemble from intermediate events.
         const output: ResponsesOutputItem[] = [];
         if (messageItemEmitted) output.push({ type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] });
         for (const tc of toolCalls) output.push({ type: "function_call", id: toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
         const usage: ResponsesUsage = finalUsage ?? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
-        // Terminal success event — always last before close.
-        emit("response.completed", { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "completed", output, usage });
+        emit("response.completed", {
+          response: { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "completed", output, usage },
+        });
       } catch (error) {
         // Upstream closed/errored before completion. Emit a terminal failure
-        // event so the client never sees a bare close (mirrors codex-lb
-        // "upstream websocket closed before response.completed" handling).
+        // so the client never sees a bare close.
         const message = error instanceof Error ? error.message : String(error);
-        emit("response.failed", { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "failed", error: { type: "api_error", message }, output: [], usage: null });
+        emit("response.failed", {
+          response: { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "failed", error: { type: "api_error", message }, output: [], usage: null },
+        });
       } finally {
         stopHeartbeat();
         closed = true;
@@ -625,8 +681,6 @@ export function chatStreamToResponsesStream(
       }
     },
     async cancel(reason) {
-      // Client disconnected. The source reader is released when the next
-      // read() rejects; we just stop emitting.
       void reason;
       closed = true;
     },
