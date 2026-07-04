@@ -233,9 +233,9 @@ const server = Bun.serve({
     // of the dashboard handler.
     //
     // Path matching tolerates a trailing slash. Only GET requests with an
-    // Upgrade: websocket header are accepted as WS; a plain GET to this path
-    // returns 426 (so it does NOT fall through to the dashboard SPA).
-    const isResponsesPath =
+    // Upgrade: websocket header take the WS branch. Everything else (the
+    // Codex CLI HTTP POST, GET probes) falls through to Hono — do NOT 426.
+    const isResponsesWsPath =
       url.pathname === "/v1/responses" ||
       url.pathname === "/v1/responses/" ||
       url.pathname === "/backend-api/codex/responses" ||
@@ -243,7 +243,7 @@ const server = Bun.serve({
     const wantsWebSocket =
       req.method === "GET" &&
       req.headers.get("upgrade")?.toLowerCase() === "websocket";
-    if (isResponsesPath && wantsWebSocket) {
+    if (isResponsesWsPath && wantsWebSocket) {
       const authHeader = req.headers.get("Authorization");
       const xApiKey = req.headers.get("x-api-key");
       const token = authHeader?.replace("Bearer ", "") || xApiKey || null;
@@ -269,12 +269,9 @@ const server = Bun.serve({
       );
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
-    if (isResponsesPath) {
-      return new Response("This endpoint requires a WebSocket upgrade", {
-        status: 426,
-        headers: { Upgrade: "websocket" },
-      });
-    }
+    // Non-upgrade requests to /v1/responses fall through to Hono (POST = HTTP
+    // Responses API; GET = 404 -> SPA). Do NOT return 426 here — that breaks
+    // the Codex CLI HTTP POST (wire_api=responses).
 
     // Try Hono routes first (API, proxy, etc.)
     const response = await app.fetch(req, { ip: server.requestIP(req) });
