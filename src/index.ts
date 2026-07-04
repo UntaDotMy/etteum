@@ -227,6 +227,24 @@ const server = Bun.serve({
       return new Response("WebSocket upgrade failed", { status: 400 });
     }
 
+    // WebSocket Responses API (OpenAI Realtime-style). Same auth as the
+    // HTTP /v1/* endpoints (Authorization: Bearer or x-api-key). Tagged via
+    // data.kind so the shared websocketHandler can dispatch to the proxy
+    // handler instead of the dashboard handler.
+    if (url.pathname === "/v1/responses" || url.pathname === "/backend-api/codex/responses") {
+      const authHeader = req.headers.get("Authorization");
+      const xApiKey = req.headers.get("x-api-key");
+      const token = authHeader?.replace("Bearer ", "") || xApiKey || null;
+      if (!token || !(await isValidApiKey(token))) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+      const upgraded = server.upgrade(req, {
+        data: { kind: "responses-proxy", path: url.pathname },
+      });
+      if (upgraded) return undefined;
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    }
+
     // Try Hono routes first (API, proxy, etc.)
     const response = await app.fetch(req, { ip: server.requestIP(req) });
     if (response.status !== 404) return response;

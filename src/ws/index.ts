@@ -1,19 +1,28 @@
 import type { ServerWebSocket } from "bun";
+import { responsesProxyHandler } from "./responses-proxy";
 
 interface WSMessage {
   type: string;
   data: unknown;
 }
 
-// Store connected WebSocket clients
+// Store connected dashboard WebSocket clients
 const clients = new Set<ServerWebSocket<unknown>>();
 const MAX_WS_PAYLOAD_BYTES = 128 * 1024;
 
 /**
- * WebSocket handler for Bun.serve
+ * WebSocket handler for Bun.serve. Dispatches per-socket based on the `kind`
+ * tag set at upgrade time (src/index.ts):
+ *   - "responses-proxy" → OpenAI Responses API over WebSocket
+ *   - anything else      → dashboard broadcast channel
  */
 export const websocketHandler = {
   open(ws: ServerWebSocket<unknown>) {
+    const kind = (ws.data as any)?.kind;
+    if (kind === "responses-proxy") {
+      responsesProxyHandler.open(ws as ServerWebSocket<any>);
+      return;
+    }
     clients.add(ws);
     ws.send(
       JSON.stringify({
@@ -25,6 +34,11 @@ export const websocketHandler = {
   },
 
   message(ws: ServerWebSocket<unknown>, message: string | Buffer) {
+    const kind = (ws.data as any)?.kind;
+    if (kind === "responses-proxy") {
+      responsesProxyHandler.message(ws as ServerWebSocket<any>, message);
+      return;
+    }
     // Handle incoming messages (ping/pong, subscribe to specific events, etc.)
     try {
       const msg = JSON.parse(
@@ -40,11 +54,21 @@ export const websocketHandler = {
   },
 
   close(ws: ServerWebSocket<unknown>) {
+    const kind = (ws.data as any)?.kind;
+    if (kind === "responses-proxy") {
+      responsesProxyHandler.close(ws as ServerWebSocket<any>);
+      return;
+    }
     clients.delete(ws);
     console.log(`[WS] Client disconnected (total: ${clients.size})`);
   },
 
   drain(ws: ServerWebSocket<unknown>) {
+    const kind = (ws.data as any)?.kind;
+    if (kind === "responses-proxy") {
+      responsesProxyHandler.drain(ws as ServerWebSocket<any>);
+      return;
+    }
     // Called when backpressure is relieved
   },
 };

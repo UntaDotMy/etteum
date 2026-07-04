@@ -477,7 +477,7 @@ function wrapStreamWithUsageFinalizer(
   });
 }
 
-async function handleChatCompletion(body: ChatCompletionRequest) {
+export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };

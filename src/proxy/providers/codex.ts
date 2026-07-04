@@ -219,6 +219,32 @@ export class CodexProvider extends BaseProvider {
     } catch { return null; }
   }
 
+  /**
+   * Build the upstream WebSocket URL + auth headers for the Responses-over-WS
+   * passthrough (the /v1/responses WS endpoint). The WS URL is the same path as
+   * CODEX_RESPONSES_URL with scheme https→wss. Headers mirror makeRequest()
+   * (codex.ts:453-461). Returns null if the account has no access_token.
+   *
+   * Used by src/ws/responses-proxy.ts to connect to OpenAI's native Responses
+   * WebSocket, preserving encrypted_content / reasoning state byte-for-byte
+   * (same rationale as codex-lb using WS instead of HTTP).
+   */
+  getUpstreamWebSocketContext(account: Account): { url: string; headers: Record<string, string> } | null {
+    const tokens = this.getTokens(account);
+    if (!tokens?.access_token) return null;
+    const wsUrl = CODEX_RESPONSES_URL.replace(/^https:\/\//, "wss://");
+    const headers: Record<string, string> = {
+      "Authorization": `Bearer ${tokens.access_token}`,
+      "Content-Type": "application/json",
+      "Accept": "text/event-stream",
+      "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+      "openai-beta": "responses=experimental",
+      "originator": "codex-cli",
+    };
+    if (tokens.account_id) headers["chatgpt-account-id"] = tokens.account_id;
+    return { url: wsUrl, headers };
+  }
+
   private resolveModel(model: string): string {
     return codexModelMap[model.toLowerCase()] || model;
   }

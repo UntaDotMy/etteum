@@ -486,55 +486,48 @@ export function chatStreamToResponsesStream(
   createdAt: number
 ): ReadableStream<Uint8Array> {
   const encoder = new TextEncoder();
-
-  // Accumulated state for the final response.completed event.
   let textAccum = "";
-  const toolCalls: {
-    index: number;
-    id?: string;
-    name?: string;
-    arguments: string;
-  }[] = [];
+  const toolCalls: { index: number; id?: string; name?: string; arguments: string }[] = [];
   let finalUsage: ResponsesUsage | null = null;
   let lastModel = model;
-
-  // Output indices: message is 0, tool calls follow.
   let messageItemEmitted = false;
-  const messageItemId = `msg_${responseId.slice(5)}`;
+  const messageItemId = "msg_" + responseId.slice(5);
   const toolCallItemIds: string[] = [];
-
   let buffer = "";
+  let heartbeat: ReturnType<typeof setInterval> | null = null;
+  let closed = false;
 
   return new ReadableStream<Uint8Array>({
-    // `start` must NOT block on the source read loop — Bun won't deliver
-    // enqueued chunks to the consumer until `start` returns. So we kick off
-    // the async processing here without awaiting it; the IIFE enqueues and
-    // closes the controller on its own.
-    start(controller) {
+    async start(controller) {
       const reader = chatStream.getReader();
-      const emit = (event: string, data: unknown) =>
+      const decoder = new TextDecoder();
+      const emit = (event: string, data: unknown) => {
+        if (closed) return;
         controller.enqueue(ssePack(event, data));
-
+      };
       const responseSkeleton = (status: string) => ({
-        id: responseId,
-        object: "response",
-        created_at: createdAt,
-        model: lastModel,
-        status,
-        output: [],
-        usage: null,
+        id: responseId, object: "response", created_at: createdAt, model: lastModel, status, output: [], usage: null,
       });
+      const stopHeartbeat = () => {
+        if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
+      };
 
-      void (async () => {
+      // Keep the connection alive during long upstream reasoning turns
+      // (matches the pattern in the anthropic streaming transform). SSE
+      // comment frames are ignored by clients but keep the wire warm.
+      heartbeat = setInterval(() => {
+        if (closed) return;
+        try { controller.enqueue(encoder.encode(": keepalive\n\n")); } catch { /* closed */ }
+      }, 15000);
+
       try {
-        // Lifecycle open.
         emit("response.created", responseSkeleton("in_progress"));
         emit("response.in_progress", responseSkeleton("in_progress"));
 
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          buffer += new TextDecoder().decode(value, { stream: true });
+          buffer += decoder.decode(value, { stream: true });
 
           let nl: number;
           while ((nl = buffer.indexOf("\n")) !== -1) {
@@ -554,36 +547,18 @@ export function chatStreamToResponsesStream(
                 total_tokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
               };
             }
-
             const choice = chunk.choices?.[0];
             const delta = choice?.delta;
-
-            // Text deltas.
             if (delta) {
               if (typeof delta.content === "string" && delta.content.length > 0) {
                 if (!messageItemEmitted) {
                   messageItemEmitted = true;
-                  emit("response.output_item.added", {
-                    output_index: 0,
-                    item: { type: "message", id: messageItemId, status: "in_progress", role: "assistant", content: [] },
-                  });
-                  emit("response.content_part.added", {
-                    item_id: messageItemId,
-                    output_index: 0,
-                    content_index: 0,
-                    part: { type: "output_text", text: "", annotations: [] },
-                  });
+                  emit("response.output_item.added", { output_index: 0, item: { type: "message", id: messageItemId, status: "in_progress", role: "assistant", content: [] } });
+                  emit("response.content_part.added", { item_id: messageItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: "", annotations: [] } });
                 }
                 textAccum += delta.content;
-                emit("response.output_text.delta", {
-                  item_id: messageItemId,
-                  output_index: 0,
-                  content_index: 0,
-                  delta: delta.content,
-                });
+                emit("response.output_text.delta", { item_id: messageItemId, output_index: 0, content_index: 0, delta: delta.content });
               }
-
-              // Tool call deltas.
               if (Array.isArray(delta.tool_calls)) {
                 for (const tc of delta.tool_calls) {
                   const idx = typeof tc.index === "number" ? tc.index : 0;
@@ -591,30 +566,16 @@ export function chatStreamToResponsesStream(
                   if (!entry) {
                     entry = { index: idx, arguments: "" };
                     toolCalls.push(entry);
-                    const outputIndex = 1 + idx; // message is 0
-                    const itemId = `fc_${responseId.slice(5)}_${idx}`;
+                    const outputIndex = 1 + idx;
+                    const itemId = "fc_" + responseId.slice(5) + "_" + idx;
                     toolCallItemIds[idx] = itemId;
-                    emit("response.output_item.added", {
-                      output_index: outputIndex,
-                      item: {
-                        type: "function_call",
-                        id: itemId,
-                        call_id: tc.id ?? `call_${responseId.slice(5)}_${idx}`,
-                        name: tc.function?.name ?? "",
-                        arguments: "",
-                        status: "in_progress",
-                      },
-                    });
+                    emit("response.output_item.added", { output_index: outputIndex, item: { type: "function_call", id: itemId, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + idx, name: tc.function?.name ?? "", arguments: "", status: "in_progress" } });
                   }
                   if (tc.id && !entry.id) entry.id = tc.id;
                   if (tc.function?.name && !entry.name) entry.name = tc.function.name;
                   if (typeof tc.function?.arguments === "string") {
                     entry.arguments += tc.function.arguments;
-                    emit("response.function_call_arguments.delta", {
-                      item_id: toolCallItemIds[idx],
-                      output_index: 1 + idx,
-                      delta: tc.function.arguments,
-                    });
+                    emit("response.function_call_arguments.delta", { item_id: toolCallItemIds[idx], output_index: 1 + idx, delta: tc.function.arguments });
                   }
                 }
               }
@@ -628,127 +589,46 @@ export function chatStreamToResponsesStream(
           const chunk = parseChatSseLine(tail);
           if (chunk?.usage) {
             const u = chunk.usage;
-            finalUsage = {
-              input_tokens: u.prompt_tokens ?? 0,
-              input_tokens_details: { cached_tokens: (u as any).prompt_tokens_details?.cached_tokens ?? 0 },
-              output_tokens: u.completion_tokens ?? 0,
-              output_tokens_details: { reasoning_tokens: (u as any).completion_tokens_details?.reasoning_tokens ?? 0 },
-              total_tokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0),
-            };
+            finalUsage = { input_tokens: u.prompt_tokens ?? 0, input_tokens_details: { cached_tokens: (u as any).prompt_tokens_details?.cached_tokens ?? 0 }, output_tokens: u.completion_tokens ?? 0, output_tokens_details: { reasoning_tokens: (u as any).completion_tokens_details?.reasoning_tokens ?? 0 }, total_tokens: u.total_tokens ?? (u.prompt_tokens ?? 0) + (u.completion_tokens ?? 0) };
           }
         }
 
         // Close the message item if it was opened.
         if (messageItemEmitted) {
-          emit("response.output_text.done", {
-            item_id: messageItemId,
-            output_index: 0,
-            content_index: 0,
-            text: textAccum,
-          });
-          emit("response.content_part.done", {
-            item_id: messageItemId,
-            output_index: 0,
-            content_index: 0,
-            part: { type: "output_text", text: textAccum, annotations: [] },
-          });
-          emit("response.output_item.done", {
-            output_index: 0,
-            item: {
-              type: "message",
-              id: messageItemId,
-              status: "completed",
-              role: "assistant",
-              content: [{ type: "output_text", text: textAccum, annotations: [] }],
-            },
-          });
+          emit("response.output_text.done", { item_id: messageItemId, output_index: 0, content_index: 0, text: textAccum });
+          emit("response.content_part.done", { item_id: messageItemId, output_index: 0, content_index: 0, part: { type: "output_text", text: textAccum, annotations: [] } });
+          emit("response.output_item.done", { output_index: 0, item: { type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] } });
         }
-
         // Close tool-call items.
         for (const tc of toolCalls) {
           const outputIndex = 1 + tc.index;
-          const itemId = toolCallItemIds[tc.index] ?? `fc_${responseId.slice(5)}_${tc.index}`;
-          emit("response.function_call_arguments.done", {
-            item_id: itemId,
-            output_index: outputIndex,
-            arguments: tc.arguments,
-          });
-          emit("response.output_item.done", {
-            output_index: outputIndex,
-            item: {
-              type: "function_call",
-              id: itemId,
-              call_id: tc.id ?? `call_${responseId.slice(5)}_${tc.index}`,
-              name: tc.name ?? "",
-              arguments: tc.arguments,
-              status: "completed",
-            },
-          });
+          const itemId = toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index;
+          emit("response.function_call_arguments.done", { item_id: itemId, output_index: outputIndex, arguments: tc.arguments });
+          emit("response.output_item.done", { output_index: outputIndex, item: { type: "function_call", id: itemId, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" } });
         }
-
-        // Assemble final output for response.completed.
         const output: ResponsesOutputItem[] = [];
-        if (messageItemEmitted) {
-          output.push({
-            type: "message",
-            id: messageItemId,
-            status: "completed",
-            role: "assistant",
-            content: [{ type: "output_text", text: textAccum, annotations: [] }],
-          });
-        }
-        for (const tc of toolCalls) {
-          output.push({
-            type: "function_call",
-            id: toolCallItemIds[tc.index] ?? `fc_${responseId.slice(5)}_${tc.index}`,
-            call_id: tc.id ?? `call_${responseId.slice(5)}_${tc.index}`,
-            name: tc.name ?? "",
-            arguments: tc.arguments,
-            status: "completed",
-          });
-        }
-
-        const usage: ResponsesUsage = finalUsage ?? {
-          input_tokens: 0,
-          input_tokens_details: { cached_tokens: 0 },
-          output_tokens: 0,
-          output_tokens_details: { reasoning_tokens: 0 },
-          total_tokens: 0,
-        };
-
-        emit("response.completed", {
-          id: responseId,
-          object: "response",
-          created_at: createdAt,
-          model: lastModel,
-          status: "completed",
-          output,
-          usage,
-        });
+        if (messageItemEmitted) output.push({ type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] });
+        for (const tc of toolCalls) output.push({ type: "function_call", id: toolCallItemIds[tc.index] ?? "fc_" + responseId.slice(5) + "_" + tc.index, call_id: tc.id ?? "call_" + responseId.slice(5) + "_" + tc.index, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
+        const usage: ResponsesUsage = finalUsage ?? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
+        // Terminal success event — always last before close.
+        emit("response.completed", { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "completed", output, usage });
       } catch (error) {
+        // Upstream closed/errored before completion. Emit a terminal failure
+        // event so the client never sees a bare close (mirrors codex-lb
+        // "upstream websocket closed before response.completed" handling).
         const message = error instanceof Error ? error.message : String(error);
-        emit("response.failed", {
-          id: responseId,
-          object: "response",
-          created_at: createdAt,
-          model: lastModel,
-          status: "failed",
-          error: { type: "api_error", message },
-          output: [],
-          usage: null,
-        });
+        emit("response.failed", { id: responseId, object: "response", created_at: createdAt, model: lastModel, status: "failed", error: { type: "api_error", message }, output: [], usage: null });
       } finally {
-        try {
-          controller.close();
-        } catch {
-          // Already closed by client cancel.
-        }
+        stopHeartbeat();
+        closed = true;
+        try { controller.close(); } catch { /* already closed by client */ }
       }
-      })(); // end async IIFE
     },
     async cancel(reason) {
-      // Best-effort; the source reader is released by GC. No-op is safe.
+      // Client disconnected. The source reader is released when the next
+      // read() rejects; we just stop emitting.
       void reason;
+      closed = true;
     },
   });
 }
