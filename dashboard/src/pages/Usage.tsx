@@ -3,10 +3,12 @@ import { useEffect, useState, useRef } from "react";
 import { fetchDashboardStats, fetchModelUsage } from "@/lib/api";
 import { modelColor } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
+import { Loader2 } from "lucide-react";
 
 export default function Usage() {
   const [stats, setStats] = useState<any>(null);
   const [modelStats, setModelStats] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   async function load() {
@@ -14,6 +16,7 @@ export default function Usage() {
       fetchDashboardStats().then(setStats).catch(() => setStats(null)),
       fetchModelUsage().then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
     ]);
+    setLoading(false);
   }
 
   const scheduleReload = () => {
@@ -56,7 +59,13 @@ export default function Usage() {
         </p>
       </div>
 
-      <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="h-8 w-8 animate-spin text-[var(--primary)]" />
+        </div>
+      ) : (
+        <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
+      )}
     </div>
   );
 }

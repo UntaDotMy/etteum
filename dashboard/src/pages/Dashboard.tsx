@@ -4,16 +4,19 @@ import { useEffect, useRef, useState } from "react";
 import { fetchDashboardStats, fetchModelUsage } from "@/lib/api";
 import { modelColor } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
+import { Loader2 } from "lucide-react";
 
 export default function Dashboard() {
   const [stats, setStats] = useState<any>(null);
   const [modelStats, setModelStats] = useState<any[]>([]);
+  const [loading, setLoading] = useState(true);
 
   async function load() {
     await Promise.all([
       fetchDashboardStats(undefined, "all").then(setStats).catch(() => setStats(null)),
       fetchModelUsage(undefined, "all").then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
     ]);
+    setLoading(false);
   }
 
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
@@ -82,9 +85,16 @@ export default function Dashboard() {
         </p>
       </div>
 
-      <StatsCards data={dashboardStats} />
-
-      <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="h-8 w-8 animate-spin text-[var(--primary)]" />
+        </div>
+      ) : (
+        <>
+          <StatsCards data={dashboardStats} />
+          <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
+        </>
+      )}
     </div>
   );
 }

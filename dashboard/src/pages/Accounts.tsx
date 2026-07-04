@@ -1314,13 +1314,20 @@ export default function Accounts() {
         </div>
         <div className="flex flex-wrap gap-2">
           <Button variant="outline" size="sm" onClick={load} disabled={loading}>
-            <RefreshCw className="w-4 h-4 mr-2" /> Refresh
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
           <Button variant="outline" size="sm" onClick={handleLoginAll}>
             <Play className="w-4 h-4 mr-2" /> Login Pending
           </Button>
         </div>
       </div>
+
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
+        </div>
+      ) : (
+      <>
 
       {/* Messages */}
       {(message || error) && (
@@ -2485,6 +2492,8 @@ sk-ws-H.zzzzzzzz..."
           )}
         </DialogContent>
       </Dialog>
+      </>
+      )}
     </div>
   );
 }

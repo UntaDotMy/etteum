@@ -118,6 +118,7 @@ export default function BotLogs() {
   const [stoppingWarmup, setStoppingWarmup] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
+  const [loading, setLoading] = useState(true);
   const perPage = 25;
   const queueRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsStatus = useWsStatus();
@@ -131,6 +132,7 @@ export default function BotLogs() {
     // Filter out all warmup logs - Login Logs only shows login operations
     setLogs((current) => mergeLogs(current, (logRes.data || []).filter((log) => !log.type.startsWith("warmup_"))));
     setQueue(queueRes);
+    setLoading(false);
   }
 
   const refreshQueues = useCallback(async () => {
@@ -343,6 +345,12 @@ export default function BotLogs() {
         </div>
       </div>
 
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
+        </div>
+      ) : (
+      <>
       <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
         <Card className="border-[var(--border)]"><CardContent className="p-4"><p className="text-xs text-[var(--muted-foreground)]">Queue</p><p className="text-2xl font-bold">{totalQueued}</p></CardContent></Card>
         <Card className="border-[var(--border)]"><CardContent className="p-4"><p className="text-xs text-[var(--muted-foreground)]">Progress</p><p className="text-2xl font-bold text-[var(--warning)]">{totalProgress}</p></CardContent></Card>
@@ -460,6 +468,8 @@ export default function BotLogs() {
           )}
         </CardContent>
       </Card>
+      </>
+      )}
     </div>
   );
 }

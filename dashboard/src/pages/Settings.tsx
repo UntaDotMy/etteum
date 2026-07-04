@@ -59,6 +59,7 @@ export default function Settings() {
   const [savedAt, setSavedAt] = useState<Date | null>(null);
   const [saving, setSaving] = useState(false);
   const [dirty, setDirty] = useState(false);
+  const [loading, setLoading] = useState(true);
   const { message, setMessage } = useTimedMessage<string>(null, 3000);
 
   // ── Update awareness ──────────────────────────────────────────────────────
@@ -128,6 +129,7 @@ export default function Settings() {
     setForm((current) => ({ ...current, ...(res.data || {}) }));
     setDirty(false);
     fetchAutoWarmupStatus().then(setWarmupStatus).catch(() => {});
+    setLoading(false);
   }
 
   useEffect(() => {
@@ -189,11 +191,17 @@ export default function Settings() {
         </div>
       </div>
 
-      {message && (
-        <div className="rounded-md bg-[var(--success)]/10 p-3 text-sm text-[var(--success)]">
-          {message}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <Loader2 className="h-8 w-8 animate-spin text-[var(--primary)]" />
         </div>
-      )}
+      ) : (
+        <>
+          {message && (
+            <div className="rounded-md bg-[var(--success)]/10 p-3 text-sm text-[var(--success)]">
+              {message}
+            </div>
+          )}
 
       {/* ── Updates ── */}
       <Card>
@@ -760,6 +768,8 @@ export default function Settings() {
           </CardContent>
         </Card>
       </div>
+      </>
+      )}
     </div>
   );
 }

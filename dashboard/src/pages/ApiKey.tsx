@@ -10,6 +10,7 @@ export default function ApiKey() {
   const [apiKey, setApiKeyState] = useState(localStorage.getItem("api_key") || "pool-proxy-secret-key");
   const [source, setSource] = useState("browser");
   const [showKey, setShowKey] = useState(false);
+  const [loading, setLoading] = useState(true);
   const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 3500);
   const { message: copied, setMessage: setCopiedTimed } = useTimedMessage<boolean>(null, 2000);
   const [error, setError] = useState<string | null>(null);
@@ -39,6 +40,8 @@ export default function ApiKey() {
       setValid(true);
     } catch (err) {
       fail(err);
+    } finally {
+      setLoading(false);
     }
   }
 
@@ -95,17 +98,23 @@ export default function ApiKey() {
         </p>
       </div>
 
-      {(message || error) && (
-        <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
-          {message || error}
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
         </div>
-      )}
+      ) : (
+        <>
+          {(message || error) && (
+            <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
+              {message || error}
+            </div>
+          )}
 
-      <Card className="border-[var(--border)] max-w-3xl">
-        <CardHeader>
-          <CardTitle className="text-base flex items-center gap-2">
-            <ShieldCheck className="w-4 h-4" /> Active API Key
-          </CardTitle>
+          <Card className="border-[var(--border)] max-w-3xl">
+            <CardHeader>
+              <CardTitle className="text-base flex items-center gap-2">
+                <ShieldCheck className="w-4 h-4" /> Active API Key
+              </CardTitle>
           <CardDescription>
             Source: <span className="font-mono">{source}</span>. The env fallback key also remains accepted.
           </CardDescription>
@@ -166,6 +175,8 @@ export default function ApiKey() {
           </div>
         </CardContent>
       </Card>
+        </>
+      )}
     </div>
   );
 }

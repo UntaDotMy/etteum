@@ -147,6 +147,12 @@ export default function Requests() {
         </Button>
       </div>
 
+      {loading ? (
+        <div className="flex items-center justify-center py-20">
+          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
+        </div>
+      ) : (
+      <>
       <div className="flex flex-col gap-3 sm:flex-row">
         <div className="relative flex-1">
           <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-[var(--muted-foreground)]" />
@@ -271,10 +277,11 @@ export default function Requests() {
           </aside>
         </div>
       )}
+      </>
+      )}
     </div>
   );
 }
-
 function Metric({ label, value, color }: { label: string; value: string | number; color: string }) {
   const colors: Record<string, string> = {
     blue: "bg-[var(--info)]/10 text-[var(--info)]",
