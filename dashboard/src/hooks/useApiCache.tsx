@@ -110,14 +110,10 @@ export function useApiCache<T>(
 
   // Stable revalidation — uses fetcherRef to avoid re-creating the callback
   // every time the fetcher identity changes (which would retrigger useEffect).
+  // CRITICAL: This function must NOT call setState unless data actually changed.
   const revalidate = useCallback(async () => {
     const cacheKey = keyRef.current;
     if (!cacheKey) return;
-
-    // Don't update isValidating state if it's already true (prevents re-render)
-    if (!cache.get(cacheKey)?.isValidating) {
-      setIsValidating(true);
-    }
 
     const existing = cache.get(cacheKey);
     if (existing) {
@@ -145,13 +141,11 @@ export function useApiCache<T>(
         setData(result);
       }
       setError(null);
-      setIsValidating(false);
     } catch (err) {
       if (!mountedRef.current) return;
 
       const error = err instanceof Error ? err : new Error(String(err));
       setError(error);
-      setIsValidating(false);
 
       const existing = cache.get(cacheKey);
       if (existing) {
@@ -179,7 +173,6 @@ export function useApiCache<T>(
     // Fresh cache → use immediately, no fetch needed
     if (cached && now - cached.timestamp <= staleTime) {
       setData(cached.data);
-      setIsValidating(false);
       return;
     }
 
