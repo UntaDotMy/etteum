@@ -1,4 +1,4 @@
-# Etteum Pool Uninstaller (Windows PowerShell 5.1+ / 7+).
+﻿# Etteum Pool Uninstaller (Windows PowerShell 5.1+ / 7+).
 #
 # Removes CLI shims, Python venv, node_modules, and optionally the database.
 # Does NOT remove the project directory itself (you can re-install into it).
