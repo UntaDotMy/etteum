@@ -61,8 +61,14 @@ from app.providers.base import NormalizedAccount
 from app.providers.nodriver_browser import launch_browser
 
 
+# --- session + phase + frame + input infrastructure ---
+
+_session_id = ""
+_input_queue: asyncio.Queue | None = None
+
+
 def emit(data: dict) -> None:
-    """Emit one JSON event line to stdout (the reference design shape, read by runner.ts)."""
+    """Emit one JSON event line to stdout (read by the TS runner)."""
     try:
         print(json.dumps(data), flush=True)
     except BrokenPipeError:
@@ -73,12 +79,16 @@ def progress(step: str, message: str, **extra: Any) -> None:
     emit({"type": "progress", "provider": "antigravity", "step": step, "message": message, **extra})
 
 
+def emit_phase(phase: str, message: str = "") -> None:
+    emit({"type": "phase", "sessionId": _session_id, "phase": phase, "message": message})
+
+
 def cancelled(cancel_signal_file: str) -> bool:
     return bool(cancel_signal_file) and os.path.exists(cancel_signal_file)
 
 
 async def emit_browser_host(page: Any) -> None:
-    """Report which host the browser is currently on (the reference design browser_host)."""
+    """Report which host the browser is currently on."""
     try:
         url = await page.evaluate("location.href") or ""
     except Exception:
@@ -91,6 +101,98 @@ async def emit_browser_host(page: Any) -> None:
         host = ""
     msg = f"Browser at {host}" if host else f"Browser at {url[:120]}"
     progress("browser_host", msg)
+
+
+async def screenshot_loop(page: Any, cancel_file: str, interval: float = 0.5) -> None:
+    """Background task: capture screenshots at intervals and emit frame events.
+
+    The frontend displays these as a live browser frame. Uses CDP
+    Page.captureScreenshot (JPEG, quality 60) — ~20-40KB per frame.
+    """
+    from nodriver import cdp
+    tab = page.tab
+    while not cancelled(cancel_file):
+        try:
+            res = await tab.send(cdp.page.capture_screenshot(
+                format_=cdp.page.ImageFormat.JPEG,
+                quality=60,
+            ))
+            # nodriver returns (data,) tuple; data is base64 string
+            b64 = res[0] if isinstance(res, tuple) else res
+            if b64 and isinstance(b64, str):
+                emit({"type": "frame", "sessionId": _session_id, "base64": b64, "format": "jpeg"})
+        except Exception as exc:
+            _debug(f"screenshot capture failed: {exc}")
+        await asyncio.sleep(interval)
+
+
+async def stdin_reader_loop(cancel_file: str) -> None:
+    """Background task: read stdin line-by-line, dispatch input + captcha answers.
+
+    Accepts 3 message types (one JSON per line):
+      {"answer":"text"}              — captcha answer (existing)
+      {"type":"pointer","x":N,"y":N,"action":"down|move|up"}  — mouse event
+      {"type":"key","text":"a","code":"KeyA","action":"down|up"} — key event
+    """
+    global _input_queue
+    _input_queue = asyncio.Queue()
+    loop = asyncio.get_event_loop()
+    while not cancelled(cancel_file):
+        try:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+        except Exception:
+            break
+        if not line:
+            break
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        await _input_queue.put(msg)
+
+
+async def dispatch_input(page: Any) -> None:
+    """Background task: drain the input queue and forward to CDP."""
+    from nodriver import cdp
+    tab = page.tab
+    while True:
+        msg = await _input_queue.get()
+        if msg is None:
+            break
+        try:
+            mtype = msg.get("type")
+            if mtype == "pointer":
+                x = float(msg.get("x", 0))
+                y = float(msg.get("y", 0))
+                action = msg.get("action", "move")
+                if action == "down":
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        type_="mousePressed", x=x, y=y,
+                        button=cdp.input_.MouseButton.LEFT, click_count=1))
+                elif action == "up":
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        type_="mouseReleased", x=x, y=y,
+                        button=cdp.input_.MouseButton.LEFT, click_count=1))
+                else:
+                    await tab.send(cdp.input_.dispatch_mouse_event(
+                        type_="mouseMoved", x=x, y=y))
+            elif mtype == "key":
+                code = msg.get("code", "")
+                text = msg.get("text", "")
+                action = msg.get("action", "down")
+                ktype = "keyDown" if action == "down" else "keyUp"
+                if text and len(text) == 1 and action == "down":
+                    # char input
+                    await tab.send(cdp.input_.dispatch_key_event(
+                        type_="char", text=text, key=text, code=code))
+                else:
+                    await tab.send(cdp.input_.dispatch_key_event(
+                        type_=ktype, key=text or code, code=code))
+        except Exception as exc:
+            _debug(f"input dispatch failed: {exc}")
 
 
 async def capture_captcha_image(page: Any) -> "tuple[str, str]":
@@ -132,12 +234,13 @@ async def capture_captcha_image(page: Any) -> "tuple[str, str]":
 
 async def emit_manual_challenge(page: Any, seq: int) -> "str | None":
     """Emit a manual_challenge event with the CAPTCHA image, then wait for the
-    answer on stdin (one JSON line {"answer":"..."}). Returns the answer or None.
+    answer via the input queue. Returns the answer or None.
 
     The dashboard renders the image + a text input; the user's answer is written
-    to this script's stdin by the TS side. We block here (with a cancel check)
-    until an answer arrives or the cancel-signal-file appears.
+    to this script's stdin by the TS side. The stdin_reader_loop puts it on
+    _input_queue; we drain the queue here looking for an {answer:...} message.
     """
+    global _input_queue
     image_b64, image_fmt = await capture_captcha_image(page)
     emit({
         "type": "manual_challenge",
@@ -149,30 +252,27 @@ async def emit_manual_challenge(page: Any, seq: int) -> "str | None":
         "message": "Google text CAPTCHA — type the characters you see",
         "prompt": "Type the characters shown in the image",
     })
+    emit_phase("manual_input_waiting", "CAPTCHA — waiting for user input")
 
-    # Read the answer from stdin (line-JSON). The TS side writes one line.
-    loop = asyncio.get_event_loop()
+    # Drain the input queue for an answer message.
     deadline = time.monotonic() + 300  # 5 min to answer
-    while time.monotonic() < deadline:
-        # Non-blocking-ish: read a line from stdin on a thread so we can also
-        # poll the cancel-signal-file.
+    while time.monotonic() < deadline and _input_queue is not None:
         try:
-            line = await loop.run_in_executor(None, sys.stdin.readline)
-        except Exception:
-            line = ""
-        if line:
-            line = line.strip()
-            if line:
-                try:
-                    obj = json.loads(line)
-                    ans = obj.get("answer")
-                    if isinstance(ans, str) and ans:
-                        return ans
-                except json.JSONDecodeError:
-                    # Tolerate a bare-string answer.
-                    if line:
-                        return line
-        await asyncio.sleep(0.5)
+            msg = await asyncio.wait_for(_input_queue.get(), timeout=1.0)
+        except asyncio.TimeoutError:
+            continue
+        if msg is None:
+            break
+        # Check if it's an answer (not a pointer/key event)
+        if "answer" in msg:
+            ans = msg.get("answer")
+            if isinstance(ans, str) and ans:
+                # Put any pointer/key events that came after back on the queue.
+                emit_phase("running", "CAPTCHA submitted, continuing...")
+                return ans
+        # If it's a pointer/key event, re-queue it for dispatch_input.
+        if msg.get("type") in ("pointer", "key"):
+            await _input_queue.put(msg)
     return None
 
 
@@ -259,6 +359,13 @@ async def main() -> int:
     adapter = AntigravityProviderAdapter()
     session: dict[str, Any] = {}
     callback_server = None
+    bg_tasks: list[asyncio.Task] = []
+
+    # Generate a session ID so the TS layer can track this browser session.
+    import secrets as _sid
+    _session_id = f"ag-{int(time.time())}-{_sid.token_hex(4)}"
+    emit({"type": "session", "sessionId": _session_id, "email": args.email, "provider": "antigravity"})
+    emit_phase("launching", "Starting browser...")
 
     try:
         progress("browser_launch", "Opening secure browser (visible window)...")
@@ -268,8 +375,9 @@ async def main() -> int:
         session["browser"] = browser
         session["page"] = page
         progress("browser_launch", "Secure browser ready")
+        emit_phase("loading", "Browser ready, navigating...")
 
-        # OAuth callback server + authorize URL (mirrors AntigravityProviderAdapter.authenticate).
+        # OAuth callback server + authorize URL.
         import secrets as _secrets
         state_token = _secrets.token_urlsafe(16)
         cb_state = _CallbackState()
@@ -289,14 +397,18 @@ async def main() -> int:
 
         progress("navigate", "Opening Google OAuth...")
         await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
+        emit_phase("running", "Driving Google login flow...")
 
-        # Background: emit browser_host periodically while the login proceeds.
+        # Background tasks: screenshots, stdin reader, input dispatcher, host heartbeat.
+        bg_tasks.append(asyncio.create_task(screenshot_loop(page, args.cancel_signal_file)))
+        bg_tasks.append(asyncio.create_task(stdin_reader_loop(args.cancel_signal_file)))
+        bg_tasks.append(asyncio.create_task(dispatch_input(page)))
+
         async def host_heartbeat() -> None:
             while not cancelled(args.cancel_signal_file):
                 await emit_browser_host(page)
                 await asyncio.sleep(6.0)
-
-        host_task = asyncio.create_task(host_heartbeat())
+        bg_tasks.append(asyncio.create_task(host_heartbeat()))
 
         progress("google_login", "Driving Google login flow...")
         await drive_login_with_frame(page, args.email, args.password, session, args.cancel_signal_file)
@@ -309,7 +421,6 @@ async def main() -> int:
                 if cb_state.code or cb_state.error:
                     break
             await asyncio.sleep(0.5)
-        host_task.cancel()
 
         with cb_state.lock:
             code = cb_state.code
@@ -330,7 +441,7 @@ async def main() -> int:
             _debug(f"quota fetch failed (non-fatal): {exc}")
             quota = None
 
-        # Capture web cookie for billing API (mirrors login.py).
+        # Capture web cookie for billing API.
         try:
             browser_cookies = await page.context.cookies()
             if browser_cookies:
@@ -338,6 +449,7 @@ async def main() -> int:
         except Exception:
             pass
 
+        emit_phase("complete", "Login successful")
         emit({"type": "result", "antigravity": {
             "success": True,
             "credentials": tokens,
@@ -348,6 +460,7 @@ async def main() -> int:
 
     except Exception as exc:
         message = str(exc) or "manual antigravity login failed"
+        emit_phase("failed", message)
         emit({"type": "error", "provider": "antigravity", "error": message})
         emit({"type": "result", "antigravity": {
             "success": False,
@@ -357,6 +470,14 @@ async def main() -> int:
         }})
         return 1
     finally:
+        # Signal input dispatchers to stop.
+        if _input_queue is not None:
+            try:
+                _input_queue.put_nowait(None)
+            except Exception:
+                pass
+        for t in bg_tasks:
+            t.cancel()
         if callback_server is not None:
             try:
                 callback_server.shutdown()
