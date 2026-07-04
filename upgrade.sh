@@ -191,12 +191,26 @@ ok "Migrations complete"
 
 # 8. Rebuild Python venv (if needed)
 step "Checking Python venv..."
-VENV_PY="$PROJECT_DIR/scripts/auth/.venv/bin/python"
+# Auto-detect the venv python — a venv created on Linux/macOS has bin/python,
+# on Windows it has Scripts/python.exe. Don't assume the current OS matches the
+# venv layout (WSL vs native, moved repo). Mirrors src/config.ts resolvePythonPath.
+VENV_DIR="$PROJECT_DIR/scripts/auth/.venv"
+VENV_PY=""
+for cand in "$VENV_DIR/bin/python" "$VENV_DIR/bin/python3" "$VENV_DIR/Scripts/python.exe"; do
+  if [[ -f "$cand" ]]; then VENV_PY="$cand"; break; fi
+done
 if [[ ! -f "$VENV_PY" ]]; then
   info "Rebuilding Python venv..."
-  python3 -m venv "$PROJECT_DIR/scripts/auth/.venv" || err "Failed to create venv"
-  "$VENV_PY" -m pip install --upgrade pip wheel >/dev/null 2>&1 || true
-  "$VENV_PY" -m pip install -r "$PROJECT_DIR/scripts/auth/requirements.txt" || err "pip install failed"
+  # Pick a python to build the venv with — prefer python3, fall back to python.
+  VENV_HOST_PY="${PYTHON_BIN:-python3}"
+  command -v "$VENV_HOST_PY" >/dev/null 2>&1 || VENV_HOST_PY="python"
+  "$VENV_HOST_PY" -m venv "$VENV_DIR" || err "Failed to create venv"
+  # Re-detect the venv python after creation (layout depends on the host OS).
+  for cand in "$VENV_DIR/bin/python" "$VENV_DIR/bin/python3" "$VENV_DIR/Scripts/python.exe"; do
+    if [[ -f "$cand" ]]; then VENV_PY="$cand"; break; fi
+  done
+  "$VENV_PY" -m pip install --no-input --progress-bar off --upgrade pip wheel >/dev/null 2>&1 || true
+  "$VENV_PY" -m pip install --no-input --progress-bar off -r "$PROJECT_DIR/scripts/auth/requirements.txt" || err "pip install failed"
   ok "Python venv rebuilt"
 else
   ok "Python venv OK"
