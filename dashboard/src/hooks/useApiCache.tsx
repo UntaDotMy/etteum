@@ -105,8 +105,8 @@ export function useApiCache<T>(
   keyRef.current = key;
   const fetcherRef = useRef(fetcher);
   fetcherRef.current = fetcher;
+  const lastRevalidateRef = useRef(0);
   const revalidateTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
-  const isRevalidatingRef = useRef(false);
 
   // Stable revalidation — uses fetcherRef to avoid re-creating the callback
   // every time the fetcher identity changes (which would retrigger useEffect).
@@ -114,7 +114,10 @@ export function useApiCache<T>(
     const cacheKey = keyRef.current;
     if (!cacheKey) return;
 
-    setIsValidating(true);
+    // Don't update isValidating state if it's already true (prevents re-render)
+    if (!cache.get(cacheKey)?.isValidating) {
+      setIsValidating(true);
+    }
 
     const existing = cache.get(cacheKey);
     if (existing) {
@@ -206,21 +209,34 @@ export function useApiCache<T>(
     return () => document.removeEventListener('visibilitychange', handleFocus);
   }, [key, revalidateOnFocus, isStale, revalidate]);
 
-  // Invalidate on WebSocket events — debounced to batch rapid updates
+  // Invalidate on WebSocket events — throttled to max once per 2 seconds
   useWsEvent(wsEvents, () => {
     if (!key) return;
     
-    // Clear any pending revalidation
-    if (revalidateTimerRef.current) {
-      clearTimeout(revalidateTimerRef.current);
+    const now = Date.now();
+    const timeSinceLastRevalidate = now - lastRevalidateRef.current;
+    
+    // If we revalidated recently (< 2 seconds ago), skip this event
+    if (timeSinceLastRevalidate < 2000) {
+      // Clear any pending revalidation
+      if (revalidateTimerRef.current) {
+        clearTimeout(revalidateTimerRef.current);
+      }
+      
+      // Schedule a revalidation for when the throttle window expires
+      const delay = 2000 - timeSinceLastRevalidate;
+      revalidateTimerRef.current = setTimeout(() => {
+        revalidateTimerRef.current = null;
+        lastRevalidateRef.current = Date.now();
+        revalidate();
+      }, delay);
+      
+      return;
     }
     
-    // Schedule revalidation after 300ms of inactivity
-    // This batches multiple WebSocket events into a single fetch
-    revalidateTimerRef.current = setTimeout(() => {
-      revalidateTimerRef.current = null;
-      revalidate();
-    }, 300);
+    // Enough time has passed, revalidate immediately
+    lastRevalidateRef.current = now;
+    revalidate();
   });
   
   // Cleanup timer on unmount
