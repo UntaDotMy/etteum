@@ -1,35 +1,22 @@
 import TokenUsage from "@/components/dashboard/TokenUsage";
-import { useEffect, useState, useRef } from "react";
 import { fetchDashboardStats, fetchModelUsage } from "@/lib/api";
 import { modelColor } from "@/lib/utils";
-import { useWsEvent } from "@/hooks/useWebSocket";
-import { Loader2 } from "lucide-react";
+import { useApiCache } from "@/hooks/useApiCache";
 
 export default function Usage() {
-  const [stats, setStats] = useState<any>(null);
-  const [modelStats, setModelStats] = useState<any[]>([]);
-  const [loading, setLoading] = useState(true);
-  const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const { data: stats } = useApiCache<any>(
+    "usage-stats",
+    () => fetchDashboardStats(),
+    { staleTime: 5000, wsEvents: ["request_log", "request_error"] }
+  );
 
-  async function load() {
-    await Promise.all([
-      fetchDashboardStats().then(setStats).catch(() => setStats(null)),
-      fetchModelUsage().then((res: { data: any[] }) => setModelStats(res.data || [])).catch(() => setModelStats([])),
-    ]);
-    setLoading(false);
-  }
+  const { data: modelStatsRes } = useApiCache<{ data: any[] }>(
+    "usage-models",
+    () => fetchModelUsage(),
+    { staleTime: 5000, wsEvents: ["request_log", "request_error"] }
+  );
 
-  const scheduleReload = () => {
-    if (reloadRef.current) clearTimeout(reloadRef.current);
-    reloadRef.current = setTimeout(() => { load(); }, 500);
-  };
-
-  useEffect(() => {
-    load();
-    return () => { if (reloadRef.current) clearTimeout(reloadRef.current); };
-  }, []);
-
-  useWsEvent(["request_log", "request_error"], scheduleReload);
+  const modelStats = modelStatsRes?.data || [];
 
   const tokenStats = {
     total: Number(stats?.tokens?.total || 0),
@@ -38,7 +25,7 @@ export default function Usage() {
     credits: Number(stats?.tokens?.credits || 0),
   };
 
-  const modelUsage = modelStats.map((m, idx) => ({
+  const modelUsage = modelStats.map((m: any, idx: number) => ({
     provider: m.provider || "unknown",
     model: m.model || "unknown",
     tokens: Number(m.totalTokens || 0),
@@ -59,13 +46,7 @@ export default function Usage() {
         </p>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <Loader2 className="h-8 w-8 animate-spin text-[var(--primary)]" />
-        </div>
-      ) : (
-        <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
-      )}
+      <TokenUsage stats={tokenStats} modelUsage={modelUsage} />
     </div>
   );
 }

@@ -5,16 +5,37 @@ import { Input } from "@/components/ui/input";
 import { Copy, Eye, EyeOff, RefreshCw, Check, Save, ShieldCheck } from "lucide-react";
 import { fetchApiKey, regenerateApiKey, setApiKey, testApiKey } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+import { useApiCache } from "@/hooks/useApiCache";
 
 export default function ApiKey() {
-  const [apiKey, setApiKeyState] = useState(localStorage.getItem("api_key") || "pool-proxy-secret-key");
-  const [source, setSource] = useState("browser");
+  // Load API key with SWR cache - instant from cache, revalidate in background
+  const { data: keyData, mutate } = useApiCache<{ key: string; source: string }>(
+    "api-key",
+    () => fetchApiKey() as Promise<{ key: string; source: string }>,
+    { staleTime: 30000 } // 30s stale - keys don't change often
+  );
+
+  const [apiKey, setApiKeyState] = useState(() => {
+    // Initialize from cache, then localStorage, then default
+    if (keyData?.key) return keyData.key;
+    return localStorage.getItem("api_key") || "pool-proxy-secret-key";
+  });
+  const [source, setSource] = useState(() => keyData?.source || "browser");
   const [showKey, setShowKey] = useState(false);
-  const [loading, setLoading] = useState(true);
   const { message, setMessage: setTimedMessage, clearMessage } = useTimedMessage<string>(null, 3500);
   const { message: copied, setMessage: setCopiedTimed } = useTimedMessage<boolean>(null, 2000);
   const [error, setError] = useState<string | null>(null);
   const [valid, setValid] = useState<boolean | null>(null);
+
+  // Sync when cache loads
+  useEffect(() => {
+    if (keyData) {
+      setApiKeyState(keyData.key);
+      setSource(keyData.source);
+      localStorage.setItem("api_key", keyData.key);
+      setValid(true);
+    }
+  }, [keyData]);
 
   function notify(text: string) {
     setTimedMessage(text);
@@ -38,16 +59,11 @@ export default function ApiKey() {
       setSource(res.source);
       saveToBrowser(res.key);
       setValid(true);
+      await mutate(); // Update cache
     } catch (err) {
       fail(err);
-    } finally {
-      setLoading(false);
     }
   }
-
-  useEffect(() => {
-    loadKey();
-  }, []);
 
   const handleCopy = () => {
     navigator.clipboard.writeText(apiKey);
@@ -61,6 +77,7 @@ export default function ApiKey() {
       setSource(res.source);
       setValid(true);
       notify("API key saved to backend and browser. It can now be used for proxy requests.");
+      await mutate(); // Update cache
     } catch (err) {
       fail(err);
     }
@@ -74,6 +91,7 @@ export default function ApiKey() {
       setSource(res.source);
       setValid(true);
       notify("New API key generated, saved, and activated.");
+      await mutate(); // Update cache
     } catch (err) {
       fail(err);
     }
@@ -98,23 +116,17 @@ export default function ApiKey() {
         </p>
       </div>
 
-      {loading ? (
-        <div className="flex items-center justify-center py-20">
-          <div className="animate-spin rounded-full h-8 w-8 border-b-2 border-[var(--primary)]"></div>
+      {(message || error) && (
+        <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
+          {message || error}
         </div>
-      ) : (
-        <>
-          {(message || error) && (
-            <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
-              {message || error}
-            </div>
-          )}
+      )}
 
-          <Card className="border-[var(--border)] max-w-3xl">
-            <CardHeader>
-              <CardTitle className="text-base flex items-center gap-2">
-                <ShieldCheck className="w-4 h-4" /> Active API Key
-              </CardTitle>
+      <Card className="border-[var(--border)] max-w-3xl">
+        <CardHeader>
+          <CardTitle className="text-base flex items-center gap-2">
+            <ShieldCheck className="w-4 h-4" /> Active API Key
+          </CardTitle>
           <CardDescription>
             Source: <span className="font-mono">{source}</span>. The env fallback key also remains accepted.
           </CardDescription>
@@ -175,8 +187,6 @@ export default function ApiKey() {
           </div>
         </CardContent>
       </Card>
-        </>
-      )}
     </div>
   );
 }
