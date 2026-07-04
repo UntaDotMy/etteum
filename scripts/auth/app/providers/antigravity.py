@@ -40,6 +40,19 @@ from app.providers.nodriver_browser import launch_browser, reap_orphan_nodriver_
 
 _EMAIL_PATTERN = re.compile(r"^[^@\s]+@[^@\s]+\.[^@\s]+$")
 
+
+def _emit_progress(provider: str, step: str, message: str) -> None:
+    """Emit a progress event to stdout (read by runner.ts)."""
+    try:
+        print(json.dumps({
+            "type": "progress",
+            "provider": provider,
+            "step": step,
+            "message": message,
+        }), flush=True)
+    except BrokenPipeError:
+        pass
+
 # Antigravity CLI's public Google OAuth client (ships in the CLI binary).
 AG_CLIENT_ID = "1071006060591-tmhssin2h21lcre235vtolojh4g403ep.apps.googleusercontent.com"
 # Assembled from fragments to avoid tripping GitHub push-protection on the
@@ -294,6 +307,7 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
     import time as _time
 
     # 1. email page
+    _emit_progress("antigravity", "email_step", "Waiting for email input...")
     e = await _wait_for(page, {"input_visible": "#identifierId", "button_text": "Next"}, timeout_s=20)
     if e:
         _debug(f"email page wait: {e}")
@@ -301,6 +315,7 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
     await _click_button(page, "Next")
 
     # 2. password page (may be slow to render; retry if timed out)
+    _emit_progress("antigravity", "password_step", "Filling password...")
     e = await _wait_for(page, {"url_contains": "challenge/pwd", "input_visible": 'input[name="Passwd"]', "button_text": "Next"}, timeout_s=45)
     if e:
         _debug(f"password page wait: {e}; re-filling email + Next")
@@ -317,6 +332,7 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
     # 3. interstitial loop: click any known actionable button (speedbump/consent)
     # until the OAuth redirect fires (we leave accounts.google.com) or deadline.
     # 'Cancel' is intentionally NOT in the list — it aborts consent.
+    _emit_progress("antigravity", "consent_step", "Handling consent/speedbump...")
     KNOWN_ACTIONS = [
         "i understand", "sign in", "continue", "allow", "accept",
         "agree", "got it", "ok", "next",
@@ -329,6 +345,7 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
         except Exception:
             url = ""
         if "accounts.google.com" not in (url or ""):
+            _emit_progress("antigravity", "login_complete", "Google login completed")
             return  # redirect to callback fired — done
         try:
             btns = await page.evaluate("""() => Array.from(document.querySelectorAll('button, div[role="button"], input[type="submit"]'))
@@ -369,9 +386,11 @@ class AntigravityProviderAdapter(ProviderAdapter):
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
         # nodriver is the default engine. Headed by default — headless gets a
         # hard 500 from Google on the password challenge.
+        _emit_progress("antigravity", "browser_launch", "Launching Chrome via nodriver...")
         headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
         browser, page = await launch_browser(headless=headless)
         page.set_default_timeout(45000)
+        _emit_progress("antigravity", "browser_ready", "Browser session ready")
         return {"browser": browser, "page": page}
 
     async def authenticate(self, account: NormalizedAccount, session: Any) -> dict[str, Any]:
@@ -396,8 +415,11 @@ class AntigravityProviderAdapter(ProviderAdapter):
         }
         authorize_url = f"{AG_AUTHORIZE_URL}?{urlencode(params)}"
         try:
+            _emit_progress("antigravity", "navigate", "Opening Google OAuth...")
             await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
+            _emit_progress("antigravity", "google_login", "Driving Google login flow...")
             await _drive_google_login(page, account.identifier, account.secret)
+            _emit_progress("antigravity", "waiting_callback", "Waiting for OAuth callback...")
 
             # Wait for the callback to capture the code.
             for _ in range(60):
@@ -412,6 +434,7 @@ class AntigravityProviderAdapter(ProviderAdapter):
                 raise NonRetryableBatcherError(ErrorCode.auth_callback_failed, f"OAuth callback error: {err}")
             if not code:
                 raise RetryableBatcherError(ErrorCode.auth_callback_failed, "OAuth callback timed out — no code received")
+            _emit_progress("antigravity", "callback_received", "OAuth code received")
             return {"code": code, "redirect_uri": redirect_uri}
         finally:
             try:
