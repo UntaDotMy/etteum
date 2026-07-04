@@ -443,13 +443,30 @@ export default function BotLogs() {
                       <tr className="border-b border-[var(--border)] bg-[var(--secondary)]/20">
                         <td colSpan={6} className="p-4">
                           <div className="space-y-2">
-                            {process.events.map((log) => (
-                              <div key={`${log.id}-${log.timestamp}`} className="grid grid-cols-[80px_120px_1fr] gap-3 rounded-md border border-[var(--border)] bg-[var(--card)] px-3 py-2 text-xs">
-                                <span className="font-mono text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
-                                <span className="text-[var(--muted-foreground)]">{log.step || statusLabel(log.type)}</span>
-                                <span className={log.error ? "text-[var(--error)]" : "text-[var(--foreground)]"}>{log.error || log.message || "-"}</span>
-                              </div>
-                            ))}
+                            {process.events.map((log) => {
+                              const isBrowserHost = log.step === "browser_host";
+                              const isChallenge = log.step === "manual_challenge";
+                              return (
+                                <div
+                                  key={`${log.id}-${log.timestamp}`}
+                                  className={`grid grid-cols-[80px_120px_1fr] gap-3 rounded-md border px-3 py-2 text-xs ${
+                                    isChallenge
+                                      ? "border-[var(--warning)]/50 bg-[var(--warning)]/10"
+                                      : isBrowserHost
+                                        ? "border-[var(--primary)]/30 bg-[var(--primary)]/5"
+                                        : "border-[var(--border)] bg-[var(--card)]"
+                                  }`}
+                                >
+                                  <span className="font-mono text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
+                                  <span className={isChallenge ? "font-semibold text-[var(--warning)]" : isBrowserHost ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}>
+                                    {isBrowserHost ? "🌐 browser" : isChallenge ? "⚠ challenge" : log.step || statusLabel(log.type)}
+                                  </span>
+                                  <span className={log.error ? "text-[var(--error)]" : "text-[var(--foreground)]"}>
+                                    {isChallenge ? "CAPTCHA shown — solve it in the popup modal" : log.error || log.message || "-"}
+                                  </span>
+                                </div>
+                              );
+                            })}
                           </div>
                         </td>
                       </tr>
