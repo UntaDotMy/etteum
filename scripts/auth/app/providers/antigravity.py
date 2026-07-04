@@ -299,7 +299,149 @@ async def _click_button(page: Any, text: str, timeout_s: float = 15.0) -> bool:
     return False
 
 
-async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150) -> None:
+async def _solve_google_captcha_manual(page: Any, is_headless: bool) -> bool:
+    """Solve Google's v3 signin text CAPTCHA by asking the user.
+
+    Non-headless: browser stays open, user types directly in the page.
+    Headless: popup GUI shows the CAPTCHA image + text input for the user to fill.
+    """
+    import time as _time
+    import base64 as _base64
+    import urllib.request as _urllib
+
+    _emit_progress("antigravity", "captcha_detected", "Google text CAPTCHA — manual solve required")
+
+    # Download the CAPTCHA image
+    img_src = await page.evaluate("""() => {
+      const img = document.querySelector('img#captchaimg, img[alt*="captcha" i]');
+      return img ? img.src : null;
+    }""")
+    if not img_src:
+        _debug("no captcha image found")
+        return False
+
+    try:
+        if img_src.startswith("data:"):
+            header, b64data = img_src.split(",", 1)
+            img_bytes = _base64.b64decode(b64data)
+        else:
+            with _urllib.urlopen(img_src, timeout=15) as resp:
+                img_bytes = resp.read()
+    except Exception as exc:
+        _debug(f"captcha image download failed: {exc}")
+        return False
+
+    if is_headless:
+        # Show a GUI popup with the image + text input
+        import tkinter as tk
+        from PIL import Image as PILImage
+        from io import BytesIO
+
+        answer = None
+
+        def show_popup():
+            nonlocal answer
+            root = tk.Tk()
+            root.title("Google CAPTCHA — please type the characters you see")
+            root.resizable(False, False)
+
+            label = tk.Label(root, text="Type the characters shown in the image below:", font=("Segoe UI", 10))
+            label.pack(pady=(10, 5))
+
+            try:
+                pil_img = PILImage.open(BytesIO(img_bytes))
+                # Scale up for readability
+                w, h = pil_img.size
+                scale = max(3, min(5, 800 // w))
+                pil_img = pil_img.resize((w * scale, h * scale), PILImage.LANCZOS)
+                from PIL import ImageTk
+                photo = ImageTk.PhotoImage(pil_img)
+            except Exception:
+                photo = None
+
+            if photo:
+                img_label = tk.Label(root, image=photo)
+                img_label.image = photo  # keep reference
+                img_label.pack(pady=5)
+
+            entry = tk.Entry(root, font=("Consolas", 16), width=20)
+            entry.pack(pady=5)
+            entry.focus_set()
+
+            btn = tk.Button(root, text="Submit", command=lambda: _submit_entry(entry, root))
+            btn.pack(pady=(5, 10))
+
+            def _submit_entry(e, r):
+                nonlocal answer
+                answer = e.get().strip()
+                r.destroy()
+
+            # Allow Enter key
+            entry.bind("<Return>", lambda ev: _submit_entry(entry, root))
+
+            root.mainloop()
+
+        # Run popup in a thread so we don't block the async loop
+        import threading
+        t = threading.Thread(target=show_popup, daemon=True)
+        t.start()
+        t.join(timeout=120)  # 2 minute timeout
+
+        if not answer:
+            _debug("CAPTCHA popup timed out or was closed without answer")
+            return False
+
+        _emit_progress("antigravity", "captcha_answer_received", f"User entered: {answer!r}")
+    else:
+        # Non-headless: wait for user to type directly in the browser
+        _emit_progress("antigravity", "captcha_waiting_user",
+                       "Browser is open — please type the CAPTCHA text in the page and press Enter")
+        # Wait until the user submits (page navigates away from captcha or input is filled)
+        deadline = _time.monotonic() + 120
+        while _time.monotonic() < deadline:
+            await asyncio.sleep(1.0)
+            # Check if captcha is still showing
+            still_captcha = await page.evaluate(
+                "!!(document.querySelector('img#captchaimg, img[alt*=\"captcha\" i]') && document.querySelector('input#ca, input[name=\"ca\"]'))"
+            )
+            if not still_captcha:
+                _emit_progress("antigravity", "captcha_solved", "CAPTCHA solved by user")
+                return True
+        _debug("CAPTCHA manual solve timed out")
+        return False
+
+    # For headless mode: type the answer into the CAPTCHA input and submit
+    captcha_input_sel = 'input#ca, input[name="ca"]'
+    try:
+        input_present = await page.evaluate(f"!!document.querySelector('{captcha_input_sel}')")
+        if not input_present:
+            captcha_input_sel = 'input[type="text"]:not([name="Passwd"]):not([id="identifierId"])'
+        await _fill_input(page, captcha_input_sel, answer)
+    except Exception as exc:
+        _debug(f"failed to type captcha answer: {exc}")
+        return False
+
+    await asyncio.sleep(0.5)
+    try:
+        await page.keyboard.press("Enter")
+    except Exception:
+        pass
+
+    # Wait for captcha to disappear
+    for _ in range(20):
+        await asyncio.sleep(0.5)
+        still_captcha = await page.evaluate(
+            "!!(document.querySelector('img#captchaimg, img[alt*=\"captcha\" i]') && document.querySelector('input#ca, input[name=\"ca\"]'))"
+        )
+        if not still_captcha:
+            _emit_progress("antigravity", "captcha_solved", "CAPTCHA solved successfully")
+            return True
+
+    _debug("CAPTCHA answer was rejected, but we submitted what the user provided")
+    return True  # trust the user's input even if page hasn't navigated yet
+
+
+async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150, is_headless: bool = False) -> None:
     """Drive accounts.google.com v3 signin: email → password → (speedbump) →
     consent → redirect. Poll-driven (no blind sleeps), DOM-aware. Handles the
     fresh-account Workspace ToS speedbump ('I understand') and the OAuth consent
@@ -355,6 +497,27 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
         except Exception:
             await asyncio.sleep(0.3)
             continue
+        # CAPTCHA detection: Google's v3 signin shows a text/image CAPTCHA
+        # when it suspects bot behavior. We detect the DOM markers and ask
+        # the user to solve it (popup in headless, direct typing otherwise).
+        try:
+            captcha_info = await page.evaluate("""() => {
+              if (document.querySelector('img#captchaimg, img[alt*="captcha" i]') && document.querySelector('input#ca, input[name="ca"]')) {
+                return { detected: true };
+              }
+              return { detected: false };
+            }""")
+        except Exception:
+            captcha_info = {"detected": False}
+        if captcha_info.get("detected"):
+            solved = await _solve_google_captcha_manual(page, is_headless)
+            if not solved:
+                raise NonRetryableBatcherError(
+                    ErrorCode.browser_challenge_blocked,
+                    "Google text CAPTCHA manual solve failed or timed out",
+                )
+            await asyncio.sleep(1.0)
+            continue  # re-check state after solve
         for action in KNOWN_ACTIONS:
             if action in btns:
                 if action == last_clicked:
@@ -418,7 +581,7 @@ class AntigravityProviderAdapter(ProviderAdapter):
             _emit_progress("antigravity", "navigate", "Opening Google OAuth...")
             await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
             _emit_progress("antigravity", "google_login", "Driving Google login flow...")
-            await _drive_google_login(page, account.identifier, account.secret)
+            await _drive_google_login(page, account.identifier, account.secret, is_headless=headless)
             _emit_progress("antigravity", "waiting_callback", "Waiting for OAuth callback...")
 
             # Wait for the callback to capture the code.

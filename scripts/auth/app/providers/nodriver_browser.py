@@ -190,12 +190,31 @@ async def launch_browser(
     resolved_proxy = proxy_url or os.getenv("BATCHER_PROXY_URL", "").strip()
 
     browser_args: list[str] = [
+        # Core stealth: strip the AutomationControlled blink feature so
+        # navigator.webdriver doesn't auto-set to true.
         "--disable-blink-features=AutomationControlled",
         "--no-sandbox",
         "--disable-dev-shm-usage",
         # Realistic UA — the default headless UA is a bot-detection tell.
         "--user-agent=Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-        "--disable-features=IsolateOrigins,site-per-process",
+        # Strip the Chrome/Playwright flags that signal "automated browser"
+        # to Google's bot detector. Based on patchright's chromiumSwitchesPatch
+        # (github.com/Kaliiiiiiiiii-Vinyzu/patchright) which successfully
+        # passes Google, Cloudflare, and DataDome bot mitigation.
+        "--disable-popup-blocking",
+        "--disable-component-update",
+        "--disable-default-apps",
+        "--disable-extensions",
+        "--disable-client-side-phishing-detection",
+        "--disable-component-extensions-with-background-pages",
+        "--disable-ipc-flooding-protection",
+        "--metrics-recording-only",
+        "--disable-back-forward-cache",
+        # Disable features that leak headless/automated signals. The
+        # default Chrome feature set includes tracking protections, media
+        # router, and certificate transparency components that are
+        # absent in normal user Chrome and trigger anomaly detection.
+        "--disable-features=ImprovedCookieControls,LazyFrameLoading,GlobalMediaControls,DestroyProfileOnBrowserClose,MediaRouter,DialMediaRouteProvider,AcceptCHFrame,AutoExpandDetailsElement,CertificateTransparencyComponentUpdater,AvoidUnnecessaryBeforeUnloadCheckSync,Translate,HttpsUpgrades,PaintHolding,ThirdPartyStoragePartitioning,LensOverlay,PlzDedicatedWorker,IsolateOrigins,site-per-process",
         "--disable-infobars",
     ]
     if extra_args:
@@ -237,7 +256,83 @@ async def launch_browser(
     # the signal handlers installed in _register_hard_kill below.
     _register_hard_kill(shim)
     page = await shim.new_page()
+
+    # Inject stealth init script to strip bot-detection signals.
+    # Google's login page checks navigator.webdriver, CDP artifacts, and
+    # several other fingerprinting signals. --disable-blink-features alone
+    # is not enough — we need to actively patch the JS context BEFORE the
+    # page's scripts run. addScriptToEvaluateOnNewDocument fires on every
+    # new document/navigation in every target.
+    try:
+        from nodriver import cdp
+        import nodriver.cdp.page as _cdp_page
+        await shim._b.send(
+            _cdp_page.add_script_to_evaluate_on_new_document(source=_STEALTH_INIT_SCRIPT)
+        )
+    except Exception as exc:
+        _debug(f"stealth init script injection failed (non-fatal): {exc}")
+
     return shim, page
+
+
+# Stealth init script — runs before any page script on every navigation.
+# Patches the browser fingerprint to remove the most common bot-detection
+# signals that trigger Google's CAPTCHA:
+#   1. navigator.webdriver → false (Chrome sets this true for CDP-controlled browsers)
+#   2. navigator.plugins → non-empty (headless Chrome has 0 plugins)
+#   3. navigator.languages → realistic
+#   4. WebGL vendor/renderer → masked
+#   5. Notification.permission → 'default' (headless leaks 'denied')
+#   6. Chrome runtime object → present (headless strips it)
+_STEALTH_INIT_SCRIPT = """
+(function() {
+  // 1. Strip navigator.webdriver
+  Object.defineProperty(navigator, 'webdriver', { get: () => false, configurable: true });
+
+  // 2. Patch navigator.plugins to look like a real browser
+  Object.defineProperty(navigator, 'plugins', {
+    get: () => {
+      const arr = [
+        { name: 'Chrome PDF Plugin', filename: 'internal-pdf-viewer', description: 'Portable Document Format' },
+        { name: 'Chrome PDF Viewer', filename: 'mhjfbmdgcfjbbpaeojofohoefgiehjai', description: '' },
+        { name: 'Native Client', filename: 'internal-nacl-plugin', description: '' },
+      ];
+      arr.item = (i) => arr[i] || null;
+      arr.namedItem = (n) => arr.find(p => p.name === n) || null;
+      arr.refresh = () => {};
+      return arr;
+    },
+    configurable: true,
+  });
+
+  // 3. Realistic languages
+  Object.defineProperty(navigator, 'languages', { get: () => ['en-US', 'en'], configurable: true });
+
+  // 4. Mask WebGL vendor/renderer
+  const getParameter = WebGLRenderingContext.prototype.getParameter;
+  WebGLRenderingContext.prototype.getParameter = function(param) {
+    if (param === 37445) return 'Intel Inc.';
+    if (param === 37446) return 'Intel Iris OpenGL Engine';
+    return getParameter.call(this, param);
+  };
+
+  // 5. Notification permission default
+  Object.defineProperty(Notification, 'permission', { get: () => 'default', configurable: true });
+
+  // 6. Chrome runtime
+  if (!window.chrome) window.chrome = {};
+  window.chrome.runtime = window.chrome.runtime || {};
+  window.chrome.csi = window.chrome.csi || (() => ({}));
+  window.chrome.loadTimes = window.chrome.loadTimes || (() => ({}));
+
+  // 7. Permissions query — hide notification prompt artifacts
+  const originalQuery = window.navigator.permissions.query;
+  window.navigator.permissions.query = (params) =>
+    params.name === 'notifications'
+      ? Promise.resolve({ state: Notification.permission, onchange: null })
+      : originalQuery(params);
+})();
+"""
 
 
 # ── Browser shim ─────────────────────────────────────────────────────────────
