@@ -558,6 +558,10 @@ class AntigravityProviderAdapter(ProviderAdapter):
 
     async def authenticate(self, account: NormalizedAccount, session: Any) -> dict[str, Any]:
         page = session["page"]
+        # Re-derive headless the same way bootstrap_session does — it is not
+        # shared across methods, and _drive_google_login needs it to pick the
+        # right CAPTCHA path (manual typing vs. headless entry).
+        headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
         import secrets as _secrets
         state_token = _secrets.token_urlsafe(16)
         # Try the configured port, then a couple of fallbacks; the redirect_uri
