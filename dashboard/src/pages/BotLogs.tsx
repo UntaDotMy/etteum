@@ -2,6 +2,7 @@ import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "rea
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
 import { clearAuthLogs, fetchAuthLogs, fetchAuthQueue, fetchWarmupQueue, loginAccount, loginAccounts, stopAllAccounts, stopWarmup } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
 import { useApiCache } from "@/hooks/useApiCache";
@@ -33,7 +34,6 @@ interface ProcessLog {
 const liveTypes: string[] = [
   "queue_added", "queue_processing", "login_progress", "login_success", "login_failed", "queue_complete", "queue_cleared",
 ];
-// Note: warmup_* events are explicitly filtered out - Login Logs only shows login operations
 
 function statusVariant(type: string): "success" | "warning" | "error" | "secondary" {
   if (type.includes("success") || type === "queue_complete" || type === "warmup_complete") return "success";
@@ -58,16 +58,22 @@ function providerLabel(provider?: string) {
   if (!provider) return "-";
   if (provider === "codebuddy") return "CodeBuddy";
   if (provider === "codebuddy-china") return "CodeBuddy CN";
+  if (provider === "gitlab-duo") return "GitLab Duo";
+  if (provider === "antigravity") return "Antigravity";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
 function operationFor(type: string) {
-  return type.startsWith("warmup_") ? "WarmUp" : "Login";
+  if (type.startsWith("login_")) return "login";
+  if (type.startsWith("warmup_")) return "warmup";
+  if (type.startsWith("queue_")) return "queue";
+  return type;
 }
 
 function processKey(log: AuthLog) {
-  const account = log.accountId || log.email || log.id;
-  return `${operationFor(log.type)}-${account}`;
+  const operation = operationFor(log.type);
+  const account = log.email || `#${log.accountId}`;
+  return `${operation}-${account}`;
 }
 
 function statusLabel(type: string) {
@@ -100,16 +106,14 @@ function logsToProcesses(logs: AuthLog[]): ProcessLog[] {
         startedAt: log.timestamp,
         updatedAt: log.timestamp,
       });
-      continue;
+    } else {
+      existing.events.push(log);
+      existing.latest = log;
+      existing.updatedAt = log.timestamp;
     }
-
-    existing.events.push(log);
-    existing.latest = { ...log, email: log.email || existing.latest.email, provider: log.provider || existing.latest.provider };
-    existing.updatedAt = log.timestamp;
   }
 
-  // Sort by queue order (startedAt) — position stays stable as new logs arrive
-  return [...groups.values()].sort((a, b) => new Date(b.startedAt).getTime() - new Date(a.startedAt).getTime());
+  return [...groups.values()].sort((a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime());
 }
 
 export default function BotLogs() {
@@ -117,67 +121,61 @@ export default function BotLogs() {
   const [stoppingWarmup, setStoppingWarmup] = useState(false);
   const [expanded, setExpanded] = useState<string | null>(null);
   const [page, setPage] = useState(1);
-  // Live in-memory raw console: the most recent browser-surface events
-  // (browser_host, manual_challenge, progress) — cleared by "Clear live console".
   const [liveConsole, setLiveConsole] = useState<AuthLog[]>([]);
+  const [captchaText, setCaptchaText] = useState("");
+  const [captchaLoading, setCaptchaLoading] = useState(false);
   const perPage = 25;
   const queueRefreshTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const wsStatus = useWsStatus();
   const connected = wsStatus === "open";
 
-  // SWR cache for queue status - instant load, background revalidation
   const { data: queue, mutate: mutateQueue } = useApiCache(
     "botlogs-queue",
     () => fetchAuthQueue().catch(() => null),
     { staleTime: 2000, wsEvents: ["queue_added", "queue_processing", "queue_complete", "queue_cleared"] }
   );
 
-  // SWR cache for warmup queue
   const { data: warmupQueue } = useApiCache(
     "botlogs-warmup-queue",
     () => fetchWarmupQueue().catch(() => null),
-    { staleTime: 3000, wsEvents: ["warmup_queue_added", "warmup_complete", "warmup_stopped"] }
+    { staleTime: 5000, wsEvents: ["warmup_added", "warmup_processing", "warmup_complete", "warmup_cleared"] }
   );
 
-  // SWR cache for initial auth logs
-  const { data: logsRes, mutate: mutateLogs } = useApiCache<{ data: AuthLog[] }>(
+  const { data: logsRes } = useApiCache(
     "botlogs-logs",
-    () => fetchAuthLogs(300) as Promise<{ data: AuthLog[] }>,
+    () => fetchAuthLogs(200).catch(() => []),
     { staleTime: 5000, wsEvents: liveTypes }
   );
 
-  // Merge cached logs into local state when cache loads
   useEffect(() => {
-    if (logsRes?.data) {
-      const filtered = (logsRes.data || []).filter((log) => !log.type.startsWith("warmup_"));
+    if (logsRes && Array.isArray(logsRes)) {
+      const filtered = logsRes.filter((log: AuthLog) => !log.type.startsWith("warmup_"));
       setLogs((current) => mergeLogs(current, filtered));
     }
   }, [logsRes]);
 
-  // Refresh function for manual reload
-  async function load() {
-    await Promise.all([mutateQueue(), mutateLogs()]);
-  }
-
-  const scheduleQueueRefresh = useCallback(() => {
-    if (queueRefreshTimerRef.current) return;
-    queueRefreshTimerRef.current = setTimeout(() => {
-      queueRefreshTimerRef.current = null;
-      mutateQueue();
-    }, 300);
+  const load = useCallback(async () => {
+    await mutateQueue();
+    try {
+      const fresh = await fetchAuthLogs(200);
+      if (Array.isArray(fresh)) {
+        const filtered = fresh.filter((log: AuthLog) => !log.type.startsWith("warmup_"));
+        setLogs((current) => mergeLogs(current, filtered));
+      }
+    } catch (err) {
+      console.error("Failed to load logs:", err);
+    }
   }, [mutateQueue]);
 
-  useEffect(() => {
-    return () => {
-      if (queueRefreshTimerRef.current) {
-        clearTimeout(queueRefreshTimerRef.current);
-        queueRefreshTimerRef.current = null;
-      }
-    };
-  }, []);
+  const scheduleQueueRefresh = useCallback(() => {
+    if (queueRefreshTimerRef.current) clearTimeout(queueRefreshTimerRef.current);
+    queueRefreshTimerRef.current = setTimeout(() => {
+      mutateQueue();
+      queueRefreshTimerRef.current = null;
+    }, 1500);
+  }, [mutateQueue]);
 
   useWsEvent(liveTypes, (msg) => {
-    // Skip all warmup events - Login Logs only shows login operations
     if (msg.type.startsWith("warmup_")) return;
 
     const data = msg.data || {};
@@ -194,7 +192,6 @@ export default function BotLogs() {
       data,
     };
     setLogs((current) => mergeLogs(current, [log]));
-    // Push browser-surface events to the live console (raw, in-memory, clearable).
     if (log.step === "browser_host" || log.step === "manual_challenge" || msg.type === "login_progress" || msg.type === "queue_processing") {
       setLiveConsole((current) => {
         const next = [...current, log];
@@ -215,97 +212,14 @@ export default function BotLogs() {
     }
     return [...map.values()];
   }, [failed]);
-  const processes = useMemo(() => {
-    const logProcesses = logsToProcesses(logs).filter((process) => {
-      // Exclude pending items that haven't started processing yet
-      if (process.events.length === 1) {
-        const type = process.events[0].type;
-        if (type === "queue_added" || type === "warmup_queue_added") return false;
-      }
-      return true;
-    });
 
-    // Add active accounts from queue that don't have log events yet
-    const activeAccounts = queue?.activeAccounts || [];
-    const existingIds = new Set(logProcesses.map(p => p.key.split('-')[0]));
-    
-    for (const account of activeAccounts) {
-      if (!existingIds.has(String(account.id))) {
-        logProcesses.push({
-          key: `${account.id}-${account.provider || 'unknown'}`,
-          operation: 'login',
-          latest: {
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            type: 'queue_processing',
-            accountId: account.id,
-            email: account.email,
-            provider: account.provider,
-            message: 'Processing...',
-          },
-          events: [{
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            type: 'queue_processing',
-            accountId: account.id,
-            email: account.email,
-            provider: account.provider,
-            message: 'Processing...',
-          }],
-          startedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    }
-
-    // Add queued accounts
-    const queuedAccounts = queue?.queuedAccounts || [];
-    for (const account of queuedAccounts) {
-      if (!existingIds.has(String(account.id))) {
-        logProcesses.push({
-          key: `${account.id}-${account.provider || 'unknown'}`,
-          operation: 'login',
-          latest: {
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            type: 'queue_added',
-            accountId: account.id,
-            email: account.email,
-            provider: account.provider,
-            message: 'Queued',
-          },
-          events: [{
-            id: Date.now(),
-            timestamp: new Date().toISOString(),
-            type: 'queue_added',
-            accountId: account.id,
-            email: account.email,
-            provider: account.provider,
-            message: 'Queued',
-          }],
-          startedAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        });
-      }
-    }
-
-    return logProcesses;
-  }, [logs, queue]);
-  const running = Number(queue?.active || 0);
-  const queued = Number(queue?.queued || 0);
-  const warmupRunning = Number(warmupQueue?.active || 0);
-  const warmupQueued = Number(warmupQueue?.queued || 0);
-
-  // Use backend queue stats for accurate counts (lightweight, no frontend recalculation)
-  const totalProgress = running + warmupRunning;
-  const totalSuccess = Number(queue?.totalSuccess || 0) + Number(warmupQueue?.totalSuccess || 0);
-  const totalFailed = Number(queue?.totalFailed || 0) + Number(warmupQueue?.totalFailed || 0);
-  const totalQueued = queued + warmupQueued;
-
-  async function handleClear() {
-    await clearAuthLogs();
-    setLogs([]);
-  }
+  const processes = useMemo(() => logsToProcesses(logs), [logs]);
+  const totalQueued = queue?.queued || 0;
+  const totalProgress = queue?.active || 0;
+  const totalSuccess = logs.filter((log) => log.type === "login_success").length;
+  const totalFailed = failedAccounts.length;
+  const warmupRunning = warmupQueue?.active || 0;
+  const warmupQueued = warmupQueue?.queued || 0;
 
   async function handleStopAll() {
     await stopAllAccounts();
@@ -316,12 +230,16 @@ export default function BotLogs() {
     setStoppingWarmup(true);
     try {
       await stopWarmup();
-    } catch {
-      // best-effort — the queue stops server-side regardless of response errors
     } finally {
       setStoppingWarmup(false);
-      await load().catch(() => {});
     }
+  }
+
+  async function handleClear() {
+    await clearAuthLogs();
+    setLogs([]);
+    setLiveConsole([]);
+    await load().catch(() => {});
   }
 
   async function handleRetry(accountId?: number) {
@@ -337,11 +255,23 @@ export default function BotLogs() {
     await load().catch(() => {});
   }
 
+  async function handleCaptchaSubmit() {
+    if (!captchaText.trim()) return;
+    setCaptchaLoading(true);
+    try {
+      // TODO: send captcha text to the running session via API
+      console.log("Captcha text:", captchaText);
+      setCaptchaText("");
+    } finally {
+      setCaptchaLoading(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       <div className="flex flex-col gap-3 sm:flex-row sm:items-center sm:justify-between">
         <div>
-          <h1 className="text-2xl font-bold text-[var(--foreground)]">Browser Log</h1>
+          <h1 className="text-2xl font-bold text-[var(--foreground)]">Browser Logs</h1>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
             Live progress for auto-login bot, including failed accounts.
           </p>
@@ -364,8 +294,7 @@ export default function BotLogs() {
         </div>
       </div>
 
-      {/* Live console — raw in-memory browser-surface events (browser_host,
-          manual_challenge, progress). "Clear live console" empties this buffer. */}
+      {/* Browser surface — live console */}
       <Card>
         <CardHeader>
           <div className="flex items-center justify-between">
@@ -380,20 +309,41 @@ export default function BotLogs() {
         </CardHeader>
         <CardContent>
           {liveConsole.length === 0 ? (
-            <p className="py-6 text-center text-sm text-[var(--muted-foreground)]">No active browser session. Start a manual add or an automation batch to see live events.</p>
+            <div className="flex flex-col items-center justify-center py-10 text-center">
+              <div className="animate-spin rounded-full h-6 w-6 border-b-2 border-[var(--primary)] mb-3"></div>
+              <p className="text-sm text-[var(--muted-foreground)]">Browser frame ended with the session.</p>
+            </div>
           ) : (
-            <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-xs">
-              {[...liveConsole].reverse().map((log, i) => (
-                <div key={`${log.id}-${i}`} className="flex items-center gap-2">
-                  <span className="text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
-                  {log.step === "browser_host" && <Globe className="h-3 w-3 text-[var(--primary)]" />}
-                  {log.step === "manual_challenge" && <AlertTriangle className="h-3 w-3 text-[var(--warning)]" />}
-                  <span className={log.step === "browser_host" ? "text-[var(--primary)]" : log.step === "manual_challenge" ? "text-[var(--warning)]" : "text-[var(--foreground)]"}>
-                    {log.step || log.type}
-                  </span>
-                  <span className="flex-1 truncate text-[var(--muted-foreground)]">{log.message}</span>
-                </div>
-              ))}
+            <div className="space-y-3">
+              {/* CAPTCHA input */}
+              <div className="flex gap-2">
+                <Input
+                  autoFocus
+                  value={captchaText}
+                  onChange={(e) => setCaptchaText(e.target.value)}
+                  onKeyDown={(e) => { if (e.key === "Enter") handleCaptchaSubmit(); }}
+                  placeholder="Enter captcha text"
+                  disabled={captchaLoading}
+                  className="flex-1"
+                />
+                <Button onClick={handleCaptchaSubmit} disabled={!captchaText.trim() || captchaLoading}>
+                  {captchaLoading ? <Loader2 className="h-4 w-4 animate-spin" /> : "Submit"}
+                </Button>
+              </div>
+              {/* Live console */}
+              <div className="max-h-64 space-y-1 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--background)] p-3 font-mono text-xs">
+                {[...liveConsole].reverse().map((log, i) => (
+                  <div key={`${log.id}-${i}`} className="flex items-center gap-2">
+                    <span className="text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
+                    {log.step === "browser_host" && <Globe className="h-3 w-3 text-[var(--primary)]" />}
+                    {log.step === "manual_challenge" && <AlertTriangle className="h-3 w-3 text-[var(--warning)]" />}
+                    <span className={log.step === "browser_host" ? "text-[var(--primary)]" : log.step === "manual_challenge" ? "text-[var(--warning)]" : "text-[var(--foreground)]"}>
+                      {log.step || log.type}
+                    </span>
+                    <span className="flex-1 truncate text-[var(--muted-foreground)]">{log.message}</span>
+                  </div>
+                ))}
+              </div>
             </div>
           )}
         </CardContent>
@@ -478,7 +428,6 @@ export default function BotLogs() {
                           {processStatusLabel(process) === "success" && <CheckCircle className="w-4 h-4 text-[var(--success)]" />}
                           {processStatusLabel(process) === "error" && <AlertTriangle className="w-4 h-4 text-[var(--error)]" />}
                           {processStatusLabel(process) !== "success" && processStatusLabel(process) !== "error" && (process.latest.type === "login_progress" || process.latest.type === "queue_processing" || process.latest.type === "warmup_processing") && <span className="h-2 w-2 rounded-full bg-[var(--warning)]" />}
-                          {/* Live browser location (the reference design-style) — latest browser_host event for this session. */}
                           {(() => {
                             const host = [...process.events].reverse().find((e) => e.step === "browser_host")?.message;
                             if (!host || processStatusLabel(process) === "success" || processStatusLabel(process) === "error") return null;
@@ -510,11 +459,9 @@ export default function BotLogs() {
                                 >
                                   <span className="font-mono text-[var(--muted-foreground)]">{formatTimeID(log.timestamp)}</span>
                                   <span className={isChallenge ? "font-semibold text-[var(--warning)]" : isBrowserHost ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]"}>
-                                    {isBrowserHost ? "🌐 browser" : isChallenge ? "⚠ challenge" : log.step || statusLabel(log.type)}
+                                    {isBrowserHost ? "🌐 browser" : isChallenge ? " challenge" : log.step || statusLabel(log.type)}
                                   </span>
-                                  <span className={log.error ? "text-[var(--error)]" : "text-[var(--foreground)]"}>
-                                    {isChallenge ? "CAPTCHA shown — solve it in the popup modal" : log.error || log.message || "-"}
-                                  </span>
+                                  <span className={log.error ? "text-[var(--error)]" : "text-[var(--foreground)]"}>{log.error || log.message || "-"}</span>
                                 </div>
                               );
                             })}
@@ -530,21 +477,20 @@ export default function BotLogs() {
               </tbody>
             </table>
           </div>
-          {/* Pagination */}
-          {processes.length > perPage && (
-            <div className="flex items-center justify-between border-t border-[var(--border)] px-4 py-3">
-              <p className="text-xs text-[var(--muted-foreground)]">
-                {(page - 1) * perPage + 1}–{Math.min(page * perPage, processes.length)} of {processes.length}
-              </p>
-              <div className="flex items-center gap-2">
-                <Button variant="outline" size="sm" disabled={page <= 1} onClick={() => setPage(page - 1)}>Prev</Button>
-                <span className="text-xs text-[var(--muted-foreground)]">{page}/{Math.ceil(processes.length / perPage)}</span>
-                <Button variant="outline" size="sm" disabled={page >= Math.ceil(processes.length / perPage)} onClick={() => setPage(page + 1)}>Next</Button>
-              </div>
-            </div>
-          )}
         </CardContent>
       </Card>
+
+      {processes.length > perPage && (
+        <div className="flex items-center justify-between border-t border-[var(--border)] pt-4">
+          <p className="text-xs text-[var(--muted-foreground)]">
+            {(page - 1) * perPage + 1}–{Math.min(page * perPage, processes.length)} of {processes.length}
+          </p>
+          <div className="flex gap-2">
+            <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.max(1, p - 1))} disabled={page === 1}>Previous</Button>
+            <Button variant="outline" size="sm" onClick={() => setPage((p) => Math.min(Math.ceil(processes.length / perPage), p + 1))} disabled={page >= Math.ceil(processes.length / perPage)}>Next</Button>
+          </div>
+        </div>
+      )}
       </>
       )}
     </div>
