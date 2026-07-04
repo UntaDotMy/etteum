@@ -1,4 +1,4 @@
-# etteum.ps1 - Etteum management CLI (Windows)
+﻿# etteum.ps1 - Etteum management CLI (Windows)
 # Usage: .\etteum.ps1 [start|stop|restart|status|logs|update|port|build]
 
 param(
@@ -83,10 +83,49 @@ function Invoke-Start {
 
 function Invoke-Stop {
   Write-Host "Stopping Etteum..."
+  $killed = @()
+
+  # 1. Match by command line (launcher + server + dashboard). This is the
+  #    primary path. production.ts spawns src/index.ts as a child; both match.
   Get-CimInstance Win32_Process -Filter "Name='bun.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
     Where-Object { $_.CommandLine -match "scripts[\\/](production|start|serve-dashboard)\.ts|src[\\/]index\.ts" } |
-    ForEach-Object { Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue }
-  Remove-Item $PidFile -ErrorAction SilentlyContinue
+    ForEach-Object {
+      Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+      $killed += $_.ProcessId
+    }
+
+  # 2. Kill whatever still owns the API/dashboard ports. The launcher
+  #    (production.ts) spawns src/index.ts detached, and killing the parent
+  #    can orphan the child — leaving the port held. This guarantees the ports
+  #    are actually freed, which is what 'stop' promises.
+  foreach ($port in @(
+    [int](Get-EnvValue "PORT" "1930"),
+    [int](Get-EnvValue "DASHBOARD_PORT" "1931")
+  )) {
+    try {
+      Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
+        ForEach-Object {
+          if ($killed -notcontains $_.OwningProcess) {
+            Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+            $killed += $_.OwningProcess
+          }
+        }
+    } catch {}
+  }
+
+  # 3. Fallback: the PID recorded at start (in case the CIM/port paths missed
+  #    a process started differently).
+  if (Test-Path $PidFile) {
+    $procId = Get-Content $PidFile -ErrorAction SilentlyContinue
+    if ($procId) {
+      Stop-Process -Id $procId -Force -ErrorAction SilentlyContinue
+      $killed += $procId
+    }
+    Remove-Item $PidFile -ErrorAction SilentlyContinue
+  }
+
+  # Give the OS a moment to release the listening sockets.
+  Start-Sleep -Milliseconds 500
   Write-Host "Etteum stopped"
 }
 

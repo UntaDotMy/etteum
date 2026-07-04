@@ -1,4 +1,4 @@
-# Etteum Pool Upgrader (Windows PowerShell 5.1+ / 7+).
+﻿# Etteum Pool Upgrader (Windows PowerShell 5.1+ / 7+).
 #
 # Safely upgrades the installation: backs up the database, pulls latest code,
 # rebuilds, and restores if anything fails.

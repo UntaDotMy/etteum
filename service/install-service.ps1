@@ -1,4 +1,4 @@
-# Etteum Pool — Windows Service Installer
+﻿# Etteum Pool — Windows Service Installer
 #
 # Installs Etteum as a Windows Service using NSSM (Non-Sucking Service Manager).
 # Requires NSSM to be installed: https://nssm.cc/download

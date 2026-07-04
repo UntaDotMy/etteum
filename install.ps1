@@ -1,4 +1,4 @@
-# Etteum Pool installer (PRIVATE) for Windows (PowerShell 5.1+ / 7+).
+﻿# Etteum Pool installer (PRIVATE) for Windows (PowerShell 5.1+ / 7+).
 #
 # This is the private repo's installer. It mirrors install.ps1 in the public
 # repo but defaults to the private repo URL. The private build includes extra
