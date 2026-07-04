@@ -12,6 +12,13 @@ import {
   normalizeRequestToOpenAI,
   type AnthropicMessagesRequest,
 } from "./transforms/anthropic";
+import {
+  responsesRequestToChat,
+  chatResponseToResponses,
+  chatStreamToResponsesStream,
+  newResponsesResponseMeta,
+  type ResponsesApiRequest,
+} from "./transforms/openai-responses";
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
@@ -833,6 +840,96 @@ proxyRouter.post("/v1/messages", async (c) => {
       responseBody: prepareLogBody({ error: errorMessage }),
       durationMs: 0,
     }, "messages error");
+
+    broadcast({ type: "request_error", data: { model: mappedModel, error: errorMessage } });
+
+    const invalidModel = isInvalidModelError(errorMessage);
+    const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
+    return c.json({
+      type: "error",
+      error: {
+        type: invalidModel || badUpstreamRequest ? "invalid_request_error" : "api_error",
+        message: errorMessage,
+      },
+    }, invalidModel || badUpstreamRequest ? 400 : 503);
+  }
+});
+
+/**
+ * POST /v1/responses - OpenAI Responses API (streaming + non-streaming)
+ *
+ * Translates Responses-API requests to the internal Chat Completions pipeline
+ * (same routeRequest/handleChatCompletion path used by /v1/chat/completions and
+ * /v1/messages), then translates the result back to the Responses shape.
+ *
+ * Stateless: previous_response_id is accepted for compatibility but the proxy
+ * keeps no server-side response store (store:false semantics). Multi-turn
+ * clients replay prior output items in `input`.
+ */
+proxyRouter.post("/v1/responses", async (c) => {
+  let body: ResponsesApiRequest;
+  try {
+    body = await c.req.json<ResponsesApiRequest>();
+  } catch (error) {
+    if (isJsonParseError(error)) {
+      return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON request body" } }, 400);
+    }
+    throw error;
+  }
+
+  if (body.input === undefined || body.input === null) {
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: "input is required" } }, 400);
+  }
+  if (typeof body.input !== "string" && !Array.isArray(body.input)) {
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: "input must be a string or an array of input items" } }, 400);
+  }
+  if (!body.model) {
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: "model is required" } }, 400);
+  }
+
+  body.model = normalizeModelId(body.model);
+
+  let chatRequest: ChatCompletionRequest;
+  try {
+    chatRequest = responsesRequestToChat(body);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: msg } }, 400);
+  }
+
+  const isStream = body.stream === true;
+
+  try {
+    if (isStream) {
+      const { result } = await handleChatCompletion({ ...chatRequest, stream: true });
+      const meta = newResponsesResponseMeta();
+      const stream = chatStreamToResponsesStream(result.stream!, chatRequest.model, meta.id, meta.createdAt);
+      return new Response(stream, {
+        headers: {
+          "Content-Type": "text/event-stream",
+          "Cache-Control": "no-cache",
+          Connection: "keep-alive",
+          "X-Accel-Buffering": "no",
+        },
+      });
+    }
+
+    const { result } = await handleChatCompletion({ ...chatRequest, stream: false });
+    const response = chatResponseToResponses(result.response, chatRequest.model);
+    return c.json(response);
+  } catch (error) {
+    const errorMessage = error instanceof Error ? error.message : String(error);
+    const mappedModel = resolveModelAlias(normalizeModelId(body.model));
+    const provider = pool.getProviderForModel(mappedModel) || "unknown";
+    await logProxyError({
+      provider,
+      model: mappedModel,
+      status: "error",
+      errorMessage,
+      requestBody: prepareLogBody({ ...body, model: mappedModel, _poolprox: { originalModel: body.model } }),
+      responseBody: prepareLogBody({ error: errorMessage }),
+      durationMs: 0,
+    }, "responses error");
 
     broadcast({ type: "request_error", data: { model: mappedModel, error: errorMessage } });
 
