@@ -1098,13 +1098,10 @@ export class AlibabaProvider extends BaseProvider {
     // DashScope thinking config — uses enable_thinking + thinking_budget.
     // Docs: https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-dashscope
     //
-    // CRITICAL: Only enable thinking when the client explicitly requests it
-    // via `thinking`. Do NOT enable it for `reasoning_effort` alone — that's
-    // an OpenAI/Anthropic concept handled by the transform layer. If we enable
-    // thinking here but the client didn't ask for it, the model returns
-    // `reasoning_content` which leaks into the visible output text (the
-    // Anthropic transform only wraps it in a thinking block when
-    // `request.thinking` is truthy).
+    // CRITICAL: Explicitly set enable_thinking based on client request.
+    // Qwen3.7+ models have thinking enabled by default, so we MUST explicitly
+    // disable it when not requested to prevent reasoning_content from leaking
+    // into the visible output.
     if (request.thinking) {
       body.enable_thinking = true;
       // thinking_budget: cap reasoning tokens (default 4096 if not specified)
@@ -1112,6 +1109,9 @@ export class AlibabaProvider extends BaseProvider {
       body.thinking_budget = Number.isFinite(Number(budget)) && Number(budget) > 0
         ? Number(budget)
         : 4096;
+    } else {
+      // Explicitly disable thinking when not requested to prevent leak
+      body.enable_thinking = false;
     }
   }
 }

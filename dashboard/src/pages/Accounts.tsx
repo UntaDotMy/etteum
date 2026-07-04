@@ -177,10 +177,10 @@ export default function Accounts() {
   const codexOauthStateRef = useRef<string | null>(null);
   const loadingRef = useRef(false);
 
-  async function load() {
+  async function load(silent = false) {
     if (loadingRef.current) return;
     loadingRef.current = true;
-    setLoading(true);
+    if (!silent) setLoading(true);
     try {
       const [accountsRes, queueRes, warmupQueueRes, autoWarmupRes, settingsRes] = await Promise.all([
         fetchAccounts() as Promise<{ data: Account[] }>,
@@ -203,7 +203,7 @@ export default function Accounts() {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       loadingRef.current = false;
-      setLoading(false);
+      if (!silent) setLoading(false);
     }
   }
 
@@ -237,7 +237,10 @@ export default function Accounts() {
 
   const scheduleReload = () => {
     if (reloadRef.current) clearTimeout(reloadRef.current);
-    reloadRef.current = setTimeout(() => { load(); }, 800);
+    reloadRef.current = setTimeout(() => {
+      // Silent reload - don't trigger loading state
+      load(true);
+    }, 800);
   };
 
   function updateWarmupQueue(res: any) {
@@ -1313,7 +1316,7 @@ export default function Accounts() {
           <p className="text-sm text-[var(--muted-foreground)] mt-1">Manage provider accounts</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={load} disabled={loading}>
+          <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
           <Button variant="outline" size="sm" onClick={handleLoginAll}>

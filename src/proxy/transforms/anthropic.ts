@@ -697,12 +697,9 @@ export function openAIToAnthropic(response: any, request: AnthropicMessagesReque
   const thinkingEnabled = Boolean(request?.thinking);
   if (reasoning && thinkingEnabled) {
     content.push({ type: "thinking", thinking: reasoning, signature: "poolprox_thinking_v1" });
-  } else if (reasoning) {
-    // No thinking requested — surface reasoning as text so it isn't lost,
-    // but it won't render as a separate thinking section (the client didn't
-    // ask for one).
-    content.push({ type: "text", text: reasoning });
   }
+  // When thinking is not enabled, discard reasoning_content completely.
+  // Do NOT add it to the text output - that's the leak we're fixing.
   if (text) content.push({ type: "text", text });
   for (const call of toolCalls) {
     let input = call?.function?.arguments || {};
@@ -895,45 +892,35 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                 };
               }
 
-              if (reasoning) {
-                if (thinkingEnabled) {
-                  // Extended thinking is on: emit a proper `thinking` block so
-                  // clients render it as a separate thinking section (not
-                  // leaked into output). The signature is not validated on
-                  // first receipt and the round-trip goes to a non-Anthropic
-                  // upstream that doesn't validate Anthropic signatures, so a
-                  // placeholder signature is safe here.
-                  if (!thinkingBlockOpen) {
-                    if (textBlockOpen) {
-                      controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
-                      textBlockOpen = false;
-                    }
-                    blockIndex += 1;
-                    thinkingBlockOpen = true;
-                    thinkingSignatureSent = false;
-                    controller.enqueue(event("content_block_start", {
-                      type: "content_block_start",
-                      index: blockIndex,
-                      content_block: { type: "thinking", thinking: "", signature: "" },
-                    }));
+              if (reasoning && thinkingEnabled) {
+                // Extended thinking is on: emit a proper `thinking` block so
+                // clients render it as a separate thinking section (not
+                // leaked into output). The signature is not validated on
+                // first receipt and the round-trip goes to a non-Anthropic
+                // upstream that doesn't validate Anthropic signatures, so a
+                // placeholder signature is safe here.
+                if (!thinkingBlockOpen) {
+                  if (textBlockOpen) {
+                    controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
+                    textBlockOpen = false;
                   }
-                  controller.enqueue(event("content_block_delta", {
-                    type: "content_block_delta",
+                  blockIndex += 1;
+                  thinkingBlockOpen = true;
+                  thinkingSignatureSent = false;
+                  controller.enqueue(event("content_block_start", {
+                    type: "content_block_start",
                     index: blockIndex,
-                    delta: { type: "thinking_delta", thinking: reasoning },
+                    content_block: { type: "thinking", thinking: "", signature: "" },
                   }));
-                } else {
-                  // No thinking requested — route reasoning to text so it
-                  // isn't lost, but it won't render as a separate section.
-                  ensureTextBlock();
-                  controller.enqueue(event("content_block_delta", {
-                    type: "content_block_delta",
-                    index: blockIndex,
-                    delta: { type: "text_delta", text: reasoning },
-                  }));
-                  index += reasoning.length;
                 }
+                controller.enqueue(event("content_block_delta", {
+                  type: "content_block_delta",
+                  index: blockIndex,
+                  delta: { type: "thinking_delta", thinking: reasoning },
+                }));
               }
+              // When thinking is not enabled, discard reasoning_content completely.
+              // Do NOT add it to the text output - that's the leak we're fixing.
 
               if (text) {
                 ensureTextBlock();
