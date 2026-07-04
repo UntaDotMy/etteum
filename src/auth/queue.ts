@@ -1,12 +1,13 @@
 import { db } from "../db/index";
 import { accounts } from "../db/schema";
 import { eq, inArray } from "drizzle-orm";
-import { loginAccount, loginAllProviders } from "./runner";
-import { encrypt } from "../utils/crypto";
+import { loginAccount, loginAllProviders, applyProviderResult, markLoginFailed } from "./runner";
+import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
 import type { Account } from "../db/schema";
 import { addAuthLog } from "./logs";
 import { config } from "../config";
+import { handleCardResult } from "../api/vcc";
 
 interface QueueItem {
   accountId: number;
@@ -34,6 +35,11 @@ class LoginQueue {
   private activeAccountIds = new Set<number>();
   private retryTimers = new Map<number, ReturnType<typeof setTimeout>>();
   private clearGeneration = 0;
+  // Phase 2: the single batch_login.py process driving the current batch
+  // (null when idle). clear() terminates it. Typed loosely because the
+  // stdin:"pipe" variant widens the Bun.spawn generic.
+  private batchProc: any = null;
+  private batchGeneration = 0;
 
   /**
    * Add an account to the login queue
@@ -176,7 +182,23 @@ class LoginQueue {
     this.clearGeneration++;
     for (const timer of this.retryTimers.values()) clearTimeout(timer);
     this.retryTimers.clear();
-    if (this.activeJobs === 0) this.processing = false;
+    // Phase 2: terminate the in-flight batch_login.py process (and its login.py
+    // children via pterminate) so a clear actually stops the work. The stale
+    // generation guards runBatch/handleBatchEvent from applying more results.
+    if (this.batchProc) {
+      const pid = this.batchProc.pid;
+      if (pid) {
+        // Kill the whole process group first (negative PID), then the parent.
+        try { Bun.spawnSync(["pterminate", "-9", "-P", String(pid)]); } catch {}
+        try { process.kill(-pid, "SIGTERM"); } catch {}
+        try { process.kill(pid, "SIGTERM"); } catch {}
+      }
+      try { this.batchProc.kill("SIGTERM"); } catch {}
+      this.batchProc = null;
+    }
+    this.activeAccountIds.clear();
+    this.activeJobs = 0;
+    this.processing = false;
     broadcast({ type: "queue_cleared", data: {} });
   }
 
@@ -188,38 +210,259 @@ class LoginQueue {
   }
 
   private async process(): Promise<void> {
-    if (this.processing && this.activeJobs >= this.concurrency) return;
+    if (this.processing) return;
+    if (this.queue.length === 0) return;
     this.processing = true;
 
-    while (this.queue.length > 0 && this.activeJobs < this.concurrency) {
-      const item = this.queue.shift();
-      if (!item) break;
+    // Drain the current queue into one batch. The Python batch_login.py runner
+    // is now the concurrency authority (Phase 2): it spawns N workers, handles
+    // retry+backoff and the not_eligible halt, and streams per-account result
+    // events. TS maps each result to applyProviderResult / markLoginFailed
+    // (the same logic loginAccount uses on the direct path) — the per-provider
+    // DB/broadcast/VCC/post-processing is NOT ported to Python.
+    const generation = this.clearGeneration;
+    const batchItems = this.queue.splice(0);
+    const options = batchItems[0];
+    const headless = options?.headless;
+    const browserEngine = options?.browserEngine;
 
-      this.activeJobs++;
-      this.activeAccountIds.add(item.accountId);
-      this.processItem(item).finally(() => {
-        this.activeJobs--;
-        this.activeAccountIds.delete(item.accountId);
+    // Resolve the full account rows + decrypted passwords for the manifest.
+    // Skip any that vanished from the DB between enqueue and run.
+    const manifest: Array<{ accountId: number; email: string; password: string; provider: string }> = [];
+    const accountRows = new Map<number, Account>();
+    for (const item of batchItems) {
+      if (item.generation !== this.clearGeneration) continue;
+      const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
+      if (!account) continue;
+      accountRows.set(account.id, account);
+      this.activeAccountIds.add(account.id);
+      manifest.push({
+        accountId: account.id,
+        email: account.email,
+        password: decrypt(account.password),
+        provider: account.provider,
+      });
+    }
+    this.activeJobs = manifest.length;
+
+    if (manifest.length === 0) {
+      this.processing = false;
+      this.finishBatchIfDone(generation);
+      return;
+    }
+
+    broadcast({
+      type: "queue_processing",
+      data: {
+        accountId: manifest[0]!.accountId,
+        email: manifest[0]!.email,
+        provider: manifest[0]!.provider,
+        attempt: 1,
+        remaining: 0,
+        message: `Starting batch of ${manifest.length} account(s) at concurrency ${this.concurrency}`,
+      },
+    });
+
+    await this.runBatch(manifest, { headless, browserEngine }, generation, accountRows);
+  }
+
+  /**
+   * Spawn batch_login.py, write the manifest to its stdin, stream line-JSON
+   * events, and map each per-account result to applyProviderResult /
+   * markLoginFailed. Retry, backoff, and the not_eligible halt live in Python.
+   */
+  private async runBatch(
+    manifest: Array<{ accountId: number; email: string; password: string; provider: string }>,
+    options: { headless?: boolean; browserEngine?: string },
+    generation: number,
+    accountRows: Map<number, Account>,
+  ): Promise<void> {
+    const { getNextProxy } = await import("../services/proxy-pool");
+    const proxyUrl = (await getNextProxy("auth"))?.url || config.proxyUrl || "";
+
+    const batchScript = config.authScriptPath.replace(/login\.py$/, "batch_login.py");
+    const proc = Bun.spawn(
+      [config.pythonPath, batchScript, "--concurrency", String(this.concurrency), "--max-retries", String(this.maxRetries)],
+      {
+        stdout: "pipe",
+        stderr: "pipe",
+        stdin: "pipe",
+        env: {
+          ...process.env,
+          PYTHONUNBUFFERED: "1",
+          BATCHER_PROXY_URL: proxyUrl,
+          HTTP_PROXY: proxyUrl,
+          HTTPS_PROXY: proxyUrl,
+          ...(options.browserEngine ? { BATCHER_BROWSER_ENGINE: options.browserEngine } : {}),
+        },
+        cwd: config.authScriptCwd,
+      },
+    );
+    this.batchProc = proc;
+    this.batchGeneration = generation;
+
+    // Write the manifest: one header line, one line per account, then eof.
+    // Bun's FileSink (stdin:"pipe") exposes write()/end() directly — not the
+    // WritableStream writer API.
+    const stdin = proc.stdin!;
+    const enc = new TextEncoder();
+    const header: any = { type: "manifest", concurrency: this.concurrency, headless: options.headless ?? config.headless, maxRetries: this.maxRetries };
+    if (options.browserEngine) header.browserEngine = options.browserEngine;
+    if (proxyUrl) header.proxyUrl = proxyUrl;
+    stdin.write(enc.encode(JSON.stringify(header) + "\n"));
+    for (const acc of manifest) {
+      stdin.write(enc.encode(JSON.stringify({ type: "account", ...acc }) + "\n"));
+    }
+    stdin.write(enc.encode(JSON.stringify({ type: "eof" }) + "\n"));
+    stdin.end();
+
+    // Stream stdout line-by-line and map events.
+    const decoder = new TextDecoder();
+    let buffer = "";
+    const reader = proc.stdout.getReader();
+    const seenResultIds = new Set<number>();
+    try {
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buffer += decoder.decode(value, { stream: true });
+        let nl: number;
+        while ((nl = buffer.indexOf("\n")) >= 0) {
+          const line = buffer.slice(0, nl).trim();
+          buffer = buffer.slice(nl + 1);
+          if (!line) continue;
+          let event: any;
+          try { event = JSON.parse(line); } catch { continue; }
+          if (generation !== this.clearGeneration) continue; // stale batch
+          this.handleBatchEvent(event, accountRows, seenResultIds, generation);
+        }
+      }
+    } catch {
+      // reader closed — fall through to finalize
+    }
+
+    await proc.exited;
+    this.batchProc = null;
+
+    // Any account that never produced a result (e.g. process crashed) → fail.
+    for (const acc of manifest) {
+      if (generation !== this.clearGeneration) break;
+      if (!seenResultIds.has(acc.accountId)) {
+        const account = accountRows.get(acc.accountId);
+        if (account) {
+          await markLoginFailed(account, account.provider, "batch runner ended without a result for this account");
+        }
         this.totalProcessed++;
-        // Don't continue if this item's generation is stale (queue was cleared)
-        if (item.generation !== this.clearGeneration) {
-          if (this.activeJobs === 0) this.processing = false;
-          return;
+        this.totalFailed++;
+        this.activeAccountIds.delete(acc.accountId);
+      }
+    }
+    this.activeJobs = 0;
+    this.processing = false;
+
+    // If new accounts were enqueued during the batch, process them; else done.
+    if (generation === this.clearGeneration && this.queue.length > 0) {
+      this.process();
+    } else {
+      this.finishBatchIfDone(generation);
+    }
+  }
+
+  private handleBatchEvent(
+    event: any,
+    accountRows: Map<number, Account>,
+    seenResultIds: Set<number>,
+    generation: number,
+  ): void {
+    if (event.type === "progress") {
+      // Surface worker progress as a queue_processing broadcast so the
+      // dashboard live-log stays populated (mirrors old per-account emitProgressLog).
+      const account = accountRows.get(event.accountId);
+      if (account) {
+        broadcast({
+          type: "queue_processing",
+          data: {
+            accountId: event.accountId,
+            email: account.email,
+            provider: account.provider || event.provider,
+            attempt: event.attempt || 1,
+            remaining: 0,
+            step: event.step,
+            message: event.message,
+            worker: event.worker,
+          },
+        });
+      }
+      return;
+    }
+    if (event.type === "upgrade_card_result") {
+      // Live VCC card-status update (declined cards fail fast so the next
+      // account won't reuse them) — mirrors loginAccount's stdout handler.
+      const { card_last4, card_status } = event;
+      if (card_last4 && card_status && card_status !== "success") {
+        const status = card_status === "declined" ? "declined" as const : "error" as const;
+        void handleCardResult(event.accountId, card_last4, status);
+      }
+      return;
+    }
+    if (event.type === "batch_halted") {
+      // Global not_eligible — clear remaining queue (mirrors old processItem).
+      this.queue = [];
+      broadcast({ type: "queue_cleared", data: { reason: event.reason || "not_eligible" } });
+      return;
+    }
+    if (event.type === "result") {
+      const accountId = event.accountId;
+      if (accountId == null || seenResultIds.has(accountId)) return;
+      seenResultIds.add(accountId);
+      const account = accountRows.get(accountId);
+      if (!account) return;
+      this.activeAccountIds.delete(accountId);
+      this.activeJobs = Math.max(0, this.activeJobs - 1);
+      this.totalProcessed++;
+
+      // Fire-and-forget the DB/broadcast mapping. applyProviderResult/markLoginFailed
+      // are the exact logic loginAccount uses on the direct path.
+      void (async () => {
+        try {
+          if (event.success) {
+            await applyProviderResult(
+              account,
+              account.provider,
+              decrypt(account.password),
+              {
+                success: true,
+                provider: account.provider,
+                credentials: event.credentials || {},
+                quota: event.quota || {},
+              },
+            );
+            this.totalSuccess++;
+          } else {
+            await markLoginFailed(account, account.provider, event.error || "Login failed");
+            this.totalFailed++;
+            // noRetry results that aren't halt conditions are terminal; the
+            // not_eligible halt is already handled by batch_halted above.
+          }
+        } catch {
+          this.totalFailed++;
         }
-        // Continue processing
-        if (this.queue.length > 0) {
-          this.process();
-        } else if (this.activeJobs === 0 && this.retryTimers.size === 0) {
-          this.processing = false;
-          broadcast({
-            type: "queue_complete",
-            data: {
-              totalProcessed: this.totalProcessed,
-              totalSuccess: this.totalSuccess,
-              totalFailed: this.totalFailed,
-            },
-          });
-        }
+      })();
+      return;
+    }
+  }
+
+  private finishBatchIfDone(generation: number): void {
+    if (generation !== this.clearGeneration) return;
+    if (this.activeJobs === 0 && this.queue.length === 0 && this.retryTimers.size === 0) {
+      this.processing = false;
+      broadcast({
+        type: "queue_complete",
+        data: {
+          totalProcessed: this.totalProcessed,
+          totalSuccess: this.totalSuccess,
+          totalFailed: this.totalFailed,
+        },
       });
     }
   }
@@ -230,72 +473,11 @@ class LoginQueue {
       || this.retryTimers.has(accountId);
   }
 
-  private async processItem(item: QueueItem): Promise<void> {
-    if (item.generation !== this.clearGeneration) return;
-
-    const [account] = await db
-      .select()
-      .from(accounts)
-      .where(eq(accounts.id, item.accountId));
-
-    if (!account) return;
-    if (item.generation !== this.clearGeneration) return;
-
-    const processingLog = addAuthLog({
-      type: "queue_processing",
-      accountId: item.accountId,
-      email: account.email,
-      provider: account.provider,
-      step: `attempt_${item.retries + 1}`,
-      message: `Processing ${account.provider} login for ${account.email} (attempt ${item.retries + 1})`,
-      data: { remaining: this.queue.length },
-    });
-    broadcast({
-      type: "queue_processing",
-      data: {
-        ...processingLog,
-        accountId: item.accountId,
-        email: account.email,
-        provider: account.provider,
-        attempt: item.retries + 1,
-        remaining: this.queue.length,
-      },
-    });
-
-    const result = await loginAccount(account, { headless: item.headless, browserEngine: item.browserEngine });
-
-    if (result.success) {
-      this.totalSuccess++;
-    } else {
-      // Don't retry if explicitly marked (e.g. kiro-pro upgrade failed but login succeeded)
-      if ((result as any).noRetry) {
-        this.totalFailed++;
-        // If not_eligible error, stop entire queue — this is a global condition
-        const errorMsg = (result as any).error || "";
-        if (errorMsg.includes("not_eligible") || errorMsg.includes("non-zero")) {
-          this.queue = [];
-          broadcast({ type: "queue_cleared", data: { reason: errorMsg } });
-        }
-      } else if (item.retries < this.maxRetries) {
-        // Re-queue with incremented retry count and delay
-        if (item.generation !== this.clearGeneration) return;
-        const retryGeneration = item.generation;
-        const timer = setTimeout(() => {
-          this.retryTimers.delete(item.accountId);
-          if (retryGeneration !== this.clearGeneration) return;
-          if (this.queue.some((queued) => queued.accountId === item.accountId) || this.activeAccountIds.has(item.accountId)) {
-            if (this.activeJobs === 0 && this.queue.length === 0 && this.retryTimers.size === 0) this.processing = false;
-            this.process();
-            return;
-          }
-          this.queue.push({ accountId: item.accountId, retries: item.retries + 1, headless: item.headless, browserEngine: item.browserEngine, generation: retryGeneration });
-          this.process();
-        }, Math.min(2000 * Math.pow(2, item.retries), 15000)); // exponential backoff
-        if (retryGeneration === this.clearGeneration) this.retryTimers.set(item.accountId, timer);
-      } else {
-        this.totalFailed++;
-      }
-    }
+  private async processItem(_item: QueueItem): Promise<void> {
+    // Phase 2: per-account work moved to the Python batch runner (runBatch).
+    // Retained as a no-op so any external caller still compiles; the queue
+    // now drives batches via process() → runBatch().
+    void _item;
   }
 }
 

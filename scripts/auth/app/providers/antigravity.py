@@ -75,6 +75,154 @@ def _debug(msg: str) -> None:
         print(f"[antigravity-debug] {msg}", flush=True)
 
 
+# ── Headed relaunch (mirrors 9router's relaunchAsHeaded) ────────────────────
+#
+# When a headless worker hits a step Google won't let automation past
+# (text CAPTCHA, "verify it's you", an interstitial we can't click through),
+# we relaunch a HEADED Chrome window carrying the headless session's cookies
+# so the user can finish the step in a real visible frame, then hand control
+# back to the automated flow. nodriver has no Playwright storageState, so we
+# carry state via CDP Network.getCookies → setCookies (the shim's
+# BrowserContext.cookies() / add_cookies()).
+
+# Signals that a headless worker cannot get past on its own and that a headed
+# relaunch is warranted. Checked against the page's visible button/text state.
+_MANUAL_STEP_HINTS = (
+    "verify it", "verify", "confirm", "recover",            # account challenges
+    "couldn", "try again later", "unusual activity",        # hard blocks
+)
+
+
+async def _detect_manual_step(page: Any) -> str | None:
+    """Return a short label if the page is showing a manual-step challenge
+    the automation can't click through, else None. Detects:
+      - text CAPTCHA (img#captchaimg / input#ca)
+      - "verify it's you" / recovery / hard-block screens
+    """
+    try:
+        info = await page.evaluate("""() => {
+          const body = (document.body && document.body.innerText) || "";
+          const hasCaptchaImg = !!document.querySelector('img#captchaimg, img[alt*="captcha" i]');
+          const hasCaptchaInput = !!document.querySelector('input#ca, input[name="ca"]');
+          return { body: body.slice(0, 4000), hasCaptcha: hasCaptchaImg || hasCaptchaInput };
+        }""")
+    except Exception:
+        return None
+    if not info:
+        return None
+    if info.get("hasCaptcha"):
+        return "captcha"
+    body = (info.get("body") or "").lower()
+    for hint in _MANUAL_STEP_HINTS:
+        if hint in body:
+            return "challenge"
+    return None
+
+
+async def relaunch_as_headed(page: Any, headless_browser: Any, reason: str = "manual_step") -> "tuple[Any, Any] | None":
+    """Relaunch the current headless session as a HEADED Chrome window, carrying
+    over cookies, and navigate to the current URL. Returns (new_page,
+    new_browser) on success, or None if the relaunch failed.
+
+    Mirrors 9router's relaunchAsHeaded (kiroBulkImportManager.js): grab
+    storageState (here: cookies via CDP), close the old headless browser,
+    launch a headed one, inject cookies, goto the last URL. The caller is
+    responsible for re-driving the login flow on the returned page and for
+    closing the new browser when done.
+    """
+    # 1. capture last URL + cookies from the headless session
+    last_url = ""
+    try:
+        last_url = await page.evaluate("location.href") or ""
+    except Exception:
+        last_url = ""
+    cookies: list[dict[str, Any]] = []
+    try:
+        ctx = page.context
+        cookies = await ctx.cookies()
+    except Exception as exc:
+        _debug(f"relaunch_as_headed: cookie capture failed: {exc}")
+        cookies = []
+
+    _emit_progress("antigravity", "manual_step", f"Manual step ({reason}) — relaunching as a visible window")
+
+    # 2. close the headless browser
+    try:
+        await headless_browser.close()
+    except Exception:
+        pass
+
+    # 3. launch a HEADED nodriver Chrome (headless=False). Headed gets past
+    #    Google's password challenge where headless takes a hard 500.
+    from app.providers.nodriver_browser import launch_browser
+    try:
+        new_browser, new_page = await launch_browser(headless=False)
+    except Exception as exc:
+        _debug(f"relaunch_as_headed: headed launch failed: {exc}")
+        return None
+    new_page.set_default_timeout(45000)
+
+    # 4. inject the carried cookies before navigating, so the user lands on
+    #    the authenticated challenge page rather than a fresh login.
+    if cookies:
+        try:
+            await new_page.context.add_cookies(cookies)
+        except Exception as exc:
+            _debug(f"relaunch_as_headed: cookie injection failed: {exc}")
+
+    # 5. navigate to the last URL the headless session was on
+    if last_url:
+        try:
+            await new_page.goto(last_url, wait_until="domcontentloaded", timeout=30000)
+        except Exception as exc:
+            _debug(f"relaunch_as_headed: goto last_url failed: {exc}")
+
+    _emit_progress("antigravity", "manual_step_ready", "Visible window ready — complete the step in the browser")
+    return new_page, new_browser
+
+
+async def _await_user_completion(page: Any, deadline_s: int = 300) -> bool:
+    """Wait for the user to finish a manual step in the headed window. We
+    consider it done when the page navigates OFF the challenge (URL changes
+    away from a challenge path, or the captcha/challenge markers disappear)
+    for a few consecutive checks. Returns True if completed, False on timeout.
+    """
+    import time as _time
+    start = _time.monotonic()
+    stable = 0
+    last_state: str | None = None
+    while _time.monotonic() - start < deadline_s:
+        try:
+            state = await page.evaluate("""() => ({
+              url: location.href,
+              hasCaptcha: !!document.querySelector('img#captchaimg, input#ca, input[name="ca"]'),
+              body: ((document.body && document.body.innerText) || "").slice(0, 500).toLowerCase()
+            })""")
+        except Exception:
+            await asyncio.sleep(1.0)
+            continue
+        if state:
+            manual = _detect_manual_step(page)
+            # Off-challenge = URL no longer a challenge path AND no captcha/challenge markers
+            off_challenge = (not manual) and "challenge" not in (state.get("url") or "")
+            cur = f"{state.get('url')}|{manual}"
+            if off_challenge:
+                if cur == last_state:
+                    stable += 1
+                else:
+                    stable = 1
+                    last_state = cur
+                if stable >= 3:  # ~3s stable off-challenge → done
+                    _emit_progress("antigravity", "manual_step_done", "Manual step completed")
+                    return True
+            else:
+                stable = 0
+                last_state = cur
+        await asyncio.sleep(1.0)
+    _debug("_await_user_completion timed out")
+    return False
+
+
 # ── OAuth callback server (mirrors codex.py) ────────────────────────────────
 
 class _CallbackState:
@@ -441,11 +589,47 @@ async def _solve_google_captcha_manual(page: Any, is_headless: bool) -> bool:
     return True  # trust the user's input even if page hasn't navigated yet
 
 
-async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150, is_headless: bool = False) -> None:
+async def _relaunch_and_resume(page: Any, session: "dict[str, Any]", reason: str) -> "Any | None":
+    """Relaunch the headless session as a headed window, wait for the user to
+    finish the manual step, mutate ``session`` to point at the new headed
+    browser/page, and return the new page (or None on failure/timeout).
+
+    On a successful resume the caller MUST continue driving `session["page"]`;
+    on failure the caller may fall back to the old in-page manual solve.
+    """
+    browser = session.get("browser") if isinstance(session, dict) else None
+    if browser is None:
+        _debug("_relaunch_and_resume: no browser in session; cannot relaunch")
+        return None
+    resumed = await relaunch_as_headed(page, browser, reason=reason)
+    if resumed is None:
+        return None
+    new_page, new_browser = resumed
+    # point the session at the headed browser/page for the rest of the flow
+    session["browser"] = new_browser
+    session["page"] = new_page
+    session["headed_via_relaunch"] = True
+    completed = await _await_user_completion(new_page, deadline_s=300)
+    if not completed:
+        _debug("_relaunch_and_resume: user did not complete the step in time")
+        # leave the headed window open briefly so the user can see; caller raises
+        return new_page
+    return new_page
+
+
+async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150, is_headless: bool = False, session: "dict[str, Any] | None" = None) -> None:
     """Drive accounts.google.com v3 signin: email → password → (speedbump) →
     consent → redirect. Poll-driven (no blind sleeps), DOM-aware. Handles the
     fresh-account Workspace ToS speedbump ('I understand') and the OAuth consent
-    ('Sign in'). Raises if the login doesn't complete in deadline_s."""
+    ('Sign in'). Raises if the login doesn't complete in deadline_s.
+
+    If `session` is provided (the adapter's session dict holding ``browser`` and
+    ``page``), a headless worker that hits a manual step (CAPTCHA / "verify it's
+    you" / hard block) relaunches a HEADED Chrome via relaunch_as_headed,
+    carries cookies over, waits for the user to finish the step in the visible
+    window, then continues the loop on the new page — mutating session["page"]
+    and session["browser"] so the caller follows the headed session onward.
+    """
     import time as _time
 
     # 1. email page
@@ -510,6 +694,16 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
         except Exception:
             captcha_info = {"detected": False}
         if captcha_info.get("detected"):
+            # In headless mode with a session, escalate to a visible framed
+            # window (9router relaunchAsHeaded) so the user can solve ANY
+            # manual step, not just type a CAPTCHA. Falls back to the tkinter
+            # popup only if no session / relaunch fails.
+            if is_headless and session is not None:
+                resumed = await _relaunch_and_resume(page, session, reason="captcha")
+                if resumed is not None:
+                    page = resumed  # continue on the headed page
+                    continue
+                _debug("relaunch_as_headed failed; falling back to tkinter captcha popup")
             solved = await _solve_google_captcha_manual(page, is_headless)
             if not solved:
                 raise NonRetryableBatcherError(
@@ -518,6 +712,17 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
                 )
             await asyncio.sleep(1.0)
             continue  # re-check state after solve
+        # Broader manual-step detection (verify-it's-you / recovery / hard
+        # block). Only escalate in headless mode with a session — headed mode
+        # already shows the page for direct interaction.
+        if is_headless and session is not None:
+            manual = await _detect_manual_step(page)
+            if manual:
+                resumed = await _relaunch_and_resume(page, session, reason=manual)
+                if resumed is not None:
+                    page = resumed
+                    continue
+                _debug("relaunch_as_headed failed for challenge; continuing automated loop")
         for action in KNOWN_ACTIONS:
             if action in btns:
                 if action == last_clicked:
@@ -585,7 +790,15 @@ class AntigravityProviderAdapter(ProviderAdapter):
             _emit_progress("antigravity", "navigate", "Opening Google OAuth...")
             await page.goto(authorize_url, wait_until="domcontentloaded", timeout=30000)
             _emit_progress("antigravity", "google_login", "Driving Google login flow...")
-            await _drive_google_login(page, account.identifier, account.secret, is_headless=headless)
+            await _drive_google_login(
+                page,
+                account.identifier,
+                account.secret,
+                is_headless=headless,
+                session=session,  # allows headless→headed relaunch on a manual step
+            )
+            # The login driver may have relaunches the session headed; follow it.
+            page = session.get("page", page)
             _emit_progress("antigravity", "waiting_callback", "Waiting for OAuth callback...")
 
             # Wait for the callback to capture the code.

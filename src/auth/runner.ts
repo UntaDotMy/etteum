@@ -333,6 +333,252 @@ function extractResult(events: ScriptEvent[]): ScriptResultEvent | null {
   return null;
 }
 
+/**
+ * Mark an account as failed + emit the login_failed log + broadcast.
+ * Extracted from loginAccount so the batch-event handler (Phase 2) reuses the
+ * exact same failure path without re-spawning login.py. Returns a LoginResult
+ * shaped like loginAccount's failure returns.
+ */
+export async function markLoginFailed(
+  account: Account,
+  provider: string,
+  errorMsg: string,
+): Promise<LoginResult> {
+  await markAccountError(account.id, errorMsg);
+  const log = addAuthLog({
+    type: "login_failed",
+    accountId: account.id,
+    email: account.email,
+    provider,
+    error: errorMsg,
+    message: errorMsg,
+  });
+  broadcast({
+    type: "login_failed",
+    data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
+  });
+  return { success: false, error: errorMsg };
+}
+
+/**
+ * Apply a successful (or structured-failure) provider result to the DB + emit
+ * the login_success/login_failed log + broadcast. This is the per-account
+ * result-handling logic extracted verbatim from loginAccount()'s success path
+ * (gitlab-duo PAT, kiro-pro upgrade, codebuddy quota, standard DB update).
+ *
+ * Used by BOTH:
+ *   - loginAccount() (direct 'login now' path, unchanged behavior)
+ *   - the Phase 2 batch-event handler (maps Python batch-runner per-account
+ *     result events → existing TS DB/broadcast logic, without porting it)
+ *
+ * `password` is the decrypted account password (needed for the gitlab-duo
+ * gmail fallback). Returns a LoginResult.
+ */
+export async function applyProviderResult(
+  account: Account,
+  provider: string,
+  password: string,
+  providerResult: ProviderResult,
+): Promise<LoginResult> {
+  // Success! Store credentials and quota
+  const credentials = providerResult.credentials || {};
+  const quota = providerResult.quota || {};
+
+  // GitLab Duo: the bot returned a freshly-generated PAT. Hand it off to the
+  // canonical account-creation pipeline (`createGitlabDuoAccount`) which
+  // validates the PAT, resolves the namespace, fetches available models and
+  // updates this row in-place. We do this here — instead of in the standard
+  // path below — because the PAT must be re-encrypted as `password`, the
+  // tokens column needs the gitlab-specific shape {gitlabBaseUrl, namespaceId,
+  // namespacePath, userId}, and the metadata must contain the model list.
+  if (provider === "gitlab-duo") {
+    const pat = (credentials as Record<string, string>).pat || "";
+    const baseUrl = (credentials as Record<string, string>).gitlab_base_url || "https://gitlab.com";
+    const gmailEmail = (credentials as Record<string, string>).gmail_email || account.email;
+    const gmailPassword = (credentials as Record<string, string>).gmail_password || password;
+
+    if (!pat) {
+      return markLoginFailed(account, provider, "Bot finished but did not return a PAT");
+    }
+
+    const { createGitlabDuoAccount } = await import("../api/accounts");
+    const finalize = await createGitlabDuoAccount({
+      gitlabBaseUrl: baseUrl,
+      pat,
+      // Keep the gmail address as the row label so users can recognize the
+      // account in the dashboard. createGitlabDuoAccount will preserve it
+      // when `existingAccountId` is provided.
+      label: account.email,
+      existingAccountId: account.id,
+      gmailEmail,
+      gmailPassword,
+    });
+
+    if (!finalize.ok) {
+      return markLoginFailed(account, provider, `PAT validation failed: ${finalize.error}`);
+    }
+
+    const successLog = addAuthLog({
+      type: "login_success",
+      accountId: account.id,
+      email: account.email,
+      provider,
+      step: "success",
+      message: `GitLab Duo onboarded: ${finalize.username} (${finalize.modelsCount} models, default=${finalize.defaultModel})`,
+      data: {
+        username: finalize.username,
+        namespacePath: finalize.namespacePath,
+        modelsCount: finalize.modelsCount,
+        defaultModel: finalize.defaultModel,
+      },
+    });
+    broadcast({
+      type: "login_success",
+      data: {
+        logId: successLog.id,
+        id: account.id,
+        email: account.email,
+        provider,
+        modelsCount: finalize.modelsCount,
+        defaultModel: finalize.defaultModel,
+      },
+    });
+
+    return { success: true, tokens: credentials, quota };
+  }
+
+  // Kiro Pro: upgrade must succeed before marking active
+  if (provider === "kiro-pro" && config.kiroProUpgrade) {
+    const upgradeResult = (providerResult as any).upgrade as
+      | { upgrade_success: boolean; upgrade_error?: string; card_last4?: string; quota?: Record<string, unknown> }
+      | null
+      | undefined;
+
+    if (!upgradeResult || !upgradeResult.upgrade_success) {
+      const upgradeError = upgradeResult?.upgrade_error || "upgrade_not_attempted";
+      await db
+        .update(accounts)
+        .set({
+          status: "error",
+          tokens: credentials as unknown,
+          errorMessage: `Login OK but upgrade failed: ${upgradeError}`,
+          lastLoginAt: new Date(),
+          updatedAt: new Date(),
+        })
+        .where(eq(accounts.id, account.id));
+
+      if (upgradeResult?.card_last4) {
+        const cardStatus = upgradeError.includes("declined") ? "declined" as const : "error" as const;
+        await handleCardResult(account.id, upgradeResult.card_last4, cardStatus);
+      }
+
+      const log = addAuthLog({
+        type: "login_failed",
+        accountId: account.id,
+        email: account.email,
+        provider,
+        error: `Upgrade failed: ${upgradeError}`,
+        message: `Upgrade failed: ${upgradeError}`,
+      });
+      broadcast({
+        type: "login_failed",
+        data: { logId: log.id, id: account.id, email: account.email, provider, error: `Upgrade failed: ${upgradeError}` },
+      });
+      return { success: false, error: `Upgrade failed: ${upgradeError}`, noRetry: true };
+    }
+
+    // Upgrade succeeded — update card status
+    if (upgradeResult.card_last4) {
+      await handleCardResult(account.id, upgradeResult.card_last4, "success");
+    }
+  }
+
+  let { limit: quotaLimit, remaining: quotaRemaining } = parseQuota(quota);
+  let quotaMetadata: Record<string, unknown> = quota;
+
+  if ((quotaLimit <= 0 || quotaRemaining <= 0) && account.provider === "codebuddy") {
+    try {
+      const syncedQuota = await fetchProviderQuota(account, credentials as Record<string, string>);
+      if (syncedQuota) {
+        quotaLimit = syncedQuota.limit;
+        quotaRemaining = syncedQuota.remaining;
+        quotaMetadata = { ...quota, syncedQuota, quotaSource: "provider.fetchQuota" };
+      }
+    } catch (error) {
+      quotaMetadata = {
+        ...quota,
+        quotaSyncError: error instanceof Error ? error.message : String(error),
+      };
+    }
+  }
+
+  // Codebuddy: quota is mandatory — without valid quota the account is unusable
+  // (warmup will misidentify it as exhausted). Treat as retryable failure.
+  if (account.provider === "codebuddy" && quotaLimit <= 0) {
+    const quotaError = "Login succeeded but quota fetch failed (billing API error) — retrying";
+    const log = addAuthLog({
+      type: "login_failed",
+      accountId: account.id,
+      email: account.email,
+      provider,
+      error: quotaError,
+      message: quotaError,
+    });
+    broadcast({
+      type: "login_failed",
+      data: { logId: log.id, id: account.id, email: account.email, provider, error: quotaError },
+    });
+    // Save tokens so next retry can potentially use them, but don't mark active
+    await db
+      .update(accounts)
+      .set({
+        tokens: credentials as unknown,
+        metadata: { ...quotaMetadata, quotaRetryReason: quotaError } as unknown,
+        updatedAt: new Date(),
+      })
+      .where(eq(accounts.id, account.id));
+    return { success: false, error: quotaError };
+  }
+
+  await db
+    .update(accounts)
+    .set({
+      status: "active",
+      tokens: credentials as unknown,
+      quotaLimit,
+      quotaRemaining,
+      lastLoginAt: new Date(),
+      errorMessage: null,
+      metadata: quotaMetadata as unknown,
+      updatedAt: new Date(),
+    })
+    .where(eq(accounts.id, account.id));
+
+  const successLog = addAuthLog({
+    type: "login_success",
+    accountId: account.id,
+    email: account.email,
+    provider,
+    step: "success",
+    message: `Login success for ${provider}/${account.email}`,
+    data: { quotaLimit, quotaRemaining },
+  });
+
+  broadcast({
+    type: "login_success",
+    data: {
+      logId: successLog.id,
+      id: account.id,
+      email: account.email,
+      provider,
+      quotaLimit,
+      quotaRemaining,
+    },
+  });
+
+  return { success: true, tokens: credentials, quota };
+}
+
 async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, string>> {
   // Check env var first, then fall back to DB settings
   let upgradeEnabled = config.kiroProUpgrade;
@@ -593,231 +839,11 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       return { success: false, error: errorMsg };
     }
 
-    // Success! Store credentials and quota
-    const credentials = providerResult.credentials || {};
-    const quota = providerResult.quota || {};
-
-    // GitLab Duo: the bot returned a freshly-generated PAT. Hand it off to the
-    // canonical account-creation pipeline (`createGitlabDuoAccount`) which
-    // validates the PAT, resolves the namespace, fetches available models and
-    // updates this row in-place. We do this here — instead of in the standard
-    // path below — because the PAT must be re-encrypted as `password`, the
-    // tokens column needs the gitlab-specific shape {gitlabBaseUrl, namespaceId,
-    // namespacePath, userId}, and the metadata must contain the model list.
-    if (provider === "gitlab-duo") {
-      const pat = (credentials as Record<string, string>).pat || "";
-      const baseUrl = (credentials as Record<string, string>).gitlab_base_url || "https://gitlab.com";
-      const gmailEmail = (credentials as Record<string, string>).gmail_email || account.email;
-      const gmailPassword = (credentials as Record<string, string>).gmail_password || password;
-
-      if (!pat) {
-        const errorMsg = "Bot finished but did not return a PAT";
-        await markAccountError(account.id, errorMsg);
-        const log = addAuthLog({
-          type: "login_failed",
-          accountId: account.id,
-          email: account.email,
-          provider,
-          error: errorMsg,
-          message: errorMsg,
-        });
-        broadcast({
-          type: "login_failed",
-          data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
-        });
-        return { success: false, error: errorMsg };
-      }
-
-      const { createGitlabDuoAccount } = await import("../api/accounts");
-      const finalize = await createGitlabDuoAccount({
-        gitlabBaseUrl: baseUrl,
-        pat,
-        // Keep the gmail address as the row label so users can recognize the
-        // account in the dashboard. createGitlabDuoAccount will preserve it
-        // when `existingAccountId` is provided.
-        label: account.email,
-        existingAccountId: account.id,
-        gmailEmail,
-        gmailPassword,
-      });
-
-      if (!finalize.ok) {
-        const errorMsg = `PAT validation failed: ${finalize.error}`;
-        await markAccountError(account.id, errorMsg);
-        const log = addAuthLog({
-          type: "login_failed",
-          accountId: account.id,
-          email: account.email,
-          provider,
-          error: errorMsg,
-          message: errorMsg,
-        });
-        broadcast({
-          type: "login_failed",
-          data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
-        });
-        return { success: false, error: errorMsg };
-      }
-
-      const successLog = addAuthLog({
-        type: "login_success",
-        accountId: account.id,
-        email: account.email,
-        provider,
-        step: "success",
-        message: `GitLab Duo onboarded: ${finalize.username} (${finalize.modelsCount} models, default=${finalize.defaultModel})`,
-        data: {
-          username: finalize.username,
-          namespacePath: finalize.namespacePath,
-          modelsCount: finalize.modelsCount,
-          defaultModel: finalize.defaultModel,
-        },
-      });
-      broadcast({
-        type: "login_success",
-        data: {
-          logId: successLog.id,
-          id: account.id,
-          email: account.email,
-          provider,
-          modelsCount: finalize.modelsCount,
-          defaultModel: finalize.defaultModel,
-        },
-      });
-
-      return { success: true, tokens: credentials, quota };
-    }
-
-    // Kiro Pro: upgrade must succeed before marking active
-    if (provider === "kiro-pro" && config.kiroProUpgrade) {
-      const upgradeResult = (providerResult as any).upgrade as
-        | { upgrade_success: boolean; upgrade_error?: string; card_last4?: string; quota?: Record<string, unknown> }
-        | null
-        | undefined;
-
-      if (!upgradeResult || !upgradeResult.upgrade_success) {
-        const upgradeError = upgradeResult?.upgrade_error || "upgrade_not_attempted";
-        await db
-          .update(accounts)
-          .set({
-            status: "error",
-            tokens: credentials as unknown,
-            errorMessage: `Login OK but upgrade failed: ${upgradeError}`,
-            lastLoginAt: new Date(),
-            updatedAt: new Date(),
-          })
-          .where(eq(accounts.id, account.id));
-
-        if (upgradeResult?.card_last4) {
-          const cardStatus = upgradeError.includes("declined") ? "declined" as const : "error" as const;
-          await handleCardResult(account.id, upgradeResult.card_last4, cardStatus);
-        }
-
-        const log = addAuthLog({
-          type: "login_failed",
-          accountId: account.id,
-          email: account.email,
-          provider,
-          error: `Upgrade failed: ${upgradeError}`,
-          message: `Upgrade failed: ${upgradeError}`,
-        });
-        broadcast({
-          type: "login_failed",
-          data: { logId: log.id, id: account.id, email: account.email, provider, error: `Upgrade failed: ${upgradeError}` },
-        });
-        return { success: false, error: `Upgrade failed: ${upgradeError}`, noRetry: true };
-      }
-
-      // Upgrade succeeded — update card status
-      if (upgradeResult.card_last4) {
-        await handleCardResult(account.id, upgradeResult.card_last4, "success");
-      }
-    }
-
-    let { limit: quotaLimit, remaining: quotaRemaining } = parseQuota(quota);
-    let quotaMetadata: Record<string, unknown> = quota;
-
-    if ((quotaLimit <= 0 || quotaRemaining <= 0) && account.provider === "codebuddy") {
-      try {
-        const syncedQuota = await fetchProviderQuota(account, credentials as Record<string, string>);
-        if (syncedQuota) {
-          quotaLimit = syncedQuota.limit;
-          quotaRemaining = syncedQuota.remaining;
-          quotaMetadata = { ...quota, syncedQuota, quotaSource: "provider.fetchQuota" };
-        }
-      } catch (error) {
-        quotaMetadata = {
-          ...quota,
-          quotaSyncError: error instanceof Error ? error.message : String(error),
-        };
-      }
-    }
-
-    // Codebuddy: quota is mandatory — without valid quota the account is unusable
-    // (warmup will misidentify it as exhausted). Treat as retryable failure.
-    if (account.provider === "codebuddy" && quotaLimit <= 0) {
-      const quotaError = "Login succeeded but quota fetch failed (billing API error) — retrying";
-      const log = addAuthLog({
-        type: "login_failed",
-        accountId: account.id,
-        email: account.email,
-        provider,
-        error: quotaError,
-        message: quotaError,
-      });
-      broadcast({
-        type: "login_failed",
-        data: { logId: log.id, id: account.id, email: account.email, provider, error: quotaError },
-      });
-      // Save tokens so next retry can potentially use them, but don't mark active
-      await db
-        .update(accounts)
-        .set({
-          tokens: credentials as unknown,
-          metadata: { ...quotaMetadata, quotaRetryReason: quotaError } as unknown,
-          updatedAt: new Date(),
-        })
-        .where(eq(accounts.id, account.id));
-      return { success: false, error: quotaError };
-    }
-
-    await db
-      .update(accounts)
-      .set({
-        status: "active",
-        tokens: credentials as unknown,
-        quotaLimit,
-        quotaRemaining,
-        lastLoginAt: new Date(),
-        errorMessage: null,
-        metadata: quotaMetadata as unknown,
-        updatedAt: new Date(),
-      })
-      .where(eq(accounts.id, account.id));
-
-    const successLog = addAuthLog({
-      type: "login_success",
-      accountId: account.id,
-      email: account.email,
-      provider,
-      step: "success",
-      message: `Login success for ${provider}/${account.email}`,
-      data: { quotaLimit, quotaRemaining },
-    });
-
-    broadcast({
-      type: "login_success",
-      data: {
-        logId: successLog.id,
-        id: account.id,
-        email: account.email,
-        provider,
-        quotaLimit,
-        quotaRemaining,
-      },
-    });
-
-    return { success: true, tokens: credentials, quota };
+    // Success! Store credentials and quota. Delegated to applyProviderResult
+    // (extracted verbatim from this function) so the Phase 2 batch-event
+    // handler can reuse the exact same DB/broadcast/provider-post-processing
+    // without re-spawning login.py.
+    return applyProviderResult(account, provider, password, providerResult);
   } catch (error) {
     const errorMsg = error instanceof Error ? error.message : String(error);
 
