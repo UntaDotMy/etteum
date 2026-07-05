@@ -102,8 +102,20 @@ export const DEFAULT_DCP_WHITELIST = ["Read", "Glob", "Grep", "LS", "WebFetch"];
 
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   rtk: {
-    enabled: false,
-    maxToolChars: 4000,
+    // RTK on by default. Old tool results are the dominant cost in long
+    // agentic sessions (hundreds of tool_result messages replayed every turn).
+    // Truncating them is what keeps prompts small enough that reasoning models
+    // (GLM-5.2 etc.) actually have output budget left to think. The last
+    // `keepLastNTurnsFull` turns stay fully intact so active tool calls are
+    // never touched.
+    enabled: true,
+    // Aggressive cap for OLD tool results. Most real tool output (file reads,
+    // command results) is far smaller than this; the cap only bites on large
+    // outputs (big file dumps, verbose logs). 800 chars is enough to preserve
+    // the gist (path, error, key result) while stopping a few huge results
+    // from blowing the context. The smart filters above still run first and
+    // preserve structure (diff hunks, grep groupings, etc.) within the cap.
+    maxToolChars: 800,
     keepLastNTurnsFull: 2,
     smartTruncate: true,
   },
