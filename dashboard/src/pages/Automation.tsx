@@ -92,7 +92,7 @@ export default function Automation() {
     }
     try {
       await importAccounts(text, [modalProvider!.value], {
-        headless: false,
+        headless: true,
         browserEngine: "nodriver",
         concurrency: config.concurrent,
       });

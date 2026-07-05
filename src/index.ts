@@ -252,7 +252,8 @@ app.use("/v1/*", async (c, next) => {
 
 // API Key authentication for management API
 app.use("/api/*", async (c, next) => {
-  // Allow health check, info, and key validation without auth
+  // Allow health check, info, key validation, and SSE frame streams without header auth
+  // (EventSource cannot send custom headers, so SSE uses ?token= query param)
   if (c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test") {
     await next();
     return;

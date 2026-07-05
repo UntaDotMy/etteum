@@ -44,7 +44,8 @@ export async function cancelBrowserSession(sessionId: string): Promise<boolean> 
  * Open an SSE connection to the session's frame stream. Returns a cleanup function.
  */
 export function connectFrameStream(sessionId: string, onFrame: (base64: string, format: string) => void, onDone?: () => void): () => void {
-  const es = new EventSource(`/api/browser-session/${sessionId}/frames`);
+  const apiKey = localStorage.getItem("api_key") || "pool-proxy-secret-key";
+  const es = new EventSource(`/api/browser-session/${sessionId}/frames?api_key=${encodeURIComponent(apiKey)}`);
   es.onmessage = (e) => {
     try {
       const data = JSON.parse(e.data);
