@@ -109,13 +109,16 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // `keepLastNTurnsFull` turns stay fully intact so active tool calls are
     // never touched.
     enabled: true,
-    // Aggressive cap for OLD tool results. Most real tool output (file reads,
-    // command results) is far smaller than this; the cap only bites on large
-    // outputs (big file dumps, verbose logs). 800 chars is enough to preserve
-    // the gist (path, error, key result) while stopping a few huge results
-    // from blowing the context. The smart filters above still run first and
-    // preserve structure (diff hunks, grep groupings, etc.) within the cap.
-    maxToolChars: 800,
+    // Aggressive cap for OLD tool results. In long agentic sessions there are
+    // hundreds of tool_result messages; the median is ~240 chars but the long
+    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 300-char cap keeps the
+    // gist (path, status, short result, error summary) while cutting the bulk
+    // — for a 313-result session this takes tool results from ~116K tokens down
+    // to ~13K, which is the difference between a reasoning model having output
+    // budget left to think vs. silently skipping reasoning. The smart shape
+    // filters (diff hunks, grep groupings, etc.) still run first within the cap,
+    // and the last `keepLastNTurnsFull` turns stay fully intact.
+    maxToolChars: 300,
     keepLastNTurnsFull: 2,
     smartTruncate: true,
   },
