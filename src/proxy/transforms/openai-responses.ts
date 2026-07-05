@@ -327,7 +327,21 @@ export function responsesRequestToChat(
 
   if (req.reasoning?.effort) {
     out.reasoning_effort = req.reasoning.effort;
-    out.thinking = { type: "enabled", effort: req.reasoning.effort };
+    // Per the reasoning guide, effort:"none" means no reasoning. Map it to a
+    // disabled thinking block so providers that gate on `thinking.type` don't
+    // accidentally enable reasoning. Any other effort enables it.
+    if (req.reasoning.effort === "none") {
+      out.thinking = { type: "disabled" };
+    } else {
+      out.thinking = { type: "enabled", effort: req.reasoning.effort };
+    }
+    // reasoning.summary ("auto" | "detailed" | "concise") controls whether
+    // providers return a readable reasoning summary. Forward it so providers
+    // that understand `thinking.summary` (and the OpenAI-native codex path)
+    // surface reasoning summaries.
+    if (req.reasoning.summary) {
+      (out.thinking as any).summary = req.reasoning.summary;
+    }
   }
 
   const responseFormat = mapTextFormatToResponseFormat(req.text);
@@ -370,6 +384,25 @@ export function chatResponseToResponses(
   const choice = resp.choices?.[0];
   const msg = choice?.message;
   const output: ResponsesOutputItem[] = [];
+
+  // Reasoning item. Providers (alibaba, codebuddy, kiro, qoder, codex) surface
+  // the model's chain-of-thought as `message.reasoning_content`. Per the OpenAI
+  // reasoning guide, raw reasoning tokens are never exposed — only the summary
+  // is readable — so we map `reasoning_content` into a `reasoning` output item's
+  // `summary` array. The reasoning item precedes the message item in output
+  // order, matching the streaming lifecycle (reasoning → message → tool calls).
+  const reasoningText =
+    typeof (msg as any)?.reasoning_content === "string" ? (msg as any).reasoning_content :
+    typeof (msg as any)?.reasoning === "string" ? (msg as any).reasoning : "";
+  if (reasoningText.length > 0) {
+    output.push({
+      type: "reasoning",
+      id: `rs_${makeResponseId().slice(5)}`,
+      status: "completed",
+      summary: [{ type: "summary_text", text: reasoningText }],
+      content: [],
+    });
+  }
 
   // Assistant text message.
   if (msg) {

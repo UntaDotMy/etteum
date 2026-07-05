@@ -170,6 +170,25 @@ describe("responsesRequestToChat", () => {
     expect(chat.thinking).toEqual({ type: "enabled", effort: "high" });
   });
 
+  test("reasoning.effort none → disabled thinking (not enabled)", () => {
+    const chat = responsesRequestToChat({
+      model: "gpt-5",
+      input: "hi",
+      reasoning: { effort: "none" },
+    });
+    expect(chat.reasoning_effort).toBe("none");
+    expect(chat.thinking).toEqual({ type: "disabled" });
+  });
+
+  test("reasoning.summary passes through to thinking.summary", () => {
+    const chat = responsesRequestToChat({
+      model: "gpt-5",
+      input: "hi",
+      reasoning: { effort: "medium", summary: "detailed" },
+    });
+    expect(chat.thinking).toEqual({ type: "enabled", effort: "medium", summary: "detailed" });
+  });
+
   test("text.format json_schema → response_format json_schema", () => {
     const chat = responsesRequestToChat({
       model: "gpt-5",
@@ -216,6 +235,35 @@ describe("chatResponseToResponses", () => {
       output_tokens_details: { reasoning_tokens: 0 },
       total_tokens: 12,
     });
+  });
+
+  test("reasoning_content → reasoning output item BEFORE message (non-streaming)", () => {
+    const r = chatResponseToResponses(
+      makeChatResponse({
+        choices: [
+          {
+            index: 0,
+            message: {
+              role: "assistant",
+              content: "The answer is 42.",
+              reasoning_content: "Let me think about this question carefully...",
+            } as any,
+            finish_reason: "stop",
+          },
+        ],
+      }),
+      "gpt-5"
+    );
+    // reasoning item precedes the message item (output order: reasoning -> message)
+    expect(r.output).toHaveLength(2);
+    expect(r.output[0].type).toBe("reasoning");
+    const rs = r.output[0] as any;
+    expect(rs.id.startsWith("rs_")).toBe(true);
+    expect(rs.status).toBe("completed");
+    expect(rs.summary).toEqual([
+      { type: "summary_text", text: "Let me think about this question carefully..." },
+    ]);
+    expect(r.output[1].type).toBe("message");
   });
 
   test("tool_calls → function_call output items (and no empty message)", () => {
