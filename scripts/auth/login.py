@@ -2,6 +2,7 @@
 
 import argparse
 import asyncio
+import base64
 import json
 import sys
 import os
@@ -40,6 +41,27 @@ def emit(data: dict):
         pass
 
 
+async def _capture_frame(page, step: str = ""):
+    """Best-effort JPEG screenshot emitted as a `frame` event for the live
+    browser viewer. Frame capture must never break a login — every failure is
+    swallowed. The downstream relay (batch_login.py) forwards `frame` events to
+    the TS layer; without this the viewer is starved and shows nothing."""
+    if page is None:
+        return
+    try:
+        jpg = await page.screenshot(type="jpeg", quality=70)
+        emit(
+            {
+                "type": "frame",
+                "format": "jpeg",
+                "step": step,
+                "data": base64.b64encode(jpg).decode("ascii"),
+            }
+        )
+    except Exception:
+        pass
+
+
 def retry_delay(attempt: int) -> float:
     return min(BASE_DELAY * (2**attempt), MAX_DELAY)
 
@@ -62,6 +84,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
     session = None
     try:
         session = await adapter.bootstrap_session(account)
+        page = session.get("page") if isinstance(session, dict) else None
         emit(
             {
                 "type": "progress",
@@ -70,6 +93,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                 "message": "Browser session ready",
             }
         )
+        await _capture_frame(page, "browser_launch")
 
         auth_state = await adapter.authenticate(account, session)
         emit(
@@ -80,6 +104,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                 "message": "Authenticated",
             }
         )
+        await _capture_frame(page, "authenticated")
 
         tokens = await adapter.fetch_tokens(account, auth_state, session)
         emit(
@@ -90,6 +115,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                 "message": "Tokens obtained",
             }
         )
+        await _capture_frame(page, "tokens")
 
         # Save browser cookie header string for billing API access
         # (do this before fetch_quota — browser may crash during quota fetch)
@@ -122,6 +148,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                             "message": f"VIP bonus claimed: +{int(gift_credits)} credits",
                         }
                     )
+                    await _capture_frame(page, "claim")
 
                 remain = (
                     quota.get("remaining_credits")
@@ -150,6 +177,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                     "message": quota_msg,
                 }
             )
+            await _capture_frame(page, "quota")
         except Exception as e:
             emit(
                 {
@@ -159,6 +187,7 @@ async def _run_provider_once(adapter, account: NormalizedAccount) -> dict:
                     "message": f"Quota fetch skipped: {e}",
                 }
             )
+            await _capture_frame(page, "quota_skip")
 
         # Codebuddy: quota is mandatory — without it the account is unusable
         # (warmup will misidentify it as exhausted). Retry from scratch.

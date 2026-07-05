@@ -5,6 +5,13 @@ import { Input } from "@/components/ui/input";
 import { connectFrameStream, sendBrowserInput, sendCaptchaAnswer, cancelBrowserSession } from "@/lib/browserApi";
 import { Loader2, X, Send, Globe } from "lucide-react";
 
+interface SessionStep {
+  ts: number;
+  step: string;
+  message: string;
+  provider: string;
+}
+
 interface SessionInfo {
   sessionId: string;
   accountId: number;
@@ -15,6 +22,7 @@ interface SessionInfo {
   terminal: boolean;
   hasChallenge: boolean;
   startedAt: number;
+  steps?: SessionStep[];
 }
 
 interface Challenge {
@@ -36,11 +44,14 @@ export function BrowserSessionCard({ session, challenge }: Props) {
   const imgRef = useRef<HTMLImageElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
-  // Connect to the SSE frame stream.
+  // Connect to the SSE frame stream. Renders frames as a base64 data-URI —
+  // this matches the ennowxai frame contract byte-for-byte: the server sends
+  // {base64, format} with RAW base64 (no data: prefix), and the client builds
+  // `data:image/${format};base64,${base64}`.
   useEffect(() => {
     if (session.terminal) return;
     const cleanup = connectFrameStream(session.sessionId, (base64, format) => {
-      setFrameSrc(`data:image/${format};base64,${base64}`);
+      if (base64) setFrameSrc(`data:image/${format || "jpeg"};base64,${base64}`);
     });
     return cleanup;
   }, [session.sessionId, session.terminal]);
@@ -184,6 +195,37 @@ export function BrowserSessionCard({ session, challenge }: Props) {
           </div>
         )}
       </div>
+
+      {/* Step timeline — the structured automation log (per-step progress/error/result) */}
+      {session.steps && session.steps.length > 0 && (
+        <div className="max-h-32 overflow-y-auto border-t border-[var(--border)] px-3 py-2">
+          <div className="mb-1 text-[10px] font-mono uppercase tracking-wide text-[var(--muted-foreground)]">
+            Automation log
+          </div>
+          <ol className="flex flex-col gap-1">
+            {session.steps.map((s, i) => (
+              <li key={i} className="flex items-start gap-2 text-[11px] font-mono">
+                <span className="shrink-0 text-[var(--muted-foreground)]">
+                  {new Date(s.ts).toLocaleTimeString([], { hour12: false })}
+                </span>
+                <span
+                  className="shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold uppercase"
+                  style={{
+                    color:
+                      s.step === "error" || s.step === "quota_skip" ? "var(--error)" :
+                      s.step === "result" ? (s.message.includes("succeed") ? "var(--success)" : "var(--error)") :
+                      s.step === "authenticated" || s.step === "tokens" ? "var(--success)" :
+                      "var(--muted-foreground)",
+                  }}
+                >
+                  {s.step}
+                </span>
+                <span className="min-w-0 flex-1 break-words text-[var(--foreground)]">{s.message}</span>
+              </li>
+            ))}
+          </ol>
+        </div>
+      )}
     </div>
   );
 }

@@ -2,13 +2,14 @@ import { db } from "../db/index";
 import { accounts } from "../db/schema";
 import { eq, inArray } from "drizzle-orm";
 import { loginAccount, loginAllProviders, applyProviderResult, markLoginFailed } from "./runner";
-import { registerSession, getSession, listSessions, updateFrame, updatePhase, updateChallenge, clearChallenge, deleteSession } from "./browserSession";
+import { registerSession, getSession, listSessions, updateFrame, updatePhase, updateChallenge, clearChallenge, deleteSession, appendStep } from "./browserSession";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
 import type { Account } from "../db/schema";
 import { addAuthLog } from "./logs";
 import { config } from "../config";
 import { handleCardResult } from "../api/vcc";
+import { runAntigravityManualLogin } from "./manualRunner";
 
 interface QueueItem {
   accountId: number;
@@ -22,6 +23,14 @@ interface BulkAddItem {
   email: string;
   password: string;
   providers: string[]; // ["kiro", "codebuddy", "canva"]
+}
+
+/** Options threaded from the dashboard through to batch_login.py / login.py. */
+export interface LoginRunOptions {
+  headless?: boolean;
+  browserEngine?: string;
+  concurrency?: number;
+  maxRetries?: number;
 }
 
 class LoginQueue {
@@ -74,8 +83,9 @@ class LoginQueue {
   /**
    * Queue all pending accounts for login
    */
-  async queueAllPending(options: { headless?: boolean; browserEngine?: string; concurrency?: number } = {}): Promise<number> {
+  async queueAllPending(options: { headless?: boolean; browserEngine?: string; concurrency?: number; maxRetries?: number } = {}): Promise<number> {
     if (options.concurrency !== undefined) this.setConcurrency(options.concurrency);
+    if (options.maxRetries !== undefined) this.setMaxRetries(options.maxRetries);
 
     // Providers that use API keys / PATs / OAuth — not browser login.
     // codebuddy-china uses static ck_ keys; byok uses user-supplied keys;
@@ -104,7 +114,7 @@ class LoginQueue {
    * Input: array of { email, password, providers }
    * This handles the case where one email is used across multiple providers.
    */
-  async bulkAdd(items: BulkAddItem[], options: { headless?: boolean; concurrency?: number; browserEngine?: string } = {}): Promise<{ created: number; queued: number }> {
+  async bulkAdd(items: BulkAddItem[], options: { headless?: boolean; concurrency?: number; browserEngine?: string; maxRetries?: number } = {}): Promise<{ created: number; queued: number }> {
     let created = 0;
     const accountIds: number[] = [];
 
@@ -135,6 +145,7 @@ class LoginQueue {
     }
 
     if (options.concurrency !== undefined) this.setConcurrency(options.concurrency);
+    if (options.maxRetries !== undefined) this.setMaxRetries(options.maxRetries);
 
     // Queue all created accounts for login
     this.enqueueBulk(accountIds, { headless: options.headless, browserEngine: options.browserEngine });
@@ -220,6 +231,10 @@ class LoginQueue {
     this.concurrency = Math.max(1, Math.min(n, 10));
   }
 
+  setMaxRetries(n: number): void {
+    this.maxRetries = Math.max(1, Math.min(Math.floor(n), 5));
+  }
+
   private async process(): Promise<void> {
     if (this.processing) return;
     if (this.queue.length === 0) return;
@@ -274,7 +289,94 @@ class LoginQueue {
       },
     });
 
+    // Antigravity uses the per-account frame-streaming path (one isolated
+    // nodriver browser per account, like ennowxai's per-account kiro_login.py).
+    // Other providers keep the batch_login.py multi-worker path.
+    const allAntigravity = manifest.every((m) => m.provider === "antigravity");
+    if (allAntigravity) {
+      await this.runAntigravityBatch(manifest, generation, accountRows);
+      return;
+    }
+
     await this.runBatch(manifest, { headless, browserEngine }, generation, accountRows);
+  }
+
+  /**
+   * Antigravity batch: spawn ONE antigravity_manual_login.py per account, up to
+   * `this.concurrency` at a time. Each spawn = one isolated nodriver browser that
+   * streams frames continuously (the Browser Logs page shows N live previews).
+   * Mirrors ennowxai's model where the backend spawns kiro_login.py per account
+   * and manages concurrency. runAntigravityManualLogin is self-contained: it
+   * registers its own session, bridges events, handles captcha, and applies the
+   * DB result. We just throttle how many run at once.
+   */
+  private async runAntigravityBatch(
+    manifest: Array<{ accountId: number; email: string; password: string; provider: string }>,
+    generation: number,
+    accountRows: Map<number, Account>,
+  ): Promise<void> {
+    const limit = Math.max(1, Math.min(this.concurrency || 2, manifest.length));
+    let nextIndex = 0;
+    let active = 0;
+    let done = 0;
+    const total = manifest.length;
+
+    const log = (m: string) => console.log(`[ag-batch] ${m}`);
+
+    log(`starting accounts=${total} concurrency=${limit} frameRelay=true`);
+
+    await new Promise<void>((resolveAll) => {
+      const startNext = () => {
+        // Stop if a newer batch generation superseded this one.
+        if (generation !== this.batchGeneration) {
+          if (active === 0) resolveAll();
+          return;
+        }
+        while (active < limit && nextIndex < total) {
+          const item = manifest[nextIndex++];
+          const account = accountRows.get(item.accountId);
+          if (!account) {
+            done++;
+            continue;
+          }
+          active++;
+          const idx = done;
+          log(`worker ${idx + 1}/${total} start email=${item.email}`);
+
+          // Fire-and-forget per account; resolve slot on completion.
+          runAntigravityManualLogin(account)
+            .catch((err) => {
+              log(`worker ${idx + 1}/${total} crash email=${item.email} error=${err?.message || err}`);
+            })
+            .finally(() => {
+              active--;
+              done++;
+              log(`worker ${idx + 1}/${total} done email=${item.email} (${done}/${total})`);
+              broadcast({
+                type: "queue_processing",
+                data: {
+                  accountId: item.accountId,
+                  email: item.email,
+                  provider: "antigravity",
+                  attempt: 1,
+                  remaining: Math.max(0, total - done),
+                  message: `Account ${done}/${total} finished`,
+                },
+              });
+              if (done >= total) {
+                resolveAll();
+              } else {
+                startNext();
+              }
+            });
+        }
+      };
+      startNext();
+    });
+
+    log(`batch complete done=${done}/${total}`);
+    this.processing = false;
+    this.finishBatchIfDone(generation);
   }
 
   /**
@@ -292,9 +394,8 @@ class LoginQueue {
     const proxyUrl = (await getNextProxy("auth"))?.url || config.proxyUrl || "";
 
     const batchScript = config.authScriptPath.replace(/login\.py$/, "batch_login.py");
-    const proc = Bun.spawn(
-      [config.pythonPath, batchScript, "--concurrency", String(this.concurrency), "--max-retries", String(this.maxRetries)],
-      {
+    const spawnArgs = [config.pythonPath, batchScript, "--concurrency", String(this.concurrency), "--max-retries", String(this.maxRetries)];
+    const proc = Bun.spawn(spawnArgs, {
         stdout: "pipe",
         stderr: "pipe",
         stdin: "pipe",
@@ -427,6 +528,13 @@ class LoginQueue {
           },
         });
       }
+      // Also append to the per-session step timeline (richer Browser Logs view).
+      appendStep(
+        `batch-${event.accountId}`,
+        event.step || "progress",
+        event.message || "",
+        event.provider || (account ? account.provider : "") || "",
+      );
       return;
     }
     // ── frame relay: route JPEG frames + phase + captcha to the in-app
@@ -446,6 +554,7 @@ class LoginQueue {
           lastFrame: "",
           lastFrameFormat: "jpeg",
           lastFrameTime: Date.now(),
+          steps: [],
           challenge: null,
           terminal: false,
           proc: this.batchProc ?? null,
@@ -454,7 +563,11 @@ class LoginQueue {
           startedAt: Date.now(),
         });
       }
-      updateFrame(sid, `data:image/jpeg;base64,${event.base64}`, event.format || "jpeg");
+      // Store RAW base64 (no data: prefix) — lastFrame's contract is "base64
+      // JPEG (no data: prefix)". The /frames SSE layer sends it as the
+      // `base64` field, and the client adds the data:image/...;base64, prefix,
+      // matching the ennowxai frame contract exactly.
+      updateFrame(sid, event.base64 || "", event.format || "jpeg");
       return;
     }
     if (event.type === "phase") {

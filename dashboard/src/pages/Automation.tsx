@@ -84,6 +84,8 @@ export default function Automation() {
     skipExisting: boolean;
     useProxy: boolean;
     captchaBehavior: "skip" | "handle";
+    headless: boolean;
+    autoUpgrade: boolean;
   }) {
     const text = config.mode === "empas" ? config.empas : config.refreshTokens;
     if (!text.trim()) {
@@ -92,7 +94,7 @@ export default function Automation() {
     }
     try {
       await importAccounts(text, [modalProvider!.value], {
-        headless: true,
+        headless: config.headless,
         browserEngine: "nodriver",
         concurrency: config.concurrent,
       });

@@ -176,9 +176,14 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
             elif etype == "frame":
                 # Forward JPEG frames to the dashboard, tagged with accountId
                 # so the TS side routes them to the right browser-session viewer.
-                emit({"type": "frame", "format": event.get("format", "jpeg"),
-                      "base64": event.get("base64", ""),
-                      "provider": provider, "accountId": account_id, "worker": worker_id})
+                # login.py emits the screenshot under "data"; older callers used
+                # "base64". Accept either so the relay never drops a frame.
+                frame_data = event.get("data") or event.get("base64") or ""
+                if frame_data:
+                    emit({"type": "frame", "format": event.get("format", "jpeg"),
+                          "base64": frame_data,
+                          "step": event.get("step", ""),
+                          "provider": provider, "accountId": account_id, "worker": worker_id})
             elif etype == "phase":
                 # Forward phase/lifecycle events so the dashboard shows live steps.
                 emit({"type": "phase", "step": event.get("step", ""),

@@ -17,6 +17,8 @@ interface StartAutomationModalProps {
     skipExisting: boolean;
     useProxy: boolean;
     captchaBehavior: "skip" | "handle";
+    headless: boolean;
+    autoUpgrade: boolean;
   }) => void;
 }
 
@@ -34,6 +36,8 @@ export default function StartAutomationModal({
   const [skipExisting, setSkipExisting] = useState(true);
   const [useProxy, setUseProxy] = useState(false);
   const [captchaBehavior, setCaptchaBehavior] = useState<"skip" | "handle">("skip");
+  const [headless, setHeadless] = useState(true);
+  const [autoUpgrade, setAutoUpgrade] = useState(false);
 
   function handleStart() {
     onStart({
@@ -44,6 +48,8 @@ export default function StartAutomationModal({
       skipExisting,
       useProxy,
       captchaBehavior,
+      headless,
+      autoUpgrade,
     });
   }
 
@@ -121,6 +127,41 @@ export default function StartAutomationModal({
                 <Plus className="h-4 w-4" />
               </button>
             </div>
+          </div>
+
+          {/* Headless + (kiro) Auto-upgrade row */}
+          <div className="grid grid-cols-2 gap-3">
+            <label className="flex items-start gap-3 rounded-lg border border-[var(--border)] p-3 cursor-pointer hover:bg-[var(--secondary)]/50">
+              <input
+                type="checkbox"
+                checked={headless}
+                onChange={(e) => setHeadless(e.target.checked)}
+                className="mt-0.5 h-4 w-4 rounded border-[var(--border)]"
+              />
+              <div>
+                <div className="text-sm font-medium">Headless</div>
+                <div className="text-xs text-[var(--muted-foreground)]">Run browser without a visible window</div>
+              </div>
+            </label>
+            {provider === "kiro" ? (
+              <label className="flex items-start gap-3 rounded-lg border border-[var(--border)] p-3 cursor-pointer hover:bg-[var(--secondary)]/50">
+                <input
+                  type="checkbox"
+                  checked={autoUpgrade}
+                  onChange={(e) => setAutoUpgrade(e.target.checked)}
+                  className="mt-0.5 h-4 w-4 rounded border-[var(--border)]"
+                />
+                <div>
+                  <div className="text-sm font-medium">Auto-upgrade</div>
+                  <div className="text-xs text-[var(--muted-foreground)]">Upgrade plan after login</div>
+                </div>
+              </label>
+            ) : (
+              <div className="rounded-lg border border-dashed border-[var(--border)] p-3 opacity-50">
+                <div className="text-sm font-medium">Auto-upgrade</div>
+                <div className="text-xs text-[var(--muted-foreground)]">Kiro only</div>
+              </div>
+            )}
           </div>
 
           {/* Skip existing accounts */}

@@ -25,7 +25,7 @@ import { handleCardResult } from "../api/vcc";
 import { existsSync, mkdirSync, writeFileSync, unlinkSync } from "node:fs";
 import path from "node:path";
 import type { Account } from "../db/schema";
-import { registerSession, updateFrame, updatePhase, deleteSession, updateChallenge } from "./browserSession";
+import { registerSession, updateFrame, updatePhase, deleteSession, updateChallenge, appendStep } from "./browserSession";
 
 // Active manual-login sessions: accountId → session handle. Lets the dashboard
 // look up the running process to submit a challenge answer or cancel.
@@ -171,6 +171,7 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
             lastFrame: "",
             lastFrameFormat: "jpeg",
             lastFrameTime: 0,
+            steps: [],
             challenge: null,
             terminal: false,
             proc,
@@ -186,6 +187,7 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
         }
         if (event.type === "phase" && browserSessionId) {
           updatePhase(browserSessionId, event.phase, event.message || "");
+          appendStep(browserSessionId, event.phase || "phase", event.message || "", "antigravity");
           broadcast({ type: "login_progress", data: { id: account.id, accountId: account.id, email: account.email, provider: "antigravity", step: "phase", message: event.message, phase: event.phase } });
           continue;
         }
@@ -242,6 +244,9 @@ function handleManualEvent(event: any, account: Account, prevResult: any, browse
       step: event.step,
       message: event.message,
     });
+    if (browserSessionId) {
+      appendStep(browserSessionId, event.step || "progress", event.message || "", event.provider || provider);
+    }
     broadcast({ type: "login_progress", data: { logId: log.id, id: account.id, accountId: account.id, email: account.email, provider: event.provider || provider, step: event.step, message: event.message, timestamp: log.timestamp } });
     return prevResult;
   }
@@ -308,12 +313,18 @@ function handleManualEvent(event: any, account: Account, prevResult: any, browse
       error: event.error,
       message: event.error,
     });
+    if (browserSessionId) {
+      appendStep(browserSessionId, event.step || "error", event.error || "", event.provider || provider);
+    }
     broadcast({ type: "login_failed", data: { logId: log.id, id: account.id, accountId: account.id, email: account.email, provider: event.provider || provider, error: event.error, timestamp: log.timestamp } });
     return prevResult;
   }
   if (event.type === "result") {
     // login.py/batch_login shape: {antigravity: {success, credentials, quota, error}}
     const pr = event[provider] || event.antigravity || event;
+    if (browserSessionId) {
+      appendStep(browserSessionId, "result", pr.success ? "Login succeeded" : (pr.error || "Login failed"), provider);
+    }
     return { success: !!pr.success, credentials: pr.credentials, quota: pr.quota, error: pr.error };
   }
   return prevResult;

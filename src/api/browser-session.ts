@@ -18,6 +18,7 @@ browserSessionRouter.get("/", (c) => {
     terminal: s.terminal,
     hasChallenge: !!s.challenge,
     startedAt: s.startedAt,
+    steps: s.steps,
   }));
   return c.json({ sessions });
 });
@@ -42,6 +43,7 @@ browserSessionRouter.get("/:sessionId", (c) => {
     lastFrameFormat: s.lastFrameFormat,
     lastFrameTime: s.lastFrameTime,
     startedAt: s.startedAt,
+    steps: s.steps,
   });
 });
 

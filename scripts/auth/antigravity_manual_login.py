@@ -103,15 +103,23 @@ async def emit_browser_host(page: Any) -> None:
     progress("browser_host", msg)
 
 
-async def screenshot_loop(page: Any, cancel_file: str, interval: float = 0.5) -> None:
+async def screenshot_loop(page: Any, cancel_file: str, interval: float = 0.25) -> None:
     """Background task: capture screenshots at intervals and emit frame events.
 
     The frontend displays these as a live browser frame. Uses CDP
     Page.captureScreenshot (JPEG, quality 60) — ~20-40KB per frame.
+
+    Adaptive frame rate (mirrors the reference engine): targets 4fps (0.25s).
+    If a single frame's capture+encode exceeds the target interval, the rate
+    degrades to 2fps (0.5s), then 1fps (1.0s) to keep CPU sane at high
+    concurrency. Recovers to 4fps when capture is fast again.
     """
     from nodriver import cdp
     tab = page.tab
+    target = interval  # 0.25s → 4fps ceiling
+    current = target
     while not cancelled(cancel_file):
+        t0 = time.monotonic()
         try:
             res = await tab.send(cdp.page.capture_screenshot(
                 format_=cdp.page.ImageFormat.JPEG,
@@ -123,7 +131,14 @@ async def screenshot_loop(page: Any, cancel_file: str, interval: float = 0.5) ->
                 emit({"type": "frame", "sessionId": _session_id, "base64": b64, "format": "jpeg"})
         except Exception as exc:
             _debug(f"screenshot capture failed: {exc}")
-        await asyncio.sleep(interval)
+        elapsed = time.monotonic() - t0
+        # Adaptive: if capture is slow, back off; if fast, recover toward target.
+        if elapsed > current:
+            current = 1.0 if elapsed > 0.5 else (0.5 if elapsed > 0.25 else target)
+        else:
+            current = target
+        # Sleep the remaining slice of the current interval (never negative).
+        await asyncio.sleep(max(0.05, current - elapsed))
 
 
 async def stdin_reader_loop(cancel_file: str) -> None:

@@ -29,6 +29,12 @@ apiRouter.route("/integration", integrationRouter);
 apiRouter.route("/oauth", oauthRouter);
 apiRouter.route("/update", updateRouter);
 apiRouter.route("/browser-sessions", browserSessionRouter);
+// Singular alias — the dashboard's browserApi.ts calls per-session routes as
+// /api/browser-session/:sessionId/{frames,input,captcha,cancel} (singular),
+// while the list call uses /api/browser-sessions (plural). Mounting the same
+// router under both paths keeps the frontend's existing URLs working without a
+// dashboard rebuild.
+apiRouter.route("/browser-session", browserSessionRouter);
 
 apiRouter.get("/providers", (c) => {
   return c.json({ data: config.providers });

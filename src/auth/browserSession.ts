@@ -7,6 +7,13 @@
  * connects to the SSE frame stream + sends input/captcha via the API endpoints.
  */
 
+export interface BrowserSessionStep {
+  ts: number;        // ms epoch
+  step: string;      // init|proxy|start|retry|browser_launch|authenticated|tokens|quota|quota_skip|claim|error|result
+  message: string;
+  provider: string;
+}
+
 export interface BrowserSession {
   sessionId: string;
   accountId: number;
@@ -17,6 +24,7 @@ export interface BrowserSession {
   lastFrame: string;      // base64 JPEG (no data: prefix)
   lastFrameFormat: string; // "jpeg"
   lastFrameTime: number;   // ms epoch
+  steps: BrowserSessionStep[]; // bounded step-history timeline (FIFO, cap 200)
   challenge: {
     image_base64: string;
     image_format: string;
@@ -54,6 +62,31 @@ export function updateFrame(sessionId: string, base64: string, format: string): 
   s.lastFrame = base64;
   s.lastFrameFormat = format;
   s.lastFrameTime = Date.now();
+}
+
+/**
+ * Append a structured step to the session's bounded timeline. This is the
+ * richer log surface (the structured progress/error/result events from the
+ * Python automation engine). Cap 200 entries FIFO so memory stays bounded for
+ * long-running sessions. Idempotent against duplicate consecutive steps.
+ */
+export function appendStep(
+  sessionId: string,
+  step: string,
+  message: string,
+  provider: string,
+): void {
+  const s = sessions.get(sessionId);
+  if (!s) return;
+  const last = s.steps[s.steps.length - 1];
+  // Dedup exact consecutive repeats (same step + message + provider) to keep
+  // the timeline readable during tight retry loops.
+  if (last && last.step === step && last.message === message && last.provider === provider) {
+    last.ts = Date.now();
+    return;
+  }
+  s.steps.push({ ts: Date.now(), step, message, provider });
+  if (s.steps.length > 200) s.steps.splice(0, s.steps.length - 200);
 }
 
 export function updatePhase(sessionId: string, phase: string, message: string): void {

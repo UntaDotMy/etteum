@@ -1,5 +1,12 @@
 import { fetchApi } from "./api";
 
+export interface BrowserSessionStep {
+  ts: number;
+  step: string;
+  message: string;
+  provider: string;
+}
+
 export interface BrowserSessionInfo {
   sessionId: string;
   accountId: number;
@@ -10,6 +17,7 @@ export interface BrowserSessionInfo {
   terminal: boolean;
   hasChallenge: boolean;
   startedAt: number;
+  steps?: BrowserSessionStep[];
 }
 
 export async function fetchBrowserSessions(): Promise<BrowserSessionInfo[]> {
@@ -41,21 +49,43 @@ export async function cancelBrowserSession(sessionId: string): Promise<boolean> 
 }
 
 /**
- * Open an SSE connection to the session's frame stream. Returns a cleanup function.
+ * Open an SSE connection to the session's frame stream. Auto-reconnects on
+ * transient errors (long batch sessions outlive a single connection). Returns
+ * a cleanup function. Matches the ennowxai frame contract: the server sends
+ * {base64, format} with RAW base64; onFrame receives that raw base64.
  */
 export function connectFrameStream(sessionId: string, onFrame: (base64: string, format: string) => void, onDone?: () => void): () => void {
   const apiKey = localStorage.getItem("api_key") || "pool-proxy-secret-key";
-  const es = new EventSource(`/api/browser-session/${sessionId}/frames?api_key=${encodeURIComponent(apiKey)}`);
-  es.onmessage = (e) => {
-    try {
-      const data = JSON.parse(e.data);
-      if (data.base64) onFrame(data.base64, data.format || "jpeg");
-      if (data.connected) return;
-    } catch {}
+  let es: EventSource | null = null;
+  let closed = false;
+  let reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+
+  const open = () => {
+    if (closed) return;
+    es = new EventSource(`/api/browser-session/${sessionId}/frames?api_key=${encodeURIComponent(apiKey)}`);
+    es.onmessage = (e) => {
+      try {
+        const data = JSON.parse(e.data);
+        if (data.base64) onFrame(data.base64, data.format || "jpeg");
+      } catch {}
+    };
+    es.onerror = () => {
+      // EventSource auto-reconnects natively, but Hono's ReadableStream closes
+      // on terminal sessions. Close this one and retry once after a short
+      // backoff; if the session is truly gone, the retry will 404 and we stop.
+      es?.close();
+      es = null;
+      if (closed) return;
+      reconnectTimer = setTimeout(open, 1500);
+    };
   };
-  es.onerror = () => {
-    es.close();
+  open();
+
+  return () => {
+    closed = true;
+    if (reconnectTimer) clearTimeout(reconnectTimer);
+    es?.close();
+    es = null;
     onDone?.();
   };
-  return () => es.close();
 }
