@@ -5,7 +5,7 @@ Ports the reference design's manual-login pattern (the manual-login script / the
 to etteum antigravity, on nodriver (NOT Camoufox — Google detects Camoufox).
 
 What this is:
-  A VISIBLE (headless=False) nodriver Chrome window opens — that window IS the
+  A nodriver Chrome window opens — that window IS the
   'frame'. The script drives Google OAuth (email → password → consent) and
   streams line-JSON events to stdout in the the reference design shape so the etteum
   dashboard can render them like the reference design's browser log:
@@ -24,10 +24,10 @@ This is ADDITIVE: it does not replace login.py (single-account direct path) or
 batch_login.py (queue path). Those still work unchanged.
 
 Usage:
-  python antigravity_manual_login.py --email X --password Y [--cancel-signal-file PATH]
+  python antigravity_manual_login.py --email X --password Y [--cancel-signal-file PATH] [--headless]
 
 Env (same as login.py):
-  BATCHER_CAMOUFOX_HEADLESS  ignored — this script is ALWAYS headed (the frame)
+  BATCHER_CAMOUFOX_HEADLESS  "true" forces headless (overridden by --headless flag)
   BATCHER_PROXY_URL          optional proxy
   BATCHER_DEBUG              true for verbose debug lines
 """
@@ -356,19 +356,24 @@ async def drive_login_with_frame(
     original_solver = ag._solve_google_captcha_manual
     ag._solve_google_captcha_manual = lambda page, is_headless: driver.solve_captcha_via_dashboard(page)
     try:
-        # is_headless=False so the existing in-page manual path is the fallback;
-        # our patched solver intercepts CAPTCHA regardless of the flag.
-        await _drive_google_login(page, email, password, is_headless=False, session=session)
+        # Pass headless flag so the in-page manual path knows whether it can
+        # rely on the visible window or must use the dashboard round-trip.
+        await _drive_google_login(page, email, password, is_headless=headless, session=session)
     finally:
         ag._solve_google_captcha_manual = original_solver
 
 
 async def main() -> int:
-    parser = argparse.ArgumentParser(description="Antigravity manual login (visible nodriver frame + dashboard challenge UX)")
+    parser = argparse.ArgumentParser(description="Antigravity manual login (nodriver frame + dashboard challenge UX)")
     parser.add_argument("--email", required=True)
     parser.add_argument("--password", required=True)
     parser.add_argument("--cancel-signal-file", default="", help="If this file appears, abort cleanly")
+    parser.add_argument("--headless", action="store_true", default=False,
+                        help="Run browser headless (frames still stream via CDP screenshots)")
     args = parser.parse_args()
+
+    # --headless flag takes precedence; fall back to env var.
+    headless = args.headless or os.environ.get("BATCHER_CAMOUFOX_HEADLESS", "").lower() in ("1", "true", "yes")
 
     account = NormalizedAccount(provider="antigravity", identifier=args.email, secret=args.password)
     adapter = AntigravityProviderAdapter()
@@ -383,9 +388,8 @@ async def main() -> int:
     emit_phase("launching", "Starting browser...")
 
     try:
-        progress("browser_launch", "Opening secure browser (visible window)...")
-        # ALWAYS headed — the visible window IS the frame.
-        browser, page = await launch_browser(headless=False)
+        progress("browser_launch", f"Opening secure browser ({'headless' if headless else 'visible window'})...")
+        browser, page = await launch_browser(headless=headless)
         page.set_default_timeout(45000)
         session["browser"] = browser
         session["page"] = page

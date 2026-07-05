@@ -309,6 +309,10 @@ class LoginQueue {
    * and manages concurrency. runAntigravityManualLogin is self-contained: it
    * registers its own session, bridges events, handles captcha, and applies the
    * DB result. We just throttle how many run at once.
+   *
+   * When concurrency > 1, browsers run headless to avoid opening multiple
+   * visible windows and to allow the dashboard frame viewer to handle all
+   * sessions cleanly. CAPTCHA challenges still round-trip through the dashboard.
    */
   private async runAntigravityBatch(
     manifest: Array<{ accountId: number; email: string; password: string; provider: string }>,
@@ -316,6 +320,7 @@ class LoginQueue {
     accountRows: Map<number, Account>,
   ): Promise<void> {
     const limit = Math.max(1, Math.min(this.concurrency || 2, manifest.length));
+    const headless = limit > 1;  // Auto-headless when running concurrent browsers
     let nextIndex = 0;
     let active = 0;
     let done = 0;
@@ -323,7 +328,7 @@ class LoginQueue {
 
     const log = (m: string) => console.log(`[ag-batch] ${m}`);
 
-    log(`starting accounts=${total} concurrency=${limit} frameRelay=true`);
+    log(`starting accounts=${total} concurrency=${limit} headless=${headless} frameRelay=true`);
 
     await new Promise<void>((resolveAll) => {
       const startNext = () => {
@@ -344,7 +349,7 @@ class LoginQueue {
           log(`worker ${idx + 1}/${total} start email=${item.email}`);
 
           // Fire-and-forget per account; resolve slot on completion.
-          runAntigravityManualLogin(account)
+          runAntigravityManualLogin(account, { headless })
             .catch((err) => {
               log(`worker ${idx + 1}/${total} crash email=${item.email} error=${err?.message || err}`);
             })

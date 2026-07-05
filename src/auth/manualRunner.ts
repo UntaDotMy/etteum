@@ -79,11 +79,15 @@ export function cancelManualLogin(accountId: number): boolean {
 }
 
 /**
- * Run antigravity_manual_login.py for one account. Spawns the visible nodriver
+ * Run antigravity_manual_login.py for one account. Spawns the nodriver
  * 'frame', streams events to the dashboard, bridges manual_challenge answers,
  * and applies the final result via applyProviderResult.
+ *
+ * When `headless` is true (or BATCHER_CAMOUFOX_HEADLESS=true in env), the
+ * browser runs headless — frames still stream via CDP screenshots, and CAPTCHA
+ * challenges still round-trip through the dashboard modal.
  */
-export async function runAntigravityManualLogin(account: Account): Promise<void> {
+export async function runAntigravityManualLogin(account: Account, opts?: { headless?: boolean }): Promise<void> {
   const provider = "antigravity";
   const password = decrypt(account.password);
   const cancelSignalFile = path.join(cancelDir(), `ag-${account.id}-${Date.now()}.cancel`);
@@ -95,9 +99,12 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
     if (proxyEntry?.url) proxyUrl = proxyEntry.url;
   } catch {}
 
+  const headless = opts?.headless ?? false;
   const manualScript = config.authScriptPath.replace(/login\.py$/, "antigravity_manual_login.py");
+  const args = [config.pythonPath, manualScript, "--email", account.email, "--password", password, "--cancel-signal-file", cancelSignalFile];
+  if (headless) args.push("--headless");
   const proc = Bun.spawn(
-    [config.pythonPath, manualScript, "--email", account.email, "--password", password, "--cancel-signal-file", cancelSignalFile],
+    args,
     {
       stdout: "pipe",
       stderr: "pipe",
@@ -107,6 +114,7 @@ export async function runAntigravityManualLogin(account: Account): Promise<void>
         PYTHONUNBUFFERED: "1",
         BATCHER_CONCURRENT: "1",
         BATCHER_PRIORITY: provider,
+        ...(headless ? { BATCHER_CAMOUFOX_HEADLESS: "true" } : {}),
         ...(proxyUrl ? { BATCHER_PROXY_URL: proxyUrl, HTTP_PROXY: proxyUrl, HTTPS_PROXY: proxyUrl } : {}),
       },
       cwd: config.authScriptCwd,
