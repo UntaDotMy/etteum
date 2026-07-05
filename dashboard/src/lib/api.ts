@@ -958,30 +958,3 @@ export async function fetchUpstreamModels(data: {
   });
 }
 
-export async function fetchAlibabaModelGroups(): Promise<{
-  data: {
-    models: Record<string, {
-      accounts: number[];
-      count: number;
-      emails: string[];
-      quota: {
-        totalLimit: number;
-        totalRemaining: number;
-      };
-    }>;
-    error: {
-      accounts: number[];
-      count: number;
-      emails: string[];
-      reasons: string[];
-    };
-    summary: {
-      totalAccounts: number;
-      activeAccounts: number;
-      errorAccounts: number;
-      modelCount: number;
-    };
-  };
-}> {
-  return fetchApi("/api/accounts/model-groups");
-}

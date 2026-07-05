@@ -14,7 +14,6 @@ import {
 import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useWsEvent } from "@/hooks/useWebSocket";
-import { AlibabaModelGroups } from "@/components/AlibabaModelGroups";
 import {
   completeCodexOAuthCallbackUrl,
   createAccount,
@@ -1663,11 +1662,6 @@ export default function Accounts() {
           </Card>
         ))}
       </div>
-
-      {/* Alibaba Model Groups */}
-      {accounts.some(a => a.provider === "alibaba") && (
-        <AlibabaModelGroups />
-      )}
 
       {/* BYOK Providers Section */}
       <div className="space-y-4">
