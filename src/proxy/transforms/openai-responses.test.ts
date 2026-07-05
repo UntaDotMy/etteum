@@ -142,6 +142,38 @@ describe("responsesRequestToChat", () => {
     expect(chat.messages[2]).toEqual({ role: "tool", tool_call_id: "call_1", content: "sunny" });
   });
 
+  test("assistant phase (commentary/final_answer) is preserved on assistant messages", () => {
+    const chat = responsesRequestToChat({
+      model: "gpt-5",
+      input: [
+        { role: "user", content: "hi" },
+        { role: "assistant", content: "Let me check.", phase: "commentary" },
+        { role: "assistant", content: "Done.", phase: "final_answer" },
+      ],
+    });
+    expect((chat.messages[1] as any).phase).toBe("commentary");
+    expect((chat.messages[2] as any).phase).toBe("final_answer");
+    // phase is NOT set on user messages
+    expect((chat.messages[0] as any).phase).toBeUndefined();
+  });
+
+  test("reasoning input item (replay) is NOT dropped — summary carried as reasoning_content", () => {
+    const chat = responsesRequestToChat({
+      model: "gpt-5",
+      input: [
+        { role: "user", content: "hi" },
+        { type: "reasoning", id: "rs_abc", summary: [{ type: "summary_text", text: "thinking..." }] },
+        { role: "assistant", content: "answer" },
+      ],
+    });
+    // reasoning item must not be silently dropped. Its summary text is carried
+    // onto the preceding assistant message as reasoning_content (or a new one).
+    const hasReasoning = chat.messages.some(
+      (m) => (m as any).reasoning_content === "thinking..."
+    );
+    expect(hasReasoning).toBe(true);
+  });
+
   test("tools (flat/internally-tagged) → wrapped .function chat tools", () => {
     const chat = responsesRequestToChat({
       model: "gpt-5",

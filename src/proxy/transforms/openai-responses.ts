@@ -53,6 +53,13 @@ export interface ResponsesMessageItem {
   type?: "message";
   role: "system" | "developer" | "user" | "assistant";
   content: string | ResponsesContentBlock[];
+  /**
+   * Assistant-message phase (reasoning guide). "commentary" = intermediate
+   * preamble before tool calls; "final_answer" = the completed answer.
+   * Dropping it "can cause preambles to be treated as final answers", so we
+   * preserve it on assistant messages for providers that understand it.
+   */
+  phase?: "commentary" | "final_answer";
 }
 
 /** An assistant tool call replayed as an input item. */
@@ -271,10 +278,42 @@ export function responsesRequestToChat(
     for (const item of req.input) {
       if (isMessageItem(item)) {
         const role = item.role === "developer" ? "system" : item.role;
-        messages.push({
+        const msg: ChatMessage = {
           role: role as ChatMessage["role"],
           content: mapContentToChat(item.content),
-        });
+        };
+        // Preserve assistant phase (commentary vs final_answer). Dropping it
+        // can cause preambles to be treated as final answers (reasoning guide).
+        if (role === "assistant" && item.phase) {
+          (msg as any).phase = item.phase;
+        }
+        messages.push(msg);
+      } else if (item.type === "reasoning") {
+        // Reasoning items replayed from a prior turn (manual context carry,
+        // per the migrate guide). OpenAI keeps these opaque (encrypted_content
+        // for stateless, or server-side via previous_response_id). For Chat
+        // providers there is no equivalent — but we must NOT silently drop
+        // them (migrate guide: "Dropping reasoning... Items when manually
+        // carrying context" is a common error). Carry the readable summary
+        // text onto the preceding assistant message as reasoning_content so
+        // providers that understand it can reuse the prior reasoning context.
+        const summaryText = Array.isArray((item as any).summary)
+          ? (item as any).summary.map((s: any) => s?.text ?? "").join("")
+          : "";
+        const last = messages[messages.length - 1];
+        if (summaryText) {
+          if (last && last.role === "assistant") {
+            (last as any).reasoning_content = summaryText;
+          } else {
+            messages.push({
+              role: "assistant",
+              content: "",
+              reasoning_content: summaryText,
+            } as any);
+          }
+        }
+        // encrypted_content (stateless reasoning tokens) has no Chat equivalent;
+        // it is intentionally not forwarded — Chat providers can't consume it.
       } else if (isFunctionCallItem(item)) {
         // Attach to the previous assistant message if possible, else create one.
         const last = messages[messages.length - 1];
