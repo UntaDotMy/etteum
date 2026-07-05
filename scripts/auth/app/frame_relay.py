@@ -259,7 +259,39 @@ async def bootstrap_with_relay(
         emit_phase("frame_relay_started", "Live frame relay active", provider=provider)
         emit_progress(provider, "frame_relay", "Frame relay started — viewable in Browser Logs")
 
-    return {"browser": browser, "page": page, "relay": relay}
+    # Set up the manual-challenge queue + callback so the provider's
+    # authenticate() can emit challenges and wait for answers from the
+    # dashboard — same pattern as the reference design.
+    challenge_queue: asyncio.Queue[dict[str, Any]] | None = None
+    if relay is not None:
+        challenge_queue = asyncio.Queue()
+
+        async def _bridge_relay_to_queue() -> None:
+            """Forward control messages from the relay's stdin loop to the
+            session's manual_challenge_queue (captcha answers, cancel, etc)."""
+            while not relay._stop:
+                msg = await relay.wait_input(timeout=1.0)
+                if msg is None:
+                    continue
+                if msg.get("type") == "cancel":
+                    # Signal cancel to the flow.
+                    pass  # relay._stop is already set by _stdin_loop
+                await challenge_queue.put(msg)
+
+        asyncio.create_task(_bridge_relay_to_queue())
+
+    def _challenge_callback(event: dict[str, Any]) -> Any:
+        """Emit a manual_challenge event to stdout (dashboard shows it)."""
+        emit(event)
+
+    return {
+        "browser": browser,
+        "page": page,
+        "relay": relay,
+        "manual_challenge_queue": challenge_queue,
+        "manual_challenge_callback": _challenge_callback,
+        "cancel_requested": False,
+    }
 
 
 async def cleanup_with_relay(session: dict[str, Any]) -> None:

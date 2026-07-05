@@ -98,9 +98,19 @@ export function forwardInput(sessionId: string, msg: Record<string, unknown>): b
 export function cancelSession(sessionId: string): boolean {
   const s = sessions.get(sessionId);
   if (!s) return false;
-  try { writeFileSync(s.cancelSignalFile, "cancel"); } catch {}
-  const proc = s.proc;
-  if (proc) {
+  // 1. Graceful: send cancel via stdin (the frame-relay path).
+  if (s.stdinWriter) {
+    const enc = new TextEncoder();
+    s.stdinWriter.write(enc.encode(JSON.stringify({ type: "cancel", accountId: s.accountId }) + "\n")).catch(() => {});
+  }
+  // 2. Legacy: write to cancel signal file (manual-login path).
+  if (s.cancelSignalFile) {
+    try { writeFileSync(s.cancelSignalFile, "cancel"); } catch {}
+  }
+  // 3. Last resort: kill the process (only for standalone manual sessions,
+  //    not batch sessions — batch sessions share one process).
+  if (s.proc && !sessionId.startsWith("batch-")) {
+    const proc = s.proc;
     const pid = proc.pid;
     if (pid) {
       try { Bun.spawnSync(["pterminate", "-9", "-P", String(pid)]); } catch {}
@@ -109,6 +119,7 @@ export function cancelSession(sessionId: string): boolean {
     try { (proc as any).kill("SIGTERM"); } catch {}
   }
   s.terminal = true;
+  s.phase = "cancelled";
   return true;
 }
 

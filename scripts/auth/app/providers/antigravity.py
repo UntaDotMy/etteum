@@ -651,6 +651,102 @@ async def _relaunch_and_resume(page: Any, session: "dict[str, Any]", reason: str
     return new_page
 
 
+async def _solve_captcha_via_session(
+    page: Any,
+    session: dict[str, Any],
+    queue: asyncio.Queue,
+    callback: Any,
+) -> bool:
+    """Solve a Google text CAPTCHA via the dashboard (frame relay).
+
+    Captures the captcha image, emits it to the dashboard via the callback,
+    waits for the user's answer on the queue, then types it into the page.
+    No headed relaunch, no tkinter popup — fully headless.
+    """
+    import base64 as _b64
+
+    # 1. Capture the captcha image.
+    captcha_url = ""
+    try:
+        captcha_url = await page.evaluate("""() => {
+            const img = document.querySelector('img[src*="captcha"], img#captchaimg, img[alt*="captcha" i]');
+            return img ? img.src : "";
+        }""")
+    except Exception:
+        pass
+
+    img_b64 = ""
+    if captcha_url and captcha_url.startswith("data:"):
+        # Data URL — extract base64 directly.
+        img_b64 = captcha_url.split(",", 1)[-1] if "," in captcha_url else ""
+    elif captcha_url:
+        # Download the image.
+        try:
+            import aiohttp
+            async with aiohttp.ClientSession() as http:
+                async with http.get(captcha_url) as resp:
+                    img_bytes = await resp.read()
+                    img_b64 = _b64.b64encode(img_bytes).decode("ascii")
+        except Exception as exc:
+            _debug(f"captcha image download failed: {exc}")
+
+    # 2. Emit the challenge to the dashboard.
+    callback({
+        "type": "manual_challenge",
+        "challenge_type": "captcha",
+        "image_base64": img_b64,
+        "message": "Please solve the CAPTCHA shown in the browser",
+    })
+    _debug("captcha: waiting for dashboard answer...")
+
+    # 3. Wait for the answer (5 min timeout, matching the reference design).
+    try:
+        resp = await asyncio.wait_for(queue.get(), timeout=300)
+    except asyncio.TimeoutError:
+        _debug("captcha: timed out waiting for dashboard answer")
+        return False
+
+    if resp.get("type") == "cancel":
+        _debug("captcha: cancelled by user")
+        return False
+
+    answer = resp.get("value") or resp.get("text") or ""
+    if not answer:
+        _debug("captcha: empty answer from dashboard")
+        return False
+
+    _debug(f"captcha: received answer ({len(answer)} chars), typing into page...")
+
+    # 4. Type the answer into the captcha input field.
+    try:
+        await page.evaluate("""(ans) => {
+            const inp = document.querySelector('input[name="ca"], input#ca, input[name="logincaptcha"], input[aria-label*="captcha" i]');
+            if (!inp) return false;
+            const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+            setter.call(inp, ans);
+            inp.dispatchEvent(new Event('input', {bubbles: true}));
+            inp.dispatchEvent(new Event('change', {bubbles: true}));
+            return true;
+        }""", answer)
+    except Exception as exc:
+        _debug(f"captcha: failed to type answer: {exc}")
+        return False
+
+    # 5. Click Next/Submit.
+    await asyncio.sleep(1.0)
+    try:
+        await page.evaluate("""() => {
+            const btn = document.querySelector('#next, #submit, button[type=submit], div[role=button]');
+            if (btn) btn.click();
+        }""")
+    except Exception:
+        pass
+
+    await asyncio.sleep(2.0)
+    return True
+
+
+
 async def _drive_google_login(page: Any, email: str, password: str, deadline_s: int = 150, is_headless: bool = False, session: "dict[str, Any] | None" = None) -> None:
     """Drive accounts.google.com v3 signin: email → password → (speedbump) →
     consent → redirect. Poll-driven (no blind sleeps), DOM-aware. Handles the
@@ -728,36 +824,48 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
         except Exception:
             captcha_info = {"detected": False}
         if captcha_info.get("detected"):
-            # In headless mode with a session, escalate to a visible framed
-            # window (the reference design the headed-relaunch pattern) so the user can solve ANY
-            # manual step, not just type a CAPTCHA. Falls back to the tkinter
-            # popup only if no session / relaunch fails.
-            if is_headless and session is not None:
-                resumed = await _relaunch_and_resume(page, session, reason="captcha")
-                if resumed is not None:
-                    page = resumed  # continue on the headed page
-                    continue
-                _debug("relaunch_as_headed failed; falling back to tkinter captcha popup")
-            relay = session.get("relay") if session else None
-            solved = await _solve_google_captcha_manual(page, is_headless, relay=relay)
+            # Headless + frame relay: emit the captcha image to the dashboard
+            # and wait for the user's answer via the session queue.
+            # Matches the reference design pattern — no headed relaunch, no popup.
+            queue = session.get("manual_challenge_queue") if session else None
+            callback = session.get("manual_challenge_callback") if session else None
+            if queue is not None and callback is not None:
+                _debug("captcha detected; solving via dashboard (frame relay)")
+                solved = await _solve_captcha_via_session(page, session, queue, callback)
+                if not solved:
+                    raise NonRetryableBatcherError(
+                        ErrorCode.browser_challenge_blocked,
+                        "Google text CAPTCHA manual solve failed or timed out",
+                    )
+                await asyncio.sleep(1.0)
+                continue
+            # No relay: old fallback (will not be reached in frame-relay mode)
+            solved = await _solve_google_captcha_manual(page, is_headless)
             if not solved:
                 raise NonRetryableBatcherError(
                     ErrorCode.browser_challenge_blocked,
                     "Google text CAPTCHA manual solve failed or timed out",
                 )
             await asyncio.sleep(1.0)
-            continue  # re-check state after solve
-        # Broader manual-step detection (verify-it's-you / recovery / hard
-        # block). Only escalate in headless mode with a session — headed mode
-        # already shows the page for direct interaction.
-        if is_headless and session is not None:
+            continue
+        # Broader manual-step detection (verify-it's-you / recovery / hard block).
+        # With the frame relay active, emit a challenge and wait for user action
+        # via the dashboard — no headed relaunch.
+        queue = session.get("manual_challenge_queue") if session else None
+        callback = session.get("manual_challenge_callback") if session else None
+        if is_headless and queue is not None and callback is not None:
             manual = await _detect_manual_step(page)
             if manual:
-                resumed = await _relaunch_and_resume(page, session, reason=manual)
-                if resumed is not None:
-                    page = resumed
-                    continue
-                _debug("relaunch_as_headed failed for challenge; continuing automated loop")
+                _debug(f"manual step detected ({manual}); emitting to dashboard")
+                callback({"type": "manual_challenge", "challenge_type": manual,
+                          "image_base64": "", "message": f"Manual step: {manual}"})
+                resp = await asyncio.wait_for(queue.get(), timeout=300)
+                if resp.get("type") == "cancel":
+                    raise NonRetryableBatcherError(
+                        ErrorCode.browser_challenge_blocked, "cancelled by user")
+                await asyncio.sleep(2.0)
+                continue
+
         for action in KNOWN_ACTIONS:
             if action in btns:
                 if action == last_clicked:
