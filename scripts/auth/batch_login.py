@@ -106,6 +106,7 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
         env["BATCHER_PROXY_URL"] = proxy
         env["HTTP_PROXY"] = proxy
         env["HTTPS_PROXY"] = proxy
+    print(json.dumps({"type": "progress", "provider": provider, "step": "worker_start", "message": f"spawning login.py for {email}"}), flush=True)
     if options.get("browserEngine"):
         env["BATCHER_BROWSER_ENGINE"] = options["browserEngine"]
 
@@ -375,6 +376,7 @@ def main() -> None:
     args = parser.parse_args()
 
     accounts, options = _read_manifest(sys.stdin)
+    print(json.dumps({"type": "progress", "provider": "batch", "step": "manifest_read", "message": f"manifest read: {len(accounts)} accounts"}), flush=True)
     if args.concurrency is not None:
         options["concurrency"] = args.concurrency
     if args.max_retries is not None:
