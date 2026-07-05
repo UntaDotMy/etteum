@@ -5,7 +5,7 @@ import { autoWarmupScheduler } from "./warmup-scheduler";
 import { loginAllProviders, stopLoginProcess, getActiveProcessIds } from "./runner";
 import { db } from "../db/index";
 import { accounts } from "../db/schema";
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 import { encrypt } from "../utils/crypto";
 import { addAuthLog, clearAuthLogs, getAuthLogs } from "./logs";
 import { broadcast } from "../ws/index";

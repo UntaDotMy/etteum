@@ -7,7 +7,7 @@ concurrency authority for the QUEUE path. The TS LoginQueue
 per-account line-JSON events back; TS maps each event to the existing DB /
 broadcast / applyProviderResult logic (see runner.ts applyProviderResult). The
 per-provider login logic is NOT rewritten here — each worker shells out to the
-existing login.py with ENOWX_ALLOWED_PROVIDERS filtered to one provider, so all
+existing login.py with BATCHER_ALLOWED_PROVIDERS filtered to one provider, so all
 provider-specific flows (kiro, codebuddy, canva, codex, gitlab-duo,
 antigravity, ...) keep working unchanged.
 
@@ -95,7 +95,7 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
 
     env = {
         **os.environ,
-        "ENOWX_ALLOWED_PROVIDERS": provider,
+        "BATCHER_ALLOWED_PROVIDERS": provider,
         "PYTHONUNBUFFERED": "1",
         "BATCHER_CAMOUFOX_HEADLESS": "true" if options.get("headless") else "false",
         "BATCHER_CONCURRENT": "1",

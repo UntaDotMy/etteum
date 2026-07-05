@@ -367,7 +367,7 @@ async def main(email: str, password: str):
     priority = os.getenv("BATCHER_PRIORITY", "standard").lower()
     allowed_providers = {
         item.strip().lower()
-        for item in os.getenv("ENOWX_ALLOWED_PROVIDERS", "").split(",")
+        for item in os.getenv("BATCHER_ALLOWED_PROVIDERS", "").split(",")
         if item.strip()
     }
 

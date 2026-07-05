@@ -40,6 +40,7 @@ class LoginQueue {
   // (null when idle). clear() terminates it. Typed loosely because the
   // stdin:"pipe" variant widens the Bun.spawn generic.
   private batchProc: any = null;
+  private _firstFrameSeen = false;
   private batchStdinWriter: { write: (chunk: Uint8Array) => Promise<void>; close: () => Promise<void> } | null = null;
   private batchGeneration = 0;
 
@@ -311,6 +312,7 @@ class LoginQueue {
     );
     this.batchProc = proc;
     this.batchGeneration = generation;
+    console.log(`[batch] started pid=${proc.pid} accounts=${manifest.length} frameRelay=true`);
     this.batchStdinWriter = {
       write: (chunk: Uint8Array) => { try { proc.stdin!.write(chunk); } catch {} return Promise.resolve(); },
       close: () => { try { proc.stdin!.end(); } catch {} return Promise.resolve(); },
@@ -328,10 +330,26 @@ class LoginQueue {
     for (const acc of manifest) {
       stdin.write(enc.encode(JSON.stringify({ type: "account", ...acc }) + "\n"));
     }
-    // stdin stays open so captcha answers / cancel can flow back to the workers.
+    // Send EOF to finalize the manifest, but keep stdin open so
+    // captcha answers / cancel can flow back to the workers later.
+    stdin.write(enc.encode(JSON.stringify({ type: "eof" }) + "\n"));
 
     // Stream stdout line-by-line and map events.
     const decoder = new TextDecoder();
+    // Capture stderr so Python crashes are visible in the server logs.
+    (async () => {
+      const sr = proc.stderr?.getReader();
+      if (sr) {
+        try {
+          while (true) {
+            const { done, value } = await sr.read();
+            if (done) break;
+            const txt = new TextDecoder().decode(value);
+            if (txt.trim()) console.log(`[batch:stderr] ${txt.trim()}`);
+          }
+        } catch {}
+      }
+    })();
     let buffer = "";
     const reader = proc.stdout.getReader();
     const seenResultIds = new Set<number>();
@@ -414,6 +432,8 @@ class LoginQueue {
     // ── frame relay: route JPEG frames + phase + captcha to the in-app
     // Browser Logs live viewer (same registry the manual-login path uses).
     if (event.type === "frame") {
+      // Debug: log first frame so we know the relay is working.
+      if (!this._firstFrameSeen) { this._firstFrameSeen = true; console.log(`[batch] first frame received for account ${event.accountId}`); }
       const sid = `batch-${event.accountId}`;
       if (!getSession(sid)) {
         registerSession({
