@@ -180,8 +180,16 @@ function extractUsageFromSsePayload(payload: string) {
       ""
     );
 
+    // Also extract reasoning_content so it's counted in token estimates
+    const reasoning = String(
+      choice?.delta?.reasoning_content ??
+      choice?.message?.reasoning_content ??
+      parsed?.delta?.reasoning_content ??
+      ""
+    );
+
     return {
-      content,
+      content: content + (reasoning ? reasoning : ""),
       promptTokens: Number(usage?.prompt_tokens || usage?.input_tokens || 0),
       completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
       totalTokens: Number(usage?.total_tokens || 0),
@@ -198,7 +206,9 @@ function extractStreamContent(payload: string): string {
   try {
     const parsed = JSON.parse(payload);
     const choice = parsed.choices?.[0];
-    return String(
+    // Include reasoning_content in the accumulated text so token estimates
+    // account for thinking/reasoning output, not just visible text.
+    const text = String(
       choice?.delta?.content ??
       choice?.message?.content ??
       choice?.text ??
@@ -207,6 +217,13 @@ function extractStreamContent(payload: string): string {
       parsed?.text ??
       ""
     );
+    const reasoning = String(
+      choice?.delta?.reasoning_content ??
+      choice?.message?.reasoning_content ??
+      parsed?.delta?.reasoning_content ??
+      ""
+    );
+    return text + (reasoning ? reasoning : "");
   } catch {
     return "";
   }

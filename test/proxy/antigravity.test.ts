@@ -146,7 +146,18 @@ describe("extractGeminiParts", () => {
   });
 
   test("empty / no parts", () => {
-    expect(extractGeminiParts([])).toEqual({ text: "", toolCalls: [] });
-    expect(extractGeminiParts(undefined as any)).toEqual({ text: "", toolCalls: [] });
+    expect(extractGeminiParts([])).toEqual({ text: "", reasoning: "", toolCalls: [] });
+    expect(extractGeminiParts(undefined as any)).toEqual({ text: "", reasoning: "", toolCalls: [] });
+  });
+
+  test("extracts thought parts as reasoning", () => {
+    const r = extractGeminiParts([
+      { thought: true, text: "Let me think about this..." },
+      { thoughtSummaryText: "I should call a tool." },
+      { text: "Calling tool now." },
+    ]);
+    expect(r.reasoning).toBe("Let me think about this...I should call a tool.");
+    expect(r.text).toBe("Calling tool now.");
+    expect(r.toolCalls).toEqual([]);
   });
 });

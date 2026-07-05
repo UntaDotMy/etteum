@@ -190,7 +190,7 @@ export function openAIToGemini(request: ChatCompletionRequest, model: string): R
       effort === "medium" ? 8192 :
       effort === "low" ? 2048 :
       -1; // dynamic when effort unspecified
-    body.generationConfig = { ...(body.generationConfig as any || {}), thinkingConfig: { thinkingBudget: budget } };
+    body.generationConfig = { ...(body.generationConfig as any || {}), thinkingConfig: { thinkingBudget: budget, includeThoughts: true } };
   } else if (spec?.thinking && !clientWantsThinking) {
     // Model supports thinking but client didn't ask — explicitly off so the
     // upstream default doesn't burn output budget on reasoning.
@@ -201,11 +201,18 @@ export function openAIToGemini(request: ChatCompletionRequest, model: string): R
 }
 
 /** Extract text + functionCall parts from a Gemini candidates[0].content.parts. */
-export function extractGeminiParts(parts: any[]): { text: string; toolCalls: { id: string; name: string; arguments: string }[] } {
+export function extractGeminiParts(parts: any[]): { text: string; reasoning: string; toolCalls: { id: string; name: string; arguments: string }[] } {
   let text = "";
+  let reasoning = "";
   const toolCalls: { id: string; name: string; arguments: string }[] = [];
   let i = 0;
   for (const part of parts || []) {
+    // Gemini thinking parts: `thought: true` or `thoughtSummaryText` field
+    if (part?.thought === true || part?.thoughtSummaryText) {
+      const thought = part?.thoughtSummaryText || part?.text || "";
+      if (thought) reasoning += thought;
+      continue;  // don't add thought parts to visible text
+    }
     if (typeof part?.text === "string") text += part.text;
     if (part?.functionCall) {
       toolCalls.push({
@@ -215,7 +222,7 @@ export function extractGeminiParts(parts: any[]): { text: string; toolCalls: { i
       });
     }
   }
-  return { text, toolCalls };
+  return { text, reasoning, toolCalls };
 }
 
 export class AntigravityProvider extends BaseProvider {
@@ -407,10 +414,13 @@ export class AntigravityProvider extends BaseProvider {
 
       const data = await resp.json() as any;
       const parts = data?.candidates?.[0]?.content?.parts || [];
-      const { text, toolCalls } = extractGeminiParts(parts);
+      const { text, reasoning, toolCalls } = extractGeminiParts(parts);
       const usage = data?.usageMetadata || {};
       const promptTokens = Number(usage.promptTokenCount || 0);
       const completionTokens = Number(usage.candidatesTokenCount || 0);
+
+      const message: any = { role: "assistant", content: text, tool_calls: toolCalls.length > 0 ? toolCalls : undefined };
+      if (reasoning) message.reasoning_content = reasoning;
 
       const response: ChatCompletionResponse = {
         id: `chatcmpl-${crypto.randomUUID().replace(/-/g, "")}`,
@@ -419,7 +429,7 @@ export class AntigravityProvider extends BaseProvider {
         model: request.model,
         choices: [{
           index: 0,
-          message: { role: "assistant", content: text, tool_calls: toolCalls.length > 0 ? toolCalls : undefined },
+          message,
           finish_reason: toolCalls.length > 0 ? "tool_calls" : "stop",
         }],
         usage: { prompt_tokens: promptTokens, completion_tokens: completionTokens, total_tokens: promptTokens + completionTokens },
@@ -479,7 +489,10 @@ export class AntigravityProvider extends BaseProvider {
                 try {
                   const obj = JSON.parse(payload);
                   const parts = obj?.candidates?.[0]?.content?.parts || [];
-                  const { text } = extractGeminiParts(parts);
+                  const { text, reasoning } = extractGeminiParts(parts);
+                  if (reasoning) {
+                    controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { reasoning_content: reasoning }, finish_reason: null }] })}\n\n`));
+                  }
                   if (text) {
                     controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { content: text }, finish_reason: null }] })}\n\n`));
                   }

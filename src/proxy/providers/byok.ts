@@ -1176,6 +1176,13 @@ export class ByokProvider extends BaseProvider {
                   const text = event.delta?.text || "";
                   if (text) controller.enqueue(makeChunk({ content: text }));
 
+                  // Thinking/reasoning delta — forward as reasoning_content so
+                  // the transform layer can convert it to Anthropic thinking
+                  // blocks for Claude Code / other thinking-aware clients.
+                  if (event.delta?.type === "thinking_delta" && event.delta?.thinking) {
+                    controller.enqueue(makeChunk({ reasoning_content: event.delta.thinking }));
+                  }
+
                   // Tool use input delta (JSON argument fragments)
                   // Anthropic: { delta: { type:"input_json_delta", partial_json } }
                   if (event.delta?.type === "input_json_delta" && event.delta?.partial_json) {

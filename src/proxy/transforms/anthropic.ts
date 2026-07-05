@@ -1,4 +1,24 @@
 import type { ChatCompletionRequest, ChatMessage } from "../providers/base";
+import { createHash } from "node:crypto";
+
+/**
+ * Generate a deterministic, Anthropic-like signature for a thinking block.
+ *
+ * The proxy routes to non-Anthropic upstreams (Kiro, CodeBuddy, …) that do not
+ * produce real Anthropic cryptographic signatures.  However, Claude Code and
+ * other strict clients validate that:
+ *   1. A signature_delta is present (non-empty) when a thinking block closes.
+ *   2. The same thinking content always produces the same signature, so the
+ *      block round-trips correctly when sent back on the next turn.
+ *
+ * A SHA-256 hash of the thinking text, base64-encoded, satisfies both
+ * requirements: it is deterministic, opaque, and looks like a real Anthropic
+ * signature to the client.
+ */
+function generateThinkingSignature(thinking: string): string {
+  if (!thinking) return "poolprox_empty_thinking_v1";
+  return createHash("sha256").update(thinking).digest("base64");
+}
 
 export type AnthropicContentBlock =
   | { type: "text"; text: string }
@@ -688,15 +708,13 @@ export function openAIToAnthropic(response: any, request: AnthropicMessagesReque
   const content = [];
   // Extended thinking: when the request enables `thinking`, upstream
   // `reasoning_content` must become an Anthropic `thinking` block (rendered
-  // separately from output by Claude Code / Cline). The `signature` is NOT
-  // validated on first receipt — only when a client sends a prior thinking
-  // block back to the REAL Anthropic API. Through this proxy the round-trip
-  // goes to a non-Anthropic upstream that doesn't validate Anthropic
-  // signatures, so a placeholder signature round-trips harmlessly. Without a
-  // thinking block, the reasoning would leak into the text/output stream.
+  // separately from output by Claude Code / Cline). The signature is generated
+  // deterministically from the thinking content so the block round-trips
+  // correctly across turns — clients like Claude Code require a non-empty,
+  // stable signature or the thinking block is silently dropped.
   const thinkingEnabled = Boolean(request?.thinking);
   if (reasoning && thinkingEnabled) {
-    content.push({ type: "thinking", thinking: reasoning, signature: "poolprox_thinking_v1" });
+    content.push({ type: "thinking", thinking: reasoning, signature: generateThinkingSignature(reasoning) });
   }
   // When thinking is not enabled, discard reasoning_content completely.
   // Do NOT add it to the text output - that's the leak we're fixing.
@@ -720,6 +738,8 @@ export function openAIToAnthropic(response: any, request: AnthropicMessagesReque
     usage: {
       input_tokens: Number(usage.prompt_tokens || 0),
       output_tokens: Number(usage.completion_tokens || 0),
+      ...(usage.cache_creation_input_tokens ? { cache_creation_input_tokens: Number(usage.cache_creation_input_tokens) } : {}),
+      ...(usage.cache_read_input_tokens ? { cache_read_input_tokens: Number(usage.cache_read_input_tokens) } : {}),
     },
   };
 }
@@ -736,10 +756,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   let textBlockOpen = false;
   let thinkingBlockOpen = false;
   let thinkingSignatureSent = false;
+  let accumulatedThinking = "";  // track thinking text for deterministic signature
   const toolBlocks = new Map<number, number>();
   const closedToolBlocks = new Set<number>();
   let stopReason = "end_turn";
-  let usageFromUpstream = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
+  let usageFromUpstream = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
 
   // Estimate input tokens from request content (system + messages)
   function estimateInputTokens(): number {
@@ -797,6 +818,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
       const startMessage = () => {
         if (started) return;
         started = true;
+        // message_start usage: use estimated input tokens initially. The real
+        // input/output token counts are sent in message_delta when the stream
+        // completes. Claude Code reads the final message_delta for accurate
+        // accounting, so starting with an estimate is fine — but we include
+        // cache token fields (0 initially) so clients know to expect them.
         controller.enqueue(event("message_start", {
           type: "message_start",
           message: {
@@ -807,7 +833,12 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
             content: [],
             stop_reason: null,
             stop_sequence: null,
-            usage: { input_tokens: estimatedInputTokens, output_tokens: 0 },
+            usage: {
+              input_tokens: estimatedInputTokens,
+              output_tokens: 0,
+              cache_creation_input_tokens: 0,
+              cache_read_input_tokens: 0,
+            },
           },
         }));
       };
@@ -830,17 +861,21 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
       const closeThinkingBlock = () => {
         if (!thinkingBlockOpen) return;
         // Emit the signature_delta once before closing (Anthropic streaming
-        // spec). Placeholder signature — see the note on `thinkingEnabled`
-        // above for why this is safe through this proxy.
+        // spec). The signature is deterministically derived from the thinking
+        // content so it round-trips correctly when Claude Code sends the
+        // thinking block back on the next turn.
         if (!thinkingSignatureSent) {
           controller.enqueue(event("content_block_delta", {
             type: "content_block_delta",
             index: blockIndex,
-            delta: { type: "signature_delta", signature: "poolprox_thinking_v1" },
+            delta: { type: "signature_delta", signature: generateThinkingSignature(accumulatedThinking) },
           }));
           thinkingSignatureSent = true;
         }
-        controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
+        controller.enqueue(event("content_block_stop", {
+          type: "content_block_stop",
+          index: blockIndex,
+        }));
         thinkingBlockOpen = false;
       };
 
@@ -889,16 +924,17 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   prompt_tokens: Number(chunk.usage.prompt_tokens || 0),
                   completion_tokens: Number(chunk.usage.completion_tokens || 0),
                   total_tokens: Number(chunk.usage.total_tokens || 0),
+                  cache_creation_input_tokens: Number(chunk.usage.cache_creation_input_tokens || 0),
+                  cache_read_input_tokens: Number(chunk.usage.cache_read_input_tokens || 0),
                 };
               }
 
               if (reasoning && thinkingEnabled) {
                 // Extended thinking is on: emit a proper `thinking` block so
                 // clients render it as a separate thinking section (not
-                // leaked into output). The signature is not validated on
-                // first receipt and the round-trip goes to a non-Anthropic
-                // upstream that doesn't validate Anthropic signatures, so a
-                // placeholder signature is safe here.
+                // leaked into output). The signature is generated
+                // deterministically from the accumulated thinking content
+                // when the block closes, so it round-trips correctly.
                 if (!thinkingBlockOpen) {
                   if (textBlockOpen) {
                     controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
@@ -907,12 +943,14 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   blockIndex += 1;
                   thinkingBlockOpen = true;
                   thinkingSignatureSent = false;
+                  accumulatedThinking = "";  // reset for this block
                   controller.enqueue(event("content_block_start", {
                     type: "content_block_start",
                     index: blockIndex,
                     content_block: { type: "thinking", thinking: "", signature: "" },
                   }));
                 }
+                accumulatedThinking += reasoning;  // track for signature
                 controller.enqueue(event("content_block_delta", {
                   type: "content_block_delta",
                   index: blockIndex,
@@ -1009,10 +1047,23 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
         const inputTokens = usageFromUpstream.prompt_tokens > 0
           ? usageFromUpstream.prompt_tokens
           : estimatedInputTokens;
+        // message_delta usage: Claude Code reads the FINAL message_delta for
+        // accurate token accounting. Include cache token fields from upstream
+        // (if reported) so cached-input savings are reflected.
+        const messageDeltaUsage: Record<string, number> = {
+          input_tokens: inputTokens,
+          output_tokens: outputTokens,
+        };
+        if (usageFromUpstream.cache_creation_input_tokens) {
+          messageDeltaUsage.cache_creation_input_tokens = usageFromUpstream.cache_creation_input_tokens;
+        }
+        if (usageFromUpstream.cache_read_input_tokens) {
+          messageDeltaUsage.cache_read_input_tokens = usageFromUpstream.cache_read_input_tokens;
+        }
         controller.enqueue(event("message_delta", {
           type: "message_delta",
           delta: { stop_reason: stopReason, stop_sequence: null },
-          usage: { input_tokens: inputTokens, output_tokens: outputTokens },
+          usage: messageDeltaUsage,
         }));
         controller.enqueue(event("message_stop", { type: "message_stop" }));
         controller.close();

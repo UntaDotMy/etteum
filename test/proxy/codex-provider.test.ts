@@ -220,7 +220,10 @@ describe("CodexProvider streaming", () => {
     expect(thinkingDelta).toBeDefined();
     // A signature_delta is emitted before the block closes.
     const signature = events.find((item) => item.event === "content_block_delta" && item.data.delta?.type === "signature_delta");
-    expect(signature?.data.delta.signature).toBe("poolprox_thinking_v1");
+    // The signature is now a deterministic SHA-256 hash of the thinking content
+    // (not a static placeholder) so it round-trips correctly across turns.
+    expect(signature?.data.delta.signature).toBeTruthy();
+    expect(signature?.data.delta.signature).not.toBe("");
 
     // The reasoning text must NOT appear in the text deltas (no leak).
     const text = events
