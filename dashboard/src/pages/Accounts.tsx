@@ -238,9 +238,15 @@ export default function Accounts() {
   const scheduleReload = () => {
     if (reloadRef.current) clearTimeout(reloadRef.current);
     reloadRef.current = setTimeout(() => {
-      // Silent reload - don't trigger loading state
+      // Silent reload - don't trigger loading state.
+      // 2500ms debounce (not 800): during a large warmup (hundreds of accounts)
+      // the server broadcasts account_status WS events faster than every 800ms,
+      // so a short debounce either starves (timer keeps resetting) or fires a
+      // burst of redundant /api/accounts + /api/accounts/warmup-queue fetches.
+      // 2.5s coalesces the burst into one reload. Warmup progress still updates
+      // live via the WS payload itself (updateWarmupQueue), not via reload.
       load(true);
-    }, 800);
+    }, 2500);
   };
 
   function updateWarmupQueue(res: any) {

@@ -111,14 +111,19 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     enabled: true,
     // Aggressive cap for OLD tool results. In long agentic sessions there are
     // hundreds of tool_result messages; the median is ~240 chars but the long
-    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 300-char cap keeps the
-    // gist (path, status, short result, error summary) while cutting the bulk
-    // — for a 313-result session this takes tool results from ~116K tokens down
-    // to ~13K, which is the difference between a reasoning model having output
-    // budget left to think vs. silently skipping reasoning. The smart shape
-    // filters (diff hunks, grep groupings, etc.) still run first within the cap,
-    // and the last `keepLastNTurnsFull` turns stay fully intact.
-    maxToolChars: 300,
+    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 150-char cap keeps the
+    // gist (path, status, short result, error summary) while cutting the bulk.
+    //
+    // Note on the chars/token ratio: the proxy estimates tokens at chars/4, but
+    // GLM/DeepSeek tokenizers are denser (~2.5 chars/token for code/markdown).
+    // So a prompt the estimator calls "127K tokens" is really ~200K GLM tokens.
+    // The cap must be aggressive enough that the REAL (GLM-counted) prompt
+    // leaves room for reasoning. 150 + TSC gets a typical long session from
+    // ~200K GLM tokens down toward ~150K; shorter sessions land in the
+    // reasoning zone (~60-90K). The smart shape filters (diff hunks, grep
+    // groupings, etc.) still run first within the cap, and the last
+    // `keepLastNTurnsFull` turns stay fully intact.
+    maxToolChars: 150,
     keepLastNTurnsFull: 2,
     smartTruncate: true,
   },
@@ -138,7 +143,14 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     enabled: false,
   },
   tsc: {
-    enabled: false,
+    // TSC (Tool Schema Compaction) is LOSSLESS: it only strips whitespace and
+    // JSON-schema metadata ($schema, title, examples, descriptions of unused
+    // params) from the tools DEFINITION. It never touches tool_call arguments
+    // or tool_result content, so it cannot break tool execution the way the
+    // (now-removed) word-rewrite filter did. Long agentic sessions carry a
+    // huge tools array every turn (100K+ chars for a 64-tool Codex/Claude Code
+    // session); TSC reclaims 5-25% of that with zero semantic loss.
+    enabled: true,
     stripSchemaWhitespace: true,
     trimDescriptions: true,
     dropSchemaMeta: true,
