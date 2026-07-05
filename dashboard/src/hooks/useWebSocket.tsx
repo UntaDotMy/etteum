@@ -7,7 +7,7 @@ import {
   useCallback,
   type ReactNode,
 } from "react";
-import { getWsBase } from "@/lib/api";
+import { getWsBase, getApiKey } from "@/lib/api";
 
 /**
  * A single shared WebSocket connection for the whole app.
@@ -83,7 +83,10 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
     let ws: WebSocket;
     try {
-      ws = new WebSocket(`${getWsBase()}/ws`);
+      // The /ws endpoint requires ?api_key= query auth (browsers can't set
+      // Authorization headers on WebSocket). Without it the upgrade returns 401
+      // and the connection fails immediately, causing a reconnect loop.
+      ws = new WebSocket(`${getWsBase()}/ws?api_key=${encodeURIComponent(getApiKey())}`);
     } catch {
       scheduleReconnect();
       return;
