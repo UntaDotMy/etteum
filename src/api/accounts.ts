@@ -1453,6 +1453,104 @@ accountsRouter.post("/gitlab-duo/:id/refresh", async (c) => {
 });
 
 /**
+ * GET /api/accounts/model-groups - Get Alibaba accounts grouped by queryable models
+ *
+ * Registered BEFORE `/:id` on purpose: Hono matches `/:id` against
+ * `/model-groups` (id="model-groups"), and Number("model-groups") is NaN,
+ * so the `/:id` handler returns 404 — which the SPA catch-all then serves
+ * as index.html (HTTP 200 text/html), breaking the dashboard's JSON.parse.
+ * Static paths before param paths is Hono best practice. Don't move this
+ * below `/:id`.
+ */
+accountsRouter.get("/model-groups", async (c) => {
+  const alibabaAccounts = await db
+    .select()
+    .from(accounts)
+    .where(eq(accounts.provider, "alibaba"));
+
+  interface ModelGroup {
+    accounts: number[];
+    count: number;
+    emails: string[];
+    quota: {
+      totalLimit: number;
+      totalRemaining: number;
+    };
+  }
+
+  const groups: Record<string, ModelGroup> = {};
+  const errorGroup: { accounts: number[]; count: number; emails: string[]; reasons: string[] } = {
+    accounts: [],
+    count: 0,
+    emails: [],
+    reasons: [],
+  };
+
+  for (const account of alibabaAccounts) {
+    const tokens = account.tokens as {
+      queryableModels?: string[];
+      modelQuotas?: Record<string, { limit: number; remaining: number }>;
+    } | null;
+    const queryableModels = tokens?.queryableModels || [];
+    const modelQuotas = tokens?.modelQuotas || {};
+
+    if (account.status === "error" || !account.enabled) {
+      errorGroup.accounts.push(account.id);
+      errorGroup.emails.push(account.email);
+      if (account.errorMessage) {
+        errorGroup.reasons.push(account.errorMessage);
+      }
+      continue;
+    }
+
+    if (queryableModels.length === 0) {
+      // No queryable models yet - warmup hasn't run or no models verified
+      errorGroup.accounts.push(account.id);
+      errorGroup.emails.push(account.email);
+      errorGroup.reasons.push("No queryable models verified");
+      continue;
+    }
+
+    // Add to each model group this account can query
+    for (const model of queryableModels) {
+      if (!groups[model]) {
+        groups[model] = {
+          accounts: [],
+          count: 0,
+          emails: [],
+          quota: { totalLimit: 0, totalRemaining: 0 },
+        };
+      }
+      groups[model].accounts.push(account.id);
+      groups[model].emails.push(account.email);
+      groups[model].count++;
+
+      // Aggregate quota for this model
+      const modelQuota = modelQuotas[model];
+      if (modelQuota) {
+        groups[model].quota.totalLimit += modelQuota.limit || 0;
+        groups[model].quota.totalRemaining += modelQuota.remaining || 0;
+      }
+    }
+  }
+
+  errorGroup.count = errorGroup.accounts.length;
+
+  return c.json({
+    data: {
+      models: groups,
+      error: errorGroup,
+      summary: {
+        totalAccounts: alibabaAccounts.length,
+        activeAccounts: alibabaAccounts.filter(a => a.status === "active" && a.enabled).length,
+        errorAccounts: errorGroup.count,
+        modelCount: Object.keys(groups).length,
+      },
+    },
+  });
+});
+
+/**
  * GET /api/accounts/:id - Get single account
  */
 accountsRouter.get("/:id", async (c) => {
@@ -2721,95 +2819,4 @@ accountsRouter.post("/:id/open-panel", async (c) => {
       error: `Failed to open browser: ${error instanceof Error ? error.message : String(error)}`,
     }, 500);
   }
-});
-
-/**
- * GET /api/accounts/model-groups - Get Alibaba accounts grouped by queryable models
- */
-accountsRouter.get("/model-groups", async (c) => {
-  const alibabaAccounts = await db
-    .select()
-    .from(accounts)
-    .where(eq(accounts.provider, "alibaba"));
-
-  interface ModelGroup {
-    accounts: number[];
-    count: number;
-    emails: string[];
-    quota: {
-      totalLimit: number;
-      totalRemaining: number;
-    };
-  }
-
-  const groups: Record<string, ModelGroup> = {};
-  const errorGroup: { accounts: number[]; count: number; emails: string[]; reasons: string[] } = {
-    accounts: [],
-    count: 0,
-    emails: [],
-    reasons: [],
-  };
-
-  for (const account of alibabaAccounts) {
-    const tokens = account.tokens as {
-      queryableModels?: string[];
-      modelQuotas?: Record<string, { limit: number; remaining: number }>;
-    } | null;
-    const queryableModels = tokens?.queryableModels || [];
-    const modelQuotas = tokens?.modelQuotas || {};
-
-    if (account.status === "error" || !account.enabled) {
-      errorGroup.accounts.push(account.id);
-      errorGroup.emails.push(account.email);
-      if (account.errorMessage) {
-        errorGroup.reasons.push(account.errorMessage);
-      }
-      continue;
-    }
-
-    if (queryableModels.length === 0) {
-      // No queryable models yet - warmup hasn't run or no models verified
-      errorGroup.accounts.push(account.id);
-      errorGroup.emails.push(account.email);
-      errorGroup.reasons.push("No queryable models verified");
-      continue;
-    }
-
-    // Add to each model group this account can query
-    for (const model of queryableModels) {
-      if (!groups[model]) {
-        groups[model] = {
-          accounts: [],
-          count: 0,
-          emails: [],
-          quota: { totalLimit: 0, totalRemaining: 0 },
-        };
-      }
-      groups[model].accounts.push(account.id);
-      groups[model].emails.push(account.email);
-      groups[model].count++;
-
-      // Aggregate quota for this model
-      const modelQuota = modelQuotas[model];
-      if (modelQuota) {
-        groups[model].quota.totalLimit += modelQuota.limit || 0;
-        groups[model].quota.totalRemaining += modelQuota.remaining || 0;
-      }
-    }
-  }
-
-  errorGroup.count = errorGroup.accounts.length;
-
-  return c.json({
-    data: {
-      models: groups,
-      error: errorGroup,
-      summary: {
-        totalAccounts: alibabaAccounts.length,
-        activeAccounts: alibabaAccounts.filter(a => a.status === "active" && a.enabled).length,
-        errorAccounts: errorGroup.count,
-        modelCount: Object.keys(groups).length,
-      },
-    },
-  });
 });
