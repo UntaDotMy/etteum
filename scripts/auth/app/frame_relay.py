@@ -128,27 +128,28 @@ class FrameRelay:
             await asyncio.sleep(max(0.05, interval))
 
     async def _capture(self, page: Any) -> str | None:
-        """Capture a JPEG screenshot via CDP and return base64 (no data: prefix)."""
+        """Capture a JPEG screenshot via CDP and return base64 (no data: prefix).
+
+        ``page`` may be a raw nodriver Tab (has .send()) or a Playwright-shim
+        Page (has .tab pointing at the underlying Tab). We resolve to the Tab
+        and send the CDP capture_screenshot command directly.
+        """
         try:
             from nodriver.cdp import page as cdp_page
-            # nodriver Tab exposes .send() which dispatches CDP commands.
-            data = await page.send(
+            # Resolve the underlying nodriver Tab (the shim wraps it).
+            tab = page
+            if hasattr(page, "tab") and not hasattr(page, "send"):
+                tab = page.tab
+            elif hasattr(page, "_tab") and not hasattr(page, "send"):
+                tab = page._tab
+            data = await tab.send(
                 cdp_page.capture_screenshot(format_="jpeg", quality=self.quality)
             )
             if not data:
                 return None
             return data
         except Exception:
-            # Fallback: try the connection attribute on some nodriver versions.
-            try:
-                conn = getattr(page, "connection", None) or getattr(page, "_conn", None)
-                if conn is None:
-                    return None
-                res = await conn.send(_cdp_screenshot(self.quality))
-                data = res if isinstance(res, str) else (res.get("data") if isinstance(res, dict) else None)
-                return data if data else None
-            except Exception:
-                return None
+            return None
 
     # ── stdin control loop ───────────────────────────────────────────────────
 
