@@ -22,6 +22,7 @@ import {
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
+import { estimateRequestTokens } from "./compression";
 import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
 import {
@@ -716,6 +717,51 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
       invalidModel || badUpstreamRequest ? 400 : 503
     );
   }
+});
+
+/**
+ * POST /v1/messages/count_tokens - Anthropic token-counting endpoint.
+ *
+ * Claude Code (and other Anthropic-compatible clients) call this before sending
+ * a request to estimate input token usage. The body is the same shape as
+ * /v1/messages (model, messages, system, tools, …). We convert it to the
+ * internal Chat Completions shape and run the same token estimator the
+ * compression pipeline uses, then return `{ input_tokens }`.
+ *
+ * The estimate is approximate (chars/4 heuristic) — it does NOT need to match
+ * upstream exactly; clients use it for budgeting/UI only. Returning 404 makes
+ * Claude Code log a noisy error on every turn, so we implement it even though
+ * the proxy is otherwise stateless.
+ */
+proxyRouter.post("/v1/messages/count_tokens", async (c) => {
+  let body: AnthropicMessagesRequest;
+  try {
+    body = await c.req.json<AnthropicMessagesRequest>();
+  } catch (error) {
+    if (isJsonParseError(error)) {
+      return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON request body" } }, 400);
+    }
+    throw error;
+  }
+
+  if (!body.messages || !Array.isArray(body.messages) || body.messages.length === 0) {
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: "messages is required and must be a non-empty array" } }, 400);
+  }
+
+  // Strip built-in server tools (e.g. web_search) the same way /v1/messages
+  // does, so anthropicToOpenAI doesn't throw on them.
+  const strippedBody: AnthropicMessagesRequest = { ...body, tools: stripWebSearchTools(body.tools) };
+
+  let openAIRequest: ChatCompletionRequest;
+  try {
+    openAIRequest = anthropicToOpenAI(strippedBody);
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    return c.json({ type: "error", error: { type: "invalid_request_error", message: msg } }, 400);
+  }
+
+  const inputTokens = estimateRequestTokens(openAIRequest);
+  return c.json({ input_tokens: inputTokens });
 });
 
 /**
