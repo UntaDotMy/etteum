@@ -919,8 +919,19 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   delta: { type: "thinking_delta", thinking: reasoning },
                 }));
               }
-              // When thinking is not enabled, discard reasoning_content completely.
-              // Do NOT add it to the text output - that's the leak we're fixing.
+              // When thinking is NOT enabled, surface reasoning_content as
+              // regular text so the model's chain-of-thought is not silently
+              // dropped. (When thinking IS enabled, it was already emitted as a
+              // thinking_delta block above.)
+              if (reasoning && !thinkingEnabled) {
+                ensureTextBlock();
+                controller.enqueue(event("content_block_delta", {
+                  type: "content_block_delta",
+                  index: blockIndex,
+                  delta: { type: "text_delta", text: reasoning },
+                }));
+                index += reasoning.length;
+              }
 
               if (text) {
                 ensureTextBlock();
