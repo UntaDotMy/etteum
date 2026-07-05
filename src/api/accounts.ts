@@ -75,6 +75,7 @@ function normalizeByokKeys(apiKeys: unknown, legacyApiKey?: string): Array<{ lab
 
   const normalized: Array<{ label: string; key: string; weight?: number; priority?: number }> = [];
   const seen = new Set<string>();
+  const seenKeys = new Set<string>();
   for (const [index, item] of rawKeys.entries()) {
     const label = String(item.label || `key-${index + 1}`).trim().toLowerCase();
     const key = String(item.key || item.api_key || "").trim();
@@ -83,7 +84,9 @@ function normalizeByokKeys(apiKeys: unknown, legacyApiKey?: string): Array<{ lab
       throw new Error("key label must start with lowercase alphanumeric and contain only lowercase letters, numbers, hyphen, or underscore");
     }
     if (seen.has(label)) throw new Error(`duplicate BYOK key label: ${label}`);
+    if (seenKeys.has(key)) throw new Error(`duplicate BYOK key value for label: ${label}`);
     seen.add(label);
+    seenKeys.add(key);
     normalized.push({
       label,
       key,
@@ -849,7 +852,7 @@ accountsRouter.post("/alibaba", async (c) => {
   const existingKeys = new Set(
     (await db.select({ password: accounts.password }).from(accounts)
       .where(eq(accounts.provider, "alibaba"))
-    ).map((r) => r.password)
+    ).map((r) => { try { return decrypt(r.password); } catch { return ""; } })
   );
 
   const existingCount = existingKeys.size;
@@ -880,6 +883,7 @@ accountsRouter.post("/alibaba", async (c) => {
 
     if (inserted[0]) {
       created.push({ id: inserted[0].id, email });
+      existingKeys.add(key);
     }
   }
 
@@ -1648,6 +1652,7 @@ accountsRouter.post("/", async (c) => {
 
       if (inserted[0]) {
         created.push({ id: inserted[0].id, email });
+        existingKeys.add(key);
       }
     }
 
@@ -1706,6 +1711,7 @@ accountsRouter.post("/", async (c) => {
 
       if (inserted[0]) {
         created.push({ id: inserted[0].id, email });
+        existingTokens.add(rt);
       }
     }
 
