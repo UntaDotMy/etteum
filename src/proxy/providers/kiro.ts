@@ -35,7 +35,7 @@ import {
   normalizeMessages,
   buildHistory,
 } from "./kiro/messages";
-import { applyModelSpecs } from "../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../model-specs";
 
 interface KiroTokens {
   access_token?: string;
@@ -603,9 +603,20 @@ export class KiroProvider extends BaseProvider {
       "x-amz-user-agent": "pool-proxy/1.0.0",
     };
 
-    // Handle -thinking suffix or reasoning_effort from request body
-    const isThinking = request.model.endsWith("-thinking") || !!request.reasoning_effort || !!request.thinking;
+    // Handle -thinking suffix or reasoning_effort from request body. Only
+    // enable thinking if the model supports it (per catalog) AND the client
+    // explicitly asked (suffix, non-"none" reasoning_effort, or
+    // thinking.type==="enabled"). Claude Code's default `thinking:{type:"adaptive"}`
+    // is NOT an explicit enable. Respect the client's effort instead of forcing
+    // "high", which burned output budget on every call.
     const actualModel = request.model.endsWith("-thinking") ? request.model.replace("-thinking", "") : request.model;
+    const spec = resolveModelSpec(actualModel);
+    const effort = request.reasoning_effort;
+    const clientWantsThinking =
+      request.model.endsWith("-thinking") ||
+      (typeof effort === "string" && effort !== "" && effort !== "none") ||
+      (request.thinking && (request.thinking as any).type === "enabled");
+    const isThinking = !!spec?.thinking && clientWantsThinking;
 
     // Collect EVERY system message (clients like opencode interleave multiple
     // system-reminders rather than using a single leading system block).
@@ -665,7 +676,9 @@ export class KiroProvider extends BaseProvider {
     if (tokens.profile_arn) body.profileArn = tokens.profile_arn;
 
     if (isThinking) {
-      (body.conversationState as any).reasoning = { effort: "high" };
+      (body.conversationState as any).reasoning = {
+        effort: (typeof effort === "string" && effort !== "none") ? effort : "high",
+      };
     }
 
     // Amazon Q/Kiro endpoint is not OpenAI-compatible. It expects this REST path;

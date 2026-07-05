@@ -9,7 +9,7 @@ import {
 } from "./base";
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
-import { applyModelSpecs } from "../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../model-specs";
 
 
 /**
@@ -791,8 +791,19 @@ export class CodeBuddyProvider extends BaseProvider {
       body.tool_choice = request.tool_choice;
     }
 
-    if (isThinking) {
-      body.reasoning = { effort: "high" };
+    // Forward reasoning config only when the model supports thinking (per the
+    // catalog) AND the client asked for it. Respect the client's effort instead
+    // of forcing "high" — forcing high on every call burned output budget and
+    // made non-thinking models slow. CodeBuddy global serves Claude/GPT models
+    // via their relay, so the standard `reasoning_effort` field is correct.
+    const spec = resolveModelSpec(actualModel);
+    const effort = request.reasoning_effort;
+    const clientWantsThinking =
+      isThinking ||
+      (typeof effort === "string" && effort !== "" && effort !== "none") ||
+      (request.thinking && (request.thinking as any).type === "enabled");
+    if (spec?.thinking && clientWantsThinking) {
+      body.reasoning = { effort: (typeof effort === "string" && effort !== "none") ? effort : "high" };
     }
 
     // Use a longer timeout for streaming requests — large context (Claude Code)

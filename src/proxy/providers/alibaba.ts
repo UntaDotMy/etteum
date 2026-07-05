@@ -1098,19 +1098,25 @@ export class AlibabaProvider extends BaseProvider {
     // DashScope thinking config — uses enable_thinking + thinking_budget.
     // Docs: https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-dashscope
     //
-    // CRITICAL: Explicitly set enable_thinking based on client request.
-    // Qwen3.7+ models have thinking enabled by default, so we MUST explicitly
-    // disable it when not requested to prevent reasoning_content from leaking
-    // into the visible output.
-    if (request.thinking) {
+    // CRITICAL: Explicitly set enable_thinking based on client request, AND only
+    // when the model supports thinking (per the catalog). The old `if (request.thinking)`
+    // check was truthy for Claude Code's default `thinking:{type:"adaptive"}`, so
+    // it forced thinking on for every Qwen call — even non-thinking variants and
+    // even when the client didn't actually want reasoning. Now: require an explicit
+    // enable signal (-thinking suffix, non-"none" reasoning_effort, or
+    // thinking.type==="enabled"); adaptive alone does NOT enable.
+    const actualModel = request.model.endsWith("-thinking") ? request.model.replace(/-thinking$/, "") : request.model;
+    const spec = resolveModelSpec(actualModel);
+    const effort = request.reasoning_effort;
+    const clientWantsThinking =
+      request.model.endsWith("-thinking") ||
+      (typeof effort === "string" && effort !== "" && effort !== "none") ||
+      (request.thinking && (request.thinking as any).type === "enabled");
+    if (spec?.thinking && clientWantsThinking) {
       body.enable_thinking = true;
-      // thinking_budget: cap reasoning tokens (default 4096 if not specified)
       const budget = (request.thinking as any)?.budget_tokens;
-      body.thinking_budget = Number.isFinite(Number(budget)) && Number(budget) > 0
-        ? Number(budget)
-        : 4096;
+      if (typeof budget === "number") body.thinking_budget = budget;
     } else {
-      // Explicitly disable thinking when not requested to prevent leak
       body.enable_thinking = false;
     }
   }

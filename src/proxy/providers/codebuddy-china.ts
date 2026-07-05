@@ -9,6 +9,7 @@ import {
 } from "./base";
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
+import { resolveModelSpec } from "../model-specs";
 
 interface CodeBuddyChinaTokens {
   api_key?: string;
@@ -698,11 +699,32 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     // content array (standard OpenAI format) — NOT hoisted to top-level fields.
     const { messages, hasVision } = this.cleanMessages(request);
 
-    // Detect thinking mode: -thinking suffix on model, or request-level
-    // reasoning_effort / thinking params. CodeBuddy China uses the same
-    // `reasoning: { effort }` body field as CodeBuddy global.
-    const isThinking = resolved.endsWith("-thinking") || !!request.reasoning_effort || !!request.thinking;
+    // Resolve the canonical model spec to check native thinking/vision support.
+    // The catalog (model-specs.ts) is the source of truth: a model only gets
+    // thinking params if its spec.thinking is true. This stops us from forcing
+    // reasoning on models that don't support it (e.g. minimax-m2.7, deepseek-v3.2)
+    // just because the client sent `thinking: {type:"adaptive"}` (Claude Code's
+    // default, which is always present regardless of model).
     const actualModel = resolved.endsWith("-thinking") ? resolved.replace(/-thinking$/, "") : resolved;
+    const spec = resolveModelSpec(actualModel);
+    const modelSupportsThinking = !!spec?.thinking;
+
+    // Client intent: did the caller ask for thinking? Sources, in priority:
+    //   1. `-thinking` suffix on the model name (explicit opt-in)
+    //   2. `reasoning_effort` set to a non-"none" value
+    //   3. `thinking.type === "enabled"` (Anthropic/OpenAI-style)
+    // `thinking: {type:"adaptive"}` is Claude Code's default and does NOT count
+    // as an explicit enable — it means "model decides". GLM has no "adaptive"
+    // concept, so we treat adaptive as "off unless the model is a -thinking
+    // variant or effort was explicitly set".
+    const hasThinkingSuffix = resolved.endsWith("-thinking");
+    const effort = request.reasoning_effort;
+    const clientWantsThinking =
+      hasThinkingSuffix ||
+      (typeof effort === "string" && effort !== "" && effort !== "none") ||
+      (request.thinking && (request.thinking as any).type === "enabled");
+
+    const enableThinking = modelSupportsThinking && clientWantsThinking;
 
     const body: Record<string, unknown> = {
       model: actualModel,
@@ -724,11 +746,50 @@ export class CodeBuddyChinaProvider extends BaseProvider {
       body.temperature = request.temperature;
     }
 
-    // Forward reasoning/thinking config to upstream — same as CodeBuddy global.
-    // Models like deepseek-r1 and kimi-k2.7 produce reasoning_content in the
-    // response when this is set.
-    if (isThinking) {
-      body.reasoning = { effort: "high" };
+    // Forward reasoning/thinking config to upstream using each model family's
+    // NATIVE field, so the upstream actually enables thinking and returns
+    // reasoning_content. The old code always sent `reasoning:{effort:"high"}`
+    // which (a) forced high on every model including non-thinking ones, (b)
+    // ignored the client's effort, and (c) didn't send GLM's `enable_thinking`
+    // toggle so GLM never actually turned reasoning on for plain (non -thinking)
+    // models — which is why Claude Code's `thinking:{type:"adaptive"}` produced
+    // zero reasoning on GLM-5.2.
+    //
+    // Per upstream docs:
+    //   - GLM (zai/codebuddy):  `enable_thinking: true` (toggle) +
+    //                           `reasoning_effort: "high"|"max"` (GLM-5.2 only)
+    //   - DeepSeek:             `thinking: { type: "enabled" }`
+    //   - Kimi:                 `reasoning_effort` field
+    //   - MiniMax M3:           thinking on by default; send nothing extra
+    if (enableThinking) {
+      const resolvedEffort =
+        (typeof effort === "string" && effort !== "" && effort !== "none") ? effort : "high";
+      const fam = actualModel.toLowerCase();
+      if (fam.startsWith("glm-")) {
+        // GLM native: enable_thinking toggle + reasoning_effort budget.
+        body.enable_thinking = true;
+        // reasoning_effort is GLM-5.2-only; older GLM ignores it. "max" is the
+        // deepest; map "high" through, and treat any explicit effort as-is.
+        body.reasoning_effort = resolvedEffort === "max" ? "max" : "high";
+      } else if (fam.startsWith("deepseek-")) {
+        // DeepSeek native thinking field.
+        body.thinking = { type: "enabled" };
+      } else if (fam.startsWith("kimi-")) {
+        body.reasoning_effort = resolvedEffort;
+      } else {
+        // MiniMax / generic: codebuddy-china accepts the `reasoning` envelope.
+        body.reasoning = { effort: resolvedEffort };
+      }
+    } else if (modelSupportsThinking) {
+      // Model supports thinking but the client didn't ask (adaptive/off).
+      // Explicitly disable so an upstream default doesn't burn the output
+      // budget on reasoning the client didn't request.
+      const fam = actualModel.toLowerCase();
+      if (fam.startsWith("glm-")) {
+        body.enable_thinking = false;
+      } else if (fam.startsWith("deepseek-")) {
+        body.thinking = { type: "disabled" };
+      }
     }
 
     // Normalize tools to OpenAI function-calling format
