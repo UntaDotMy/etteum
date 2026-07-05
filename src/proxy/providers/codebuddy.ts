@@ -793,15 +793,17 @@ export class CodeBuddyProvider extends BaseProvider {
 
     // Forward reasoning config only when the model supports thinking (per the
     // catalog) AND the client asked for it. Respect the client's effort instead
-    // of forcing "high" — forcing high on every call burned output budget and
-    // made non-thinking models slow. CodeBuddy global serves Claude/GPT models
-    // via their relay, so the standard `reasoning_effort` field is correct.
+    // of forcing "high". CodeBuddy global serves Claude/GPT models via their
+    // relay, so the standard `reasoning_effort` field is correct.
+    // Claude Code defaults to thinking.type="adaptive" — treat any non-disabled
+    // type as an enable.
     const spec = resolveModelSpec(actualModel);
     const effort = request.reasoning_effort;
+    const thinkType = (request.thinking as any)?.type;
     const clientWantsThinking =
       isThinking ||
       (typeof effort === "string" && effort !== "" && effort !== "none") ||
-      (request.thinking && (request.thinking as any).type === "enabled");
+      (thinkType && thinkType !== "disabled");
     if (spec?.thinking && clientWantsThinking) {
       body.reasoning = { effort: (typeof effort === "string" && effort !== "none") ? effort : "high" };
     }

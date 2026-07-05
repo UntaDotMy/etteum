@@ -712,17 +712,16 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     // Client intent: did the caller ask for thinking? Sources, in priority:
     //   1. `-thinking` suffix on the model name (explicit opt-in)
     //   2. `reasoning_effort` set to a non-"none" value
-    //   3. `thinking.type === "enabled"` (Anthropic/OpenAI-style)
-    // `thinking: {type:"adaptive"}` is Claude Code's default and does NOT count
-    // as an explicit enable — it means "model decides". GLM has no "adaptive"
-    // concept, so we treat adaptive as "off unless the model is a -thinking
-    // variant or effort was explicitly set".
+    //   3. Any `thinking.type` other than "disabled" (Claude Code defaults to
+    //      "adaptive" which means "model decides" — upstreams that support
+    //      thinking should honor it).
     const hasThinkingSuffix = resolved.endsWith("-thinking");
     const effort = request.reasoning_effort;
+    const thinkType = (request.thinking as any)?.type;
     const clientWantsThinking =
       hasThinkingSuffix ||
       (typeof effort === "string" && effort !== "" && effort !== "none") ||
-      (request.thinking && (request.thinking as any).type === "enabled");
+      (thinkType && thinkType !== "disabled");
 
     const enableThinking = modelSupportsThinking && clientWantsThinking;
 

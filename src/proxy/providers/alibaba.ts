@@ -1099,19 +1099,18 @@ export class AlibabaProvider extends BaseProvider {
     // Docs: https://www.alibabacloud.com/help/en/model-studio/qwen-api-via-dashscope
     //
     // CRITICAL: Explicitly set enable_thinking based on client request, AND only
-    // when the model supports thinking (per the catalog). The old `if (request.thinking)`
-    // check was truthy for Claude Code's default `thinking:{type:"adaptive"}`, so
-    // it forced thinking on for every Qwen call — even non-thinking variants and
-    // even when the client didn't actually want reasoning. Now: require an explicit
-    // enable signal (-thinking suffix, non-"none" reasoning_effort, or
-    // thinking.type==="enabled"); adaptive alone does NOT enable.
+    // when the model supports thinking (per the catalog). Enable signals:
+    // -thinking suffix, non-"none" reasoning_effort, or any thinking.type
+    // other than "disabled" (Claude Code defaults to "adaptive", which means
+    // "model decides" — upstreams that support thinking should honor it).
     const actualModel = request.model.endsWith("-thinking") ? request.model.replace(/-thinking$/, "") : request.model;
     const spec = resolveModelSpec(actualModel);
     const effort = request.reasoning_effort;
+    const thinkType = (request.thinking as any)?.type;
     const clientWantsThinking =
       request.model.endsWith("-thinking") ||
       (typeof effort === "string" && effort !== "" && effort !== "none") ||
-      (request.thinking && (request.thinking as any).type === "enabled");
+      (thinkType && thinkType !== "disabled");
     if (spec?.thinking && clientWantsThinking) {
       body.enable_thinking = true;
       const budget = (request.thinking as any)?.budget_tokens;

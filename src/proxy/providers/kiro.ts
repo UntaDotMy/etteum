@@ -605,17 +605,17 @@ export class KiroProvider extends BaseProvider {
 
     // Handle -thinking suffix or reasoning_effort from request body. Only
     // enable thinking if the model supports it (per catalog) AND the client
-    // explicitly asked (suffix, non-"none" reasoning_effort, or
-    // thinking.type==="enabled"). Claude Code's default `thinking:{type:"adaptive"}`
-    // is NOT an explicit enable. Respect the client's effort instead of forcing
-    // "high", which burned output budget on every call.
+    // asked (suffix, non-"none" reasoning_effort, or any thinking.type other
+    // than "disabled"). Claude Code defaults to "adaptive" which means
+    // "model decides" — upstreams that support thinking should honor it.
     const actualModel = request.model.endsWith("-thinking") ? request.model.replace("-thinking", "") : request.model;
     const spec = resolveModelSpec(actualModel);
     const effort = request.reasoning_effort;
+    const thinkType = (request.thinking as any)?.type;
     const clientWantsThinking =
       request.model.endsWith("-thinking") ||
       (typeof effort === "string" && effort !== "" && effort !== "none") ||
-      (request.thinking && (request.thinking as any).type === "enabled");
+      (thinkType && thinkType !== "disabled");
     const isThinking = !!spec?.thinking && clientWantsThinking;
 
     // Collect EVERY system message (clients like opencode interleave multiple
