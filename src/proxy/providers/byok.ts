@@ -1233,7 +1233,23 @@ export class ByokProvider extends BaseProvider {
     // Forward reasoning / thinking config so BYOK upstreams that support
     // extended thinking (e.g. OpenRouter routing to o1 / Claude) actually
     // receive it. Without this, thinking is silently dropped.
-    if (request.reasoning_effort) body.reasoning_effort = request.reasoning_effort;
-    if (request.thinking) body.thinking = request.thinking;
+    //
+    // Only forward an EXPLICIT enable: -thinking suffix, non-"none"
+    // reasoning_effort, or thinking.type==="enabled". Claude Code's default
+    // `thinking:{type:"adaptive"}` is NOT forwarded — it's Claude Code's
+    // internal "model decides" flag and means nothing to OpenAI-compat
+    // upstreams (which use reasoning_effort). Forwarding it raw confused some
+    // upstreams and forced reasoning on unintentionally.
+    const effort = request.reasoning_effort;
+    const thinkType = (request.thinking as any)?.type;
+    const clientWantsThinking =
+      (typeof request.model === "string" && request.model.endsWith("-thinking")) ||
+      (typeof effort === "string" && effort !== "" && effort !== "none") ||
+      thinkType === "enabled";
+    if (clientWantsThinking) {
+      if (effort && effort !== "none") body.reasoning_effort = effort;
+      // Only forward a positive `thinking` enable, never adaptive/disabled.
+      if (thinkType === "enabled") body.thinking = request.thinking;
+    }
   }
 }

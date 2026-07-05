@@ -28,7 +28,7 @@ import {
 } from "./base";
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
-import { applyModelSpecs } from "../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../model-specs";
 
 // ── OAuth (Antigravity CLI's public client) ────────────────────────────────
 // The client_id is public (ships in the Antigravity CLI binary + public
@@ -165,6 +165,38 @@ export function openAIToGemini(request: ChatCompletionRequest, model: string): R
       })),
     }];
   }
+
+  // Gemini 3 Pro thinking config. Gemini uses
+  // generationConfig.thinkingConfig = { thinkingBudget } where:
+  //   -1 = dynamic (model decides), 0 = off, N = token budget.
+  // Only enable when the model supports thinking (per catalog) AND the client
+  // explicitly asked (suffix, non-"none" reasoning_effort, or
+  // thinking.type==="enabled"). Claude Code's default `thinking:{type:"adaptive"}`
+  // is NOT an explicit enable — Gemini has its own "dynamic" (-1) which we'd
+  // only set when the client actually wants reasoning.
+  const actualModel = model.endsWith("-thinking") ? model.replace(/-thinking$/, "") : model;
+  const spec = resolveModelSpec(actualModel);
+  const effort = request.reasoning_effort;
+  const clientWantsThinking =
+    model.endsWith("-thinking") ||
+    (typeof effort === "string" && effort !== "" && effort !== "none") ||
+    (request.thinking && (request.thinking as any).type === "enabled");
+  if (spec?.thinking && clientWantsThinking) {
+    // Map effort to a thinkingBudget. Gemini doesn't take "high"/"low"; it
+    // takes a token budget. Use generous budgets for high/max, smaller for low.
+    const budget =
+      effort === "max" ? 24576 :
+      effort === "high" ? 16384 :
+      effort === "medium" ? 8192 :
+      effort === "low" ? 2048 :
+      -1; // dynamic when effort unspecified
+    body.generationConfig = { ...(body.generationConfig as any || {}), thinkingConfig: { thinkingBudget: budget } };
+  } else if (spec?.thinking && !clientWantsThinking) {
+    // Model supports thinking but client didn't ask — explicitly off so the
+    // upstream default doesn't burn output budget on reasoning.
+    body.generationConfig = { ...(body.generationConfig as any || {}), thinkingConfig: { thinkingBudget: 0 } };
+  }
+
   return body;
 }
 
