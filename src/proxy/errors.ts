@@ -39,35 +39,39 @@ export function isContentModerationError(error?: string): boolean {
   if (!error) return false;
   const normalized = error.toLowerCase();
   return (
-    // ── Generic patterns (all providers) ──────────────────────────────
-    error.includes("content_filter") ||
-    error.includes("content filter") ||
-    error.includes("content moderation") ||
-    error.includes("content policy") ||
-    error.includes("content safety") ||
-    error.includes("safety filter") ||
-    error.includes("safety_policy") ||
-    error.includes("safety policy") ||
-    error.includes("flagged as potentially sensitive") ||
+    // -- Generic patterns (all providers) --
+    // Use the lowercased `normalized` form for all Latin-script checks so
+    // mixed-case upstream messages (e.g. "Content moderation: ...") are caught.
+    // CJK substrings are case-insensitive by definition; kept on `error`
+    // to avoid any re-encoding surprises, Latin ones use `normalized`.
+    normalized.includes("content_filter") ||
+    normalized.includes("content filter") ||
+    normalized.includes("content moderation") ||
+    normalized.includes("content policy") ||
+    normalized.includes("content safety") ||
+    normalized.includes("safety filter") ||
+    normalized.includes("safety_policy") ||
+    normalized.includes("safety policy") ||
+    normalized.includes("flagged as potentially sensitive") ||
     // ── Chinese-language moderation (Alibaba, Baidu, etc.) ────────────
     error.includes("敏感内容") ||
     error.includes("内容审核") ||
     error.includes("内容安全") ||
     error.includes("系统检测到") ||
-    error.includes("sensitive content") ||
+    normalized.includes("sensitive content") ||
     // ── Alibaba DashScope specific ────────────────────────────────────
-    error.includes("data_inspection_failed") ||
-    error.includes("DataInspectionFailed") ||
-    error.includes("inappropriate content") ||
-    error.includes("data inspection failed") ||
+    normalized.includes("data_inspection_failed") ||
+    normalized.includes("datainspectionfailed") ||
+    normalized.includes("inappropriate content") ||
+    normalized.includes("data inspection failed") ||
     // ── AWS Bedrock / Kiro ───────────────────────────────────────────
-    error.includes("input is not allowed") ||
-    error.includes("input was filtered") ||
-    error.includes("blocked by content") ||
-    error.includes("content policy violation") ||
+    normalized.includes("input is not allowed") ||
+    normalized.includes("input was filtered") ||
+    normalized.includes("blocked by content") ||
+    normalized.includes("content policy violation") ||
     // ── CodeBuddy / Tencent ──────────────────────────────────────────
-    error.includes("content security") ||
-    error.includes("text contains sensitive") ||
+    normalized.includes("content security") ||
+    normalized.includes("text contains sensitive") ||
     // ── Generic HTTP 400 content rejections ──────────────────────────
     // Catch "HTTP 400: ...content..." patterns from any provider
     (normalized.includes("400") && (

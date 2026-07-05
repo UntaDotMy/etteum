@@ -698,8 +698,8 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         config.authScriptPath,
         "--email",
         account.email,
-        "--password",
-        password,
+        // Password is passed via the BATCHER_AUTH_PASSWORD env var below
+        // (NOT as a CLI arg) so it never appears in `ps` / /proc/<pid>/cmdline.
       ],
       {
         stdout: "pipe",
@@ -717,6 +717,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           HTTPS_PROXY: proxyUrlForAuth || config.proxyUrl || "",
           BATCHER_CONCURRENT: "1",
           BATCHER_PRIORITY: provider,
+          BATCHER_AUTH_PASSWORD: password,
           ...kiroProEnv,
         },
         cwd: config.authScriptCwd,
@@ -914,8 +915,7 @@ export async function loginAllProviders(
         config.authScriptPath,
         "--email",
         email,
-        "--password",
-        password,
+        // Password passed via BATCHER_AUTH_PASSWORD env (not CLI arg).
       ],
       {
         stdout: "pipe",
@@ -928,6 +928,7 @@ export async function loginAllProviders(
           HTTP_PROXY: proxyUrlForAuth || config.proxyUrl || "",
           HTTPS_PROXY: proxyUrlForAuth || config.proxyUrl || "",
           BATCHER_CONCURRENT: "5",
+          BATCHER_AUTH_PASSWORD: password,
         },
         cwd: config.authScriptCwd,
       }

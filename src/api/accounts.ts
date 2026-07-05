@@ -860,7 +860,7 @@ accountsRouter.post("/alibaba", async (c) => {
     const encryptedKey = encrypt(key);
 
     // Skip duplicate keys
-    if (existingKeys.has(encryptedKey)) {
+    if (existingKeys.has(key)) {
       skippedCount++;
       continue;
     }
@@ -1618,7 +1618,7 @@ accountsRouter.post("/", async (c) => {
     const existingKeys = new Set(
       (await db.select({ password: accounts.password }).from(accounts)
         .where(eq(accounts.provider, "codebuddy-china"))
-      ).map((r) => r.password)
+      ).map((r) => { try { return decrypt(r.password); } catch { return r.password; } })
     );
     const existingCount = existingKeys.size;
     let skippedCount = 0;
@@ -1627,7 +1627,7 @@ accountsRouter.post("/", async (c) => {
       const key = keys[i]!;
       const encryptedKey = encrypt(key);
 
-      if (existingKeys.has(encryptedKey)) {
+      if (existingKeys.has(key)) {
         skippedCount++;
         continue;
       }
@@ -1680,7 +1680,7 @@ accountsRouter.post("/", async (c) => {
     const existingTokens = new Set(
       (await db.select({ password: accounts.password }).from(accounts)
         .where(eq(accounts.provider, "antigravity"))
-      ).map((r) => r.password)
+      ).map((r) => { try { return decrypt(r.password); } catch { return r.password; } })
     );
     const existingCount = existingTokens.size;
     let skippedCount = 0;
@@ -1688,7 +1688,7 @@ accountsRouter.post("/", async (c) => {
     for (let i = 0; i < tokens.length; i++) {
       const rt = tokens[i]!;
       const encryptedRt = encrypt(rt);
-      if (existingTokens.has(encryptedRt)) { skippedCount++; continue; }
+      if (existingTokens.has(rt)) { skippedCount++; continue; }
 
       const email = `antigravity-account-${existingCount + i + 1 - skippedCount}`;
       const tokenSet = JSON.stringify({ refresh_token: rt });
@@ -2569,210 +2569,6 @@ async function handleCodexInstantLogin(c: any, tokens: string[]) {
   const result = await exchangeCodexRefreshTokens(tokens);
   return c.json(result);
 }
-
-/**
- * BYOK (Bring Your Own Key) Management Endpoints
- */
-
-/**
- * POST /api/accounts/byok - Create BYOK provider
- */
-accountsRouter.post("/byok", async (c) => {
-  const body = await c.req.json<{
-    label: string;
-    base_url: string;
-    api_key: string;
-    format?: "openai" | "anthropic" | "auto";
-    models: string[];
-    headers?: Record<string, string>;
-  }>();
-
-  if (!body.label || !body.base_url || !body.api_key || !body.models || body.models.length === 0) {
-    return c.json({ error: "label, base_url, api_key, and models[] are required" }, 400);
-  }
-
-  // Validate label format (lowercase alphanumeric + hyphens)
-  if (!/^[a-z0-9-]+$/.test(body.label)) {
-    return c.json({ error: "label must be lowercase alphanumeric with hyphens only" }, 400);
-  }
-
-  // Check uniqueness
-  const existing = await db.select().from(accounts)
-    .where(eq(accounts.email, body.label))
-    .then((rows) => rows.find((r) => r.provider === "byok"));
-
-  if (existing) {
-    return c.json({ error: "BYOK provider with this label already exists" }, 409);
-  }
-
-  // Encrypt API key
-  const encryptedKey = encrypt(body.api_key);
-
-  // Build tokens JSON
-  const tokens = {
-    base_url: body.base_url,
-    format: body.format || "auto",
-    models: body.models,
-    model_prefix: body.label,
-    headers: body.headers || {},
-  };
-
-  try {
-    const result = await db.insert(accounts).values({
-      provider: "byok",
-      email: body.label,
-      password: encryptedKey,
-      status: "active",
-      enabled: true,
-      tokens: tokens,
-      quotaLimit: -1,
-      quotaRemaining: -1,
-    }).returning();
-
-    const created = result[0]!;
-    pool.invalidate("byok" as ProviderName);
-
-    broadcast({
-      type: "byok_created",
-      data: { id: created.id, label: body.label },
-    });
-
-    // Refresh BYOK model cache
-    const { refreshByokModels } = await import("../proxy/providers/registry");
-    await refreshByokModels();
-
-    return c.json({
-      success: true,
-      id: created.id,
-      label: body.label,
-      models: body.models.map((m) => `${body.label}-${m}`),
-    }, 201);
-  } catch (error) {
-    return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
-  }
-});
-
-/**
- * GET /api/accounts/byok - List all BYOK providers
- */
-accountsRouter.get("/byok", async (c) => {
-  const byokAccounts = await db.select().from(accounts)
-    .where(eq(accounts.provider, "byok"));
-
-  const providers = byokAccounts.map((acc) => {
-    const tokens = typeof acc.tokens === "string"
-      ? JSON.parse(acc.tokens)
-      : acc.tokens;
-
-    return {
-      id: acc.id,
-      label: acc.email,
-      base_url: tokens?.base_url || "",
-      format: tokens?.format || "auto",
-      models: tokens?.models || [],
-      model_prefix: tokens?.model_prefix || acc.email,
-      status: acc.status,
-      enabled: acc.enabled,
-      available_models: (tokens?.models || []).map((m: string) => `${tokens?.model_prefix || acc.email}-${m}`),
-    };
-  });
-
-  return c.json({ providers, total: providers.length });
-});
-
-/**
- * PATCH /api/accounts/byok/:id - Update BYOK provider
- */
-accountsRouter.patch("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-  const body = await c.req.json<{
-    base_url?: string;
-    api_key?: string;
-    format?: "openai" | "anthropic" | "auto";
-    models?: string[];
-    headers?: Record<string, string>;
-  }>();
-
-  const account = await db.select().from(accounts)
-    .where(eq(accounts.id, id))
-    .get();
-
-  if (!account || account.provider !== "byok") {
-    return c.json({ error: "BYOK provider not found" }, 404);
-  }
-
-  const tokens = typeof account.tokens === "string"
-    ? JSON.parse(account.tokens)
-    : account.tokens || {};
-
-  // Update fields
-  if (body.base_url) tokens.base_url = body.base_url;
-  if (body.format) tokens.format = body.format;
-  if (body.models) tokens.models = body.models;
-  if (body.headers) tokens.headers = body.headers;
-
-  const updateData: Record<string, unknown> = {
-    tokens: tokens,
-    updatedAt: new Date(),
-  };
-
-  if (body.api_key) {
-    updateData.password = encrypt(body.api_key);
-  }
-
-  await db.update(accounts)
-    .set(updateData)
-    .where(eq(accounts.id, id));
-
-  pool.invalidate("byok" as ProviderName);
-
-  broadcast({
-    type: "byok_updated",
-    data: { id },
-  });
-
-  // Refresh BYOK model cache
-  const { refreshByokModels } = await import("../proxy/providers/registry");
-  await refreshByokModels();
-
-  return c.json({
-    success: true,
-    id,
-    label: account.email,
-    models: (tokens.models || []).map((m: string) => `${tokens.model_prefix || account.email}-${m}`),
-  });
-});
-
-/**
- * DELETE /api/accounts/byok/:id - Delete BYOK provider
- */
-accountsRouter.delete("/byok/:id", async (c) => {
-  const id = Number(c.req.param("id"));
-
-  // Nullify foreign key references
-  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-
-  const result = await db.delete(accounts)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
-    return c.json({ error: "BYOK provider not found" }, 404);
-  }
-
-  pool.invalidate("byok" as ProviderName);
-
-  broadcast({
-    type: "byok_deleted",
-    data: { id },
-  });
-
-  // Refresh BYOK model cache
-  const { refreshByokModels } = await import("../proxy/providers/registry");
-  await refreshByokModels();
-
-  return c.json({ success: true, deleted: id });
-});
 
 /**
  * POST /api/accounts/:id/open-panel - Open web panel in browser with auto-login

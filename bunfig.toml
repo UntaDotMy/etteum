@@ -1,0 +1,5 @@
+[test]
+# Exclude the vendored `refer/` reference project from the test glob.
+# It pollutes the default `bun test` run with ~150 spurious failures that
+# belong to a different codebase, not this project.
+pathIgnorePatterns = ["refer/**", "node_modules/**"]

@@ -10,8 +10,31 @@ import { encrypt } from "../utils/crypto";
 import { addAuthLog, clearAuthLogs, getAuthLogs } from "./logs";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
+import { RateLimiter } from "../utils/security";
 
 export const authRouter = new Hono();
+
+// Rate-limit resource-intensive bulk operations (each spawns browser processes).
+// 5 bulk ops/min per IP — enough for normal dashboard use, blocks abuse.
+const bulkLimiter = new RateLimiter(5, 5);
+
+/** Middleware: rate-limit per-IP for endpoints that spawn browser automation. */
+function bulkRateLimit(): ((c: any, next: any) => Promise<any>) {
+  return async (c: any, next: any) => {
+    const ip =
+      c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+      c.req.header("x-real-ip") ||
+      "unknown";
+    const rl = bulkLimiter.check(ip);
+    if (!rl.allowed) {
+      return c.json(
+        { error: "Too many requests. Try again later.", retryAfterMs: rl.retryAfterMs },
+        429,
+      );
+    }
+    await next();
+  };
+}
 
 /** Providers that support browser-based login via the Python auth script.
  *  Excludes key-based providers (byok, codebuddy-china, youmind, alibaba)
@@ -53,7 +76,7 @@ authRouter.post("/login/:id", async (c) => {
 /**
  * POST /api/auth/login-all - Login all pending accounts
  */
-authRouter.post("/login-all", async (c) => {
+authRouter.post("/login-all", bulkRateLimit(), async (c) => {
   const body = await c.req.json<{ headless?: boolean; concurrency?: number }>().catch(emptyLoginOptions);
   const count = await loginQueue.queueAllPending({ headless: body.headless, concurrency: body.concurrency });
   return c.json({ message: `Queued ${count} accounts for login`, count });
@@ -98,7 +121,7 @@ authRouter.post("/stop-all", async (c) => {
 /**
  * POST /api/auth/login-bulk - Login specific accounts by IDs
  */
-authRouter.post("/login-bulk", async (c) => {
+authRouter.post("/login-bulk", bulkRateLimit(), async (c) => {
   const body: { accountIds?: number[]; headless?: boolean } = await c.req.json().catch(() => ({}));
 
   if (!body.accountIds || !Array.isArray(body.accountIds)) {
@@ -320,7 +343,7 @@ authRouter.post("/warmup/:id", async (c) => {
 /**
  * POST /api/auth/warmup-bulk - WarmUp specific accounts by IDs
  */
-authRouter.post("/warmup-bulk", async (c) => {
+authRouter.post("/warmup-bulk", bulkRateLimit(), async (c) => {
   const body = await c.req.json<{ accountIds: number[] }>();
   if (!body.accountIds || !Array.isArray(body.accountIds)) {
     return c.json({ error: "accountIds array is required" }, 400);
@@ -333,7 +356,7 @@ authRouter.post("/warmup-bulk", async (c) => {
 /**
  * POST /api/auth/warmup-all - WarmUp active/exhausted/error Kiro and CodeBuddy accounts
  */
-authRouter.post("/warmup-all", async (c) => {
+authRouter.post("/warmup-all", bulkRateLimit(), async (c) => {
   type WarmupAllBody = { providers?: string[]; statuses?: string[]; includePending?: boolean; concurrency?: number };
   const body: WarmupAllBody = await c.req.json<WarmupAllBody>().catch(() => ({}));
   if (body.concurrency !== undefined && body.concurrency !== null) {

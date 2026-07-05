@@ -359,7 +359,12 @@ export async function applyUpdate(): Promise<{
 
 // ── router ─────────────────────────────────────────────────────────────────
 
+import { RateLimiter } from "../utils/security";
+
 export const updateRouter = new Hono();
+
+// Rate-limit the destructive /apply endpoint: at most 3 applies/hour per IP.
+const applyLimiter = new RateLimiter(3, 3);
 
 updateRouter.get("/status", (c) => {
   const force = c.req.query("force") === "1";
@@ -367,6 +372,27 @@ updateRouter.get("/status", (c) => {
 });
 
 updateRouter.post("/apply", async (c) => {
+  // Require explicit confirmation to prevent accidental triggers (this endpoint
+  // runs git pull + rebuild + restart on the live install).
+  let body: { confirm?: boolean } = {};
+  try { body = await c.req.json(); } catch { /* empty body = no confirm */ }
+  if (!body.confirm) {
+    return c.json(
+      { error: 'Confirmation required: send { "confirm": true } to apply an update.' },
+      400,
+    );
+  }
+  const ip =
+    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
+    c.req.header("x-real-ip") ||
+    "unknown";
+  const rl = applyLimiter.check(ip);
+  if (!rl.allowed) {
+    return c.json(
+      { error: "Too many update attempts. Try again later.", retryAfterMs: rl.retryAfterMs },
+      429,
+    );
+  }
   const result = await applyUpdate();
   return c.json({ data: result });
 });

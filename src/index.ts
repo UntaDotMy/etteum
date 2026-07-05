@@ -1,13 +1,14 @@
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { logger } from "hono/logger";
-import { config } from "./config";
+import { config, validateSecurityConfig } from "./config";
 import { runMigrations } from "./db/migrate";
 import { apiRouter } from "./api/index";
 import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";
 import { websocketHandler, getClientCount } from "./ws/index";
 import { isValidApiKey } from "./api/keys";
+import { extractApiKey } from "./utils/security";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { db } from "./db/index";
@@ -18,6 +19,24 @@ import { loadFilterCache } from "./proxy/filter-cache";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
 import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
+
+// ── Security config gate ────────────────────────────────────────────────
+const securityProblems = validateSecurityConfig();
+if (securityProblems.length > 0) {
+  console.error("╔══════════════════════════════════════════════════════════════════╗");
+  console.error("║  SECURITY CONFIGURATION WARNING                                   ║");
+  console.error("╚══════════════════════════════════════════════════════════════════╝");
+  for (const p of securityProblems) {
+    console.error(`  ! ${p}`);
+  }
+  if (process.env.POOLPROX_ALLOW_INSECURE === "1") {
+    console.error("  (POOLPROX_ALLOW_INSECURE=1 set — continuing anyway. NOT for production.)");
+  } else {
+    console.error("  Refusing to start. Set the missing keys in .env, or set");
+    console.error("  POOLPROX_ALLOW_INSECURE=1 for local development only.");
+    process.exit(1);
+  }
+}
 
 // Setup log rotation (runs in background, checks every 5 minutes)
 setupLogRotation();
@@ -187,14 +206,32 @@ setTimeout(() => {
 const app = new Hono();
 
 // Middleware
-app.use("*", cors());
+// CORS — allowlist the dashboard origin(s) rather than a blanket "*".
+  // Configurable via POOLPROX_CORS_ORIGINS (comma-separated); defaults to the
+  // dashboard port on localhost. Set to "*" only for local dev if needed.
+  const corsOrigins = (process.env.POOLPROX_CORS_ORIGINS || "")
+    .split(",")
+    .map((s) => s.trim())
+    .filter(Boolean);
+  const dashboardOrigin = `http://localhost:${config.dashboardPort}`;
+  const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : [dashboardOrigin];
+  app.use(
+    "*",
+    cors({
+      origin: (origin) => {
+        // Allow same-origin (no Origin header) and allowlisted origins.
+        if (!origin) return null;
+        return allowedOrigins.includes(origin) ? origin : null;
+      },
+      allowHeaders: ["Authorization", "Content-Type", "x-api-key"],
+      allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+    }),
+  );
 app.use("*", logger());
 
 // API Key authentication middleware for proxy endpoints
 app.use("/v1/*", async (c, next) => {
-  const authHeader = c.req.header("Authorization");
-  const xApiKey = c.req.header("x-api-key");
-  const token = authHeader?.replace("Bearer ", "") || xApiKey;
+  const token = extractApiKey(c.req.raw.headers, null, { allowQuery: false });
 
   if (!token) {
     return c.json(
@@ -221,9 +258,7 @@ app.use("/api/*", async (c, next) => {
     return;
   }
 
-  const authHeader = c.req.header("Authorization");
-  const apiKeyQuery = c.req.query("api_key");
-  const token = authHeader?.replace("Bearer ", "") || apiKeyQuery;
+  const token = extractApiKey(c.req.raw.headers, new URL(c.req.url).searchParams, { allowQuery: true });
 
   if (!token || !(await isValidApiKey(token))) {
     return c.json(
@@ -288,6 +323,14 @@ const server = Bun.serve({
     // Handle WebSocket upgrade
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
+      // Dashboard WebSocket — authenticate via ?api_key= query (browsers cannot
+      // set Authorization headers on WS upgrades). Mirrors the /v1/responses
+      // WS auth gate so unauthenticated clients cannot read live request
+      // metadata (provider, model, account email, errors).
+      const wsToken = url.searchParams.get("api_key");
+      if (!wsToken || !(await isValidApiKey(wsToken))) {
+        return new Response("Unauthorized", { status: 401 });
+      }
       const upgraded = server.upgrade(req, { data: {} });
       if (upgraded) return undefined;
       return new Response("WebSocket upgrade failed", { status: 400 });
@@ -310,9 +353,7 @@ const server = Bun.serve({
       req.method === "GET" &&
       req.headers.get("upgrade")?.toLowerCase() === "websocket";
     if (isResponsesWsPath && wantsWebSocket) {
-      const authHeader = req.headers.get("Authorization");
-      const xApiKey = req.headers.get("x-api-key");
-      const token = authHeader?.replace("Bearer ", "") || xApiKey || null;
+      const token = extractApiKey(req.headers, null, { allowQuery: false });
       if (!token || !(await isValidApiKey(token))) {
         return new Response("Unauthorized", { status: 401 });
       }

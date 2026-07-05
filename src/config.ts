@@ -94,7 +94,7 @@ function resolvePythonPath(): string {
 export const config = {
   port: Number(process.env.PORT) || 1930,
   dashboardPort: Number(process.env.DASHBOARD_PORT) || 1931,
-  apiKey: process.env.API_KEY || "pool-proxy-secret-key",
+  apiKey: process.env.API_KEY || "",
   databasePath: (() => {
     const p = process.env.DATABASE_PATH || path.join(projectRoot, "data/poolprox3.db");
     return path.isAbsolute(p) ? p : path.resolve(projectRoot, p);
@@ -112,8 +112,7 @@ export const config = {
     return path.isAbsolute(p) ? p : path.resolve(projectRoot, p);
   })(),
   proxyUrl: process.env.PROXY_URL || "",
-  encryptionKey:
-    process.env.ENCRYPTION_KEY || "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6",
+  encryptionKey: process.env.ENCRYPTION_KEY || "",
   headless: process.env.HEADLESS !== "false", // default true
   logBodyEnabled: process.env.POOLPROX_LOG_BODY_ENABLED !== "false",
   logBodyFull: process.env.POOLPROX_LOG_BODY_FULL !== "false",
@@ -244,3 +243,41 @@ export const config = {
 
 export type Config = typeof config;
 export type Provider = (typeof config.providers)[number];
+
+/**
+ * Validate security-critical configuration at startup.
+ * Returns an array of human-readable problems (empty = OK).
+ */
+export function validateSecurityConfig(): string[] {
+  const problems: string[] = [];
+  if (!config.encryptionKey || config.encryptionKey.length < 16) {
+    problems.push(
+      "ENCRYPTION_KEY is missing or shorter than 16 characters. Stored provider " +
+        "credentials cannot be protected. Set a strong ENCRYPTION_KEY in your .env " +
+        "(e.g. 32+ random hex/base64 chars).",
+    );
+  }
+  if (config.encryptionKey === "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6") {
+    problems.push(
+      "ENCRYPTION_KEY is the publicly documented default from .env.example. " +
+        "Anyone can decrypt stored tokens. Generate a unique key.",
+    );
+  }
+  if (!config.apiKey || config.apiKey.length < 16) {
+    problems.push(
+      "API_KEY is missing or shorter than 16 characters. Set a strong API_KEY in your .env.",
+    );
+  }
+  if (config.apiKey === "pool-proxy-secret-key") {
+    problems.push(
+      'API_KEY is the publicly documented default "pool-proxy-secret-key". ' +
+        "Set a unique API_KEY.",
+    );
+  }
+  return problems;
+}
+
+/** True when the running config is insecure and should refuse to serve. */
+export function isInsecureConfig(): boolean {
+  return validateSecurityConfig().length > 0;
+}

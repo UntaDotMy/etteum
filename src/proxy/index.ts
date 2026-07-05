@@ -35,7 +35,26 @@ import { config } from "../config";
 
 export const proxyRouter = new Hono();
 
-const MAX_REQUEST_LOGS = 50;
+/**
+ * Reject oversized request bodies before parsing JSON. Prevents a single
+ * huge payload from OOMing the process. Default 32 MB (configurable via env);
+ * generous enough for large multimodal/context-heavy requests.
+ */
+const MAX_BODY_BYTES =
+  Number(process.env.POOLPROX_MAX_BODY_BYTES) || 32 * 1024 * 1024;
+
+proxyRouter.use("/v1/*", async (c, next) => {
+  const cl = Number(c.req.header("content-length") || "0");
+  if (cl > MAX_BODY_BYTES) {
+    return c.json(
+      { error: { message: `Request body too large (${cl} > ${MAX_BODY_BYTES} bytes)`, type: "invalid_request_error" } },
+      413,
+    );
+  }
+  await next();
+});
+
+const MAX_REQUEST_LOGS = Number(process.env.POOLPROX_MAX_REQUEST_LOGS) || 2000;
 
 /** Upsert a request's stats into the usage_summary table (hourly bucket) */
 async function upsertUsageSummary(entry: {

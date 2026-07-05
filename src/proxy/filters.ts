@@ -116,10 +116,43 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
 import { getFilterRulesCached } from "./filter-cache";
 
 /**
+ * Hard caps to keep filter execution bounded on the request hot path:
+ * - MAX_PATTERN_LEN: reject absurdly long patterns (ReDoS / memory).
+ * - MAX_REPLACE_ITER: bound the non-regex replace-all loop so a pattern that
+ *   matches its own replacement cannot spin forever.
+ * - MAX_OUTPUT_LEN: if a rule explodes content size, stop processing further
+ *   rules and return what we have (defensive).
+ */
+const MAX_PATTERN_LEN = 4_000;
+const MAX_REPLACE_ITER = 10_000;
+const MAX_OUTPUT_LEN = 2_000_000;
+
+/** Compile + cache regexes so we don't recompile the same pattern per request. */
+const regexCache = new Map<string, RegExp | null>();
+
+function compileRegex(pattern: string): RegExp | null {
+  let cached = regexCache.get(pattern);
+  if (cached !== undefined) return cached;
+  try {
+    cached = new RegExp(pattern, "gi");
+  } catch {
+    cached = null;
+    console.error(`[Filter] Invalid regex pattern: ${pattern}`);
+  }
+  if (regexCache.size > 500) regexCache.clear();
+  regexCache.set(pattern, cached);
+  return cached;
+}
+
+/**
  * Apply pudidil filters to a string. Reads rules from in-memory cache
  * (DB-backed); falls back to PUDIDIL_FILTERS const if cache is empty (pre-boot).
  *
  * General: every active rule runs, for every provider. No scope gating.
+ *
+ * Safety: regex patterns are length-capped and compiled once (cached). The
+ * non-regex replace-all path is iteration-bounded so a pattern that matches
+ * its own replacement cannot loop forever.
  */
 export function applyPudidilFilters(content: string): string {
   let filtered = content;
@@ -131,17 +164,32 @@ export function applyPudidilFilters(content: string): string {
   for (const rule of rules) {
     if (!rule.is_active) continue;
     if (!rule.pattern) continue;
+    if (filtered.length > MAX_OUTPUT_LEN) break;
 
     if (rule.is_regex) {
+      if (rule.pattern.length > MAX_PATTERN_LEN) {
+        console.error(`[Filter] Pattern too long (${rule.pattern.length} > ${MAX_PATTERN_LEN}), skipping: ${rule.id}`);
+        continue;
+      }
+      const regex = compileRegex(rule.pattern);
+      if (!regex) continue;
       try {
-        const regex = new RegExp(rule.pattern, "gi");
         filtered = filtered.replace(regex, rule.replacement);
       } catch (error) {
-        console.error(`[Filter] Invalid regex pattern: ${rule.pattern}`, error);
+        console.error(`[Filter] Regex execution failed for ${rule.id}:`, error);
       }
     } else {
-      while (filtered.includes(rule.pattern)) {
+      // Iteration-bounded replace-all: prevents infinite loops when the
+      // replacement contains the pattern.
+      let iter = 0;
+      let prev = "";
+      while (filtered.includes(rule.pattern) && filtered !== prev && iter < MAX_REPLACE_ITER) {
+        prev = filtered;
         filtered = filtered.replace(rule.pattern, rule.replacement);
+        iter++;
+      }
+      if (iter >= MAX_REPLACE_ITER) {
+        console.error(`[Filter] Replace-all hit iteration cap (${MAX_REPLACE_ITER}) for rule ${rule.id}; stopping.`);
       }
     }
   }
