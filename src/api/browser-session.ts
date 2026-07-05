@@ -124,7 +124,7 @@ browserSessionRouter.post("/:sessionId/captcha", async (c) => {
   const sid = c.req.param("sessionId");
   const body = await c.req.json().catch(() => ({}));
   if (!body.answer) return c.json({ error: "answer is required" }, 400);
-  const ok = forwardInput(sid, { answer: body.answer });
+  const ok = forwardInput(sid, { type: "captcha", value: body.answer });
   return c.json({ success: ok });
 });
 

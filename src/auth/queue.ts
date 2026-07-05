@@ -2,6 +2,7 @@ import { db } from "../db/index";
 import { accounts } from "../db/schema";
 import { eq, inArray } from "drizzle-orm";
 import { loginAccount, loginAllProviders, applyProviderResult, markLoginFailed } from "./runner";
+import { registerSession, getSession, listSessions, updateFrame, updatePhase, updateChallenge, clearChallenge, deleteSession } from "./browserSession";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
 import type { Account } from "../db/schema";
@@ -39,6 +40,7 @@ class LoginQueue {
   // (null when idle). clear() terminates it. Typed loosely because the
   // stdin:"pipe" variant widens the Bun.spawn generic.
   private batchProc: any = null;
+  private batchStdinWriter: { write: (chunk: Uint8Array) => Promise<void>; close: () => Promise<void> } | null = null;
   private batchGeneration = 0;
 
   /**
@@ -199,6 +201,14 @@ class LoginQueue {
     this.activeAccountIds.clear();
     this.activeJobs = 0;
     this.processing = false;
+    // Mark all automation browser sessions as done so BotLogs stops polling.
+    for (const s of listSessions()) {
+      if (s.sessionId.startsWith("batch-")) {
+        s.phase = "complete";
+        s.terminal = true;
+        clearChallenge(s.sessionId);
+      }
+    }
     broadcast({ type: "queue_cleared", data: {} });
   }
 
@@ -294,12 +304,17 @@ class LoginQueue {
           HTTP_PROXY: proxyUrl,
           HTTPS_PROXY: proxyUrl,
           ...(options.browserEngine ? { BATCHER_BROWSER_ENGINE: options.browserEngine } : {}),
+          BATCHER_FRAME_RELAY: "true",
         },
         cwd: config.authScriptCwd,
       },
     );
     this.batchProc = proc;
     this.batchGeneration = generation;
+    this.batchStdinWriter = {
+      write: (chunk: Uint8Array) => { try { proc.stdin!.write(chunk); } catch {} return Promise.resolve(); },
+      close: () => { try { proc.stdin!.end(); } catch {} return Promise.resolve(); },
+    };
 
     // Write the manifest: one header line, one line per account, then eof.
     // Bun's FileSink (stdin:"pipe") exposes write()/end() directly — not the
@@ -313,8 +328,7 @@ class LoginQueue {
     for (const acc of manifest) {
       stdin.write(enc.encode(JSON.stringify({ type: "account", ...acc }) + "\n"));
     }
-    stdin.write(enc.encode(JSON.stringify({ type: "eof" }) + "\n"));
-    stdin.end();
+    // stdin stays open so captcha answers / cancel can flow back to the workers.
 
     // Stream stdout line-by-line and map events.
     const decoder = new TextDecoder();
@@ -343,6 +357,8 @@ class LoginQueue {
 
     await proc.exited;
     this.batchProc = null;
+    this.batchStdinWriter = null;
+    try { stdin.end(); } catch {}
 
     // Any account that never produced a result (e.g. process crashed) → fail.
     for (const acc of manifest) {
@@ -393,6 +409,47 @@ class LoginQueue {
           },
         });
       }
+      return;
+    }
+    // ── frame relay: route JPEG frames + phase + captcha to the in-app
+    // Browser Logs live viewer (same registry the manual-login path uses).
+    if (event.type === "frame") {
+      const sid = `batch-${event.accountId}`;
+      if (!getSession(sid)) {
+        registerSession({
+          sessionId: sid,
+          accountId: Number(event.accountId) || 0,
+          email: accountRows.get(Number(event.accountId))?.email || "",
+          provider: event.provider || "automation",
+          phase: "automation",
+          lastMessage: "",
+          lastFrame: "",
+          lastFrameFormat: "jpeg",
+          lastFrameTime: Date.now(),
+          challenge: null,
+          terminal: false,
+          proc: this.batchProc ?? null,
+          stdinWriter: this.batchStdinWriter,
+          cancelSignalFile: "",
+          startedAt: Date.now(),
+        });
+      }
+      updateFrame(sid, `data:image/jpeg;base64,${event.base64}`, event.format || "jpeg");
+      return;
+    }
+    if (event.type === "phase") {
+      const sid = `batch-${event.accountId}`;
+      updatePhase(sid, event.step || "", event.message || "");
+      return;
+    }
+    if (event.type === "manual_challenge") {
+      const sid = `batch-${event.accountId}`;
+      updateChallenge(sid, {
+        image_base64: event.image_base64 || "",
+        image_format: "jpeg",
+        prompt: event.message || "",
+        seq: 1,
+      });
       return;
     }
     if (event.type === "upgrade_card_result") {

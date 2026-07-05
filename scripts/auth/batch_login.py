@@ -44,6 +44,9 @@ from typing import Any
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
+# accountId -> login.py stdin writer, for forwarding captcha/cancel messages.
+_worker_stdins: dict[int, Any] = {}
+
 # Concurrency bounds — match TS LoginQueue (1..10) and the reference design (1..8). Use the
 # TS bounds since this replaces the TS queue: min 1, max 10.
 MIN_CONCURRENCY = 1
@@ -123,6 +126,7 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
             *cmd,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
+            stdin=asyncio.subprocess.PIPE,
             env=env,
             cwd=os.path.dirname(os.path.abspath(__file__)),
         )
@@ -130,6 +134,10 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
         return {"type": "result", "success": False, "provider": provider,
                 "accountId": account_id, "error": f"failed to launch login.py: {exc}",
                 "noRetry": True}
+
+    # Keep the worker's stdin pipe so we can forward captcha answers to it.
+    if proc.stdin:
+        _worker_stdins[account_id] = proc.stdin
 
     # Stream login.py stdout line-by-line, re-emitting progress/error events
     # tagged with accountId so the TS runner can correlate them to the account.
@@ -164,6 +172,26 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
                 emit({"type": "progress", "provider": event.get("provider", provider),
                       "step": event.get("step", ""), "message": event.get("message", ""),
                       "accountId": account_id, "worker": worker_id, "attempt": attempt})
+            elif etype == "frame":
+                # Forward JPEG frames to the dashboard, tagged with accountId
+                # so the TS side routes them to the right browser-session viewer.
+                emit({"type": "frame", "format": event.get("format", "jpeg"),
+                      "base64": event.get("base64", ""),
+                      "provider": provider, "accountId": account_id, "worker": worker_id})
+            elif etype == "phase":
+                # Forward phase/lifecycle events so the dashboard shows live steps.
+                emit({"type": "phase", "step": event.get("step", ""),
+                      "message": event.get("message", ""),
+                      "provider": event.get("provider", provider),
+                      "accountId": account_id, "worker": worker_id})
+            elif etype == "manual_challenge":
+                # Forward captcha/challenge prompts so the dashboard can show
+                # the overlay and accept a user-supplied answer.
+                emit({"type": "manual_challenge",
+                      "challenge_type": event.get("challenge_type", "captcha"),
+                      "image_base64": event.get("image_base64", ""),
+                      "message": event.get("message", ""),
+                      "provider": provider, "accountId": account_id, "worker": worker_id})
             elif etype == "error":
                 emit({"type": "progress", "provider": provider, "step": "subprocess_error",
                       "message": event.get("error", ""), "accountId": account_id,
@@ -181,7 +209,8 @@ async def _run_login_py(account: dict, options: dict, worker_id: int, attempt: i
     await proc.wait()
 
     if final_result is None:
-        # login.py exited without a result event — synthesize a failure.
+        _worker_stdins.pop(account_id, None)
+    # login.py exited without a result event — synthesize a failure.
         stderr = ""
         assert proc.stderr is not None
         try:
@@ -282,6 +311,9 @@ async def run_batch(accounts: list[dict], options: dict) -> None:
     halt_event = asyncio.Event()
     counters = {"processed": 0, "success": 0, "failed": 0}
 
+    # Forward captcha/cancel messages from our stdin to the right worker.
+    forwarder_task = asyncio.create_task(_stdin_forwarder())
+
     if not accounts:
         emit({"type": "batch_done", "totalProcessed": 0, "totalSuccess": 0, "totalFailed": 0})
         return
@@ -302,6 +334,7 @@ async def run_batch(accounts: list[dict], options: dict) -> None:
     ]
     await asyncio.gather(*workers, return_exceptions=True)
 
+    forwarder_task.cancel()
     emit({"type": "batch_done", "totalProcessed": counters["processed"],
           "totalSuccess": counters["success"], "totalFailed": counters["failed"],
           "halted": halt_event.is_set()})
@@ -352,6 +385,53 @@ def main() -> None:
     except KeyboardInterrupt:
         emit({"type": "batch_done", "totalProcessed": 0, "totalSuccess": 0,
               "totalFailed": 0, "halted": True, "reason": "interrupted by user"})
+
+
+async def _stdin_forwarder() -> None:
+    """Read control messages from our own stdin and forward them to the
+    right worker's login.py stdin.
+
+    Message format (one JSON per line):
+      {"type":"captcha","accountId":123,"value":"answer text"}
+      {"type":"manual_input","accountId":123,"value":"text"}
+      {"type":"cancel","accountId":123}
+    """
+    loop = asyncio.get_event_loop()
+    while True:
+        try:
+            line = await loop.run_in_executor(None, sys.stdin.readline)
+        except Exception:
+            await asyncio.sleep(0.5)
+            continue
+        if not line:
+            await asyncio.sleep(0.1)
+            continue
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            msg = json.loads(line)
+        except Exception:
+            continue
+        if not isinstance(msg, dict):
+            continue
+        # Skip manifest rows (they have email/provider, not type)
+        mtype = msg.get("type")
+        if mtype not in ("captcha", "manual_input", "cancel", "eof"):
+            continue
+        if mtype == "eof":
+            break
+        account_id = msg.get("accountId")
+        if account_id is None:
+            continue
+        stdin = _worker_stdins.get(int(account_id))
+        if stdin is None:
+            continue
+        try:
+            stdin.write((json.dumps(msg) + "\n").encode())
+            await stdin.drain()
+        except Exception:
+            pass
 
 
 if __name__ == "__main__":

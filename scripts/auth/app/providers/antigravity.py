@@ -31,6 +31,7 @@ import aiohttp
 
 from app.errors.codes import ErrorCode
 from app.errors.exceptions import NonRetryableBatcherError, RetryableBatcherError
+from app.frame_relay import bootstrap_with_relay, cleanup_with_relay, emit as _relay_emit
 from app.providers.base import NormalizedAccount, ProviderAdapter, ProviderResult
 # nodriver-based browser layer (replaces Camoufox). The Google-login state
 # machine is self-contained below — it no longer imports the stale gitlab_duo
@@ -447,7 +448,7 @@ async def _click_button(page: Any, text: str, timeout_s: float = 15.0) -> bool:
     return False
 
 
-async def _solve_google_captcha_manual(page: Any, is_headless: bool) -> bool:
+async def _solve_google_captcha_manual(page: Any, is_headless: bool, relay: Any = None) -> bool:
     """Solve Google's v3 signin text CAPTCHA by asking the user.
 
     Non-headless: browser stays open, user types directly in the page.
@@ -478,6 +479,39 @@ async def _solve_google_captcha_manual(page: Any, is_headless: bool) -> bool:
     except Exception as exc:
         _debug(f"captcha image download failed: {exc}")
         return False
+
+    if relay is not None and img_bytes:
+        # Frame-relay path: emit the captcha image to the dashboard and
+        # wait for the user's answer via the relay's stdin channel.
+        import base64 as _b64
+        img_b64 = _b64.b64encode(img_bytes).decode("ascii")
+        _relay_emit({"type": "manual_challenge", "challenge_type": "captcha",
+                     "image_base64": img_b64,
+                     "message": "Please solve the CAPTCHA shown in the browser"})
+        _debug("CAPTCHA: waiting for dashboard answer via frame relay...")
+        resp = await relay.wait_input(timeout=300)
+        if resp and resp.get("type") == "captcha" and resp.get("value"):
+            captcha_answer = resp["value"]
+            _debug(f"CAPTCHA: received answer from dashboard ({len(captcha_answer)} chars)")
+            # Type the answer into the captcha input field.
+            await page.evaluate("""(ans) => {
+              const inp = document.querySelector('input[name="ca"], input#ca, input[name="logincaptcha"]');
+              if (!inp) return false;
+              const setter = Object.getOwnPropertyDescriptor(window.HTMLInputElement.prototype, 'value').set;
+              setter.call(inp, ans);
+              inp.dispatchEvent(new Event('input', {bubbles: true}));
+              inp.dispatchEvent(new Event('change', {bubbles: true}));
+              return true;
+            }""", captcha_answer)
+            await asyncio.sleep(1.0)
+            # Click the Next/Submit button via JS.
+            await page.evaluate("""() => {
+              const btn = document.querySelector('#next, #submit, button[type=submit], div[role=button]');
+              if (btn) btn.click();
+            }""")
+            await asyncio.sleep(2.0)
+            return True
+        _debug("CAPTCHA: no answer from dashboard, falling back to popup")
 
     if is_headless:
         # Show a GUI popup with the image + text input
@@ -704,7 +738,8 @@ async def _drive_google_login(page: Any, email: str, password: str, deadline_s: 
                     page = resumed  # continue on the headed page
                     continue
                 _debug("relaunch_as_headed failed; falling back to tkinter captcha popup")
-            solved = await _solve_google_captcha_manual(page, is_headless)
+            relay = session.get("relay") if session else None
+            solved = await _solve_google_captcha_manual(page, is_headless, relay=relay)
             if not solved:
                 raise NonRetryableBatcherError(
                     ErrorCode.browser_challenge_blocked,
@@ -752,21 +787,16 @@ class AntigravityProviderAdapter(ProviderAdapter):
         return NormalizedAccount(provider="antigravity", identifier=email, secret=password, raw=raw_line)
 
     async def bootstrap_session(self, account: NormalizedAccount) -> Any:
-        # nodriver is the default engine. Headed by default — headless gets a
-        # hard 500 from Google on the password challenge.
-        _emit_progress("antigravity", "browser_launch", "Launching Chrome via nodriver...")
-        headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
-        browser, page = await launch_browser(headless=headless)
-        page.set_default_timeout(45000)
-        _emit_progress("antigravity", "browser_ready", "Browser session ready")
-        return {"browser": browser, "page": page}
-
+        # One-liner: launches the browser + starts the frame relay.
+        # The relay (headless + JPEG streaming) is shared across all providers.
+        return await bootstrap_with_relay("antigravity", launch_browser)
     async def authenticate(self, account: NormalizedAccount, session: Any) -> dict[str, Any]:
         page = session["page"]
         # Re-derive headless the same way bootstrap_session does — it is not
         # shared across methods, and _drive_google_login needs it to pick the
         # right CAPTCHA path (manual typing vs. headless entry).
-        headless = os.getenv("BATCHER_CAMOUFOX_HEADLESS", "false").lower() == "true"
+        from app.frame_relay import should_run_headless
+        headless = should_run_headless()
         import secrets as _secrets
         state_token = _secrets.token_urlsafe(16)
         # Try the configured port, then a couple of fallbacks; the redirect_uri
@@ -867,12 +897,8 @@ class AntigravityProviderAdapter(ProviderAdapter):
             return None
 
     async def cleanup_session(self, session: Any) -> None:
-        browser = session.get("browser")
-        if browser:
-            try:
-                await browser.close()
-            except Exception:
-                pass
+        # One-liner: stops the relay + closes the browser (shared teardown).
+        await cleanup_with_relay(session)
         # Safety net: reap any orphaned nodriver chrome by PID (only kills
         # processes with the uc_<random> temp profile — never the user's Chrome).
         try:

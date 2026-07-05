@@ -84,7 +84,10 @@ export function forwardInput(sessionId: string, msg: Record<string, unknown>): b
   const s = sessions.get(sessionId);
   if (!s || !s.stdinWriter || s.terminal) return false;
   const enc = new TextEncoder();
-  s.stdinWriter.write(enc.encode(JSON.stringify(msg) + "\n")).catch(() => {});
+  // Inject accountId so the batch runner can route the message to the
+  // right login.py worker (automation sessions are batch-<accountId>).
+  const out = { ...msg, accountId: s.accountId };
+  s.stdinWriter.write(enc.encode(JSON.stringify(out) + "\n")).catch(() => {});
   if ("answer" in msg) clearChallenge(sessionId);
   return true;
 }
