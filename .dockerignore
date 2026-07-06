@@ -1,0 +1,34 @@
+# VCS
+.git
+**/.git
+
+# Editor
+.vscode
+**/.vscode
+.idea
+
+# Dependencies and build output
+node_modules
+dist
+build
+coverage
+
+# Reference codebase (not needed in image)
+refer
+
+# Python automation being removed (Wave 3 migration to TS+Camoufox)
+scripts/auth/.venv
+
+# Runtime data and logs
+data
+logs
+*.log
+
+# Local env files (inject at runtime via --env-file or -e)
+.env
+.env.local
+.env.*.local
+
+# OS cruft
+.DS_Store
+Thumbs.db

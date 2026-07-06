@@ -732,6 +732,18 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
       error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
 
+    // Graceful 429: when every account was rate-limited, the router throws a
+    // typed error carrying retryAfterMs. Map it to a real 429 + Retry-After so
+    // well-behaved clients back off correctly instead of getting a 503.
+    if (error && typeof error === "object" && (error as any).rateLimited === true) {
+      const retryMs = (error as any).retryAfterMs ?? 60_000;
+      return c.json(
+        { error: { message: errorMessage, type: "rate_limit_error" } },
+        429,
+        { "Retry-After": String(Math.ceil(retryMs / 1000)) }
+      );
+    }
+
     // Log the error without masking the original proxy failure.
     const provider = pool.getProviderForModel(mappedModel) || "unknown";
     await logProxyError({

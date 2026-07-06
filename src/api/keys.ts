@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
-import { settings } from "../db/schema";
+import { settings, apiKeys } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { config } from "../config";
 import { constantTimeEqual, RateLimiter } from "../utils/security";
@@ -39,13 +39,26 @@ export async function getActiveApiKey(): Promise<string> {
   return key;
 }
 
-export async function isValidApiKey(token: string): Promise<boolean> {
-  if (!token) return false;
-  // Constant-time compare against both the env default and the DB-stored key.
-  if (config.apiKey && constantTimeEqual(token, config.apiKey)) return true;
+/**
+ * Validate an API key against ALL active sources (Wave 2 multi-key):
+ *   1. The legacy single global key (settings.api_key / env) — preserved.
+ *   2. Any active row in the api_keys table (named, machine-bound, revocable).
+ * Returns the api_keys row id if matched (for per-key attribution), else null.
+ */
+export async function resolveApiKey(token: string): Promise<{ valid: boolean; apiKeyId?: number }> {
+  if (!token) return { valid: false };
+  // 1. Legacy single-key (env or settings).
+  if (config.apiKey && constantTimeEqual(token, config.apiKey)) return { valid: true };
   const active = await getActiveApiKey();
-  if (!active) return false;
-  return constantTimeEqual(token, active);
+  if (active && constantTimeEqual(token, active)) return { valid: true };
+  // 2. Multi-key table.
+  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
+  if (row && row.isActive) return { valid: true, apiKeyId: row.id };
+  return { valid: false };
+}
+
+export async function isValidApiKey(token: string): Promise<boolean> {
+  return (await resolveApiKey(token)).valid;
 }
 
 async function saveApiKey(key: string) {
@@ -96,6 +109,62 @@ keysRouter.post("/test", async (c) => {
   const body = await c.req.json<{ key: string }>();
   const valid = await isValidApiKey(body.key || "");
   return c.json({ valid });
+});
+
+// --- Wave 2/5: Multi-key API key management (named, machine-bound, revocable) ---
+
+/** List all managed API keys (never returns the key string — only a masked prefix). */
+keysRouter.get("/managed", async (c) => {
+  const rows = await db.select().from(apiKeys).orderBy(apiKeys.id);
+  return c.json({
+    keys: rows.map((k) => ({
+      id: k.id,
+      keyPreview: k.key.slice(0, 12) + "…",
+      name: k.name,
+      machineId: k.machineId,
+      isActive: k.isActive,
+      createdAt: k.createdAt,
+      lastUsedAt: k.lastUsedAt,
+    })),
+  });
+});
+
+/** Create a new managed key. Returns the full key ONCE (not retrievable later). */
+keysRouter.post("/managed", async (c) => {
+  const body = await c.req.json<{ name?: string; machineId?: string }>().catch(() => ({ name: undefined, machineId: undefined }));
+  const key = generateApiKey();
+  const [row] = await db
+    .insert(apiKeys)
+    .values({
+      key,
+      name: body.name || null,
+      machineId: body.machineId || null,
+      isActive: true,
+    })
+    .returning();
+  return c.json({ id: row!.id, key, name: row!.name, machineId: row!.machineId });
+});
+
+/** Revoke (deactivate) a managed key by id. The key string stays unique but is
+ *  no longer accepted by resolveApiKey. */
+keysRouter.post("/managed/:id/revoke", async (c) => {
+  const id = Number(c.req.param("id"));
+  await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, id));
+  return c.json({ success: true });
+});
+
+/** Reactivate a previously revoked managed key. */
+keysRouter.post("/managed/:id/activate", async (c) => {
+  const id = Number(c.req.param("id"));
+  await db.update(apiKeys).set({ isActive: true }).where(eq(apiKeys.id, id));
+  return c.json({ success: true });
+});
+
+/** Delete a managed key permanently. */
+keysRouter.delete("/managed/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  await db.delete(apiKeys).where(eq(apiKeys.id, id));
+  return c.json({ success: true });
 });
 
 function getClientIp(c: { req: { header: (n: string) => string | undefined } }): string {

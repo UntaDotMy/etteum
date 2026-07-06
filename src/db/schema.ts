@@ -21,6 +21,24 @@ export const accounts = sqliteTable("accounts", {
   lastLoginAt: integer("last_login_at", { mode: "timestamp" }),
   errorMessage: text("error_message"),
   metadata: text("metadata", { mode: "json" }), // extra provider-specific data
+  // --- Routing resilience (Wave 1) ---
+  // Transient-error exponential backoff: an account here is temporarily
+  // excluded from selection until the timestamp passes, then auto-reinstated.
+  // NULL = not cooling down.
+  cooldownUntil: integer("cooldown_until", { mode: "timestamp" }),
+  // Backoff bookkeeping: consecutive transient failures and the next backoff
+  // delay (doubles each time, capped). Reset to 0 on success.
+  consecutiveTransientFailures: integer("consecutive_transient_failures").notNull().default(0),
+  nextBackoffMs: integer("next_backoff_ms").notNull().default(0),
+  // Terminal-error hysteresis: consecutive hard auth/persistent errors. At
+  // >= TERMINAL_ERROR_THRESHOLD the account is marked `error` (disabled from
+  // pool). Reset to 0 on success. Prevents a single transient 401 from
+  // permanently killing an account.
+  consecutiveAuthErrors: integer("consecutive_auth_errors").notNull().default(0),
+  // --- Wave 2: Provider-priority routing (mirrors 9router priority) ---
+  // Lower number = tried first. Enables "paid first, free fallback" ordering
+  // of credentials within a provider. Default 0 preserves existing LB order.
+  priority: integer("priority").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 }, (table) => [
@@ -63,6 +81,14 @@ export const requestLogs = sqliteTable("request_logs", {
    * null when compression is disabled.
    */
   savingsByTechnique: text("savings_by_technique", { mode: "json" }),
+  // --- Wave 2: Per-API-key attribution + USD cost (mirrors 9router) ---
+  // Which client API key made this request (null = legacy single-key or
+  // internal). Enables "which client key spent the most" analytics that the
+  // old schema could not answer.
+  apiKeyId: integer("api_key_id"),
+  // Estimated USD cost of this request, computed from per-model pricing.
+  // null when pricing is unknown. Additive — creditsUsed (credits) is preserved.
+  cost: real("cost"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),
@@ -70,6 +96,7 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_provider_created_at_idx").on(table.provider, table.createdAt),
   index("request_logs_provider_model_status_idx").on(table.provider, table.model, table.status),
   index("request_logs_account_idx").on(table.accountId),
+  index("request_logs_api_key_idx").on(table.apiKeyId),
 ]);
 
 export const settings = sqliteTable("settings", {
@@ -94,10 +121,14 @@ export const usageSummary = sqliteTable("usage_summary", {
   totalTokens: integer("total_tokens", { mode: "number" }).default(0),
   creditsUsed: real("credits_used").default(0),
   totalDurationMs: integer("total_duration_ms", { mode: "number" }).default(0),
+  // --- Wave 2: per-key + cost rollup (mirrors 9router) ---
+  apiKeyId: integer("api_key_id"),
+  totalCost: real("total_cost").default(0),
 }, (table) => [
   uniqueIndex("usage_summary_bucket_provider_model_idx").on(table.bucket, table.provider, table.model),
   index("usage_summary_bucket_idx").on(table.bucket),
   index("usage_summary_provider_idx").on(table.provider, table.bucket),
+  index("usage_summary_api_key_idx").on(table.apiKeyId),
 ]);
 
 export const vccCards = sqliteTable("vcc_cards", {
@@ -218,11 +249,51 @@ export const combos = sqliteTable("combos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(), // e.g. "zero-cost" or "premium"
   models: text("models", { mode: "json" }).$type<string[]>().notNull().$defaultFn(() => []),
+  // Strategy for the combo chain (mirrors 9router `combos.kind`).
+  //   fallback — try first model, fall through to next on error/rate-limit
+  //   sticky   — round-robin within combo, sticky session (same account per combo)
+  //   fusion   — parallel inference, judge model picks winner (advanced)
+  // Default "fallback" preserves existing behavior for rows created pre-Wave-2.
+  kind: text("kind").notNull().default("fallback"),
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 }, (table) => [
   index("combos_name_idx").on(table.name),
+]);
+
+// --- Wave 2: Multi-key API key system (mirrors 9router `apiKeys` table) ---
+// Replaces the single-global-key model with named, machine-bound, individually
+// revocable keys. The legacy single key (settings.api_key) is preserved as a
+// fallback during the transition — nothing is dropped.
+export const apiKeys = sqliteTable("api_keys", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  // The actual key string clients send as Authorization: Bearer <key>.
+  // Prefixed "etteum_" so it is distinguishable from provider tokens.
+  key: text("key").notNull().unique(),
+  name: text("name"), // human label e.g. "Claude Code · Dev Machine"
+  machineId: text("machine_id"), // optional per-machine binding
+  isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+}, (table) => [
+  index("api_keys_key_idx").on(table.key),
+  index("api_keys_active_idx").on(table.isActive),
+]);
+
+// --- Wave 2: Generic KV store (mirrors 9router `kv` table) ---
+// Used by: customModels, disabledModels, pricing, mitmAlias scopes.
+// A single table avoids one-off tables for each small config namespace.
+export const kv = sqliteTable("kv", {
+  scope: text("scope").notNull(), // e.g. "customModels" | "disabledModels" | "pricing" | "mitmAlias"
+  key: text("key").notNull(), // e.g. model id or provider:model
+  value: text("value").notNull(), // JSON-encoded payload
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+}, (table) => [
+  // composite primary key via unique index — Drizzle sqlite composite PK helper
+  // is verbose; a unique index on (scope, key) achieves the same lookup semantics.
+  index("kv_scope_idx").on(table.scope),
+  uniqueIndex("kv_scope_key_idx").on(table.scope, table.key),
 ]);
 
 // Type exports
@@ -249,3 +320,8 @@ export type FilterRule = typeof filterRules.$inferSelect;
 export type NewFilterRule = typeof filterRules.$inferInsert;
 export type ModelMapping = typeof modelMappings.$inferSelect;
 export type NewModelMapping = typeof modelMappings.$inferInsert;
+// --- Wave 2 type exports ---
+export type ApiKey = typeof apiKeys.$inferSelect;
+export type NewApiKey = typeof apiKeys.$inferInsert;
+export type KvEntry = typeof kv.$inferSelect;
+export type NewKvEntry = typeof kv.$inferInsert;

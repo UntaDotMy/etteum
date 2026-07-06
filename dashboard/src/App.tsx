@@ -24,6 +24,11 @@ const Analytics = lazy(() => import("./pages/Analytics"));
 const FilterRules = lazy(() => import("./pages/FilterRules"));
 const Integration = lazy(() => import("./pages/Integration"));
 const CodexOAuthCallback = lazy(() => import("./pages/CodexOAuthCallback"));
+const Combos = lazy(() => import("./pages/Combos"));
+const Translator = lazy(() => import("./pages/Translator"));
+const MediaProviders = lazy(() => import("./pages/MediaProviders"));
+const LiveConsole = lazy(() => import("./pages/LiveConsole"));
+const Skills = lazy(() => import("./pages/Skills"));
 
 function RouteFallback() {
   return <div className="flex h-64 items-center justify-center text-sm text-[var(--muted-foreground)]">Loading...</div>;
@@ -90,6 +95,11 @@ export default function App() {
           <Route path="/image-studio" element={<ImageStudio />} />
           <Route path="/chat" element={<Chat />} />
           <Route path="/analytics" element={<Analytics />} />
+          <Route path="/combos" element={<Combos />} />
+          <Route path="/translator" element={<Translator />} />
+          <Route path="/media" element={<MediaProviders />} />
+          <Route path="/console" element={<LiveConsole />} />
+          <Route path="/skills" element={<Skills />} />
           <Route path="/oauth/codex/callback" element={<CodexOAuthCallback />} />
         </Route>
       </Routes>

@@ -15,6 +15,13 @@
       "when": 1783309791907,
       "tag": "0001_bouncy_jimmy_woo",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "6",
+      "when": 1783345425968,
+      "tag": "0002_sparkling_dark_phoenix",
+      "breakpoints": true
     }
   ]
 }
