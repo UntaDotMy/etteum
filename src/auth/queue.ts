@@ -9,7 +9,6 @@ import type { Account } from "../db/schema";
 import { addAuthLog } from "./logs";
 import { config } from "../config";
 import { handleCardResult } from "../api/vcc";
-import { runAntigravityManualLogin } from "./manualRunner";
 
 interface QueueItem {
   accountId: number;
@@ -349,7 +348,12 @@ class LoginQueue {
           log(`worker ${idx + 1}/${total} start email=${item.email}`);
 
           // Fire-and-forget per account; resolve slot on completion.
-          runAntigravityManualLogin(account, { headless })
+          // Wave 3 migration: loginAccount() now routes antigravity through the
+          // TS+Camoufox stealth engine (googleAutomation.ts), replacing the
+          // nodriver-based antigravity_manual_login.py subprocess. Manual/CAPTCHA
+          // challenges surface as a `manual` result and round-trip via the
+          // dashboard session layer.
+          loginAccount(account, { headless })
             .catch((err) => {
               log(`worker ${idx + 1}/${total} crash email=${item.email} error=${err?.message || err}`);
             })
@@ -385,9 +389,11 @@ class LoginQueue {
   }
 
   /**
-   * Spawn batch_login.py, write the manifest to its stdin, stream line-JSON
-   * events, and map each per-account result to applyProviderResult /
-   * markLoginFailed. Retry, backoff, and the not_eligible halt live in Python.
+   * Run a batch of logins through the native TS+Camoufox automation layer
+   * (Wave 3 migration — replaces the batch_login.py subprocess). Fans out up to
+   * `concurrency` loginAccount() calls in parallel, mapping each result to
+   * applyProviderResult / markLoginFailed, exactly as the old Python event
+   * stream did. Retry/backoff is handled inside loginAccount's provider path.
    */
   private async runBatch(
     manifest: Array<{ accountId: number; email: string; password: string; provider: string }>,
@@ -395,102 +401,51 @@ class LoginQueue {
     generation: number,
     accountRows: Map<number, Account>,
   ): Promise<void> {
-    const { getNextProxy } = await import("../services/proxy-pool");
-    const proxyUrl = (await getNextProxy("auth"))?.url || config.proxyUrl || "";
-
-    const batchScript = config.authScriptPath.replace(/login\.py$/, "batch_login.py");
-    const spawnArgs = [config.pythonPath, batchScript, "--concurrency", String(this.concurrency), "--max-retries", String(this.maxRetries)];
-    const proc = Bun.spawn(spawnArgs, {
-        stdout: "pipe",
-        stderr: "pipe",
-        stdin: "pipe",
-        env: {
-          ...process.env,
-          PYTHONUNBUFFERED: "1",
-          BATCHER_PROXY_URL: proxyUrl,
-          HTTP_PROXY: proxyUrl,
-          HTTPS_PROXY: proxyUrl,
-          ...(options.browserEngine ? { BATCHER_BROWSER_ENGINE: options.browserEngine } : {}),
-          BATCHER_FRAME_RELAY: "true",
-        },
-        cwd: config.authScriptCwd,
-      },
-    );
-    this.batchProc = proc;
     this.batchGeneration = generation;
-    console.log(`[batch] started pid=${proc.pid} accounts=${manifest.length} frameRelay=true`);
-    this.batchStdinWriter = {
-      write: (chunk: Uint8Array) => { try { proc.stdin!.write(chunk); } catch {} return Promise.resolve(); },
-      close: () => { try { proc.stdin!.end(); } catch {} return Promise.resolve(); },
-    };
-
-    // Write the manifest: one header line, one line per account, then eof.
-    // Bun's FileSink (stdin:"pipe") exposes write()/end() directly — not the
-    // WritableStream writer API.
-    const stdin = proc.stdin!;
-    const enc = new TextEncoder();
-    const header: any = { type: "manifest", concurrency: this.concurrency, headless: options.headless ?? config.headless, maxRetries: this.maxRetries };
-    if (options.browserEngine) header.browserEngine = options.browserEngine;
-    if (proxyUrl) header.proxyUrl = proxyUrl;
-    stdin.write(enc.encode(JSON.stringify(header) + "\n"));
-    for (const acc of manifest) {
-      stdin.write(enc.encode(JSON.stringify({ type: "account", ...acc }) + "\n"));
-    }
-    // Send EOF to finalize the manifest, but keep stdin open so
-    // captcha answers / cancel can flow back to the workers later.
-    stdin.write(enc.encode(JSON.stringify({ type: "eof" }) + "\n"));
-
-    // Stream stdout line-by-line and map events.
-    const decoder = new TextDecoder();
-    // Capture stderr so Python crashes are visible in the server logs.
-    (async () => {
-      const sr = proc.stderr?.getReader();
-      if (sr) {
-        try {
-          while (true) {
-            const { done, value } = await sr.read();
-            if (done) break;
-            const txt = new TextDecoder().decode(value);
-            if (txt.trim()) console.log(`[batch:stderr] ${txt.trim()}`);
-          }
-        } catch {}
-      }
-    })();
-    let buffer = "";
-    const reader = proc.stdout.getReader();
+    console.log(`[batch] native TS+Camoufox batch started accounts=${manifest.length} concurrency=${this.concurrency}`);
     const seenResultIds = new Set<number>();
-    try {
-      while (true) {
-        const { done, value } = await reader.read();
-        if (done) break;
-        buffer += decoder.decode(value, { stream: true });
-        let nl: number;
-        while ((nl = buffer.indexOf("\n")) >= 0) {
-          const line = buffer.slice(0, nl).trim();
-          buffer = buffer.slice(nl + 1);
-          if (!line) continue;
-          let event: any;
-          try { event = JSON.parse(line); } catch { continue; }
-          if (generation !== this.clearGeneration) continue; // stale batch
-          this.handleBatchEvent(event, accountRows, seenResultIds, generation);
+
+    // Concurrency-limited worker pool over the manifest.
+    const queue = [...manifest];
+    const workers: Promise<void>[] = [];
+    const workerCount = Math.min(this.concurrency, manifest.length);
+    const runOne = async (acc: { accountId: number; provider: string }) => {
+      if (generation !== this.clearGeneration) return; // stale batch
+      const account = accountRows.get(acc.accountId);
+      if (!account) return;
+      try {
+        const result = await loginAccount(account, { headless: options.headless ?? config.headless });
+        seenResultIds.add(acc.accountId);
+        if (!result.success) {
+          this.totalFailed++;
         }
+        this.totalProcessed++;
+        this.activeAccountIds.delete(acc.accountId);
+      } catch (err: any) {
+        await markLoginFailed(account, acc.provider, err?.message || "login threw");
+        seenResultIds.add(acc.accountId);
+        this.totalProcessed++;
+        this.totalFailed++;
+        this.activeAccountIds.delete(acc.accountId);
       }
-    } catch {
-      // reader closed — fall through to finalize
+    };
+    for (let w = 0; w < workerCount; w++) {
+      workers.push((async () => {
+        while (queue.length && generation === this.clearGeneration) {
+          const acc = queue.shift();
+          if (acc) await runOne(acc);
+        }
+      })());
     }
+    await Promise.all(workers);
 
-    await proc.exited;
-    this.batchProc = null;
-    this.batchStdinWriter = null;
-    try { stdin.end(); } catch {}
-
-    // Any account that never produced a result (e.g. process crashed) → fail.
+    // Any account that never produced a result → fail (safety net).
     for (const acc of manifest) {
       if (generation !== this.clearGeneration) break;
       if (!seenResultIds.has(acc.accountId)) {
         const account = accountRows.get(acc.accountId);
         if (account) {
-          await markLoginFailed(account, account.provider, "batch runner ended without a result for this account");
+          await markLoginFailed(account, account.provider, "batch ended without a result for this account");
         }
         this.totalProcessed++;
         this.totalFailed++;
@@ -500,7 +455,6 @@ class LoginQueue {
     this.activeJobs = 0;
     this.processing = false;
 
-    // If new accounts were enqueued during the batch, process them; else done.
     if (generation === this.clearGeneration && this.queue.length > 0) {
       this.process();
     } else {

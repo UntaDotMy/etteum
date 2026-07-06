@@ -6,13 +6,17 @@ import { runMigrations } from "./db/migrate";
 import { apiRouter } from "./api/index";
 import { authRouter } from "./auth/index";
 import { proxyRouter } from "./proxy/index";
+import { mediaRouter } from "./proxy/media/router";
+import { mcpRouter } from "./proxy/mcp/router";
+import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { isValidApiKey } from "./api/keys";
 import { extractApiKey } from "./utils/security";
+import { isValidApiKey, resolveApiKey } from "./api/keys";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { db } from "./db/index";
-import { filterRules } from "./db/schema";
+import { filterRules, apiKeys } from "./db/schema";
+import { eq } from "drizzle-orm";
 import { sql, inArray } from "drizzle-orm";
 import { PUDIDIL_FILTERS } from "./proxy/filters";
 import { loadFilterCache } from "./proxy/filter-cache";
@@ -240,11 +244,19 @@ app.use("/v1/*", async (c, next) => {
     );
   }
 
-  if (!(await isValidApiKey(token))) {
+  // resolveApiKey checks both the legacy single key and the multi-key table.
+  // Stash the resolved apiKeyId on the context for per-key usage attribution.
+  const resolved = await resolveApiKey(token);
+  if (!resolved.valid) {
     return c.json(
       { error: { message: "Invalid API key", type: "auth_error" } },
       401
     );
+  }
+  if (resolved.apiKeyId) {
+    (c.req.raw as any).apiKeyId = resolved.apiKeyId;
+    // Fire-and-forget: stamp last-used for the managed key (attribution).
+    void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, resolved.apiKeyId)).then(() => {}, () => {});
   }
 
   await next();
@@ -273,6 +285,9 @@ app.use("/api/*", async (c, next) => {
 
 // Mount routes
 app.route("/", proxyRouter); // /v1/chat/completions, /v1/models
+app.route("/", mediaRouter); // /v1/audio/*, /v1/images/*, /v1/embeddings (Wave 4 media)
+app.route("/", mcpRouter); // /v1/mcp/* — MCP stdio↔SSE bridge (Wave 6)
+app.route("/", searchRouter); // /v1/search — web search (Wave 9)
 app.route("/api", apiRouter); // /api/accounts, /api/settings, /api/stats
 app.route("/api/auth", authRouter); // /api/auth/login, /api/auth/queue
 

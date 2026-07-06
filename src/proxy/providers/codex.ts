@@ -23,6 +23,34 @@ const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
 const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+
+/**
+ * Parse an upstream 429 reset hint into a Date / ms pair. Codex returns either
+ * a `Retry-After` header (seconds) or a JSON body with `reset_at`/`resets_at`
+ * (epoch seconds or ms). Returns undefineds if no usable hint was found, in
+ * which case the pool applies a default 60s cooldown.
+ */
+function parseRateLimitReset(headers: Headers, bodyText: string): { resetsAt?: Date; retryAfterMs?: number } {
+  const retryAfterHdr = headers.get("retry-after");
+  if (retryAfterHdr) {
+    const secs = Number(retryAfterHdr);
+    if (Number.isFinite(secs) && secs > 0) {
+      const retryAfterMs = secs * 1000;
+      return { retryAfterMs, resetsAt: new Date(Date.now() + retryAfterMs) };
+    }
+  }
+  try {
+    const j = JSON.parse(bodyText || "{}");
+    const ra = j?.reset_at ?? j?.resets_at ?? j?.error?.reset_at;
+    if (ra) {
+      const epoch = Number(ra);
+      if (Number.isFinite(epoch)) {
+        return { resetsAt: new Date(epoch > 1e12 ? epoch : epoch * 1000) };
+      }
+    }
+  } catch { /* body wasn't JSON */ }
+  return {};
+}
 const CODEX_SCOPE = "openid profile email offline_access";
 
 /**
@@ -527,7 +555,10 @@ export class CodexProvider extends BaseProvider {
       }
       if (response.status === 429) {
         const text = await response.text().catch(() => "");
-        return { success: false, error: text || "Rate limited", quotaExhausted: true };
+        // 429 is transient — surface as rateLimited (not quotaExhausted, which
+        // the router treats as permanent) and carry the upstream reset hint.
+        const { resetsAt, retryAfterMs } = parseRateLimitReset(response.headers, text);
+        return { success: false, error: text || "Rate limited", rateLimited: true, resetsAt, retryAfterMs };
       }
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => "");
@@ -657,7 +688,8 @@ export class CodexProvider extends BaseProvider {
       }
       if (response.status === 429) {
         const text = await response.text().catch(() => "");
-        return { success: false, error: text || "Rate limited", quotaExhausted: true };
+        const { resetsAt, retryAfterMs } = parseRateLimitReset(response.headers, text);
+        return { success: false, error: text || "Rate limited", rateLimited: true, resetsAt, retryAfterMs };
       }
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => "");

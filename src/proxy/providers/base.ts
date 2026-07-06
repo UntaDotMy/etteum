@@ -123,7 +123,16 @@ export interface ProviderResult {
   creditSource?: CreditSource;
   error?: string;
   quotaExhausted?: boolean;
-  rateLimited?: boolean; // 429 rate-limit (temporary, don't mark exhausted)
+  rateLimited?: boolean;
+  /**
+   * When the upstream rate limit / quota window resets, if known (e.g. parsed
+   * from a 429 `reset_at` header/body). Used by the router to honor the real
+   * cooldown instead of immediately retrying. Optional — providers that don't
+   * surface it leave it undefined and the pool falls back to backoff.
+   */
+  resetsAt?: Date;
+  /** Parsed `Retry-After` (ms), if the upstream gave one. Same role as resetsAt. */
+  retryAfterMs?: number; // 429 rate-limit (temporary, don't mark exhausted)
   banned?: boolean; // 403 — account is banned/restricted, not an auth issue
   tokens?: unknown; // New tokens after refresh (if refreshed during request)
   metadata?: Record<string, unknown>; // Provider-specific diagnostics (e.g. upstream error text)

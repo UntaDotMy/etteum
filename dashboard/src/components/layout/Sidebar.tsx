@@ -24,6 +24,11 @@ import {
   MessageSquare,
   Zap,
   MonitorSmartphone,
+  Layers,
+  Bug,
+  Volume2,
+  Terminal,
+  Wrench,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
@@ -54,7 +59,11 @@ const navSections: NavSection[] = [
     title: "TOOLS",
     items: [
       { label: "Image Studio", path: "/image-studio", icon: Sparkles },
+      { label: "Media Providers", path: "/media", icon: Volume2 },
       { label: "Chat", path: "/chat", icon: MessageSquare },
+      { label: "Model Combos", path: "/combos", icon: Layers },
+      { label: "Translator", path: "/translator", icon: Bug },
+      { label: "Skills", path: "/skills", icon: Wrench },
       { label: "Integration", path: "/integration", icon: Plug },
     ],
   },
@@ -74,6 +83,7 @@ const navSections: NavSection[] = [
       { label: "Requests", path: "/requests", icon: Activity },
       { label: "Analytics", path: "/analytics", icon: BarChart3 },
       { label: "Browser Log", path: "/bot-logs", icon: MonitorSmartphone },
+      { label: "Live Console", path: "/console", icon: Terminal },
       { label: "Usage", path: "/usage", icon: BarChart3 },
     ],
   },

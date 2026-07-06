@@ -1,12 +1,22 @@
 import { db } from "../db/index";
 import { accounts, settings } from "../db/schema";
-import { eq, and, sql } from "drizzle-orm";
+import { eq, and, sql, or, isNull, lt } from "drizzle-orm";
 import type { Account } from "../db/schema";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
 import { getProviderForModel, type ProviderName } from "./providers/registry";
 
 export type { ProviderName };
+
+// --- Routing resilience constants (Wave 1) ---
+// Exponential backoff for transient failures: start at 2s, double each time,
+// cap at 5 min. A transient blip cools an account briefly; sustained flakiness
+// pushes it out longer. Auto-reinstates the moment cooldownUntil passes.
+const BACKOFF_INITIAL_MS = 2_000;
+const BACKOFF_MAX_MS = 5 * 60_000;
+// Terminal-error hysteresis: require this many CONSECUTIVE hard auth/persistent
+// errors before disabling an account. One transient 401 no longer kills it.
+const TERMINAL_ERROR_THRESHOLD = 3;
 
 interface PoolState {
   lastIndex: Map<ProviderName, number>;
@@ -400,6 +410,9 @@ class AccountPool {
   }
 
   private async fetchActiveAccounts(provider: ProviderName): Promise<Account[]> {
+    // Cooldown reinstatement: an account with cooldownUntil in the future is
+    // temporarily excluded. The moment that timestamp passes it is eligible
+    // again automatically — no manual re-enable, no cron, no extra state.
     return db
       .select()
       .from(accounts)
@@ -408,6 +421,10 @@ class AccountPool {
           eq(accounts.provider, provider),
           eq(accounts.status, "active"),
           eq(accounts.enabled, true),
+          or(
+            isNull(accounts.cooldownUntil),
+            lt(accounts.cooldownUntil, new Date()),
+          ),
         )
       );
   }
@@ -417,11 +434,23 @@ class AccountPool {
    */
   async getAccountForModel(
     model: string,
-    options: { excludeAccountIds?: Set<number> } = {}
+    options: { excludeAccountIds?: Set<number>; preferredAccountId?: number } = {}
   ): Promise<{ account: Account; provider: ProviderName } | null> {
     // Determine which provider handles this model
     const provider = this.getProviderForModel(model);
     if (!provider) return null;
+
+    // Sticky/preferred-connection pinning (Wave 9 LOW): if a preferred account
+    // id was passed (e.g. the account that served a previous_response_id),
+    // return it first if it is eligible — preserves Codex session continuity.
+    if (options.preferredAccountId) {
+      const [pref] = await db.select().from(accounts).where(eq(accounts.id, options.preferredAccountId)).limit(1);
+      if (pref && pref.provider === provider && pref.status === "active" && pref.enabled &&
+        !(options.excludeAccountIds?.has(pref.id)) &&
+        (!pref.cooldownUntil || pref.cooldownUntil < new Date())) {
+        return { account: pref, provider };
+      }
+    }
 
     // BYOK requires special handling - find account by prefix
     if (provider === "byok") {
@@ -475,7 +504,9 @@ class AccountPool {
   }
 
   /**
-   * Mark an account as used (update last_used_at)
+   * Mark an account as used (update last_used_at). Also resets the routing-
+   * resilience counters — a successful request proves the account is healthy,
+   * so consecutive transient/auth failures and any active cooldown are cleared.
    */
   async markUsed(accountId: number): Promise<void> {
     await db
@@ -483,6 +514,11 @@ class AccountPool {
       .set({
         lastUsedAt: new Date(),
         updatedAt: new Date(),
+        consecutiveTransientFailures: 0,
+        nextBackoffMs: 0,
+        consecutiveAuthErrors: 0,
+        cooldownUntil: null,
+        errorMessage: null,
       })
       .where(eq(accounts.id, accountId));
   }
@@ -511,14 +547,26 @@ class AccountPool {
   }
 
   /**
-   * Mark an account as errored
+   * Mark an account as errored. Terminal-error hysteresis: requires
+   * TERMINAL_ERROR_THRESHOLD (3) CONSECUTIVE hard errors before disabling the
+   * account. Below the threshold the account stays `active` with a short
+   * cooldown, so a single transient 401/auth blip no longer permanently kills
+   * it. A subsequent success resets the counter.
    */
   async markError(accountId: number, errorMessage: string): Promise<void> {
+    const [cur] = await db.select({ cae: accounts.consecutiveAuthErrors })
+      .from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const consecutive = (cur?.cae ?? 0) + 1;
+    const terminal = consecutive >= TERMINAL_ERROR_THRESHOLD;
+
     const [account] = await db
       .update(accounts)
       .set({
-        status: "error",
+        ...(terminal
+          ? { status: "error" as const, cooldownUntil: null }
+          : { status: "active" as const, cooldownUntil: new Date(Date.now() + 30_000) }),
         errorMessage,
+        consecutiveAuthErrors: consecutive,
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
@@ -528,16 +576,30 @@ class AccountPool {
 
     broadcast({
       type: "account_status",
-      data: { id: accountId, status: "error", error: errorMessage },
+      data: { id: accountId, status: terminal ? "error" : "active", error: errorMessage, consecutiveAuthErrors: consecutive },
     });
   }
 
   async markTransientFailure(accountId: number, errorMessage: string): Promise<void> {
+    // Exponential backoff: each consecutive transient failure doubles the
+    // cooldown (2s, 4s, 8s, … capped at BACKOFF_MAX_MS). The account stays
+    // `active` but is excluded from selection by cooldownUntil. Auto-reinstates
+    // when the timestamp passes — no manual action, no permanent disable.
+    const [cur] = await db.select({ ctf: accounts.consecutiveTransientFailures, nb: accounts.nextBackoffMs })
+      .from(accounts).where(eq(accounts.id, accountId)).limit(1);
+    const failures = (cur?.ctf ?? 0) + 1;
+    const baseDelay = cur?.nb && cur.nb > 0 ? cur.nb : BACKOFF_INITIAL_MS;
+    const delay = Math.min(baseDelay * 2, BACKOFF_MAX_MS);
+    const cooldownUntil = new Date(Date.now() + delay);
+
     const [account] = await db
       .update(accounts)
       .set({
         status: "active",
         errorMessage,
+        cooldownUntil,
+        consecutiveTransientFailures: failures,
+        nextBackoffMs: delay,
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
@@ -547,7 +609,44 @@ class AccountPool {
 
     broadcast({
       type: "account_status",
-      data: { id: accountId, status: "active", warning: errorMessage },
+      data: { id: accountId, status: "active", warning: errorMessage, cooldownUntil: cooldownUntil.toISOString() },
+    });
+  }
+
+  /**
+   * Mark an account as rate-limited (429). Honors the upstream reset time if
+   * known: cools the account down until the real window resets (parsed from
+   * `resetsAt`/`retryAfterMs`) rather than a synthetic backoff. Falls back to
+   * the transient-failure backoff if the upstream gave no reset hint.
+   */
+  async markRateLimited(accountId: number, errorMessage: string, opts?: { resetsAt?: Date; retryAfterMs?: number }): Promise<void> {
+    let cooldownUntil: Date;
+    if (opts?.resetsAt && opts.resetsAt.getTime() > Date.now()) {
+      cooldownUntil = opts.resetsAt;
+    } else if (opts?.retryAfterMs && opts.retryAfterMs > 0) {
+      cooldownUntil = new Date(Date.now() + opts.retryAfterMs);
+    } else {
+      // No upstream hint: use a short fixed cooldown (60s) — better than the
+      // old behavior of immediately retrying and re-hitting the 429.
+      cooldownUntil = new Date(Date.now() + 60_000);
+    }
+
+    const [account] = await db
+      .update(accounts)
+      .set({
+        status: "active",
+        errorMessage,
+        cooldownUntil,
+        updatedAt: new Date(),
+      })
+      .where(eq(accounts.id, accountId))
+      .returning();
+
+    if (account) this.invalidate(account.provider as ProviderName);
+
+    broadcast({
+      type: "account_status",
+      data: { id: accountId, status: "active", warning: errorMessage, rateLimited: true, cooldownUntil: cooldownUntil.toISOString() },
     });
   }
 

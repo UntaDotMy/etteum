@@ -147,6 +147,12 @@ export async function routeRequest(
   const maxRetries = 3;
   let lastError = "";
   const attemptedByokAccountIds = new Set<number>();
+  // Track rate-limit state across attempts so we can return a graceful 429
+  // with Retry-After when EVERY account was rate-limited (vs. a 503 generic
+  // failure). earliestReset lets us tell the client when to retry.
+  let allRateLimited = true;
+  let attemptsMade = 0;
+  let earliestReset: Date | null = null;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     // BYOK uses prefix-based account lookup (not the generic pool),
@@ -195,11 +201,26 @@ export async function routeRequest(
         throw new Error(result.error || `Invalid model: ${compressedRequest.model}`);
       }
 
-      // Handle rate limiting (429) — temporary, don't mark exhausted
+      // Handle rate limiting (429) — temporary, don't mark exhausted.
+      // Honor the upstream reset time if the provider surfaced it (resetsAt /
+      // retryAfterMs), so we cool the account for the real window instead of
+      // immediately retrying and re-hitting the 429.
       if (result.rateLimited) {
         lastError = result.error || "Rate limited";
-        continue; // Try next account without poisoning this one
+        attemptsMade++;
+        const resetHint = result.resetsAt
+          ? { resetsAt: result.resetsAt }
+          : result.retryAfterMs
+            ? { retryAfterMs: result.retryAfterMs }
+            : undefined;
+        await pool.markRateLimited(account.id, lastError, resetHint);
+        if (result.resetsAt && (!earliestReset || result.resetsAt < earliestReset)) {
+          earliestReset = result.resetsAt;
+        }
+        continue; // Try next account
       }
+      // A non-rate-limit failure means not ALL accounts were rate-limited.
+      allRateLimited = false;
 
       // Handle quota exhaustion (402 / 403 without PAYG).
       //
@@ -341,6 +362,20 @@ export async function routeRequest(
       }
       lastError = errMsg;
     }
+  }
+
+  // Graceful "all rate-limited" path: if every attempt was a 429 (and at least
+  // one attempt was made), surface a rate-limit error carrying the earliest
+  // reset time so the proxy layer can return 429 + Retry-After instead of a
+  // generic 503. This lets well-behaved clients back off correctly.
+  if (allRateLimited && attemptsMade > 0) {
+    const resetMs = earliestReset ? Math.max(0, earliestReset.getTime() - Date.now()) : 60_000;
+    const err = new Error(
+      `All ${providerName} accounts rate-limited. Retry in ${Math.ceil(resetMs / 1000)}s.`
+    ) as Error & { rateLimited?: true; retryAfterMs?: number };
+    err.rateLimited = true;
+    err.retryAfterMs = resetMs;
+    throw err;
   }
 
   throw new Error(

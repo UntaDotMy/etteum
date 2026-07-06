@@ -2135,51 +2135,33 @@ accountsRouter.post("/:id/login", async (c) => {
   // Import auth runner dynamically to avoid circular deps
   const { loginAccount } = await import("../auth/runner");
 
-  // Antigravity uses the visible-frame manual-login flow (antigravity_manual_login.py):
-  // a real headed nodriver Chrome window opens and the dashboard renders a
-  // manual_challenge modal for CAPTCHA. Other providers use the standard
-  // loginAccount path. (Antigravity-only; mirrors enowxai's manual-login pattern.)
-  if (account.provider === "antigravity") {
-    const { runAntigravityManualLogin } = await import("../auth/manualRunner");
-    // Fire-and-forget: the flow streams progress/challenge events to the
-    // dashboard via WebSocket. Respond immediately so the UI can show the frame.
-    void runAntigravityManualLogin(account).catch(async (e) => {
-      const { markLoginFailed } = await import("../auth/runner");
-      await markLoginFailed(account, "antigravity", String(e));
-    });
-    return c.json({ success: true, manual: true, message: "Manual login started — watch the login logs" });
-  }
-
+  // All providers (including antigravity) now route through the TS+Camoufox
+  // automation layer (Wave 3 migration). The nodriver visible-frame manual-login
+  // flow has been removed; the stealth engine surfaces challenges as a `manual`
+  // result via the standard loginAccount path.
   const result = await loginAccount(account);
 
   return c.json(result);
 });
 
 /**
- * POST /api/accounts/:id/challenge-answer - Submit a manual-challenge answer
- * (e.g. the CAPTCHA the user typed in the dashboard modal) to a running
- * antigravity manual-login session.
+ * POST /api/accounts/:id/challenge-answer - (Removed in Wave 3 migration.)
+ * The nodriver manual-login captcha round-trip is gone; the TS+Camoufox engine
+ * detects challenges and reports them as a manual-intervention login result.
  */
 accountsRouter.post("/:id/challenge-answer", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isFinite(id)) return c.json({ error: "Invalid account id" }, 400);
-  const body = await c.req.json().catch(() => ({})) as { answer?: string };
-  if (!body.answer) return c.json({ error: "answer is required" }, 400);
-  const { submitManualChallengeAnswer } = await import("../auth/manualRunner");
-  const delivered = submitManualChallengeAnswer(id, body.answer);
-  return c.json({ success: delivered, message: delivered ? "Answer delivered" : "No active manual-login session for this account" });
+  return c.json({ success: false, message: "Manual captcha round-trip removed in Wave 3 migration. The TS+Camoufox engine reports challenges as a login result." });
 });
 
 /**
- * POST /api/accounts/:id/cancel-manual - Cancel a running antigravity manual
- * login (creates the cancel-signal-file the script polls + terminates it).
+ * POST /api/accounts/:id/cancel-manual - (Removed in Wave 3 migration.)
  */
 accountsRouter.post("/:id/cancel-manual", async (c) => {
   const id = Number(c.req.param("id"));
   if (!Number.isFinite(id)) return c.json({ error: "Invalid account id" }, 400);
-  const { cancelManualLogin } = await import("../auth/manualRunner");
-  const cancelled = cancelManualLogin(id);
-  return c.json({ success: cancelled, message: cancelled ? "Cancel signalled" : "No active manual-login session for this account" });
+  return c.json({ success: false, message: "Manual login cancellation removed in Wave 3 migration." });
 });
 
 /**

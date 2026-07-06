@@ -1,0 +1,23 @@
+services:
+  etteum:
+    build: .
+    image: etteum-pool:latest
+    container_name: etteum-pool
+    restart: unless-stopped
+    ports:
+      - "1930:1930"   # API + proxy
+      - "1931:1931"   # dashboard
+    volumes:
+      - etteum-data:/app/data
+      - etteum-home:/app/data-home
+    environment:
+      - NODE_ENV=production
+      - PORT=1930
+      - DASHBOARD_PORT=1931
+      - DATA_DIR=/app/data
+      - HOME=/app/data-home
+      # Set these via a .env file or your orchestrator.
+      - API_KEY=${API_KEY:-}
+volumes:
+  etteum-data:
+  etteum-home:

@@ -11,6 +11,43 @@ import { getVccPoolFromDb, handleCardResult } from "../api/vcc";
 import { getNextProxy } from "../services/proxy-pool";
 import { existsSync } from "node:fs";
 import path from "node:path";
+import { loginProvider } from "./automation/services";
+import type { ProviderId } from "./automation/constants";
+
+// Provider ids that the new TS+Camoufox automation layer supports. Logins for
+// these go through loginProvider() instead of the legacy Python subprocess.
+const NATIVE_AUTOMATION_PROVIDERS = new Set<string>([
+  "kiro", "antigravity", "codex", "gemini-cli", "codebuddy", "codebuddy-cn",
+  "qoder", "qwen", "github", "openai", "iflow", "cursor", "cline", "gitlab",
+  "claude", "kimi-coding", "kilocode",
+]);
+
+/** Map our account.provider values to the automation-layer ProviderId. */
+function providerToAutomationId(provider: string): ProviderId | null {
+  const map: Record<string, ProviderId> = {
+    kiro: "kiro",
+    "kiro-pro": "kiro",
+    antigravity: "antigravity",
+    codex: "codex",
+    "gemini-cli": "gemini-cli",
+    gemini: "gemini-cli",
+    codebuddy: "codebuddy",
+    "codebuddy-cn": "codebuddy-cn",
+    qoder: "qoder",
+    qwen: "qwen",
+    github: "github",
+    openai: "openai",
+    iflow: "iflow",
+    cursor: "cursor",
+    cline: "cline",
+    "gitlab-duo": "gitlab",
+    gitlab: "gitlab",
+    claude: "claude",
+    "kimi-coding": "kimi-coding",
+    kilocode: "kilocode",
+  };
+  return map[provider] ?? null;
+}
 
 // Process registry for active login processes — allows killing from outside
 const activeProcesses = new Map<number, ReturnType<typeof Bun.spawn>>();
@@ -655,6 +692,85 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     });
     return { success: false, error: errorMsg };
   }
+
+  // --- Native TS+Camoufox automation path (Wave 3 migration) ---
+  // Providers supported by the new automation layer bypass the legacy Python
+  // subprocess entirely. The result is converted to the same ProviderResult
+  // shape and applied via the existing applyProviderResult(), preserving the
+  // DB/broadcast/credential-persistence flow.
+  const automationId = providerToAutomationId(provider);
+  if (automationId && NATIVE_AUTOMATION_PROVIDERS.has(automationId)) {
+    const password = decrypt(account.password);
+    const startLog = addAuthLog({
+      type: "login_progress",
+      accountId: account.id,
+      email: account.email,
+      provider,
+      step: "starting",
+      message: `Starting ${provider} login (TS+Camoufox) for ${account.email}...`,
+    });
+    broadcast({
+      type: "login_progress",
+      data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" },
+    });
+
+    try {
+      const proxy = await getNextProxy("auth");
+      const proxyUrl = proxy?.url;
+      const res = await loginProvider(automationId, { email: account.email, password }, {
+        headless: options.headless ?? config.headless,
+      });
+      if (res.error || !res.tokens) {
+        const errorMsg = res.error || "No tokens returned";
+        await markAccountError(account.id, errorMsg);
+        const failLog = addAuthLog({
+          type: "login_failed",
+          accountId: account.id,
+          email: account.email,
+          provider,
+          error: errorMsg,
+          message: errorMsg,
+        });
+        broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: errorMsg } });
+        return { success: false, error: errorMsg };
+      }
+      const providerResult: ProviderResult = {
+        success: true,
+        provider,
+        credentials: {
+          access_token: String((res.tokens as any).accessToken || ""),
+          refresh_token: String((res.tokens as any).refreshToken || ""),
+          id_token: String((res.tokens as any).idToken || ""),
+          ...(res.accountInfo || {}),
+        },
+        quota: res.quota as any,
+      };
+      await applyProviderResult(account, provider, password, providerResult);
+      const okLog = addAuthLog({
+        type: "login_success",
+        accountId: account.id,
+        email: account.email,
+        provider,
+        message: `${provider} login succeeded (TS+Camoufox)`,
+      });
+      broadcast({ type: "login_success", data: { logId: okLog.id, id: account.id, email: account.email, provider } });
+      return { success: true };
+    } catch (err: any) {
+      const errorMsg = err?.message || String(err);
+      await markAccountError(account.id, errorMsg);
+      const failLog = addAuthLog({
+        type: "login_failed",
+        accountId: account.id,
+        email: account.email,
+        provider,
+        error: errorMsg,
+        message: errorMsg,
+      });
+      broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: errorMsg } });
+      return { success: false, error: errorMsg };
+    }
+  }
+  // --- Legacy Python subprocess path (providers not yet migrated) ---
 
   const password = decrypt(account.password);
   const headless = options.headless ?? config.headless;
