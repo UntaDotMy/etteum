@@ -18,6 +18,7 @@
  *   compression_tsc_strip_schema_whitespace "true" | "false"
  *   compression_tsc_trim_descriptions       "true" | "false"
  *   compression_tsc_drop_schema_meta        "true" | "false"
+ *   compression_ponytail_enabled            "true" | "false"
  */
 
 import { db } from "../../db/index";
@@ -138,6 +139,9 @@ async function loadFromDb(): Promise<CompressionConfig> {
         dflt.tsc.trimDescriptions
       ),
       dropSchemaMeta: parseBool(map.get("compression_tsc_drop_schema_meta"), dflt.tsc.dropSchemaMeta),
+    },
+    ponytail: {
+      enabled: parseBool(map.get("compression_ponytail_enabled"), dflt.ponytail.enabled),
     },
   };
 }

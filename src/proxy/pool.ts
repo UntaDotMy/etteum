@@ -444,6 +444,29 @@ class AccountPool {
   }
 
   /**
+   * Get all active accounts for a model, sorted by capability match.
+   * Used by combo.ts to build fallback chains ranked by capability.
+   */
+  async getAccountsForModel(model: string): Promise<Account[]> {
+    const provider = this.getProviderForModel(model);
+    if (!provider) return [];
+
+    const activeAccounts = await this.getActiveAccounts(provider);
+    if (activeAccounts.length === 0) return [];
+
+    // For Alibaba, filter by queryable models
+    if (provider === "alibaba") {
+      const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
+      return activeAccounts.filter((account) => {
+        const tokens = account.tokens as { queryableModels?: string[] } | null;
+        return tokens?.queryableModels?.includes(upstreamModel) ?? false;
+      });
+    }
+
+    return activeAccounts;
+  }
+
+  /**
    * Map model name to provider. Delegates to the provider registry, which asks
    * each provider's ownsModel() in priority order (single source of truth).
    */

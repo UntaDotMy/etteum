@@ -47,6 +47,22 @@ export const requestLogs = sqliteTable("request_logs", {
   accountQuotaAfter: real("account_quota_after").default(0),
   /** JSON-encoded CompressionStats (see src/proxy/compression/types.ts). null when compression is fully disabled. */
   compressionStats: text("compression_stats", { mode: "json" }),
+  /**
+   * The actual request body sent upstream (post-compression pipeline).
+   * Unlike `requestBody` which stores the ORIGINAL client request,
+   * this field holds what was actually transmitted — enabling accurate
+   * replay and compression savings analysis.
+   * Respects logBodyEnabled / logBodyFull / logBodyMaxBytes limits.
+   */
+  compressedRequestBody: text("compressed_request_body", { mode: "json" }),
+  /**
+   * Human-readable savings breakdown per compression technique.
+   * Derived from compressionStats.byTechnique at insert time so it is
+   * queryable with plain SQL (no JSON parsing) on the dashboard.
+   * Stored as a flat JSON object, e.g. { "rtk": 320, "tsc": 140 }.
+   * null when compression is disabled.
+   */
+  savingsByTechnique: text("savings_by_technique", { mode: "json" }),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),
@@ -191,7 +207,27 @@ export const modelMappings = sqliteTable("model_mappings", {
   index("model_mappings_priority_idx").on(table.priority),
 ]);
 
+// Combos: named model chains for multi-model fallback.
+// Clients send "my-combo/claude-sonnet" and the router expands to
+// the configured chain: [provider-a/model-a, provider-b/model-b, ...].
+// Strategies per combo (stored in settings, keyed by combo name):
+//   fallback     — try first model, fall through to next on error/rate-limit
+//   sticky       — round-robin within combo, sticky session (same account per combo)
+//   fusion       — parallel inference, judge model picks winner (advanced)
+export const combos = sqliteTable("combos", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  name: text("name").notNull().unique(), // e.g. "zero-cost" or "premium"
+  models: text("models", { mode: "json" }).$type<string[]>().notNull().$defaultFn(() => []),
+  enabled: integer("enabled", { mode: "boolean" }).notNull().default(true),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
+}, (table) => [
+  index("combos_name_idx").on(table.name),
+]);
+
 // Type exports
+export type Combo = typeof combos.$inferSelect;
+export type NewCombo = typeof combos.$inferInsert;
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;

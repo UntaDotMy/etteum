@@ -13,6 +13,7 @@ import { integrationRouter } from "./integration";
 import { oauthRouter } from "./oauth";
 import { updateRouter } from "./update";
 import { browserSessionRouter } from "./browser-session";
+import { combosRouter } from "./combos";
 
 export const apiRouter = new Hono();
 
@@ -24,6 +25,7 @@ apiRouter.route("/vcc", vccRouter);
 apiRouter.route("/proxy-pool", proxyPoolRouter);
 apiRouter.route("/image-studio", imageStudioRouter);
 apiRouter.route("/filters", filtersRouter);
+apiRouter.route("/combos", combosRouter);
 apiRouter.route("/bin", binApi);
 apiRouter.route("/integration", integrationRouter);
 apiRouter.route("/oauth", oauthRouter);

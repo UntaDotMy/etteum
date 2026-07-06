@@ -60,6 +60,10 @@ export interface TSCConfig {
   dropSchemaMeta: boolean;
 }
 
+export interface PonytailConfig {
+  enabled: boolean;
+}
+
 export interface CompressionConfig {
   rtk: RTKConfig;
   dcp: DCPConfig;
@@ -67,6 +71,7 @@ export interface CompressionConfig {
   cacheMarkers: CacheMarkerConfig;
   imageDedupe: ImageDedupeConfig;
   tsc: TSCConfig;
+  ponytail: PonytailConfig;
 }
 
 export type CompressionTechnique =
@@ -75,7 +80,8 @@ export type CompressionTechnique =
   | "caveman"
   | "imageDedupe"
   | "cacheMarkers"
-  | "tsc";
+  | "tsc"
+  | "ponytail";
 
 export interface CompressionStats {
   /** Estimated tokens before compression. */
@@ -154,6 +160,13 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     stripSchemaWhitespace: true,
     trimDescriptions: true,
     dropSchemaMeta: true,
+  },
+  ponytail: {
+    // Ponytail targets repetitive structure in tool results — repeated directory
+    // prefixes, collapsed log spam, normalized line endings. OFF by default
+    // because it is lossy (though low-risk: it never removes semantic content,
+    // only the verbose scaffolding around it). Enable per-provider via settings.
+    enabled: false,
   },
 };
 

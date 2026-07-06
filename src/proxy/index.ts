@@ -308,8 +308,12 @@ function wrapStreamWithUsageFinalizer(
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let reader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
+  // Accumulate raw bytes in an array, join once per chunk. Avoids O(n²) string
+  // concatenation where each += re-allocates and copies the growing string.
+  const rawChunks: string[] = [];
   let buffer = "";
   let streamedContent = "";
+  let streamedParts: string[] = [];
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
@@ -318,7 +322,9 @@ function wrapStreamWithUsageFinalizer(
   let streamError = false;
 
   const observe = (chunk: Uint8Array) => {
-    buffer += decoder.decode(chunk, { stream: true });
+    rawChunks.push(decoder.decode(chunk, { stream: true }));
+    // Join accumulated chunks once per observe call, not on every +=.
+    buffer += rawChunks.splice(0).join("");
     const lines = buffer.split("\n");
     buffer = lines.pop() || "";
 
@@ -351,7 +357,7 @@ function wrapStreamWithUsageFinalizer(
 
       // Always extract content for estimation, even if no usage field
       const content = extractStreamContent(trimmedPayload);
-      if (content) streamedContent += content;
+      if (content) streamedParts.push(content);
 
       const usage = extractUsageFromSsePayload(trimmedPayload);
       if (!usage) continue;
@@ -367,7 +373,7 @@ function wrapStreamWithUsageFinalizer(
     finalized = true;
 
     const finalPromptTokens = promptTokens || context.fallbackPromptTokens;
-    const finalCompletionTokens = completionTokens || estimateTokensFromText(streamedContent) || context.fallbackCompletionTokens;
+    const finalCompletionTokens = completionTokens || estimateTokensFromText(streamedParts.join("")) || context.fallbackCompletionTokens;
     const finalTotalTokens = totalTokens || finalPromptTokens + finalCompletionTokens || context.fallbackTotalTokens;
     const { creditsUsed, creditSource } = computeCredits(
       context.provider,
@@ -519,7 +525,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
   const isStream = body.stream === true;
-  const { result, account, provider, durationMs, compressionStats } = await routeRequest(body, isStream);
+  const { result, account, provider, durationMs, compressionStats, compressedRequest } = await routeRequest(body, isStream);
   let shouldReleaseTracking = true;
 
   try {
@@ -586,6 +592,10 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     accountQuotaBefore: quotaBefore,
     accountQuotaAfter: quotaAfter,
     compressionStats: compressionStats ?? null,
+    compressedRequestBody: compressedRequest ? prepareLogBody(compressedRequest) : null,
+    savingsByTechnique: compressionStats?.byTechnique
+      ? JSON.stringify(compressionStats.byTechnique)
+      : null,
   };
 
     if (isStream && result.stream) {

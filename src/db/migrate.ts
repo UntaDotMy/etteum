@@ -21,6 +21,9 @@ const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> 
   { table: "accounts", column: "free_limit",     ddl: "ALTER TABLE accounts ADD COLUMN free_limit REAL DEFAULT 0" },
   { table: "accounts", column: "free_remaining", ddl: "ALTER TABLE accounts ADD COLUMN free_remaining REAL DEFAULT 0" },
   { table: "accounts", column: "free_reset_at",  ddl: "ALTER TABLE accounts ADD COLUMN free_reset_at INTEGER" },
+  // 2026-07-06 — request detail storage (compressed body + per-technique savings)
+  { table: "request_logs", column: "compressed_request_body", ddl: "ALTER TABLE request_logs ADD COLUMN compressed_request_body TEXT" },
+  { table: "request_logs", column: "savings_by_technique",    ddl: "ALTER TABLE request_logs ADD COLUMN savings_by_technique TEXT" },
 ];
 
 function tableHasColumn(table: string, column: string): boolean {

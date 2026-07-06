@@ -8,9 +8,10 @@
  *   1. DCP          — lossless (cheapest savings, must run first so RTK
  *                     doesn't waste effort truncating soon-to-be-stubbed blocks)
  *   2. RTK          — lossy tool-result truncation
- *   3. Caveman      — lossy system-prompt compaction (off by default)
- *   4. Image dedupe — lossless image dedup
- *   5. Cache markers — structural; must run LAST because it tags the final
+ *   3. Ponytail     — lossy structural compression (path prefixes, log spam)
+ *   4. Caveman      — lossy system-prompt compaction (off by default)
+ *   5. Image dedupe — lossless image dedup
+ *   6. Cache markers — structural; must run LAST because it tags the final
  *                      prefix shape that upstream providers will hash for caching
  */
 
@@ -22,6 +23,7 @@ import { applyCaveman } from "./caveman";
 import { applyCacheMarkers } from "./cache-markers";
 import { applyImageDedupe } from "./image-dedupe";
 import { applyTSC } from "./tsc";
+import { applyPonytail } from "./ponytail";
 import { estimateRequestTokens } from "./token-estimate";
 
 export type { CompressionConfig, CompressionStats, CompressionTechnique } from "./types";
@@ -85,21 +87,28 @@ export function compressRequest(
     current = r.request;
   }
 
-  // 3. Caveman
+  // 3. Ponytail — strip repeated path prefixes and log spam from tool results.
+  if (cfg.ponytail.enabled) {
+    const r = applyPonytail(current, cfg.ponytail);
+    if (r.saved > 0) byTechnique.ponytail = charsToTokens(r.saved);
+    current = r.request;
+  }
+
+  // 4. Caveman
   if (cfg.caveman.enabled) {
     const r = applyCaveman(current, cfg.caveman);
     if (r.saved > 0) byTechnique.caveman = charsToTokens(r.saved);
     current = r.request;
   }
 
-  // 4. Image dedupe
+  // 5. Image dedupe
   if (cfg.imageDedupe.enabled) {
     const r = applyImageDedupe(current, cfg.imageDedupe);
     if (r.saved > 0) byTechnique.imageDedupe = charsToTokens(r.saved);
     current = r.request;
   }
 
-  // 5. Cache markers (structural only — saved=0)
+  // 6. Cache markers (structural only — saved=0)
   if (cfg.cacheMarkers.enabled) {
     const r = applyCacheMarkers(current, cfg.cacheMarkers, providerName);
     current = r.request;

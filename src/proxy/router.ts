@@ -9,6 +9,8 @@ import {
   getCompressionConfig,
   type CompressionStats,
 } from "./compression";
+import { expandComboRequest, routeCombo } from "./combo";
+import { detectRequiredCapabilities, stripUnsupportedCapabilities } from "./capabilities";
 
 export interface RouteResult {
   result: ProviderResult;
@@ -16,16 +18,8 @@ export interface RouteResult {
   provider: ProviderName;
   durationMs: number;
   compressionStats?: CompressionStats;
-}
-
-/** Check if a request contains image content blocks */
-function requestHasImages(request: ChatCompletionRequest): boolean {
-  return request.messages.some((msg) => {
-    if (!Array.isArray(msg.content)) return false;
-    return (msg.content as any[]).some(
-      (block) => block?.type === "image_url" || block?.type === "image"
-    );
-  });
+  /** The request that was actually sent upstream (post-compression pipeline). */
+  compressedRequest?: ChatCompletionRequest;
 }
 
 /**
@@ -100,13 +94,35 @@ export async function routeRequest(
   request: ChatCompletionRequest,
   stream: boolean
 ): Promise<RouteResult> {
+  // ── Combo expansion ──────────────────────────────────────────────────────────
+  // If the model string looks like "combo-name/model-alias", expand it to a
+  // multi-model fallback chain before routing.
+  const comboExpansion = await expandComboRequest(request);
+  if (comboExpansion?.expanded) {
+    return routeCombo({
+      request: comboExpansion.request,
+      comboName: comboExpansion.comboName!,
+      models: comboExpansion.models!,
+    });
+  }
+
   // Apply content filters to strip Claude Code identity, billing headers, etc.
   const providerName = pool.getProviderForModel(request.model);
   const sanitizedRequest = sanitizeRequest(request, providerName ?? undefined);
 
-  const hasImages = requestHasImages(sanitizedRequest);
+  // ── Capability detection & stripping ───────────────────────────────────────
   if (!providerName) {
     throw new Error(`No provider found for model: ${sanitizedRequest.model}`);
+  }
+  // If the request contains vision/pdf/audio content, strip it from models
+  // that don't support it and add a placeholder note instead of letting the
+  // provider reject it with a 400.
+  const requiredCaps = detectRequiredCapabilities(sanitizedRequest.messages, sanitizedRequest.tools);
+  if (requiredCaps.size > 0) {
+    const stripped = stripUnsupportedCapabilities(sanitizedRequest.messages, providerName, sanitizedRequest.model);
+    if (stripped.visionStripped || stripped.pdfStripped || stripped.audioStripped) {
+      console.log(`[Capabilities] Stripped unsupported modalities for ${providerName}/${sanitizedRequest.model}:`, stripped);
+    }
   }
 
   // Apply compression pipeline (RTK + DCP + Caveman + image dedupe + cache markers).
@@ -125,16 +141,6 @@ export async function routeRequest(
   const provider = providers[providerName];
   if (!provider) {
     throw new Error(`Provider not configured: ${providerName}`);
-  }
-
-  // Reject image requests for models that don't support vision
-  if (hasImages) {
-    const modelInfo = provider.getModelInfo(sanitizedRequest.model);
-    if (modelInfo && !modelInfo.vision) {
-      throw new Error(
-        `Model "${sanitizedRequest.model}" does not support image/vision inputs. Use a vision-capable model instead.`
-      );
-    }
   }
 
   // Try up to 3 accounts before giving up
@@ -176,7 +182,7 @@ export async function routeRequest(
           await pool.updateTokens(account.id, result.tokens);
         }
         await pool.markUsed(account.id);
-        return { result, account, provider: providerName, durationMs, compressionStats };
+        return { result, account, provider: providerName, durationMs, compressionStats, compressedRequest };
       }
 
       pool.trackRequestEnd(account.id);
@@ -255,6 +261,7 @@ export async function routeRequest(
               provider: providerName,
               durationMs: Date.now() - startTime,
               compressionStats,
+              compressedRequest,
             };
           }
           pool.trackRequestEnd(account.id);
