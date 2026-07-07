@@ -21,7 +21,7 @@ import type { NormalizedAccount, AutomationEvent } from "./automation/enowxaiAda
 // log streaming). These go through runProvider() first; others fall back to
 // the loginProvider() path. enowxai adapters are added incrementally per the
 // user directive ("follow enowxai 1:1").
-const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro"]);
+const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro", "codex"]);
 
 // Provider ids that the new TS+Camoufox automation layer supports. Logins for
 // these go through loginProvider() instead of the legacy Python subprocess.

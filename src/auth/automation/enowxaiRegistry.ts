@@ -8,6 +8,7 @@
  */
 import type { ProviderAdapter } from "./enowxaiAdapter";
 import { KiroAdapter } from "./adapters/kiroAdapter";
+import { CodexAdapter } from "./adapters/codexAdapter";
 
 const REGISTRY = new Map<string, () => ProviderAdapter>();
 
@@ -26,8 +27,8 @@ export function listAdapters(): string[] {
 
 // --- Built-in adapter registrations ---
 registerAdapter("kiro", () => new KiroAdapter());
+registerAdapter("codex", () => new CodexAdapter());
 
-// TODO (remaining enowxai adapters): codebuddy, canva, codex, qoder — each
-// implements the ProviderAdapter contract. The Kiro adapter above is the
-// reference implementation; the others follow the same shape with their
-// provider-specific authenticate/fetchTokens/fetchQuota logic.
+// TODO (remaining enowxai adapters): codebuddy (pyarmor-obfuscated — port from
+// config + device-code pattern), canva, qoder — each implements the
+// ProviderAdapter contract. Kiro + Codex above are the reference implementations.
