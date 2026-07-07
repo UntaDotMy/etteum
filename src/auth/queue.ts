@@ -621,13 +621,6 @@ class LoginQueue {
       || this.activeAccountIds.has(accountId)
       || this.retryTimers.has(accountId);
   }
-
-  private async processItem(_item: QueueItem): Promise<void> {
-    // Phase 2: per-account work moved to the Python batch runner (runBatch).
-    // Retained as a no-op so any external caller still compiles; the queue
-    // now drives batches via process() → runBatch().
-    void _item;
-  }
 }
 
 export const loginQueue = new LoginQueue();

@@ -162,7 +162,6 @@ async function launchCamoufox(opts: LaunchBrowserOptions) {
   const browser = await playwrightFirefox.launch(launchOptions);
   const profile = buildStealthProfile(stealthSeed);
   // Apply the consistency/behavioral hardening to every new context.
-  browser.on("disconnected", () => { /* cleanup hook */ });
   // Patch newContext to auto-apply stealth.
   const origNewContext = browser.newContext.bind(browser);
   const hardenedNewContext = async (ctxOpts?: import("playwright").BrowserContextOptions) => {
