@@ -19,6 +19,7 @@ import { configureCodex } from "./generators/codex";
 import { configureHermes } from "./generators/hermes";
 import { configureOpenClaw } from "./generators/openclaw";
 import { configureKilo } from "./generators/kilo";
+import { configureClaude, configureCline, configureCopilot, configureDroid, configureDeepSeekTui, configureJcode, configureCowork } from "./generators/extra-clients";
 
 // ── Generator registry ──────────────────────────────────────────
 
@@ -31,6 +32,13 @@ const GENERATORS: Record<
   hermes: configureHermes,
   openclaw: configureOpenClaw,
   kilo: configureKilo,
+  claude: configureClaude,
+  cline: configureCline,
+  copilot: configureCopilot,
+  droid: configureDroid,
+  "deepseek-tui": configureDeepSeekTui,
+  jcode: configureJcode,
+  cowork: configureCowork,
 };
 
 // ── Public API ──────────────────────────────────────────────────

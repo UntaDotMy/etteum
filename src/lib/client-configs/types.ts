@@ -8,7 +8,14 @@ export type ClientTarget =
   | "codex"
   | "hermes"
   | "openclaw"
-  | "kilo";
+  | "kilo"
+  | "claude"
+  | "cline"
+  | "copilot"
+  | "droid"
+  | "deepseek-tui"
+  | "jcode"
+  | "cowork";
 
 export interface ProxyClientModel {
   id: string;
@@ -99,5 +106,54 @@ export const CLIENT_META: Record<ClientTarget, Omit<ClientMeta, "detected" | "co
     description: "AI coding extension for VS Code",
     cli: "kilo",
     url: "https://github.com/Kilo-Org/kilocode",
+  },
+  claude: {
+    id: "claude",
+    name: "Claude Code",
+    description: "Anthropic's CLI coding agent",
+    cli: "claude",
+    url: "https://github.com/anthropics/claude-code",
+  },
+  cline: {
+    id: "cline",
+    name: "Cline",
+    description: "Autonomous coding agent for VS Code",
+    cli: "cline",
+    url: "https://github.com/cline/cline",
+  },
+  copilot: {
+    id: "copilot",
+    name: "GitHub Copilot Chat",
+    description: "GitHub Copilot Chat custom model",
+    cli: "copilot",
+    url: "https://docs.github.com/copilot",
+  },
+  droid: {
+    id: "droid",
+    name: "Droid / Factory",
+    description: "Factory Droid coding agent",
+    cli: "droid",
+    url: "https://docs.factory.ai",
+  },
+  "deepseek-tui": {
+    id: "deepseek-tui",
+    name: "DeepSeek TUI",
+    description: "DeepSeek terminal UI",
+    cli: "deepseek",
+    url: "https://github.com/deepseek-ai/DeepSeek-Coder",
+  },
+  jcode: {
+    id: "jcode",
+    name: "Jcode",
+    description: "Jcode coding agent",
+    cli: "jcode",
+    url: "https://github.com/jcode-dev/jcode",
+  },
+  cowork: {
+    id: "cowork",
+    name: "Cowork (Claude Desktop)",
+    description: "Cowork MCP via Claude Desktop config",
+    cli: "cowork",
+    url: "https://github.com/cowork",
   },
 };

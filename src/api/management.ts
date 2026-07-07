@@ -16,6 +16,7 @@ import { kv } from "../db/schema";
 import { eq, and } from "drizzle-orm";
 import { getAllModels, providers } from "../proxy/router";
 import { pool } from "../proxy/pool";
+import { invalidatePricingCache } from "../proxy/pricing";
 
 export const managementRouter = new Hono();
 
@@ -112,18 +113,22 @@ managementRouter.get("/pricing", async (c) => {
   return c.json({ pricing: await kvGet("pricing") });
 });
 managementRouter.post("/pricing", async (c) => {
-  const body = await c.req.json<{ model: string; inputPer1M?: number; outputPer1M?: number; cachedInputPer1M?: number }>();
+  const body = await c.req.json<{ model: string; inputPer1M?: number; outputPer1M?: number; cachedInputPer1M?: number; reasoningPer1M?: number; cacheCreationPer1M?: number }>();
   if (!body.model) return c.json({ error: "model required" }, 400);
   await kvSet("pricing", body.model, {
     inputPer1M: body.inputPer1M ?? 0,
     outputPer1M: body.outputPer1M ?? 0,
     cachedInputPer1M: body.cachedInputPer1M ?? 0,
+    reasoningPer1M: body.reasoningPer1M ?? 0,
+    cacheCreationPer1M: body.cacheCreationPer1M ?? 0,
     updatedAt: Date.now(),
   });
+  invalidatePricingCache();
   return c.json({ success: true });
 });
 managementRouter.delete("/pricing/:model", async (c) => {
   await kvDelete("pricing", c.req.param("model"));
+  invalidatePricingCache();
   return c.json({ success: true });
 });
 

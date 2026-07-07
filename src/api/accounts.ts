@@ -2235,6 +2235,36 @@ accountsRouter.post("/:id/warmup", async (c) => {
   return c.json({ message: "WarmUp queued", accountId: id });
 });
 
+/**
+ * F15: Consume a Codex rate-limit-reset credit to reset the rate-limit window
+ * immediately. Mirrors reference handleResetCodexLimit +
+ * /api/usage/[connectionId]/codex-reset-credits. Server-side anti-replay
+ * `redeemRequestId` prevents double-spending a credit on retry.
+ */
+accountsRouter.post("/:id/codex-reset-credits", async (c) => {
+  const id = Number(c.req.param("id"));
+  const [account] = await db.select().from(accounts).where(eq(accounts.id, id));
+  if (!account) return c.json({ error: "Account not found" }, 404);
+  if (account.provider !== "codex") {
+    return c.json({ error: "Codex reset credits only apply to codex accounts" }, 400);
+  }
+  const { providers } = await import("../proxy/router");
+  const codexProvider = providers["codex"] as any;
+  if (!codexProvider?.consumeResetCredit) {
+    return c.json({ error: "Codex provider does not support reset credits" }, 400);
+  }
+  const redeemRequestId = crypto.randomUUID();
+  const result = await codexProvider.consumeResetCredit(account, redeemRequestId);
+  if (!result.success) {
+    if (result.error === "no_credit") return c.json({ code: "no_credit", error: "No reset credits available" }, 409);
+    return c.json({ error: result.error || "Reset failed" }, 400);
+  }
+  // Invalidate pool cache so the reset is reflected immediately.
+  pool.invalidate("codex" as ProviderName);
+  broadcast({ type: "codex_reset_consumed", data: { accountId: id, remainingCredits: result.remainingCredits } });
+  return c.json({ success: true, remainingCredits: result.remainingCredits });
+});
+
 const CODEX_ISSUER = "https://auth.openai.com";
 const CODEX_TOKEN_URL = `${CODEX_ISSUER}/oauth/token`;
 const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";

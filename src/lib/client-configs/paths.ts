@@ -45,6 +45,41 @@ const CLIENT_PRIMARY_PATHS: Record<ClientTarget, Partial<Record<NodeJS.Platform,
     darwin: home(".config", "kilo", "kilo.jsonc"),
     linux: home(".config", "kilo", "kilo.jsonc"),
   },
+  claude: {
+    win32: home(".claude", "settings.json"),
+    darwin: home(".claude", "settings.json"),
+    linux: home(".claude", "settings.json"),
+  },
+  cline: {
+    win32: home(".cline", "data", "globalState.json"),
+    darwin: home(".cline", "data", "globalState.json"),
+    linux: home(".cline", "data", "globalState.json"),
+  },
+  copilot: {
+    win32: home("AppData", "Roaming", "Code", "User", "chatLanguageModels.json"),
+    darwin: home("Library", "Application Support", "Code", "User", "chatLanguageModels.json"),
+    linux: home(".config", "Code", "User", "chatLanguageModels.json"),
+  },
+  droid: {
+    win32: home(".factory", "settings.json"),
+    darwin: home(".factory", "settings.json"),
+    linux: home(".factory", "settings.json"),
+  },
+  "deepseek-tui": {
+    win32: home(".deepseek", "config.toml"),
+    darwin: home(".deepseek", "config.toml"),
+    linux: home(".deepseek", "config.toml"),
+  },
+  jcode: {
+    win32: home(".jcode", "config.toml"),
+    darwin: home(".jcode", "config.toml"),
+    linux: home(".jcode", "config.toml"),
+  },
+  cowork: {
+    win32: home("AppData", "Roaming", "Claude", "claude_desktop_config.json"),
+    darwin: home("Library", "Application Support", "Claude", "claude_desktop_config.json"),
+    linux: home(".config", "Claude", "claude_desktop_config.json"),
+  },
 };
 
 /**

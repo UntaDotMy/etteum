@@ -46,6 +46,8 @@ export interface ProviderService {
   refresh?: (refreshToken: string) => Promise<TokenSet>;
   /** Provider-specific login URL for browser automation. */
   loginUrl?: string;
+  /** Optional captcha/2FA round-trip handler for bulk-import manual items. */
+  handleManual?: (item: import("./bulkImport").ImportItem, answer: string) => Promise<void>;
 }
 
 const GOOGLE_LOGIN_URL = "https://accounts.google.com/o/oauth2/v2/auth";
@@ -112,11 +114,34 @@ const codebuddyService: ProviderService = {
   refresh: async (refreshToken) => refreshAccessToken(cfg(PROVIDERS.CODEBUDDY), refreshToken),
 };
 
-// --- CodeBuddy-CN: device-code + 5sim phone (phone automation handled in job) ---
+// --- CodeBuddy-CN: device-code + 5sim phone login (F5 phone-flow wiring) ---
 const codebuddyCnService: ProviderService = {
   provider: PROVIDERS.CODEBUDDY_CN,
   engine: "chromium",
   oauthLogin: async () => ({ ...(await runDeviceCodeFlow(cfg(PROVIDERS.CODEBUDDY_CN))) }),
+  // F5: phone-login flow — buys a 5sim number, enters it on codebuddy.cn, polls
+  // the OTP, mints an API key. The credential carries the 5sim token + optional
+  // country/product under extra fields. Falls back to device-code if no token.
+  login: async (credential, ctx) => {
+    const fiveSimToken = (credential as any).fiveSimToken || (credential as any).five_sim_token;
+    if (!fiveSimToken) {
+      // No 5sim token → fall back to device-code OAuth.
+      return { ...(await runDeviceCodeFlow(cfg(PROVIDERS.CODEBUDDY_CN))) };
+    }
+    const { runCodeBuddyCnPhoneFlow } = await import("./codebuddy-cn-phone");
+    const result = await runCodeBuddyCnPhoneFlow(ctx.browser, {
+      token: fiveSimToken,
+      country: (credential as any).country,
+      product: (credential as any).product || "codebuddy",
+    });
+    if (result.error || !result.apiKey) {
+      return { error: result.error || "Phone login failed" };
+    }
+    return {
+      tokens: { api_key: result.apiKey, access_token: result.apiKey } as any,
+      email: result.phone ? `phone-${result.phone}@codebuddy.cn` : `phone@codebuddy.cn`,
+    };
+  },
   refresh: async (refreshToken) => refreshAccessToken(cfg(PROVIDERS.CODEBUDDY_CN), refreshToken),
 };
 
@@ -279,6 +304,8 @@ export function toBulkImportAdapter(service: ProviderService): BulkImportAdapter
       }
       throw new Error(`Provider ${service.provider} has no login or oauthLogin implementation`);
     },
+    // Pass through the provider's manual-captcha handler if it defines one.
+    handleManual: service.handleManual,
   };
 }
 

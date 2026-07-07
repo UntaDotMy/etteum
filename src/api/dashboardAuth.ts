@@ -32,6 +32,7 @@ import {
   createOidcNonce,
   createPkcePair,
   getPublicOrigin,
+  shouldUseSecureCookie,
   OIDC_COOKIE_NAMES,
   checkLock,
   recordFail,
@@ -46,7 +47,9 @@ dashboardAuthRouter.get("/status", async (c) => {
   const token = getCookie(c, SESSION_COOKIE);
   const payload = await verifyDashboardAuthToken(token);
   const oidc = await getOidcRuntimeConfig();
-  const hasPassword = !!(await getStoredPasswordHash()) || true; // initial-password fallback
+  // Reflects real DB state — no `|| true`. When no password hash is stored yet,
+  // the dashboard shows its first-run / initial-password setup flow.
+  const hasPassword = !!(await getStoredPasswordHash());
   return c.json({
     authenticated: !!payload,
     user: payload ? { email: payload.email || "admin", method: payload.method || "password" } : null,
@@ -119,9 +122,12 @@ dashboardAuthRouter.get("/oidc/start", async (c) => {
   const url = await buildOidcAuthorizationUrl({ discovery, clientId: oidc.clientId, redirectUri, state, nonce, challenge, scopes: oidc.scopes });
 
   // Stash state/nonce/verifier in short-lived cookies for the callback.
-  setCookie(c, OIDC_COOKIE_NAMES.state, state, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });
-  setCookie(c, OIDC_COOKIE_NAMES.nonce, nonce, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });
-  setCookie(c, OIDC_COOKIE_NAMES.verifier, verifier, { httpOnly: true, sameSite: "lax", path: "/", maxAge: 600 });
+  // `secure` mirrors reference start/route.js:37-43 so the PKCE/nonce round-trip
+  // is never exposed over plain HTTP when the dashboard is fronted by TLS.
+  const secure = shouldUseSecureCookie(c.req.raw.headers);
+  setCookie(c, OIDC_COOKIE_NAMES.state, state, { httpOnly: true, secure, sameSite: "lax", path: "/", maxAge: 600 });
+  setCookie(c, OIDC_COOKIE_NAMES.nonce, nonce, { httpOnly: true, secure, sameSite: "lax", path: "/", maxAge: 600 });
+  setCookie(c, OIDC_COOKIE_NAMES.verifier, verifier, { httpOnly: true, secure, sameSite: "lax", path: "/", maxAge: 600 });
   return c.redirect(url);
 });
 
@@ -147,7 +153,10 @@ dashboardAuthRouter.get("/oidc/callback", async (c) => {
   if (!idToken) return c.json({ error: "OIDC provider did not return an id_token" }, 400);
   const payload = await verifyOidcIdToken(idToken, discovery, oidc.clientId);
   if (!payload) return c.json({ error: "OIDC id_token verification failed" }, 401);
-  if (nonce && payload.nonce && payload.nonce !== nonce) {
+  // Nonce is mandatory when we issued one (we always do in /oidc/start). A token
+  // omitting `nonce`, or carrying a mismatched one, is rejected — closes the
+  // bypass where an attacker-crafted token simply omits the claim.
+  if (!nonce || payload.nonce !== nonce) {
     return c.json({ error: "OIDC nonce mismatch" }, 401);
   }
   const email = pickOidcEmail(payload);

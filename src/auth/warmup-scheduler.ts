@@ -49,11 +49,20 @@ class AutoWarmupScheduler {
   /** Per-provider schedules — only contains enabled providers. */
   private schedules = new Map<string, ProviderSchedule>();
   private running = false;
+  /** F15: reset-window-aware tick timer. Probes accounts nearing their quota
+   * reset boundary (mirrors reference lastPingedResetAt + refreshAheadMs) so an
+   * exhausted account is reinstated as soon as its window rolls over, rather
+   * than waiting for the next fixed-interval tick. */
+  private resetTickTimer: ReturnType<typeof setInterval> | null = null;
+  private resetTicking = false;
 
   async start(): Promise<void> {
     if (this.running) return;
     this.running = true;
     await this.reload();
+    // F15: reset-window tick every 60s — queue only accounts due for reset.
+    this.resetTickTimer = setInterval(() => { void this.resetTick().catch(() => {}); }, 60_000);
+    if (this.resetTickTimer.unref) this.resetTickTimer.unref();
   }
 
   stop(): void {
@@ -61,8 +70,31 @@ class AutoWarmupScheduler {
       if (sched.timer) clearTimeout(sched.timer);
     }
     this.schedules.clear();
+    if (this.resetTickTimer) clearInterval(this.resetTickTimer);
+    this.resetTickTimer = null;
     this.running = false;
     this.broadcastStatus();
+  }
+
+  /** F15: probe accounts whose quota window is about to reset. */
+  private async resetTick(): Promise<void> {
+    if (this.resetTicking || !this.running) return;
+    this.resetTicking = true;
+    try {
+      const count = await warmupQueue.queueAll({ onlyDueForReset: true, resetLeadMs: 5 * 60 * 1000 });
+      if (count > 0) {
+        addAuthLog({
+          type: "warmup_reset_tick",
+          message: `Reset-window warmup queued ${count} accounts due for quota reset`,
+          data: { queued: count },
+        });
+      }
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      addAuthLog({ type: "warmup_auto_error", error: message });
+    } finally {
+      this.resetTicking = false;
+    }
   }
 
   async reload(): Promise<void> {

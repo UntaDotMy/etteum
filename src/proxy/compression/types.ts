@@ -64,6 +64,31 @@ export interface PonytailConfig {
   enabled: boolean;
 }
 
+// --- F11: output-reducing prompt injections + Headroom LLM compression ---
+
+export type CavemanInjectionLevel = "lite" | "full" | "ultra" | "wenyan-lite" | "wenyan" | "wenyan-ultra";
+export type PonytailInjectionLevel = "lite" | "full" | "ultra";
+
+export interface CavemanInjectionConfig {
+  enabled: boolean;
+  level: CavemanInjectionLevel;
+}
+
+export interface PonytailInjectionConfig {
+  enabled: boolean;
+  level: PonytailInjectionLevel;
+}
+
+export interface HeadroomConfig {
+  enabled: boolean;
+  /** URL of the headroom-ai compression proxy (default http://localhost:8787). */
+  url: string;
+  /** Compress user/assistant free-form messages, not just tool output. */
+  compressUserMessages: boolean;
+  /** Per-request timeout (ms). */
+  timeoutMs: number;
+}
+
 export interface CompressionConfig {
   rtk: RTKConfig;
   dcp: DCPConfig;
@@ -72,6 +97,12 @@ export interface CompressionConfig {
   imageDedupe: ImageDedupeConfig;
   tsc: TSCConfig;
   ponytail: PonytailConfig;
+  /** F11: output-reducing caveman prompt injection (distinct from input-side caveman). */
+  cavemanInjection: CavemanInjectionConfig;
+  /** F11: output-reducing ponytail (YAGNI-ladder) prompt injection. */
+  ponytailInjection: PonytailInjectionConfig;
+  /** F11: LLM-based whole-message compression via an external headroom-ai proxy. */
+  headroom: HeadroomConfig;
 }
 
 export type CompressionTechnique =
@@ -81,7 +112,10 @@ export type CompressionTechnique =
   | "imageDedupe"
   | "cacheMarkers"
   | "tsc"
-  | "ponytail";
+  | "ponytail"
+  | "cavemanInjection"
+  | "ponytailInjection"
+  | "headroom";
 
 export interface CompressionStats {
   /** Estimated tokens before compression. */
@@ -167,6 +201,27 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // because it is lossy (though low-risk: it never removes semantic content,
     // only the verbose scaffolding around it). Enable per-provider via settings.
     enabled: false,
+  },
+  // F11: output-reducing prompt injections. OFF by default — they change model
+  // behavior (terser output / less code), which is a user opt-in. When enabled,
+  // they APPEND to the system prompt (cache-aware) so the model emits fewer
+  // OUTPUT tokens. Distinct from the input-side caveman/ponytail above.
+  cavemanInjection: {
+    enabled: false,
+    level: "full",
+  },
+  ponytailInjection: {
+    enabled: false,
+    level: "full",
+  },
+  // F11: Headroom LLM whole-message compression. OFF by default — requires an
+  // external headroom-ai proxy running at `url`. When enabled + reachable, it
+  // compresses the conversation via Claude→OpenAI→compress→Claude round-trip.
+  headroom: {
+    enabled: false,
+    url: "http://localhost:8787",
+    compressUserMessages: false,
+    timeoutMs: 3000,
   },
 };
 

@@ -28,6 +28,8 @@ import {
   DEFAULT_COMPRESSION_CONFIG,
   DEFAULT_DCP_WHITELIST,
   type CavemanLevel,
+  type CavemanInjectionLevel,
+  type PonytailInjectionLevel,
   type CompressionConfig,
 } from "./types";
 
@@ -54,6 +56,20 @@ function parseCavemanLevel(v: string | null | undefined): CavemanLevel {
   const s = (v || "").trim().toLowerCase();
   if (s === "full" || s === "ultra") return s;
   return "lite";
+}
+
+/** Parse a caveman-injection level (6 levels incl. wenyan). Mirrors reference CAVEMAN_LEVELS. */
+function parseCavemanInjectionLevel(v: string | null | undefined): CavemanInjectionLevel {
+  const s = (v || "").trim().toLowerCase();
+  const valid = ["lite", "full", "ultra", "wenyan-lite", "wenyan", "wenyan-ultra"];
+  return (valid.includes(s) ? s : "full") as CavemanInjectionLevel;
+}
+
+/** Parse a ponytail-injection level (3 levels). */
+function parsePonytailInjectionLevel(v: string | null | undefined): PonytailInjectionLevel {
+  const s = (v || "").trim().toLowerCase();
+  if (s === "lite" || s === "ultra") return s;
+  return "full";
 }
 
 function parseStringArray(v: string | null | undefined, dflt: string[]): string[] {
@@ -142,6 +158,29 @@ async function loadFromDb(): Promise<CompressionConfig> {
     },
     ponytail: {
       enabled: parseBool(map.get("compression_ponytail_enabled"), dflt.ponytail.enabled),
+    },
+    // F11: output-reducing prompt injections + Headroom LLM compression.
+    cavemanInjection: {
+      enabled: parseBool(map.get("compression_caveman_injection_enabled"), dflt.cavemanInjection.enabled),
+      level: parseCavemanInjectionLevel(map.get("compression_caveman_injection_level")),
+    },
+    ponytailInjection: {
+      enabled: parseBool(map.get("compression_ponytail_injection_enabled"), dflt.ponytailInjection.enabled),
+      level: parsePonytailInjectionLevel(map.get("compression_ponytail_injection_level")),
+    },
+    headroom: {
+      enabled: parseBool(map.get("compression_headroom_enabled"), dflt.headroom.enabled),
+      url: map.get("compression_headroom_url")?.trim() || dflt.headroom.url,
+      compressUserMessages: parseBool(
+        map.get("compression_headroom_compress_user_messages"),
+        dflt.headroom.compressUserMessages,
+      ),
+      timeoutMs: parseInt10(
+        map.get("compression_headroom_timeout_ms"),
+        dflt.headroom.timeoutMs,
+        500,
+        30_000,
+      ),
     },
   };
 }

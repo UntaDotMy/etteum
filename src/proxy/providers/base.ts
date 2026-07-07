@@ -181,7 +181,35 @@ export abstract class BaseProvider {
       };
     }
 
-    const quota = await this.fetchQuota(account, signal);
+    let quota = await this.fetchQuota(account, signal);
+    let refreshedTokens: unknown | undefined;
+    // F15: auth-expired-retry on quota fetch. When fetchQuota fails with a
+    // 401/expired/unauthorized error AND the provider supports refresh, force a
+    // token refresh + retry the quota fetch once. Mirrors reference
+    // usage/[connectionId]/route.js:173-183 (isAuthExpiredMessage → force refresh → re-fetch).
+    if (!quota.success) {
+      const errText = (quota.error || "").toLowerCase();
+      const isAuthExpired = errText.includes("expired") || errText.includes("401") || errText.includes("unauthorized") || errText.includes("re-authorize");
+      if (isAuthExpired) {
+        try {
+          const refresh = await this.refreshToken(account);
+          if (refresh.success && refresh.tokens) {
+            let parsedTokens: unknown;
+            try { parsedTokens = typeof refresh.tokens === "string" ? JSON.parse(refresh.tokens) : refresh.tokens; }
+            catch { parsedTokens = refresh.tokens; }
+            refreshedTokens = parsedTokens;
+            // Refresh the account object's tokens in-memory for the retry fetch.
+            const refreshedAccount = { ...account, tokens: parsedTokens };
+            const retry = await this.fetchQuota(refreshedAccount as Account, signal);
+            if (retry.success) {
+              quota = retry;
+            }
+          }
+        } catch {
+          // refresh failed — fall through with the original quota error
+        }
+      }
+    }
     if (!quota.success) {
       const error = quota.error || "Quota check failed";
       const unsupported = /not support|does not support/i.test(error);
@@ -205,6 +233,7 @@ export abstract class BaseProvider {
         kind: "exhausted",
         success: true,
         quota: { ...quota.quota, source: `${this.name}.fetchQuota` },
+        ...(refreshedTokens ? { tokens: refreshedTokens } : {}),
       };
     }
 
@@ -212,6 +241,7 @@ export abstract class BaseProvider {
       kind: "healthy",
       success: true,
       quota: quota.quota ? { ...quota.quota, source: `${this.name}.fetchQuota` } : undefined,
+      ...(refreshedTokens ? { tokens: refreshedTokens } : {}),
     };
   }
 
@@ -255,6 +285,15 @@ export abstract class BaseProvider {
    * canonical internal shape; Anthropic-native providers set "anthropic".
    */
   nativeFormat: "openai" | "anthropic" = "openai";
+
+  /**
+   * F12: when true, the provider only works in streaming mode upstream. A
+   * non-streaming client request (`stream:false`) is then served by fetching
+   * the stream and assembling it into a single JSON response (forcedSseToJson).
+   * Default false; streaming-only providers opt in. Mirrors reference
+   * PROVIDERS[provider].forceStream.
+   */
+  forceStream = false;
 
   protected generateId(): string {
     return `chatcmpl-${crypto.randomUUID().replace(/-/g, "").slice(0, 24)}`;

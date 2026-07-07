@@ -44,7 +44,13 @@ describe("getProviderForModel", () => {
     ["claude-sonnet-4", "kiro"],
     ["claude-sonnet-4.5", "kiro"],
     ["claude-sonnet-4.5-thinking", "kiro"],
-    ["deepseek-3.2", "kiro"],
+    // F13: deepseek now owns the `deepseek-` prefix (API-key catalog provider).
+    ["deepseek-3.2", "deepseek"],
+    ["deepseek-chat", "deepseek"],
+    // New F13 catalog providers (prefix-routed):
+    ["openai-gpt-4o", "openai"],
+    ["groq-llama-3.3-70b-versatile", "groq"],
+    ["grok-2-latest", "grok"],
     ["glm-5", "kiro"],
     ["glm-5-thinking", "kiro"],
     ["minimax-m2.1", "kiro"],

@@ -10,6 +10,8 @@ import { GitlabDuoProvider } from "./gitlab-duo";
 import { YouMindProvider } from "./youmind";
 import { AlibabaProvider } from "./alibaba";
 import { AntigravityProvider } from "./antigravity";
+import { createOpenAICompatibleProviders } from "./openai-compatible";
+import { compatibleNodeRegistry, ensureCompatibleNodesLoaded } from "./compatible-node";
 
 /**
  * Single source of truth for the provider set.
@@ -39,15 +41,24 @@ const youmind = new YouMindProvider();
 const alibaba = new AlibabaProvider();
 const antigravity = new AntigravityProvider();
 
+// F13: API-key LLM catalog (openai, deepseek, groq, openrouter, …). Each is a
+// generic OpenAI-compatible relay instantiated from OPENAI_COMPATIBLE_CATALOG.
+const openaiCompatibleProviders = createOpenAICompatibleProviders();
+
 // Priority order. canva/qoder/codex/kiro-pro/youmind have unique prefixes; codex
 // is listed before codebuddy so the literal "gpt-5-codex" resolves to codex
 // while codebuddy keeps its own "gpt-5*"/"gpt-5.x-codex" models. byok checks
-// dynamic prefixes from DB accounts. kiro is the fallback. gitlab-duo owns
+// dynamic prefixes from DB accounts. The F13 API-key catalog is slotted before
+// byok/alibaba so their prefixes win; kiro is the fallback. gitlab-duo owns
 // `claude_(haiku|sonnet|opus)_<digit>...` underscore-style identifiers — no
 // overlap with any other provider, so position is not load-bearing. youmind
 // owns the `ym-*` prefix exclusively — also position-independent, but slotted
 // alongside the other prefix-based providers for readability.
-const PROVIDER_ORDER = [gitlabDuo, canva, qoder, codex, kiroPro, youmind, antigravity, byok, alibaba, codebuddyChina, codebuddy, kiro] as const;
+const PROVIDER_ORDER = [
+  gitlabDuo, canva, qoder, codex, kiroPro, youmind, antigravity,
+  ...openaiCompatibleProviders,
+  byok, alibaba, codebuddyChina, codebuddy, kiro,
+] as const;
 
 export const providers = {
   kiro,
@@ -62,6 +73,8 @@ export const providers = {
   youmind,
   alibaba,
   antigravity,
+  // F13: API-key catalog.
+  ...Object.fromEntries(openaiCompatibleProviders.map((p) => [p.name, p])),
 } as const;
 
 export type ProviderName = keyof typeof providers;
@@ -71,6 +84,13 @@ export function getProviderForModel(model: string): ProviderName | null {
   for (const provider of PROVIDER_ORDER) {
     if (provider.ownsModel(model)) return provider.name as ProviderName;
   }
+  // F13: dynamic compatible-node providers (user-defined, prefix-routed). These
+  // are checked AFTER the static providers but BEFORE the kiro fallback, so a
+  // user-defined node prefix wins over the catch-all but not over a built-in.
+  try {
+    const nodeProvider = compatibleNodeRegistry.getProviderForModel(model);
+    if (nodeProvider) return nodeProvider.name as ProviderName;
+  } catch { /* registry not loaded yet — fall through */ }
   const fallback = PROVIDER_ORDER.find((p) => p.isFallback);
   return (fallback?.name as ProviderName) ?? null;
 }
@@ -96,6 +116,12 @@ export async function refreshGitlabDuoModels(): Promise<void> {
 /** Refresh Alibaba's discovered model catalog from DashScope /v1/models. */
 export async function refreshAlibabaModels(): Promise<void> {
   await alibaba.refreshModelsCache();
+}
+
+/** F13: refresh dynamic compatible-node providers from the DB (call at boot + after node CRUD). */
+export async function refreshCompatibleNodes(): Promise<void> {
+  await ensureCompatibleNodesLoaded();
+  await compatibleNodeRegistry.refresh();
 }
 
 /** Get BYOK provider instance. */

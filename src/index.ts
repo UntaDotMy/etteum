@@ -14,6 +14,7 @@ import { extractApiKey } from "./utils/security";
 import { isValidApiKey, resolveApiKey } from "./api/keys";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
+import { autoRefreshScheduler } from "./auth/refresh-scheduler";
 import { db } from "./db/index";
 import { filterRules, apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
@@ -21,8 +22,10 @@ import { sql, inArray } from "drizzle-orm";
 import { PUDIDIL_FILTERS } from "./proxy/filters";
 import { loadFilterCache } from "./proxy/filter-cache";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
-import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels } from "./proxy/providers/registry";
+import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
+import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
+import { disableMitm } from "./proxy/mitm/manager";
 
 // ── Security config gate ────────────────────────────────────────────────
 const securityProblems = validateSecurityConfig();
@@ -47,6 +50,10 @@ setupLogRotation();
 
 // Run database migrations on startup
 await runMigrations();
+
+// F5: recover bulk-import jobs left running by a crash/restart (mark
+// interrupted items as error + move the job to a terminal status).
+recoverJobsOnBoot();
 
 // Seed filter rules from PUDIDIL_FILTERS if table is empty (first boot only)
 try {
@@ -165,6 +172,13 @@ try {
   console.error("[BYOK] Cache warm-up skipped:", e instanceof Error ? e.message : e);
 }
 
+// F13: load dynamic compatible-node providers so their prefixes route from boot.
+try {
+  await refreshCompatibleNodes();
+} catch (e) {
+  console.error("[CompatibleNodes] load skipped:", e instanceof Error ? e.message : e);
+}
+
 // Pre-warm GitLab Duo provider cache (model list is per-account, queried at
 // onboarding via GraphQL `aiChatAvailableModels` and stored in metadata).
 try {
@@ -188,6 +202,11 @@ try {
 
 // Start auto-warmup scheduler (reads settings from DB)
 await autoWarmupScheduler.start();
+
+// F7: start proactive token-refresh scheduler (refreshes tokens before they
+// expire; uses the F8 coordinator for dedup/lock/retry). .unref()'d internally
+// so it never keeps the process alive.
+await autoRefreshScheduler.start();
 
 // One-shot startup warmup across ALL providers (independent of the dashboard
 // auto-warmup enable flags). Syncs each account's quota/tokens with upstream
@@ -454,5 +473,15 @@ console.log(`
 ║    WS   /ws                   (real-time)        ║
 ╚══════════════════════════════════════════════════╝
 `);
+
+// F10: on shutdown, stop the MITM server + strip DNS hijack entries so the
+// IDEs' hardcoded vendor hosts resolve normally again. Best-effort.
+function gracefulShutdown(signal: string): void {
+  console.log(`\n[shutdown] ${signal} received — cleaning up MITM…`);
+  try { disableMitm(); } catch { /* best effort */ }
+  process.exit(0);
+}
+process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
+process.on("SIGINT", () => gracefulShutdown("SIGINT"));
 
 export default server;

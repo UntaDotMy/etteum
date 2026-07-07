@@ -15,7 +15,7 @@
  * Provider services plug in via a BulkImportAdapter.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, writeFileSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync, renameSync, rmSync } from "node:fs";
 import path from "node:path";
 import { broadcast } from "../../ws/index";
 import { config } from "../../config";
@@ -53,6 +53,9 @@ export interface BulkJob {
   createdAt: number;
   updatedAt: number;
   summary?: JobSummary;
+  /** Base64 JPEG screenshot of the most-recently-active worker's page (rate-limited). Mirrors reference `job.lastPreview`. */
+  lastPreview?: string;
+  previewUpdatedAt?: number;
 }
 
 export interface JobSummary {
@@ -92,9 +95,17 @@ function jobsDir(): string {
 function jobPath(jobId: string): string {
   return path.join(jobsDir(), `${jobId}.json`);
 }
+/**
+ * Atomically persist a job to disk (temp file + rename) so a crash mid-write
+ * never leaves a corrupt/truncated job file. Mirrors reference
+ * kiroBulkImportManager.js writeJsonFile (temp + renameSync).
+ */
 export function persistJob(job: BulkJob): void {
   job.updatedAt = Date.now();
-  writeFileSync(jobPath(job.id), JSON.stringify(job, null, 2));
+  const target = jobPath(job.id);
+  const tmp = `${target}.${process.pid}.tmp`;
+  writeFileSync(tmp, JSON.stringify(job, null, 2));
+  renameSync(tmp, target);
 }
 export function loadJob(jobId: string): BulkJob | null {
   try {
@@ -122,6 +133,119 @@ export function deleteJob(jobId: string): void {
 
 // --- Active job registry (in-memory) ---
 const activeJobs = new Map<string, { job: BulkJob; abort: AbortController; adapter: BulkImportAdapter }>();
+
+// --- Manual-session registry (in-memory) ---
+// When a login throws with `manual: true` (captcha/2FA), the worker keeps the
+// browser+page alive and registers it here so `openManualSession` can reveal it
+// to a human and `resumeManualSession` can drive the adapter's handleManual.
+// Mirrors reference `account.manualSession` + `runManualFollowup`.
+interface ManualSession {
+  browser: import("playwright").Browser;
+  context?: import("playwright").BrowserContext;
+  page?: import("playwright").Page;
+  opened: boolean;
+  openedAt: number | null;
+}
+const manualSessions = new Map<string, ManualSession>(); // key = `${jobId}:${itemId}`
+
+function manualKey(jobId: string, itemId: string): string {
+  return `${jobId}:${itemId}`;
+}
+
+/** Preview-capture rate limit (ms). Mirrors reference PREVIEW_CAPTURE_INTERVAL_MS. */
+const PREVIEW_CAPTURE_INTERVAL_MS = 1500;
+
+/**
+ * Capture a base64 JPEG screenshot of the currently-running item's page, if any.
+ * Rate-limited per job. Failures are swallowed (preview is best-effort). Mirrors
+ * reference kiroBulkImportManager.capturePreview.
+ */
+async function capturePreview(job: BulkJob, force = false): Promise<void> {
+  if (!force && job.previewUpdatedAt && Date.now() - job.previewUpdatedAt < PREVIEW_CAPTURE_INTERVAL_MS) {
+    return;
+  }
+  // Prefer the running item's page; fall back to a manual-awaiting page.
+  const running = job.items.find((it) => it.status === "running");
+  const target = running ?? job.items.find((it) => it.status === "manual");
+  if (!target) return;
+  const session = manualSessions.get(manualKey(job.id, target.id));
+  const page = session?.page;
+  if (!page) return;
+  try {
+    const buf = await Promise.race([
+      page.screenshot({ type: "jpeg", quality: 55, timeout: 2500 } as any),
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error("preview timeout")), 2500)),
+    ]);
+    job.lastPreview = typeof buf === "string" ? buf : Buffer.from(buf as Uint8Array).toString("base64");
+    job.previewUpdatedAt = Date.now();
+  } catch {
+    // best-effort — swallow
+  }
+}
+
+/**
+ * Reveal a manual-awaiting item's browser window to a human (captcha/2FA).
+ * Returns the page so the caller (API route) can optionally drive it. The
+ * browser stays alive until `resumeManualSession` or job completion closes it.
+ */
+export async function openManualSession(jobId: string, itemId: string): Promise<{ opened: boolean } | null> {
+  const session = manualSessions.get(manualKey(jobId, itemId));
+  if (!session) return null;
+  session.opened = true;
+  session.openedAt = Date.now();
+  // Bring the page to the foreground. For headless launches we can't un-hide,
+  // but we surface the preview so the operator can see + the API can relay
+  // input. (A full headed relaunch is provider-specific; preview + handleManual
+  // covers the captcha-answer round-trip.)
+  try {
+    await session.page?.bringToFront?.().catch(() => {});
+  } catch { /* noop */ }
+  return { opened: true };
+}
+
+/**
+ * Drive a manual (captcha/2FA) item to completion using the adapter's
+ * handleManual. Closes the browser afterwards. Mirrors reference
+ * runManualFollowup resolving on the OAuth callback.
+ */
+export async function resumeManualSession(jobId: string, itemId: string, answer: string): Promise<{ resolved: boolean; error?: string }> {
+  const active = activeJobs.get(jobId);
+  const session = manualSessions.get(manualKey(jobId, itemId));
+  if (!active || !session) return { resolved: false, error: "No active manual session for that item" };
+  const item = active.job.items.find((it) => it.id === itemId);
+  if (!item || item.status !== "manual") return { resolved: false, error: "Item is not awaiting manual input" };
+  try {
+    if (active.adapter.handleManual) {
+      await active.adapter.handleManual(item, answer);
+    }
+    item.status = "done";
+    item.error = undefined;
+    item.finishedAt = Date.now();
+    persistJob(active.job);
+    emit(active.job);
+    return { resolved: true };
+  } catch (err: any) {
+    item.status = "error";
+    item.error = err?.message || String(err);
+    item.finishedAt = Date.now();
+    persistJob(active.job);
+    emit(active.job);
+    return { resolved: false, error: item.error };
+  } finally {
+    await session.browser.close().catch(() => {});
+    manualSessions.delete(manualKey(jobId, itemId));
+  }
+}
+
+/** Close any lingering manual session (e.g. on job cancel). */
+async function closeManualSessions(jobId: string): Promise<void> {
+  for (const [key, session] of manualSessions.entries()) {
+    if (key.startsWith(`${jobId}:`)) {
+      await session.browser.close().catch(() => {});
+      manualSessions.delete(key);
+    }
+  }
+}
 
 function buildSummary(items: ImportItem[]): JobSummary {
   const s: JobSummary = { total: items.length, done: 0, error: 0, manual: 0, skipped: 0 };
@@ -227,8 +351,15 @@ async function runWorker(job: BulkJob, adapter: BulkImportAdapter, queue: Import
       stealthSeed: workerIndex + 1,
     };
     let browser: import("playwright").Browser | null = null;
+    let context: import("playwright").BrowserContext | null = null;
+    let page: import("playwright").Page | null = null;
     try {
       browser = await launchBrowser(launchOpts);
+      // Capture the active page/context so previews + manual takeover can use it.
+      try {
+        context = await browser.newContext?.().catch(() => null) ?? null;
+        page = (context ? await context.newPage().catch(() => null) : null) ?? (await browser.newPage?.().catch(() => null)) ?? null;
+      } catch { /* adapter may manage its own pages */ }
       const result = await adapter.login(item.credential, { browser, signal });
       item.status = "done";
       item.result = result;
@@ -236,8 +367,21 @@ async function runWorker(job: BulkJob, adapter: BulkImportAdapter, queue: Import
       item.status = err?.manual ? "manual" : "error";
       item.error = err?.message || String(err);
     } finally {
-      if (browser) await browser.close().catch(() => {});
-      item.finishedAt = Date.now();
+      // Keep the browser alive for manual (captcha) items so the operator can
+      // take over via openManualSession/resumeManualSession. Close otherwise.
+      if (item.status === "manual" && browser) {
+        manualSessions.set(manualKey(job.id, item.id), {
+          browser,
+          context: context ?? undefined,
+          page: page ?? undefined,
+          opened: false,
+          openedAt: null,
+        });
+        void capturePreview(job, true);
+      } else if (browser) {
+        await browser.close().catch(() => {});
+      }
+      item.finishedAt = item.status === "manual" ? undefined : Date.now();
       persistJob(job);
       emit(job);
     }
@@ -250,6 +394,8 @@ export function cancelBulkJob(jobId: string): boolean {
   if (!active) return false;
   active.abort.abort();
   active.job.status = "cancelled";
+  // Close any lingering manual-session browsers for this job.
+  void closeManualSessions(jobId);
   persistJob(active.job);
   emit(active.job);
   return true;
@@ -257,5 +403,45 @@ export function cancelBulkJob(jobId: string): boolean {
 
 /** Get a job's current state (from memory if running, else disk). */
 export function getBulkJob(jobId: string): BulkJob | null {
-  return activeJobs.get(jobId)?.job ?? loadJob(jobId);
+  const active = activeJobs.get(jobId)?.job;
+  if (active) {
+    // Refresh the preview opportunistically on read (best-effort).
+    void capturePreview(active).then(() => emit(active)).catch(() => {});
+    return active;
+  }
+  return loadJob(jobId);
+}
+
+/** Get the most recent job (by updatedAt) optionally filtered to a provider. */
+export function getLatestJob(provider?: string): BulkJob | null {
+  const jobs = listJobs();
+  const filtered = provider ? jobs.filter((j) => j.provider === provider) : jobs;
+  if (filtered.length === 0) return null;
+  return filtered.reduce((a, b) => ((b.updatedAt || 0) > (a.updatedAt || 0) ? b : a));
+}
+
+/**
+ * Recover jobs left in a non-terminal state by a crash/restart. A crashed job
+ * can't resume its in-flight browsers, so `running` items are marked `error`
+ * and the job is moved to a terminal status. `manual`-awaiting items are also
+ * marked `error` (their browsers are gone). Call once at boot.
+ */
+export function recoverJobsOnBoot(): void {
+  try {
+    for (const job of listJobs()) {
+      if (job.status === "running" || job.status === "paused") {
+        for (const item of job.items) {
+          if (item.status === "running" || item.status === "manual") {
+            item.status = "error";
+            item.error = "Interrupted by server restart";
+            item.finishedAt = Date.now();
+          }
+        }
+        job.status = resolveFinishedJobStatus(job);
+        persistJob(job);
+      }
+    }
+  } catch (err) {
+    console.error("[BulkImport] recoverJobsOnBoot failed:", err);
+  }
 }

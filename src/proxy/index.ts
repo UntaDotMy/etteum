@@ -19,10 +19,12 @@ import {
   newResponsesResponseMeta,
   type ResponsesApiRequest,
 } from "./transforms/openai-responses";
+import { forcedSseToJson } from "./transforms/forced-sse-to-json";
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
 import { estimateRequestTokens } from "./compression";
+import { calculateCost, type TokenBreakdown } from "./pricing";
 import { eq, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
 import {
@@ -65,6 +67,7 @@ async function upsertUsageSummary(entry: {
   completionTokens: number;
   totalTokens: number;
   creditsUsed: number;
+  cost: number;
   durationMs: number;
 }) {
   try {
@@ -72,11 +75,11 @@ async function upsertUsageSummary(entry: {
     bucket.setMinutes(0, 0, 0); // truncate to hour
 
     await db.run(sql`
-      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
+      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_cost, total_duration_ms)
       VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, 1,
         ${entry.status === "success" ? 1 : 0}, ${entry.status === "error" ? 1 : 0},
         ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0},
-        ${entry.creditsUsed || 0}, ${entry.durationMs || 0})
+        ${entry.creditsUsed || 0}, ${entry.cost || 0}, ${entry.durationMs || 0})
       ON CONFLICT (bucket, provider, model) DO UPDATE SET
         total_requests = usage_summary.total_requests + excluded.total_requests,
         success_requests = usage_summary.success_requests + excluded.success_requests,
@@ -85,6 +88,7 @@ async function upsertUsageSummary(entry: {
         completion_tokens = usage_summary.completion_tokens + excluded.completion_tokens,
         total_tokens = usage_summary.total_tokens + excluded.total_tokens,
         credits_used = usage_summary.credits_used + excluded.credits_used,
+        total_cost = usage_summary.total_cost + excluded.total_cost,
         total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms
     `);
   } catch (err) {
@@ -119,6 +123,7 @@ export async function recordRequest(entry: NewRequestLog) {
       completionTokens: entry.completionTokens || 0,
       totalTokens: entry.totalTokens || 0,
       creditsUsed: entry.creditsUsed || 0,
+      cost: entry.cost || 0,
       durationMs: entry.durationMs || 0,
     });
     if (++requestCounter % 10 === 0) void pruneRequestLogs();
@@ -194,10 +199,32 @@ function extractUsageFromSsePayload(payload: string) {
       completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
       totalTokens: Number(usage?.total_tokens || 0),
       creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || usage?.credit || parsed.credits_used || parsed.creditsUsed || 0),
+      cachedTokens: Number(usage?.cached_tokens || usage?.cache_read_input_tokens || 0),
+      cacheCreationTokens: Number(usage?.cache_creation_input_tokens || 0),
+      reasoningTokens: Number(usage?.reasoning_tokens || 0),
     };
   } catch {
     return null;
   }
+}
+
+/**
+ * Extract a full TokenBreakdown (incl. cached/reasoning/cache-creation) from an
+ * upstream `usage` object. Used on the non-stream path where the whole response
+ * (with `usage`) is available at once. Falls back to 0 for any missing field.
+ */
+function extractBreakdown(usage: any): TokenBreakdown {
+  if (!usage || typeof usage !== "object") {
+    return { promptTokens: 0, completionTokens: 0, totalTokens: 0, cachedTokens: 0, cacheCreationTokens: 0, reasoningTokens: 0 };
+  }
+  return {
+    promptTokens: Number(usage.prompt_tokens || usage.input_tokens || 0),
+    completionTokens: Number(usage.completion_tokens || usage.output_tokens || 0),
+    totalTokens: Number(usage.total_tokens || 0),
+    cachedTokens: Number(usage.cached_tokens || usage.cache_read_input_tokens || 0),
+    cacheCreationTokens: Number(usage.cache_creation_input_tokens || 0),
+    reasoningTokens: Number(usage.reasoning_tokens || 0),
+  };
 }
 
 /** Accumulate streamed text content across SSE chunks for token estimation */
@@ -280,7 +307,7 @@ async function logProxyError(entry: NewRequestLog, label: string) {
     // Also track errors in usage_summary
     void upsertUsageSummary({
       provider: entry.provider || "unknown", model: entry.model || "unknown", status: "error",
-      promptTokens: 0, completionTokens: 0, totalTokens: 0, creditsUsed: 0, durationMs: entry.durationMs || 0,
+      promptTokens: 0, completionTokens: 0, totalTokens: 0, creditsUsed: 0, cost: 0, durationMs: entry.durationMs || 0,
     });
     if (++requestCounter % 10 === 0) void pruneRequestLogs();
   } catch (logError) {
@@ -318,6 +345,10 @@ function wrapStreamWithUsageFinalizer(
   let completionTokens = 0;
   let totalTokens = 0;
   let upstreamCredits = 0;
+  // F6: token-breakdown accumulation for USD cost (cached/reasoning/cache-creation).
+  let cachedTokens = 0;
+  let cacheCreationTokens = 0;
+  let reasoningTokens = 0;
   let finalized = false;
   let streamError = false;
 
@@ -365,6 +396,9 @@ function wrapStreamWithUsageFinalizer(
       completionTokens = usage.completionTokens || completionTokens;
       totalTokens = usage.totalTokens || totalTokens;
       upstreamCredits = usage.creditsUsed || upstreamCredits;
+      cachedTokens = usage.cachedTokens || cachedTokens;
+      cacheCreationTokens = usage.cacheCreationTokens || cacheCreationTokens;
+      reasoningTokens = usage.reasoningTokens || reasoningTokens;
     }
   };
 
@@ -428,6 +462,18 @@ function wrapStreamWithUsageFinalizer(
           quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
         }
 
+        // F6: USD cost from per-model pricing + the accumulated token breakdown.
+        // Never throws (calculateCost catches internally); 0 when unpriced/unknown.
+        const breakdown: TokenBreakdown = {
+          promptTokens: finalPromptTokens,
+          completionTokens: finalCompletionTokens,
+          totalTokens: finalTotalTokens,
+          cachedTokens,
+          cacheCreationTokens,
+          reasoningTokens,
+        };
+        const cost = await calculateCost(context.model, breakdown).catch(() => 0);
+
         if (context.logId) {
           await db
             .update(requestLogs)
@@ -436,6 +482,7 @@ function wrapStreamWithUsageFinalizer(
               completionTokens: finalCompletionTokens,
               totalTokens: finalTotalTokens,
               creditsUsed,
+              cost,
               durationMs,
               accountQuotaAfter: quotaAfter,
             })
@@ -455,6 +502,7 @@ function wrapStreamWithUsageFinalizer(
             completionTokens: finalCompletionTokens,
             totalTokens: finalTotalTokens,
             creditsUsed,
+            cost,
             status: "success",
             durationMs,
             accountQuotaBefore: context.quotaBefore,
@@ -476,7 +524,7 @@ function wrapStreamWithUsageFinalizer(
         void upsertUsageSummary({
           provider: context.provider, model: context.model, status: "success",
           promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens,
-          totalTokens: finalTotalTokens, creditsUsed, durationMs,
+          totalTokens: finalTotalTokens, creditsUsed, cost, durationMs,
         });
         if (++requestCounter % 10 === 0) void pruneRequestLogs();
       } catch (error) {
@@ -525,13 +573,38 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
   const isStream = body.stream === true;
-  const { result, account, provider, durationMs, compressionStats, compressedRequest } = await routeRequest(body, isStream);
+  // F12: if the client wants non-stream but the provider is streaming-only,
+  // fetch the stream upstream and assemble it into a single JSON response.
+  // Resolve the provider name from the model to check forceStream before the
+  // routeRequest call (which is where `provider` is normally assigned).
+  const preProviderName = pool.getProviderForModel(body.model);
+  const providerForceStream = !!(preProviderName && (providers as any)[preProviderName]?.forceStream);
+  const effectiveStream = isStream || providerForceStream;
+  const { result, account, provider, durationMs, compressionStats, compressedRequest } = await routeRequest(body, effectiveStream);
   let shouldReleaseTracking = true;
 
   try {
+    // F12: forced SSE→JSON — assemble the stream into a single response object
+    // for a non-streaming client that hit a streaming-only provider.
+    if (!isStream && providerForceStream && result.success && result.stream) {
+      try {
+        result.response = await forcedSseToJson(result.stream, body.model);
+        result.stream = undefined;
+      } catch {
+        return {
+          result: { success: false, error: "Invalid SSE response from streaming-only provider" } as any,
+          account, provider, durationMs, compressionStats, compressedRequest,
+        };
+      }
+    }
     const promptTokens = result.promptTokens || result.response?.usage?.prompt_tokens || estimateMessagesTokens(body.messages);
     const completionTokens = result.completionTokens || result.response?.usage?.completion_tokens || 0;
     const totalTokens = result.tokensUsed || result.response?.usage?.total_tokens || promptTokens + completionTokens;
+    // Full token breakdown (cached/reasoning/cache-creation) for USD cost.
+    const breakdown = extractBreakdown(result.response?.usage);
+    breakdown.promptTokens = promptTokens;
+    breakdown.completionTokens = completionTokens;
+    breakdown.totalTokens = totalTokens;
 
   const { creditsUsed, creditSource } = computeCredits(
     provider,
@@ -540,6 +613,8 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     result.creditsUsed,
     result.creditSource
   );
+  // F6: USD cost from per-model pricing. Never throws; 0 when unpriced/unknown.
+  const cost = await calculateCost(body.model, breakdown).catch(() => 0);
 
     // Qoder: server IS the source of truth, but we now also decrement the
     // local `freeRemaining` counter optimistically for free-bucket models
@@ -578,6 +653,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     completionTokens,
     totalTokens,
     creditsUsed,
+    cost,
     status: "success" as const,
     durationMs,
     requestBody: prepareLogBody({
@@ -632,7 +708,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Upsert to usage_summary + periodic prune
   void upsertUsageSummary({
     provider, model: body.model, status: "success",
-    promptTokens, completionTokens, totalTokens, creditsUsed, durationMs,
+    promptTokens, completionTokens, totalTokens, creditsUsed, cost, durationMs,
   });
   if (++requestCounter % 10 === 0) void pruneRequestLogs();
 

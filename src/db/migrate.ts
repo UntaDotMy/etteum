@@ -64,6 +64,22 @@ export async function runMigrations() {
 
   // Always run idempotent column-add migrations (works on fresh deploys without drizzle/).
   await runIdempotentColumns();
+
+  // F13: ensure the provider_nodes table exists (dynamic compatible-node providers).
+  try {
+    await db.run(sql.raw(`
+      CREATE TABLE IF NOT EXISTS provider_nodes (
+        id text PRIMARY KEY NOT NULL,
+        type text NOT NULL,
+        name text NOT NULL,
+        data text NOT NULL,
+        created_at integer NOT NULL,
+        updated_at integer NOT NULL
+      )
+    `));
+  } catch (err) {
+    console.error("[DB] provider_nodes table creation skipped:", err);
+  }
 }
 
 // Run if called directly

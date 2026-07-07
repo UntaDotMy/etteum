@@ -1,6 +1,6 @@
 import { db } from "../db/index";
 import { accounts } from "../db/schema";
-import { and, eq, inArray } from "drizzle-orm";
+import { and, eq, inArray, lte, isNotNull } from "drizzle-orm";
 import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
 import { warmupAccount, type WarmupResult } from "./warmup-runner";
@@ -25,6 +25,17 @@ export interface WarmupAllOptions {
   providers?: string[];
   statuses?: string[];
   includePending?: boolean;
+  /**
+   * F15: when true, only queue accounts whose quotaResetAt is within the reset
+   * lead window (about to reset) OR has just passed (already due). Mirrors the
+   * reference's reset-window-aware warmup (lastPingedResetAt + refreshAheadMs):
+   * warmup right around the provider's reset boundary so an exhausted account
+   * is reinstated + re-probed as soon as its window rolls over, instead of
+   * waiting for the next fixed-interval tick.
+   */
+  onlyDueForReset?: boolean;
+  /** Reset lead window in ms (only used when onlyDueForReset). Default 5 min. */
+  resetLeadMs?: number;
 }
 
 class WarmupQueue {
@@ -152,10 +163,27 @@ class WarmupQueue {
         ? ["active", "exhausted", "error", "pending"]
         : ["active", "exhausted", "error"];
 
+    const conditions = [
+      inArray(accounts.provider, providers),
+      inArray(accounts.status, statuses),
+    ];
+
+    // F15: reset-window-aware selection. When onlyDueForReset is set, limit to
+    // accounts whose quotaResetAt is within the lead window (about to reset) —
+    // so warmup runs right around the provider's reset boundary and an
+    // exhausted account is reinstated + re-probed as soon as its window rolls
+    // over, rather than on a fixed interval. Mirrors reference lastPingedResetAt.
+    if (options.onlyDueForReset) {
+      const leadMs = options.resetLeadMs ?? 5 * 60 * 1000;
+      const horizon = new Date(Date.now() + leadMs);
+      conditions.push(isNotNull(accounts.quotaResetAt));
+      conditions.push(lte(accounts.quotaResetAt, horizon));
+    }
+
     const rows = await db
       .select({ id: accounts.id })
       .from(accounts)
-      .where(and(inArray(accounts.provider, providers), inArray(accounts.status, statuses)));
+      .where(and(...conditions));
 
     const ids = rows.map((row) => row.id);
     await this.enqueueBulk(ids);

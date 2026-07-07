@@ -296,11 +296,32 @@ export const kv = sqliteTable("kv", {
   uniqueIndex("kv_scope_key_idx").on(table.scope, table.key),
 ]);
 
+/**
+ * F13: dynamic compatible-node providers — user-defined OpenAI/Anthropic-
+ * compatible endpoints added at runtime via the dashboard, resolved by model
+ * prefix (mirrors reference providerNodes + nodesRepo). Each node carries its
+ * own baseUrl + apiType + prefix + models, so a user can add e.g. a local
+ * Ollama or a third-party relay without writing a provider class.
+ *
+ * `data` JSON holds: { name, prefix, type ("openai-compatible"|"anthropic-compatible"|"custom-embedding"),
+ *   baseUrl, apiType, models[], headers? }.
+ */
+export const providerNodes = sqliteTable("provider_nodes", {
+  id: text("id").primaryKey(), // user-supplied node id (also the routing key)
+  type: text("type").notNull(), // "openai-compatible" | "anthropic-compatible" | "custom-embedding"
+  name: text("name").notNull(),
+  data: text("data", { mode: "json" }).notNull(), // { prefix, baseUrl, apiType, models[], headers? }
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+});
+
 // Type exports
 export type Combo = typeof combos.$inferSelect;
 export type NewCombo = typeof combos.$inferInsert;
 export type Account = typeof accounts.$inferSelect;
 export type NewAccount = typeof accounts.$inferInsert;
+export type ProviderNode = typeof providerNodes.$inferSelect;
+export type NewProviderNode = typeof providerNodes.$inferInsert;
 export type RequestLog = typeof requestLogs.$inferSelect;
 export type NewRequestLog = typeof requestLogs.$inferInsert;
 export type Setting = typeof settings.$inferSelect;

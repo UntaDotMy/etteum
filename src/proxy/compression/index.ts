@@ -24,6 +24,8 @@ import { applyCacheMarkers } from "./cache-markers";
 import { applyImageDedupe } from "./image-dedupe";
 import { applyTSC } from "./tsc";
 import { applyPonytail } from "./ponytail";
+import { applyInjections } from "./injection";
+import { applyHeadroom } from "./headroom";
 import { estimateRequestTokens } from "./token-estimate";
 
 export type { CompressionConfig, CompressionStats, CompressionTechnique } from "./types";
@@ -94,21 +96,32 @@ export function compressRequest(
     current = r.request;
   }
 
-  // 4. Caveman
+  // 4. Caveman (input-side system-prompt compaction)
   if (cfg.caveman.enabled) {
     const r = applyCaveman(current, cfg.caveman);
     if (r.saved > 0) byTechnique.caveman = charsToTokens(r.saved);
     current = r.request;
   }
 
-  // 5. Image dedupe
+  // 5. F11: Output-reducing prompt injections (caveman + ponytail). These
+  //    APPEND to the system prompt (cache-aware) to make the model emit fewer
+  //    OUTPUT tokens. saved=0 (input grows slightly; savings realized upstream
+  //    on the response). Tracked in byTechnique so the dashboard knows it ran.
+  if (cfg.cavemanInjection.enabled || cfg.ponytailInjection.enabled) {
+    const r = applyInjections(current, cfg.cavemanInjection, cfg.ponytailInjection, providerName);
+    if (cfg.cavemanInjection.enabled) byTechnique.cavemanInjection = 0;
+    if (cfg.ponytailInjection.enabled) byTechnique.ponytailInjection = 0;
+    current = r.request;
+  }
+
+  // 6. Image dedupe
   if (cfg.imageDedupe.enabled) {
     const r = applyImageDedupe(current, cfg.imageDedupe);
     if (r.saved > 0) byTechnique.imageDedupe = charsToTokens(r.saved);
     current = r.request;
   }
 
-  // 6. Cache markers (structural only — saved=0)
+  // 7. Cache markers (structural only — saved=0)
   if (cfg.cacheMarkers.enabled) {
     const r = applyCacheMarkers(current, cfg.cacheMarkers, providerName);
     current = r.request;

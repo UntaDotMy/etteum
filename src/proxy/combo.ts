@@ -25,7 +25,7 @@ import type { RouteResult } from "./router";
 import { routeRequest } from "./router";
 import type { ChatCompletionRequest } from "./providers/base";
 import { getProviderForModel } from "./providers/registry";
-import { routeComboFusion } from "./fusion";
+import { routeComboFusion, routeComboFusionWithJudge } from "./fusion";
 
 // ─── Settings helpers ──────────────────────────────────────────────────────────
 
@@ -158,6 +158,12 @@ export async function routeCombo(options: ComboRoutingOptions): Promise<RouteRes
     : reorderByCapabilitiesLocal(models);
 
   if (strategy === "fusion") {
+    const judgeModel = strategies[comboName]?.judgeModel;
+    // F12: when a judge model is configured, use judge-fusion (collect all
+    // responses, judge picks the best). Otherwise race semantics (first wins).
+    if (judgeModel) {
+      return routeComboFusionWithJudge({ request, comboName, models: orderedModels, judgeModel });
+    }
     return routeComboFusion({ request, comboName, models: orderedModels });
   }
 

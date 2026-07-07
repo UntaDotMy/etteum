@@ -7,10 +7,14 @@ import type { Account } from "../db/schema";
 import {
   compressRequest,
   getCompressionConfig,
+  estimateRequestTokens,
   type CompressionStats,
 } from "./compression";
+import { applyHeadroom } from "./compression/headroom";
 import { expandComboRequest, routeCombo } from "./combo";
 import { detectRequiredCapabilities, stripUnsupportedCapabilities } from "./capabilities";
+import { coordinatedRefresh, invalidateRefreshDedup } from "../auth/refresh-coordinator";
+import { execute } from "./executor";
 
 export interface RouteResult {
   result: ProviderResult;
@@ -131,9 +135,29 @@ export async function routeRequest(
   let compressionStats: CompressionStats | undefined;
   try {
     const cfg = await getCompressionConfig();
-    const out = compressRequest(sanitizedRequest, cfg, providerName);
+    // F11: Headroom LLM whole-message compression (async, fail-open). Runs
+    // BEFORE the synchronous pipeline so the sync stages compress an already-
+    // smaller conversation. Never blocks — on any error the original request
+    // passes through to compressRequest unchanged.
+    let headroomRequest = sanitizedRequest;
+    let headroomSaved = 0;
+    if (cfg.headroom.enabled) {
+      const hr = await applyHeadroom(sanitizedRequest, cfg.headroom, estimateRequestTokens).catch(() => ({
+        request: sanitizedRequest, saved: 0, applied: false,
+      }));
+      headroomRequest = hr.request;
+      headroomSaved = hr.saved;
+    }
+    const out = compressRequest(headroomRequest, cfg, providerName);
     compressedRequest = out.request;
     compressionStats = out.stats;
+    if (headroomSaved > 0) {
+      compressionStats.byTechnique.headroom = headroomSaved;
+      compressionStats.saved += headroomSaved;
+      compressionStats.tokensAfter = Math.max(0, compressionStats.tokensAfter - headroomSaved);
+      const before = compressionStats.tokensBefore;
+      compressionStats.savedPct = before > 0 ? Math.round(((compressionStats.saved / before) * 10000)) / 100 : 0;
+    }
   } catch (err) {
     console.error("[Compression] Failed, passing request through unchanged:", err);
   }
@@ -176,9 +200,9 @@ export async function routeRequest(
     try {
       pool.trackRequestStart(account.id);
       tracked = true;
-      const result = stream
-        ? await provider.chatCompletionStream(account, compressedRequest)
-        : await provider.chatCompletion(account, compressedRequest);
+      // F12: dispatch through the shared executor (per-status retry + Codex
+      // SSE-peek for 200-OK overload errors + uniform reclassification).
+      const result = await execute({ provider, providerName, account, request: compressedRequest, stream });
 
       const durationMs = Date.now() - startTime;
 
@@ -252,27 +276,23 @@ export async function routeRequest(
         continue; // Try next account
       }
 
-      // Handle token refresh for expired/401 errors
+      // Handle token refresh for expired/401 errors.
+      // F8: route through the refresh coordinator (dedup + per-account lock +
+      // retry/backoff + unrecoverable-error classification) so concurrent 401s
+      // on the same account coalesce instead of racing on token rotation.
       if (
         result.error?.includes("expired") ||
         result.error?.includes("401")
       ) {
-        const refreshResult = await provider.refreshToken(account);
+        const refreshResult = await coordinatedRefresh(provider, account);
         if (refreshResult.success && refreshResult.tokens) {
-          // Parse tokens string to store as jsonb
-          let parsedTokens: unknown;
-          try {
-            parsedTokens = JSON.parse(refreshResult.tokens);
-          } catch {
-            parsedTokens = refreshResult.tokens;
-          }
-          await pool.updateTokens(account.id, parsedTokens);
+          // tokens is already parsed (object) from the coordinator.
+          await pool.updateTokens(account.id, refreshResult.tokens);
+          invalidateRefreshDedup(account, providerName);
           // Retry with same account after refresh
           pool.trackRequestStart(account.id);
           tracked = true;
-          const retryResult = stream
-            ? await provider.chatCompletionStream(account, compressedRequest)
-            : await provider.chatCompletion(account, compressedRequest);
+          const retryResult = await execute({ provider, providerName, account, request: compressedRequest, stream });
 
           if (retryResult.success) {
             await pool.markUsed(account.id);
@@ -291,22 +311,28 @@ export async function routeRequest(
           // might work on next request after propagation).
           await pool.markTransientFailure(account.id, result.error || "Auth failed");
         } else {
-          // Provider doesn't support token refresh (e.g. codebuddy,
-          // codebuddy-china, canva use static keys / browser cookies).
-          // "Session expired" means the credential is genuinely dead —
-          // mark as error so the account is excluded from the pool and
-          // only reinstated after a manual re-login or warmup confirms
-          // it's healthy again. Keeping it "active" would cause every
-          // subsequent request to hit the same dead account.
-          const refreshErrorMsg = refreshResult.error || "";
-          const noRefresh = refreshErrorMsg.includes("re-login") ||
-            refreshErrorMsg.includes("no refresh") ||
-            refreshErrorMsg.includes("static") ||
-            refreshErrorMsg.includes("browser");
-          if (noRefresh) {
-            await pool.markError(account.id, result.error || "Session expired — re-login required");
+          // F8: unrecoverable refresh errors (invalid_grant / reused refresh
+          // token) mean the credential is permanently dead → disable account.
+          if (refreshResult.unrecoverable) {
+            await pool.markError(account.id, refreshResult.error || "Token unrecoverable — re-login required");
           } else {
-            await pool.markTransientFailure(account.id, result.error || "Auth failed");
+            // Provider doesn't support token refresh (e.g. codebuddy,
+            // codebuddy-china, canva use static keys / browser cookies).
+            // "Session expired" means the credential is genuinely dead —
+            // mark as error so the account is excluded from the pool and
+            // only reinstated after a manual re-login or warmup confirms
+            // it's healthy again. Keeping it "active" would cause every
+            // subsequent request to hit the same dead account.
+            const refreshErrorMsg = refreshResult.error || "";
+            const noRefresh = refreshErrorMsg.includes("re-login") ||
+              refreshErrorMsg.includes("no refresh") ||
+              refreshErrorMsg.includes("static") ||
+              refreshErrorMsg.includes("browser");
+            if (noRefresh) {
+              await pool.markError(account.id, result.error || "Session expired — re-login required");
+            } else {
+              await pool.markTransientFailure(account.id, result.error || "Auth failed");
+            }
           }
         }
         lastError = result.error || "Auth failed";

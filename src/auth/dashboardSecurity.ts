@@ -213,11 +213,14 @@ export async function verifyOidcIdToken(idToken: string, discovery: any, clientI
     if (payload.iss !== discovery.issuer) return null;
     if (payload.exp && Math.floor(Date.now() / 1000) >= payload.exp) return null;
     // Fetch JWKS and verify with the matching key.
+    // FAIL-CLOSED: any inability to fetch JWKS, find the matching key, or verify
+    // the signature returns null (no session) — never the unverified payload.
+    // Mirrors reference oidc.js:212-226 where jose jwtVerify throws → /login?error.
     const jwksRes = await fetch(discovery.jwks_uri, { headers: { accept: "application/json" } });
-    if (!jwksRes.ok) return payload; // can't verify signature — return claims but caller should treat as unverified
+    if (!jwksRes.ok) return null; // JWKS unreachable → refuse login
     const jwks = (await jwksRes.json()) as any;
     const key = jwks.keys?.find((k: any) => k.kid === header.kid);
-    if (!key) return payload;
+    if (!key) return null; // no key for token's kid → refuse login
     const cryptoKey = await crypto.subtle.importKey("jwk", key as any, { name: "RSASSA-PKCS1-v1_5", hash: header.alg === "RS256" ? "SHA-256" : "SHA-384" }, false, ["verify"]);
     const sigBytes = new Uint8Array(base64urlDecode(sigB64));
     const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", cryptoKey, sigBytes, new TextEncoder().encode(`${headerB64}.${payloadB64}`));

@@ -103,7 +103,11 @@ export const PROVIDER_OAUTH: Record<string, OAuthConfig> = {
     ...GOOGLE_OAUTH_CLIENT,
     authorizeUrl: "https://accounts.google.com/o/oauth2/v2/auth",
     tokenUrl: "https://oauth2.googleapis.com/token",
-    scopes: ["https://www.googleapis.com/auth/cloud-platform"],
+    scopes: [
+      "https://www.googleapis.com/auth/cloud-platform",
+      "https://www.googleapis.com/auth/userinfo.email",
+      "https://www.googleapis.com/auth/userinfo.profile",
+    ],
   },
   codebuddy: {
     provider: "codebuddy",
@@ -148,9 +152,11 @@ export const PROVIDER_OAUTH: Record<string, OAuthConfig> = {
   github: {
     provider: "github",
     flow: "device_code",
-    clientId: "Iv1.b50d6e7c43d6dbd6",
-    authorizeUrl: "https://github.com/login/device/code",
+    clientId: "Iv1.b507a08c87ecfe98",
+    authorizeUrl: "https://github.com/login/oauth/authorize",
+    deviceCodeUrl: "https://github.com/login/device/code",
     tokenUrl: "https://github.com/login/oauth/access_token",
+    scope: "read:user",
   },
   kiro: {
     provider: "kiro",
