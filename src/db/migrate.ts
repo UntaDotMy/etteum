@@ -24,6 +24,8 @@ const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> 
   // 2026-07-06 — request detail storage (compressed body + per-technique savings)
   { table: "request_logs", column: "compressed_request_body", ddl: "ALTER TABLE request_logs ADD COLUMN compressed_request_body TEXT" },
   { table: "request_logs", column: "savings_by_technique",    ddl: "ALTER TABLE request_logs ADD COLUMN savings_by_technique TEXT" },
+  // 2026-07-07 — sticky response-id pinning (previous_response_id → account)
+  { table: "request_logs", column: "response_id", ddl: "ALTER TABLE request_logs ADD COLUMN response_id TEXT" },
 ];
 
 function tableHasColumn(table: string, column: string): boolean {

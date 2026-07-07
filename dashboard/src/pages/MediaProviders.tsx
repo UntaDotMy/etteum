@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, useEffect } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -30,6 +30,12 @@ export default function MediaProviders() {
       return Array.isArray(j) ? j : j.accounts || [];
     },
   );
+
+  // Vendor catalog from the backend (the ~20 supported media providers).
+  const [catalog, setCatalog] = useState<Array<{ id: string; name: string; serviceKinds: string[]; category: string }>>([]);
+  useEffect(() => {
+    fetch("/api/media/catalog").then((r) => r.json()).then((j) => setCatalog(j.providers || [])).catch(() => {});
+  }, []);
 
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
   const [apiKey, setApiKey] = useState("");
@@ -90,6 +96,28 @@ export default function MediaProviders() {
           );
         })}
       </div>
+
+      <Card>
+        <CardHeader>
+          <CardTitle className="text-base">Supported Media Vendors</CardTitle>
+          <CardDescription>Built-in catalog — register an API key for any of these to enable that modality</CardDescription>
+        </CardHeader>
+        <CardContent>
+          <div className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-2">
+            {catalog.map((v) => (
+              <div key={v.id} className="text-xs border rounded p-2">
+                <div className="font-medium">{v.name}</div>
+                <div className="flex flex-wrap gap-1 mt-1">
+                  {v.serviceKinds.map((m) => (
+                    <span key={m} className="text-[10px] px-1.5 py-0.5 rounded bg-muted">{m}</span>
+                  ))}
+                </div>
+                <div className="text-[10px] text-muted-foreground mt-1">{v.category}</div>
+              </div>
+            ))}
+          </div>
+        </CardContent>
+      </Card>
 
       <Card>
         <CardHeader>

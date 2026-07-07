@@ -29,6 +29,7 @@ const Translator = lazy(() => import("./pages/Translator"));
 const MediaProviders = lazy(() => import("./pages/MediaProviders"));
 const LiveConsole = lazy(() => import("./pages/LiveConsole"));
 const Skills = lazy(() => import("./pages/Skills"));
+const SecurityProfile = lazy(() => import("./pages/SecurityProfile"));
 
 function RouteFallback() {
   return <div className="flex h-64 items-center justify-center text-sm text-[var(--muted-foreground)]">Loading...</div>;
@@ -100,6 +101,7 @@ export default function App() {
           <Route path="/media" element={<MediaProviders />} />
           <Route path="/console" element={<LiveConsole />} />
           <Route path="/skills" element={<Skills />} />
+          <Route path="/security" element={<SecurityProfile />} />
           <Route path="/oauth/codex/callback" element={<CodexOAuthCallback />} />
         </Route>
       </Routes>

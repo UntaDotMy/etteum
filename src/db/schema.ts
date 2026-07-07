@@ -89,6 +89,10 @@ export const requestLogs = sqliteTable("request_logs", {
   // Estimated USD cost of this request, computed from per-model pricing.
   // null when pricing is unknown. Additive — creditsUsed (credits) is preserved.
   cost: real("cost"),
+  // The upstream response id (e.g. Codex/OpenAI-Responses `id` field). Enables
+  // sticky response-id pinning: a follow-up request carrying previous_response_id
+  // is routed back to the account that created that response.
+  responseId: text("response_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),
@@ -97,6 +101,7 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_provider_model_status_idx").on(table.provider, table.model, table.status),
   index("request_logs_account_idx").on(table.accountId),
   index("request_logs_api_key_idx").on(table.apiKeyId),
+  index("request_logs_response_id_idx").on(table.responseId),
 ]);
 
 export const settings = sqliteTable("settings", {

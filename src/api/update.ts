@@ -28,6 +28,7 @@ const projectRoot = path.resolve(import.meta.dir, "../..");
 // from origin/HEAD at runtime, with a hard fallback chain, so it survives
 // upstream renames and never crashes if origin/HEAD is unset.
 let _fetchBranch: string | null = null;
+import { adminGuard } from "../utils/security";
 function fetchBranch(): string {
   if (_fetchBranch) return _fetchBranch;
   const r = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
@@ -372,6 +373,13 @@ updateRouter.get("/status", (c) => {
 });
 
 updateRouter.post("/apply", async (c) => {
+  // Access-control: this endpoint runs git pull + rebuild + migrate + restart
+  // (remote code execution). Restrict to local origin OR a machine-bound CLI
+  // admin token — a leaked API key alone must NOT be able to trigger it.
+  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) {
+    return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
+  }
   // Require explicit confirmation to prevent accidental triggers (this endpoint
   // runs git pull + rebuild + restart on the live install).
   let body: { confirm?: boolean } = {};

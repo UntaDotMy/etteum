@@ -11,12 +11,26 @@
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { registerSession, unregisterSession, sendToChild, findPlugin, listPlugins } from "./stdioSseBridge";
+import { DEFAULT_REMOTE_PLUGINS, buildManagedMcpServers } from "./marketplace";
 
 export const mcpRouter = new Hono();
 
 /** GET /v1/mcp/plugins — list preset MCP plugins and their run state. */
 mcpRouter.get("/v1/mcp/plugins", (c) => {
   return c.json({ plugins: listPlugins() });
+});
+
+/** GET /v1/mcp/marketplace — list available remote + local MCP plugins. */
+mcpRouter.get("/v1/mcp/marketplace", (c) => {
+  return c.json({
+    remote: DEFAULT_REMOTE_PLUGINS,
+    local: listPlugins(),
+  });
+});
+
+/** GET /v1/mcp/managed-servers — emit the managedMcpServers config for clients. */
+mcpRouter.get("/v1/mcp/managed-servers", (c) => {
+  return c.json({ managedMcpServers: buildManagedMcpServers() });
 });
 
 /** GET /v1/mcp/:plugin/sse — SSE stream bridging the plugin's JSON-RPC stdout. */

@@ -13,6 +13,15 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
+import { runProvider } from "./automation/enowxaiAdapter";
+import { getAdapter } from "./automation/enowxaiRegistry";
+import type { NormalizedAccount, AutomationEvent } from "./automation/enowxaiAdapter";
+
+// Provider ids that use the enowxai adapter architecture (Camoufox + browser-
+// log streaming). These go through runProvider() first; others fall back to
+// the loginProvider() path. enowxai adapters are added incrementally per the
+// user directive ("follow enowxai 1:1").
+const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro"]);
 
 // Provider ids that the new TS+Camoufox automation layer supports. Logins for
 // these go through loginProvider() instead of the legacy Python subprocess.
@@ -691,6 +700,80 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       data: { logId: log.id, id: account.id, email: account.email, provider, error: errorMsg },
     });
     return { success: false, error: errorMsg };
+  }
+
+  // --- Native TS+Camoufox automation path (Wave 3 migration) ---
+  // --- enowxai adapter architecture (1:1 Camoufox + browser-log stream) ---
+  // Providers with an enowxai adapter go through runProvider(), which drives
+  // the ProviderAdapter contract and emits browser-log events. Those events
+  // are bridged to the dashboard WebSocket (the "Browser Log" live viewer).
+  if (ENOWXAI_ADAPTER_PROVIDERS.has(provider)) {
+    const adapter = getAdapter(provider);
+    if (adapter) {
+      const password = decrypt(account.password);
+      const proxy = await getNextProxy("auth");
+      if (proxy?.url) (adapter as any).proxyUrl = proxy.url;
+      const startLog = addAuthLog({
+        type: "login_progress",
+        accountId: account.id,
+        email: account.email,
+        provider,
+        step: "starting",
+        message: `Starting ${provider} login (enowxai + Camoufox) for ${account.email}...`,
+      });
+      broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
+
+      // Bridge the enowxai emit() stream → dashboard WebSocket + auth log.
+      const emit = (ev: AutomationEvent) => {
+        if (ev.type === "progress") {
+          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
+          broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: ev.step, message: ev.message } });
+        } else if (ev.type === "manual_challenge") {
+          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "manual_challenge", message: ev.message });
+          broadcast({ type: "manual_challenge", data: { id: account.id, email: account.email, provider, challengeType: ev.challengeType, message: ev.message } });
+        } else if (ev.type === "error") {
+          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "error", message: ev.error });
+          broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: "error", message: ev.error } });
+        }
+      };
+
+      try {
+        const normalized: NormalizedAccount = { provider, identifier: account.email, secret: password };
+        const result = await runProvider(adapter, normalized, emit, { maxRetries: 3 });
+        if (!result.success) {
+          await markAccountError(account.id, result.error);
+          const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: result.error, message: result.error });
+          broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error } });
+          return { success: false, error: result.error };
+        }
+        const providerResult: ProviderResult = {
+          success: true,
+          provider,
+          credentials: {
+            access_token: String(result.credentials.access_token || ""),
+            refresh_token: String(result.credentials.refresh_token || ""),
+            id_token: String(result.credentials.id_token || ""),
+            profile_arn: String((result.credentials as any).profile_arn || ""),
+          },
+          quota: result.quota ? {
+            remaining_credits: (result.quota as any).remaining_credits,
+            total_credits: (result.quota as any).total_credits,
+            credit_capacity_remain: (result.quota as any).credit_capacity_remain,
+            credit_capacity_size: (result.quota as any).credit_capacity_size,
+          } : undefined,
+        };
+        await applyProviderResult(account, provider, password, providerResult);
+        const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (enowxai)` });
+        broadcast({ type: "login_success", data: { logId: okLog.id, id: account.id, email: account.email, provider } });
+        return { success: true };
+      } catch (err: any) {
+        const errorMsg = err?.message || String(err);
+        await markAccountError(account.id, errorMsg);
+        const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: errorMsg, message: errorMsg });
+        broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: errorMsg } });
+        return { success: false, error: errorMsg };
+      }
+    }
   }
 
   // --- Native TS+Camoufox automation path (Wave 3 migration) ---

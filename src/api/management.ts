@@ -16,6 +16,7 @@ import { kv } from "../db/schema";
 import { eq, and } from "drizzle-orm";
 import { getAllModels, providers } from "../proxy/router";
 import { pool } from "../proxy/pool";
+import { adminGuard } from "../utils/security";
 import { invalidatePricingCache } from "../proxy/pricing";
 
 export const managementRouter = new Hono();
@@ -134,6 +135,9 @@ managementRouter.delete("/pricing/:model", async (c) => {
 
 // --- Config sync (merge-to-target: export/import configuration) ---
 managementRouter.get("/sync/export", async (c) => {
+  // Export can include provider config/secrets → admin-guard it.
+  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const [customModels, disabledModels, pricing] = await Promise.all([
     kvGet("customModels"), kvGet("disabledModels"), kvGet("pricing"),
   ]);
@@ -160,6 +164,9 @@ managementRouter.get("/tunnel/status", async (c) => {
   });
 });
 managementRouter.post("/tunnel/enable", async (c) => {
+  // Tunnel enable may spawn a sidecar process → admin-guard it.
+  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ provider: "cloudflare" | "tailscale"; token?: string }>().catch(() => ({}) as any);
   if (!body?.provider) return c.json({ error: "provider required (cloudflare|tailscale)" }, 400);
   // Tunnel provisioning is environment-dependent; we record the intent and
@@ -188,4 +195,34 @@ managementRouter.get("/system/specs", (c) => {
     rssBytes: mem,
     uptime: Math.floor(process.uptime()),
   });
+});
+
+// --- Settings upsert (for dashboard config like oidc_config) ---
+// Generic key/value settings store (mirrors 9router settings). Admin-guarded
+// because oidc_config can carry a client secret.
+managementRouter.post("/settings", async (c) => {
+  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
+  const body = await c.req.json<{ key: string; value: string }>();
+  if (!body.key) return c.json({ error: "key required" }, 400);
+  const { settings } = await import("../db/schema");
+  const [existing] = await db.select().from(settings).where(eq(settings.key, body.key));
+  if (existing) {
+    await db.update(settings).set({ value: body.value }).where(eq(settings.key, body.key));
+  } else {
+    await db.insert(settings).values({ key: body.key, value: body.value });
+  }
+  return c.json({ success: true });
+});
+managementRouter.get("/settings/:key", async (c) => {
+  const { settings } = await import("../db/schema");
+  const [row] = await db.select().from(settings).where(eq(settings.key, c.req.param("key")));
+  return c.json({ value: row?.value ?? null });
+});
+
+// --- Media provider catalog (vendor list for the dashboard Media page) ---
+managementRouter.get("/media/catalog", async (c) => {
+  const { listMediaProviders } = await import("../proxy/media/catalog");
+  const modality = c.req.query("modality") as any;
+  return c.json({ providers: listMediaProviders(modality) });
 });

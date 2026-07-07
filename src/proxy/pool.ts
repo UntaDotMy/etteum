@@ -1,6 +1,6 @@
 import { db } from "../db/index";
 import { accounts, settings } from "../db/schema";
-import { eq, and, sql, or, isNull, lt } from "drizzle-orm";
+import { eq, and, sql, or, isNull, lt, asc, desc } from "drizzle-orm";
 import type { Account } from "../db/schema";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
@@ -426,7 +426,10 @@ class AccountPool {
             lt(accounts.cooldownUntil, new Date()),
           ),
         )
-      );
+      )
+      // Provider-priority routing: lower priority = tried first. Enables
+      // "paid first, free fallback" ordering of credentials within a provider.
+      .orderBy(asc(accounts.priority), desc(accounts.lastUsedAt));
   }
 
   /**
