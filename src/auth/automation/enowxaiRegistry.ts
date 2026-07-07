@@ -9,6 +9,7 @@
 import type { ProviderAdapter } from "./enowxaiAdapter";
 import { KiroAdapter } from "./adapters/kiroAdapter";
 import { CodexAdapter } from "./adapters/codexAdapter";
+import { CodeBuddyAdapter } from "./adapters/codebuddyAdapter";
 
 const REGISTRY = new Map<string, () => ProviderAdapter>();
 
@@ -26,9 +27,13 @@ export function listAdapters(): string[] {
 }
 
 // --- Built-in adapter registrations ---
+// Kiro + Codex + CodeBuddy ported 1:1 from enowxai. CodeBuddy was reconstructed
+// from the readable companion files (_config.py/_api.py/_google_oauth.py/
+// _page_helpers.py/_utils.py) since enowxai's _adapter.py is pyarmor-obfuscated
+// (irreversible) — the protocol/endpoints/selectors are all in the companions.
 registerAdapter("kiro", () => new KiroAdapter());
 registerAdapter("codex", () => new CodexAdapter());
+registerAdapter("codebuddy", () => new CodeBuddyAdapter());
 
-// TODO (remaining enowxai adapters): codebuddy (pyarmor-obfuscated — port from
-// config + device-code pattern), canva, qoder — each implements the
-// ProviderAdapter contract. Kiro + Codex above are the reference implementations.
+// TODO (remaining enowxai adapters): canva, qoder — each implements the
+// ProviderAdapter contract.
