@@ -53,6 +53,33 @@ function parseRateLimitReset(headers: Headers, bodyText: string): { resetsAt?: D
 }
 const CODEX_SCOPE = "openid profile email offline_access";
 
+// --- Codex request sanitization (1:1 with the reference codex executor) ---
+// Server-generated item id prefixes that /responses can't resolve with store=false.
+const SERVER_ID_PATTERN = /^(rs|fc|resp|msg)_/;
+// Hosted tool types Codex/OpenAI Responses executes server-side. Non-function
+// tools outside this set + the passthrough set are dropped.
+const CODEX_HOSTED_TOOL_TYPES = new Set([
+  "image_generation", "web_search", "web_search_preview", "file_search",
+  "computer", "computer_use_preview", "code_interpreter", "mcp", "local_shell",
+  "tool_search",
+]);
+// Responses-native freeform tools carry a name + format payload and pass intact.
+const CODEX_PASSTHROUGH_TOOL_TYPES = new Set(["custom"]);
+
+/** Strip server-generated item references from body.input (store=false). */
+export function stripStoredItemReferences(input: unknown[]): unknown[] {
+  if (!Array.isArray(input)) return input;
+  return input.filter((item) => {
+    if (typeof item === "string" && SERVER_ID_PATTERN.test(item)) return false;
+    if (item && typeof item === "object" && !Array.isArray(item)) {
+      const obj = item as Record<string, unknown>;
+      if (obj.type === "item_reference") return false;
+      if (typeof obj.id === "string" && SERVER_ID_PATTERN.test(obj.id)) delete obj.id;
+    }
+    return true;
+  });
+}
+
 /**
  * Parsed Codex usage — the credit model codex-lb uses. See parseCodexUsage.
  */
@@ -312,27 +339,40 @@ export class CodexProvider extends BaseProvider {
 
   private normalizeTools(tools: any[] | undefined): any[] {
     if (!Array.isArray(tools) || tools.length === 0) return [];
-    return tools
+    const validNames = new Set<string>();
+    const out = tools
       .map((tool) => {
-        if (tool?.type === "function" && tool.function?.name) {
-          return {
-            type: "function",
-            name: tool.function.name,
-            description: tool.function.description || "",
-            parameters: tool.function.parameters || { type: "object", properties: {} },
-          };
+        if (!tool || typeof tool !== "object" || Array.isArray(tool)) return null;
+        const type = typeof tool.type === "string" ? tool.type : "";
+        // Namespace tools pass through; their inner function names are registered.
+        if (type === "namespace") {
+          if (Array.isArray(tool.tools)) {
+            for (const st of tool.tools) {
+              const n = typeof st?.name === "string" ? st.name.trim().slice(0, 128) : "";
+              if (n) validNames.add(n);
+            }
+          }
+          return tool;
         }
-        if (tool?.name) {
-          return {
-            type: "function",
-            name: tool.name,
-            description: tool.description || "",
-            parameters: tool.input_schema || tool.parameters || { type: "object", properties: {} },
-          };
+        // Non-function tools: keep only hosted + passthrough allowlisted types.
+        if (type !== "function") {
+          if (CODEX_PASSTHROUGH_TOOL_TYPES.has(type)) return tool;
+          if (!type || tool.function || typeof tool.name === "string") return null;
+          return CODEX_HOSTED_TOOL_TYPES.has(type) ? tool : null;
         }
-        return null;
+        const fn = tool.function && typeof tool.function === "object" && !Array.isArray(tool.function) ? tool.function : null;
+        const rawName = typeof tool.name === "string" ? tool.name : (typeof fn?.name === "string" ? fn.name : "");
+        const name = rawName.trim();
+        if (!name) return null;
+        const description = typeof tool.description === "string" ? tool.description : (typeof fn?.description === "string" ? fn.description : "");
+        const parameters = (tool.parameters && typeof tool.parameters === "object" && !Array.isArray(tool.parameters))
+          ? tool.parameters
+          : (fn?.parameters && typeof fn.parameters === "object" && !Array.isArray(fn.parameters) ? fn.parameters : { type: "object", properties: {} });
+        validNames.add(name);
+        return { type: "function", name: name.slice(0, 128), ...(description ? { description } : {}), parameters };
       })
-      .filter(Boolean);
+      .filter((t) => t !== null) as any[];
+    return out;
   }
 
   private normalizeToolChoice(toolChoice: any): any {
@@ -515,11 +555,14 @@ export class CodexProvider extends BaseProvider {
     if (tokens.account_id) headers["chatgpt-account-id"] = tokens.account_id;
 
     const { instructions, input } = this.buildPayload(request);
+    // Strip server-generated item references (rs_/fc_/resp_/msg_). /responses
+    // can't resolve them with store=false and returns 404.
+    const sanitizedInput = stripStoredItemReferences(input);
     // Guard: if every message was dropped (e.g. system-only, or all-empty
     // content), Codex's /responses rejects with 400 "must provide input /
     // previous_response_id / prompt / conversation_id". Fail fast with a clear
     // error instead of sending a guaranteed-to-fail request.
-    if (input.length === 0) {
+    if (sanitizedInput.length === 0) {
       throw new Error("Codex request has no input messages (all roles were empty or system-only).");
     }
     const tools = this.normalizeTools(request.tools);
@@ -527,7 +570,7 @@ export class CodexProvider extends BaseProvider {
     const body = {
       model: this.resolveModel(request.model),
       instructions,
-      input,
+      input: sanitizedInput,
       tools,
       tool_choice: tools.length > 0 ? this.normalizeToolChoice(request.tool_choice) : "auto",
       parallel_tool_calls: tools.length > 0,

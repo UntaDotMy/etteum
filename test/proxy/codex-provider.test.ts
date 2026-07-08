@@ -1,6 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import type { Account } from "../../src/db/schema";
 import { CodexProvider } from "../../src/proxy/providers/codex";
+import { stripStoredItemReferences } from "../../src/proxy/providers/codex";
 import { openAIStreamToAnthropic } from "../../src/proxy/transforms/anthropic";
 
 class TestCodexProvider extends CodexProvider {
@@ -152,7 +153,7 @@ describe("CodexProvider streaming", () => {
 
     expect(result.success).toBe(true);
     expect(provider.lastRequestBody.tools).toEqual([
-      { type: "function", name: "get_project_structure", description: "", parameters: { type: "object", properties: {} } },
+      { type: "function", name: "get_project_structure", parameters: { type: "object", properties: {} } },
     ]);
     const chunks = await collectOpenAIStream(result.stream!);
     const toolName = chunks.find((chunk) => chunk.choices[0].delta.tool_calls?.[0]?.function?.name)
@@ -260,5 +261,60 @@ describe("CodexProvider streaming", () => {
     expect(start?.data.content_block).toMatchObject({ type: "tool_use", id: "call_1", name: "get_project_structure" });
     expect(args).toBe('{"path":"."}');
     expect(messageDelta?.data.delta.stop_reason).toBe("tool_use");
+  });
+});
+
+describe("Codex request sanitization", () => {
+  test("hosted-tool allowlist keeps hosted types, drops unknown non-function tools", async () => {
+    const provider = new TestCodexProvider(() => codexResponse([
+      { type: "response.output_text.delta", delta: "ok" },
+      { type: "response.completed", response: { usage: { input_tokens: 4, output_tokens: 1 } } },
+    ]));
+
+    await provider.chatCompletionStream(account, {
+      model: "codex-gpt-5.5",
+      stream: true,
+      messages: [{ role: "user", content: "search" }],
+      tools: [
+        { type: "function", function: { name: "get_weather", parameters: { type: "object", properties: {} } } },
+        { type: "web_search" },
+        { type: "file_search" },
+        { type: "custom", name: "freeform", data: {} },
+        { type: "unknown_tool_type" },
+        { type: "retrieval" },
+      ],
+    });
+
+    const types = provider.lastRequestBody.tools.map((t: any) => t.type);
+    expect(types).toContain("function");
+    expect(types).toContain("web_search");
+    expect(types).toContain("file_search");
+    expect(types).toContain("custom");
+    // Dropped: unknown tool type + retrieval (not in hosted allowlist).
+    expect(types).not.toContain("unknown_tool_type");
+    expect(types).not.toContain("retrieval");
+  });
+
+  test("stripStoredItemReferences drops item_reference + server-prefixed ids", () => {
+    const input = [
+      "rs_abc",
+      "plain string",
+      { type: "item_reference", id: "resp_1" },
+      { type: "message", role: "user", content: [{ type: "input_text", text: "hi" }] },
+      { type: "message", role: "assistant", id: "msg_9", content: [{ type: "output_text", text: "hello" }] },
+      { type: "function_call", id: "fc_2", call_id: "call_2", name: "f", arguments: "{}" },
+    ];
+    const out = stripStoredItemReferences(input);
+    // Server-id strings + item_reference items are removed.
+    expect(out).not.toContain("rs_abc");
+    expect(out.find((i: any) => i?.type === "item_reference")).toBeUndefined();
+    // Server-prefixed ids are stripped from kept items.
+    const assistant = out.find((i: any) => i?.role === "assistant") as any;
+    expect(assistant.id).toBeUndefined();
+    const fnCall = out.find((i: any) => i?.type === "function_call") as any;
+    expect(fnCall.id).toBeUndefined();
+    // Non-server content survives.
+    expect(out.find((i: any) => i?.role === "user")).toBeDefined();
+    expect(out).toContain("plain string");
   });
 });
