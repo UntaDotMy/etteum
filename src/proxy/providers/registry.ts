@@ -10,6 +10,7 @@ import { GitlabDuoProvider } from "./gitlab-duo";
 import { YouMindProvider } from "./youmind";
 import { AlibabaProvider } from "./alibaba";
 import { AntigravityProvider } from "./antigravity";
+import { CursorProvider } from "./cursor/cursorProvider";
 import { createOpenAICompatibleProviders } from "./openai-compatible";
 import { compatibleNodeRegistry, ensureCompatibleNodesLoaded } from "./compatible-node";
 
@@ -40,6 +41,7 @@ const gitlabDuo = new GitlabDuoProvider();
 const youmind = new YouMindProvider();
 const alibaba = new AlibabaProvider();
 const antigravity = new AntigravityProvider();
+const cursor = new CursorProvider();
 
 // F13: API-key LLM catalog (openai, deepseek, groq, openrouter, …). Each is a
 // generic OpenAI-compatible relay instantiated from OPENAI_COMPATIBLE_CATALOG.
@@ -55,7 +57,7 @@ const openaiCompatibleProviders = createOpenAICompatibleProviders();
 // owns the `ym-*` prefix exclusively — also position-independent, but slotted
 // alongside the other prefix-based providers for readability.
 const PROVIDER_ORDER = [
-  gitlabDuo, canva, qoder, codex, kiroPro, youmind, antigravity,
+  gitlabDuo, canva, qoder, codex, kiroPro, youmind, antigravity, cursor,
   ...openaiCompatibleProviders,
   byok, alibaba, codebuddyChina, codebuddy, kiro,
 ] as const;
@@ -73,6 +75,7 @@ export const providers = {
   youmind,
   alibaba,
   antigravity,
+  cursor,
   // F13: API-key catalog.
   ...Object.fromEntries(openaiCompatibleProviders.map((p) => [p.name, p])),
 } as const;
