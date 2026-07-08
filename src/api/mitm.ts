@@ -1,7 +1,7 @@
 /**
  * MITM API (F10) — exposes the MITM manager over HTTP.
  *
- * TS port of 9router's /api/cli-tools/antigravity-mitm/* routes:
+ * TS port of the reference proxy's /api/cli-tools/antigravity-mitm/* routes:
  *   GET    /api/mitm/status                  — running/cert/dns status
  *   POST   /api/mitm/start                   — generate CA + enable DNS + start server (body: {password?})
  *   POST   /api/mitm/stop                    — stop server (keep DNS)

@@ -1,5 +1,5 @@
 /**
- * Per-provider automation services — TS port of 9router's
+ * Per-provider automation services — TS port of the reference proxy's
  * src/lib/oauth/services/*.js, consolidated into one registry.
  *
  * Each entry wires a provider's login to the right mechanism:

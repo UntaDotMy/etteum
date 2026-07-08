@@ -1,5 +1,5 @@
 /**
- * Dashboard authentication routes — TS port of 9router's
+ * Dashboard authentication routes — TS port of the reference proxy's
  * src/app/api/auth/{login,logout,status,oidc/*,reset-password}/route.js.
  *
  * Establishes a server-side session via an httpOnly JWT cookie (replaces the
@@ -13,6 +13,7 @@ import { getCookie, setCookie, deleteCookie } from "hono/cookie";
 import { db } from "../db/index";
 import { settings } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { adminGuard } from "../utils/security";
 import {
   createDashboardAuthToken,
   verifyDashboardAuthToken,
@@ -89,6 +90,9 @@ dashboardAuthRouter.post("/reset-password", async (c) => {
   const token = getCookie(c, SESSION_COOKIE);
   const payload = await verifyDashboardAuthToken(token);
   if (!payload) return c.json({ error: "Not authenticated" }, 401);
+  // Privilege escalation: require local origin or CLI token even with a session.
+  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ current?: string; newPassword?: string }>().catch(() => ({ current: "", newPassword: "" }));
   const stored = await getStoredPasswordHash();
   if (stored && !verifyDashboardPassword(body.current || "", stored)) {

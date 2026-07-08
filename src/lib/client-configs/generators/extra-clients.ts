@@ -1,6 +1,6 @@
 /**
  * Additional CLI-tool config generators (F14): claude, cline, copilot.
- * Ported from 9router src/app/api/cli-tools/{claude,cline,copilot}-settings/route.js.
+ * Ported from the reference proxy src/app/api/cli-tools/{claude,cline,copilot}-settings/route.js.
  *
  * Each writes the tool's native config file with the etteum base URL + API key +
  * model injected, preserving existing fields (merge, never overwrite), with a

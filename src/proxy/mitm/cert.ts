@@ -1,6 +1,6 @@
 /**
  * MITM certificate authority + per-domain leaf certs (F10).
- * Faithful 1:1 TS port of 9router src/mitm/cert/rootCA.js.
+ * Faithful 1:1 TS port of the reference proxy src/mitm/cert/rootCA.js.
  *
  * Generates a 10-year self-signed Root CA (RSA 2048, cA:true, keyCertSign+cRLSign,
  * SHA-256) and per-domain leaf certs (RSA 2048, 1yr, SAN domain+wildcard,

@@ -29,10 +29,9 @@ const PROVIDERS: ProviderConfig[] = [
     value: "kiro",
     label: "Kiro",
     subtitle: "Auto-add Kiro accounts using empas.",
-    description: "Standalone Kiro-only autologin flow.",
+    description: "Standalone Kiro-only autologin flow (Camoufox stealth).",
     icon: "⚡",
     color: "from-blue-500/20 to-blue-600/20",
-    comingSoon: true,
   },
   {
     value: "codebuddy",

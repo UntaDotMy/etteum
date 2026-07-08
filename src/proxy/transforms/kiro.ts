@@ -1,7 +1,7 @@
 /**
  * Kiro (AWS CodeWhisperer) response → OpenAI translator (F12).
  *
- * Ported from 9router open-sse/translator/response/kiro-to-openai.js. Parses the
+ * Ported from the reference proxy open-sse/translator/response/kiro-to-openai.js. Parses the
  * Kiro AWS-eventstream SSE events (assistantResponseEvent, codeEvent, etc.) into
  * OpenAI chat-completion chunks. Used by the MITM Kiro handler to convert an
  * intercepted Kiro response back to OpenAI shape for forwarding to the router.

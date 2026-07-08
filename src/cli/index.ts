@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * etteum CLI — TS port of 9router's cli/ interactive menus, adapted to our stack.
+ * etteum CLI — TS port of the reference proxy's cli/ interactive menus, adapted to our stack.
  *
  * Provides operator commands for account/token/combos management without needing
  * the dashboard. Talks to the running server's REST API via API key.

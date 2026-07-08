@@ -3,7 +3,7 @@
  * that hardcode vendor endpoints resolve to 127.0.0.1 (where the MITM TLS
  * server listens). Strips them on shutdown.
  *
- * Faithful 1:1 TS port of 9router src/mitm/dns/dnsConfig.js:
+ * Faithful 1:1 TS port of the reference proxy src/mitm/dns/dnsConfig.js:
  *   - hosts file path per-OS (Windows SystemRoot\...\hosts, else /etc/hosts)
  *   - atomic write on Windows with rollback (.new → .bak → rename)
  *   - sudo-with-password on macOS/Linux (password prompted via the API)

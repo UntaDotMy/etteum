@@ -396,7 +396,7 @@ oauthRouter.get("/codex/stop-proxy", (c) => {
   return c.json({ success: true });
 });
 
-// 9router supports device-code on other providers; Codex does not use it here.
+// the reference proxy supports device-code on other providers; Codex does not use it here.
 oauthRouter.get("/codex/device-code", (c) => {
   return c.json({ error: "Provider does not support device code flow" }, 400);
 });

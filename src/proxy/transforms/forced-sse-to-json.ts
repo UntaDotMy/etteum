@@ -1,6 +1,6 @@
 /**
  * Forced SSE→JSON conversion (F12).
- * Ported from 9router open-sse/handlers/chatCore/sseToJsonHandler.js
+ * Ported from the reference proxy open-sse/handlers/chatCore/sseToJsonHandler.js
  * (parseSSEToOpenAIResponse accumulator, lines ~41-99).
  *
  * When a non-streaming client (`stream:false`) hits a provider that only works

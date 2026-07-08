@@ -1,6 +1,6 @@
 /**
  * MITM config: which hosts map to which tool + model-alias/synonym tables (F10).
- * Ported from 9router src/mitm/config.js + src/shared/constants/mitmToolHosts.js.
+ * Ported from the reference proxy src/mitm/config.js + src/shared/constants/mitmToolHosts.js.
  *
  * When the TLS server receives a request on a given SNI host, it looks up the
  * tool here, runs that tool's handler (which rewrites body.model via the alias

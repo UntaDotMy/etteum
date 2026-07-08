@@ -1,6 +1,6 @@
 /**
  * Content filter system for removing patterns that trigger content moderation.
- * Based on enowxai's pudidil filter template system.
+ * Based on the reference design's pudidil filter template system.
  *
  * General (one rule set for every provider). Only sanitization rules remain:
  *   - strip vendor telemetry (billing headers, cc_* hashes, claude-code GitHub

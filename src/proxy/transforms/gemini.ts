@@ -8,7 +8,7 @@
  * non-Antigravity client hitting a Gemini upstream, or the MITM forwarding a
  * Gemini `generateContent` response back as OpenAI).
  *
- * Ported from 9router open-sse/translator/response/gemini-to-openai.js.
+ * Ported from the reference proxy open-sse/translator/response/gemini-to-openai.js.
  */
 import type { ChatCompletionResponse } from "../providers/base";
 

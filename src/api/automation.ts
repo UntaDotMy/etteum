@@ -1,7 +1,7 @@
 /**
  * Automation API — exposes the bulk-import job framework (F5).
  *
- * TS port of 9router's `/api/oauth/[provider]/bulk-import/*` routes:
+ * TS port of the reference proxy's `/api/oauth/[provider]/bulk-import/*` routes:
  *   POST   /api/automation/jobs                          — start a bulk-import job
  *   GET    /api/automation/jobs                          — list all jobs
  *   GET    /api/automation/jobs/latest                   — most recent job (optionally by provider)

@@ -1,5 +1,5 @@
 /**
- * Base OAuth service — TS port of 9router's src/lib/oauth/services/oauth.js +
+ * Base OAuth service — TS port of the reference proxy's src/lib/oauth/services/oauth.js +
  * providerHelpers.js, 1:1 flow behavior.
  *
  * Provides the two generic flow engines every provider service builds on:

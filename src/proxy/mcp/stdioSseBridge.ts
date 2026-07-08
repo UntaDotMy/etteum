@@ -1,5 +1,5 @@
 /**
- * MCP stdio↔SSE bridge — TS port of 9router's src/lib/mcp/stdioSseBridge.js, 1:1.
+ * MCP stdio↔SSE bridge — TS port of the reference proxy's src/lib/mcp/stdioSseBridge.js, 1:1.
  *
  * Hosts local MCP server plugins: spawns one child process per plugin on
  * demand, broadcasts its newline-delimited JSON-RPC stdout over SSE to all

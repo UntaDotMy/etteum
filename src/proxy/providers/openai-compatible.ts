@@ -156,7 +156,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
 
 /**
  * The API-key LLM catalog (F13). Each entry is one OpenAI-compatible relay.
- * Ported from 9router open-sse/providers/registry/{openai,deepseek,groq,...}.js
+ * Ported from the reference proxy open-sse/providers/registry/{openai,deepseek,groq,...}.js
  * (the "apikey" category). Add/remove providers here in one place.
  */
 export const OPENAI_COMPATIBLE_CATALOG: OpenAICompatibleSpec[] = [

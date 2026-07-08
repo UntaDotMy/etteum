@@ -1,7 +1,7 @@
 /**
  * Output-reducing prompt-injection applicator (F11).
  *
- * Ported from 9router open-sse/rtk/caveman.js + ponytail.js + cavemanGuard.js.
+ * Ported from the reference proxy open-sse/rtk/caveman.js + ponytail.js + cavemanGuard.js.
  * Appends output-reducing instructions to the system prompt so the MODEL emits
  * fewer tokens. Distinct from the input-side compression/caveman.ts &
  * compression/ponytail.ts (which rewrite existing text); both coexist.

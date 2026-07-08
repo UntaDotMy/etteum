@@ -4,6 +4,9 @@ import { isNonAccountRequestError, isTransientError } from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
 import type { Account } from "../db/schema";
+import { requestLogs } from "../db/schema";
+import { db } from "../db/index";
+import { eq } from "drizzle-orm";
 import {
   compressRequest,
   getCompressionConfig,
@@ -171,6 +174,21 @@ export async function routeRequest(
   const maxRetries = 3;
   let lastError = "";
   const attemptedByokAccountIds = new Set<number>();
+
+  // Sticky response-id pinning: if the request carries a previous_response_id,
+  // resolve which account created that response and prefer it on the first
+  // attempt. Preserves Codex/OpenAI-Responses session continuity.
+  let preferredAccountId: number | undefined;
+  const prevResponseId = (request as any)?.previous_response_id;
+  if (prevResponseId) {
+    try {
+      const row = await db.select({ accountId: requestLogs.accountId })
+        .from(requestLogs)
+        .where(eq(requestLogs.responseId, String(prevResponseId)))
+        .limit(1);
+      if (row[0]?.accountId) preferredAccountId = row[0].accountId;
+    } catch { /* lookup best-effort */ }
+  }
   // Track rate-limit state across attempts so we can return a graceful 429
   // with Retry-After when EVERY account was rate-limited (vs. a 503 generic
   // failure). earliestReset lets us tell the client when to retry.
@@ -185,6 +203,7 @@ export async function routeRequest(
     const account = providerName === "byok"
       ? (await pool.getAccountForModel(compressedRequest.model, {
           excludeAccountIds: attemptedByokAccountIds,
+          preferredAccountId: attempt === 0 ? preferredAccountId : undefined,
         }))?.account ?? null
       : await pool.getNextAccountForModel(providerName, compressedRequest.model);
     if (!account) {

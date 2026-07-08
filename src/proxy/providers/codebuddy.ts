@@ -89,7 +89,7 @@ const CB_MODEL_MAP: Record<string, string> = {
   // Kimi
   "cb-kimi-k2.5": "kimi-k2.5",
   // Other
-  "cb-enowx": "enowx-default",
+  "cb-default": "codebuddy-default",
 };
 
 /**
@@ -165,7 +165,7 @@ export class CodeBuddyProvider extends BaseProvider {
     { id: "cb-gemini-3.5-flash", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.004 / 1000, creditSource: "estimated" },
     { id: "cb-deepseek-v3-2", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: false, creditUnit: "token", creditRate: 0.002 / 1000, creditSource: "estimated" },
     { id: "cb-kimi-k2.5", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: false, creditUnit: "token", creditRate: 0.005 / 1000, creditSource: "estimated" },
-    { id: "cb-enowx", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: true, creditUnit: "token", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    { id: "cb-default", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: true, creditUnit: "token", creditRate: 0.01 / 1000, creditSource: "estimated" },
   ], (m) => CodeBuddyProvider.toCanonical(m.id));
 
   private getTokens(account: Account): CodeBuddyTokens | null {

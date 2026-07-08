@@ -1,5 +1,5 @@
 /**
- * Dashboard security layer — TS port of 9router's
+ * Dashboard security layer — TS port of the reference proxy's
  * src/lib/auth/{dashboardSession,oidc,loginLimiter}.js, 1:1 behavior.
  *
  * Uses only Node's built-in crypto (WebCrypto + scrypt) — no `jose`/`bcryptjs`

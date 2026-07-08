@@ -35,10 +35,13 @@ export const accounts = sqliteTable("accounts", {
   // pool). Reset to 0 on success. Prevents a single transient 401 from
   // permanently killing an account.
   consecutiveAuthErrors: integer("consecutive_auth_errors").notNull().default(0),
-  // --- Wave 2: Provider-priority routing (mirrors 9router priority) ---
+  // --- Wave 2: Provider-priority routing (mirrors the reference proxy priority) ---
   // Lower number = tried first. Enables "paid first, free fallback" ordering
   // of credentials within a provider. Default 0 preserves existing LB order.
   priority: integer("priority").notNull().default(0),
+  // --- Sticky round-robin: consecutive requests served as the active pick ---
+  // Rotates at the threshold. Persisted so stickiness survives restarts.
+  consecutiveUseCount: integer("consecutive_use_count").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 }, (table) => [
@@ -81,7 +84,7 @@ export const requestLogs = sqliteTable("request_logs", {
    * null when compression is disabled.
    */
   savingsByTechnique: text("savings_by_technique", { mode: "json" }),
-  // --- Wave 2: Per-API-key attribution + USD cost (mirrors 9router) ---
+  // --- Wave 2: Per-API-key attribution + USD cost (mirrors the reference proxy) ---
   // Which client API key made this request (null = legacy single-key or
   // internal). Enables "which client key spent the most" analytics that the
   // old schema could not answer.
@@ -89,6 +92,10 @@ export const requestLogs = sqliteTable("request_logs", {
   // Estimated USD cost of this request, computed from per-model pricing.
   // null when pricing is unknown. Additive — creditsUsed (credits) is preserved.
   cost: real("cost"),
+  // The upstream response id (e.g. Codex/OpenAI-Responses `id` field). Enables
+  // sticky response-id pinning: a follow-up request carrying previous_response_id
+  // is routed back to the account that created that response.
+  responseId: text("response_id"),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 }, (table) => [
   index("request_logs_created_at_idx").on(table.createdAt),
@@ -97,6 +104,7 @@ export const requestLogs = sqliteTable("request_logs", {
   index("request_logs_provider_model_status_idx").on(table.provider, table.model, table.status),
   index("request_logs_account_idx").on(table.accountId),
   index("request_logs_api_key_idx").on(table.apiKeyId),
+  index("request_logs_response_id_idx").on(table.responseId),
 ]);
 
 export const settings = sqliteTable("settings", {
@@ -121,7 +129,7 @@ export const usageSummary = sqliteTable("usage_summary", {
   totalTokens: integer("total_tokens", { mode: "number" }).default(0),
   creditsUsed: real("credits_used").default(0),
   totalDurationMs: integer("total_duration_ms", { mode: "number" }).default(0),
-  // --- Wave 2: per-key + cost rollup (mirrors 9router) ---
+  // --- Wave 2: per-key + cost rollup (mirrors the reference proxy) ---
   apiKeyId: integer("api_key_id"),
   totalCost: real("total_cost").default(0),
 }, (table) => [
@@ -249,7 +257,7 @@ export const combos = sqliteTable("combos", {
   id: integer("id").primaryKey({ autoIncrement: true }),
   name: text("name").notNull().unique(), // e.g. "zero-cost" or "premium"
   models: text("models", { mode: "json" }).$type<string[]>().notNull().$defaultFn(() => []),
-  // Strategy for the combo chain (mirrors 9router `combos.kind`).
+  // Strategy for the combo chain (mirrors the reference proxy `combos.kind`).
   //   fallback — try first model, fall through to next on error/rate-limit
   //   sticky   — round-robin within combo, sticky session (same account per combo)
   //   fusion   — parallel inference, judge model picks winner (advanced)
@@ -262,7 +270,7 @@ export const combos = sqliteTable("combos", {
   index("combos_name_idx").on(table.name),
 ]);
 
-// --- Wave 2: Multi-key API key system (mirrors 9router `apiKeys` table) ---
+// --- Wave 2: Multi-key API key system (mirrors the reference proxy `apiKeys` table) ---
 // Replaces the single-global-key model with named, machine-bound, individually
 // revocable keys. The legacy single key (settings.api_key) is preserved as a
 // fallback during the transition — nothing is dropped.
@@ -281,7 +289,7 @@ export const apiKeys = sqliteTable("api_keys", {
   index("api_keys_active_idx").on(table.isActive),
 ]);
 
-// --- Wave 2: Generic KV store (mirrors 9router `kv` table) ---
+// --- Wave 2: Generic KV store (mirrors the reference proxy `kv` table) ---
 // Used by: customModels, disabledModels, pricing, mitmAlias scopes.
 // A single table avoids one-off tables for each small config namespace.
 export const kv = sqliteTable("kv", {

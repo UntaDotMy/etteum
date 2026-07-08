@@ -1,7 +1,7 @@
 /**
  * Dynamic compatible-node provider system (F13).
  *
- * Ported from 9router providerNodes + nodesRepo + the model.js prefix resolution.
+ * Ported from the reference proxy providerNodes + nodesRepo + the model.js prefix resolution.
  * Lets users add OpenAI/Anthropic-compatible endpoints at runtime via the
  * dashboard (stored in the `provider_nodes` table), resolved by model prefix —
  * no provider class needed per node.

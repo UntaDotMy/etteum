@@ -1,5 +1,5 @@
 /**
- * Output-reducing prompt injections (F11) — ported verbatim from 9router:
+ * Output-reducing prompt injections (F11) — ported verbatim from the reference proxy:
  *   - open-sse/rtk/cavemanPrompts.js (CAVEMAN_PROMPTS, 6 levels)
  *   - open-sse/rtk/ponytailPrompt.js (PONYTAIL_PROMPTS, 3 levels)
  *

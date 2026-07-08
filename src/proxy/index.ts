@@ -4,7 +4,7 @@ import { db } from "../db/index";
 import { requestLogs, usageSummary, accounts, type NewRequestLog } from "../db/schema";
 import { pool } from "./pool";
 import { broadcast } from "../ws/index";
-import type { ChatCompletionRequest, CreditSource } from "./providers/base";
+import type { ChatCompletionRequest, CreditSource, ProviderResult } from "./providers/base";
 import {
   anthropicToOpenAI,
   openAIStreamToAnthropic,
@@ -111,6 +111,13 @@ async function pruneRequestLogs() {
 
 // Prune every 10 requests to avoid running DELETE on every single insert
 let requestCounter = 0;
+
+/** Extract the upstream response id for sticky response-id pinning. */
+function extractResponseId(result: ProviderResult | undefined): string | undefined {
+  if (!result?.response) return undefined;
+  const r = result.response as any;
+  return r.id || r.response?.id || undefined;
+}
 
 export async function recordRequest(entry: NewRequestLog) {
   try {
@@ -656,6 +663,8 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     cost,
     status: "success" as const,
     durationMs,
+    // Record the upstream response id for sticky response-id pinning.
+    responseId: extractResponseId(result) ?? null,
     requestBody: prepareLogBody({
       ...body,
       _poolprox: {

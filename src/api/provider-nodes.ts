@@ -1,7 +1,7 @@
 /**
  * Provider-nodes API (F13) — CRUD for dynamic compatible-node providers.
  *
- * TS port of 9router /api/provider-nodes/* (create/validate/list/delete).
+ * TS port of the reference proxy /api/provider-nodes/* (create/validate/list/delete).
  * Lets the dashboard add user-defined OpenAI/Anthropic-compatible endpoints at
  * runtime; they're resolved by model prefix via the compatible-node registry.
  *

@@ -29,6 +29,8 @@ import {
   Volume2,
   Terminal,
   Wrench,
+  Shield,
+  Network,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/hooks/useTheme";
@@ -75,6 +77,8 @@ const navSections: NavSection[] = [
       { label: "VCC Pool", path: "/vcc-pool", icon: CreditCard },
       { label: "Filter Rules", path: "/filter-rules", icon: Filter },
       { label: "Proxy Settings", path: "/settings", icon: Sliders },
+      { label: "Security & Profile", path: "/security", icon: Shield },
+      { label: "MITM Interception", path: "/mitm", icon: Network },
     ],
   },
   {

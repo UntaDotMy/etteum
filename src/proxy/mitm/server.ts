@@ -1,6 +1,6 @@
 /**
  * MITM TLS intercepting server (F10).
- * Ported from 9router src/mitm/server.js.
+ * Ported from the reference proxy src/mitm/server.js.
  *
  * A `tls.Server` on :443 with an `SNICallback` that mints a per-domain leaf
  * cert (signed by the Root CA) on the fly, caching the secure context. Each TLS

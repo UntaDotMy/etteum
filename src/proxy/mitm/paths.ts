@@ -1,6 +1,6 @@
 /**
  * MITM subsystem paths + per-tool DNS hosts (F10).
- * Ported from 9router src/mitm/paths.js + src/shared/constants/mitmToolHosts.js.
+ * Ported from the reference proxy src/mitm/paths.js + src/shared/constants/mitmToolHosts.js.
  */
 import path from "node:path";
 import os from "node:os";
