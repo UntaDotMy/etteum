@@ -1,7 +1,7 @@
 /**
  * Headroom — LLM-based whole-message compression (F11).
  *
- * Ported from 9router open-sse/rtk/headroom.js. Compresses free-form
+ * Ported from the reference proxy open-sse/rtk/headroom.js. Compresses free-form
  * conversation messages via an external headroom-ai proxy:
  *   POST ${url}/v1/compress  { messages, model, config? }
  * The proxy runs an LLM (Claude→OpenAI→compress→Claude round-trip in the

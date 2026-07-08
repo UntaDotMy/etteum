@@ -1,7 +1,7 @@
 /**
  * Config-driven error classification rules (F12).
  *
- * Ported from 9router open-sse/config/errorConfig.js (ERROR_RULES + BACKOFF_CONFIG
+ * Ported from the reference proxy open-sse/config/errorConfig.js (ERROR_RULES + BACKOFF_CONFIG
  * + NON_ACCOUNT_ERROR_TEXTS) + open-sse/services/accountFallback.js
  * (checkFallbackError, isNonAccountError).
  *

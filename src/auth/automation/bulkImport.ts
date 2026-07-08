@@ -1,5 +1,5 @@
 /**
- * Bulk-import job framework — TS port of 9router's
+ * Bulk-import job framework — TS port of the reference proxy's
  * src/lib/oauth/services/kiroBulkImportManager.js, 1:1 architecture.
  *
  * A durable job manager that imports N accounts using M concurrent browser
@@ -75,7 +75,7 @@ export interface BulkImportAdapter {
   handleManual?: (item: ImportItem, answer: string) => Promise<void>;
 }
 
-// --- Optimal concurrency (mirrors 9router systemSpecs.getOptimalWorkerCount) ---
+// --- Optimal concurrency (mirrors the reference proxy systemSpecs.getOptimalWorkerCount) ---
 export function isAutoConcurrencyValue(value: unknown): boolean {
   return value === "auto" || value === "Auto";
 }

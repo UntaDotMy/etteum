@@ -1,6 +1,6 @@
 /**
  * MITM per-tool request handlers (F10).
- * Ported from 9router src/mitm/handlers/{antigravity,copilot,kiro,cursor}.js.
+ * Ported from the reference proxy src/mitm/handlers/{antigravity,copilot,kiro,cursor}.js.
  *
  * Each handler: parse the intercepted request body → remap body.model via the
  * alias DB + synonyms → forward to the local router (/v1/chat/completions) →

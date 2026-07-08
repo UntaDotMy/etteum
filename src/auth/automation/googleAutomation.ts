@@ -1,5 +1,5 @@
 /**
- * Stealth Google login automation — TS port of 9router's
+ * Stealth Google login automation — TS port of the reference proxy's
  * src/lib/oauth/services/kiroGoogleAutomation.js, 1:1.
  *
  * This is the #410-critical recipe: locale-aware Google login selectors

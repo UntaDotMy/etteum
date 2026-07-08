@@ -1,17 +1,17 @@
 /**
- * CodeBuddy provider adapter — faithful TS reconstruction from enowxai's
- * readable companion files (codebuddy/_config.py + _api.py + _google_oauth.py
- * + _page_helpers.py + _utils.py). The single obfuscated file (_adapter.py) is
- * orchestration glue; the actual protocol/endpoints/selectors are all in the
- * readable companions ported here.
+ * CodeBuddy provider adapter — faithful TS reconstruction from the reference
+ * automation design's readable companion files (codebuddy/_config.py + _api.py
+ * + _google_oauth.py + _page_helpers.py + _utils.py). The single obfuscated file
+ * (_adapter.py) is orchestration glue; the actual protocol/endpoints/selectors
+ * are all in the readable companions ported here.
  *
- * Flow (1:1 with enowxai):
+ * Flow (1:1 with the reference design):
  *   Google login → region select (SG) → trial activate → console-login-enterprise
  *   (exchange state → accessToken) → create API key → fetch credits
  *
  * Emits the browser-log stream throughout.
  */
-import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../enowxaiAdapter";
+import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../providerAdapter";
 import { runGoogleAccountAutomation } from "../googleAutomation";
 
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
@@ -34,7 +34,7 @@ const WEB_HEADERS: Record<string, string> = {
 };
 
 function randName(): string {
-  return `enowx-${Math.floor(100000 + Math.random() * 900000)}`;
+  return `cb-key-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 export class CodeBuddyAdapter extends ProviderAdapter {
@@ -155,7 +155,7 @@ export class CodeBuddyAdapter extends ProviderAdapter {
     return creditFromResourcePayload(result.json);
   }
 
-  // --- Helpers (1:1 with enowxai _api.py) ---
+  // --- Helpers (1:1 with the reference _api.py) ---
   private async submitRegion(page: any, emit: EmitFn): Promise<boolean> {
     const result = await pageEvaluate(page, async ({ url, body }) => {
       const resp = await fetch(url, {
@@ -203,7 +203,7 @@ export class CodeBuddyAdapter extends ProviderAdapter {
   }
 }
 
-/** Run a function in the page context (mirrors page.evaluate in enowxai). */
+/** Run a function in the page context (mirrors page.evaluate in the reference). */
 async function pageEvaluate(page: any, fn: (arg: any) => any, arg?: any): Promise<any> {
   if (!page?.evaluate) return { status: 0, json: null };
   try {

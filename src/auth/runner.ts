@@ -13,15 +13,15 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
-import { runProvider } from "./automation/enowxaiAdapter";
-import { getAdapter } from "./automation/enowxaiRegistry";
-import type { NormalizedAccount, AutomationEvent } from "./automation/enowxaiAdapter";
+import { runProvider } from "./automation/providerAdapter";
+import { getAdapter } from "./automation/providerRegistry";
+import type { NormalizedAccount, AutomationEvent } from "./automation/providerAdapter";
 
-// Provider ids that use the enowxai adapter architecture (Camoufox + browser-
+// Provider ids that use the Camoufox-based adapter architecture (browser +
 // log streaming). These go through runProvider() first; others fall back to
-// the loginProvider() path. enowxai adapters are added incrementally per the
-// user directive ("follow enowxai 1:1").
-const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro", "codex", "codebuddy"]);
+// the loginProvider() path. Adapters are added incrementally per the user
+// directive to follow the reference automation design 1:1.
+const CAMOUFOX_ADAPTER_PROVIDERS = new Set<string>(["kiro", "codex", "codebuddy"]);
 
 // Provider ids that the new TS+Camoufox automation layer supports. Logins for
 // these go through loginProvider() instead of the legacy Python subprocess.
@@ -666,13 +666,13 @@ async function getKiroProUpgradeEnv(accountId: number): Promise<Record<string, s
 
 /**
  * Run the Python login script for a SINGLE provider.
- * Uses ENOWX_ALLOWED_PROVIDERS env to filter to just the needed provider.
+ * Uses AUTH_ALLOWED_PROVIDERS env to filter to just the needed provider.
  *
  * The the reference design login.py script accepts:
  *   --email <email> --password <password>
  *
  * And uses env vars:
- *   ENOWX_ALLOWED_PROVIDERS=kiro,codebuddy,canva (comma-separated)
+ *   AUTH_ALLOWED_PROVIDERS=kiro,codebuddy,canva (comma-separated)
  *   BATCHER_CAMOUFOX_HEADLESS=true
  *   BATCHER_PROXY_URL=<proxy>
  *   BATCHER_CONCURRENT=1
@@ -703,11 +703,11 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   }
 
   // --- Native TS+Camoufox automation path (Wave 3 migration) ---
-  // --- enowxai adapter architecture (1:1 Camoufox + browser-log stream) ---
-  // Providers with an enowxai adapter go through runProvider(), which drives
+  // --- Camoufox adapter architecture (1:1 browser-log stream) ---
+  // Providers with a Camoufox adapter go through runProvider(), which drives
   // the ProviderAdapter contract and emits browser-log events. Those events
   // are bridged to the dashboard WebSocket (the "Browser Log" live viewer).
-  if (ENOWXAI_ADAPTER_PROVIDERS.has(provider)) {
+  if (CAMOUFOX_ADAPTER_PROVIDERS.has(provider)) {
     const adapter = getAdapter(provider);
     if (adapter) {
       const password = decrypt(account.password);
@@ -719,11 +719,11 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         email: account.email,
         provider,
         step: "starting",
-        message: `Starting ${provider} login (enowxai + Camoufox) for ${account.email}...`,
+        message: `Starting ${provider} login (Camoufox) for ${account.email}...`,
       });
       broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
 
-      // Bridge the enowxai emit() stream → dashboard WebSocket + auth log.
+      // Bridge the emit() stream → dashboard WebSocket + auth log.
       const emit = (ev: AutomationEvent) => {
         if (ev.type === "progress") {
           addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
@@ -763,7 +763,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           } : undefined,
         };
         await applyProviderResult(account, provider, password, providerResult);
-        const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (enowxai)` });
+        const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (Camoufox)` });
         broadcast({ type: "login_success", data: { logId: okLog.id, id: account.id, email: account.email, provider } });
         return { success: true };
       } catch (err: any) {
@@ -905,7 +905,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         stderr: "pipe",
         env: {
           ...process.env,
-          ENOWX_ALLOWED_PROVIDERS: provider,
+          AUTH_ALLOWED_PROVIDERS: provider,
           PYTHONUNBUFFERED: "1",
           BATCHER_CAMOUFOX_HEADLESS: headless ? "true" : "false",
           DISPLAY: process.env.DISPLAY || ":0",
@@ -1121,7 +1121,7 @@ export async function loginAllProviders(
         stderr: "pipe",
         env: {
           ...process.env,
-          ENOWX_ALLOWED_PROVIDERS: "kiro,kiro-pro,codebuddy,canva,codex",
+          AUTH_ALLOWED_PROVIDERS: "kiro,kiro-pro,codebuddy,canva,codex",
           BATCHER_CAMOUFOX_HEADLESS: config.headless ? "true" : "false",
           BATCHER_PROXY_URL: proxyUrlForAuth || config.proxyUrl || "",
           HTTP_PROXY: proxyUrlForAuth || config.proxyUrl || "",

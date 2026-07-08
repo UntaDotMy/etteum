@@ -1,7 +1,7 @@
 /**
  * Cursor (Connect proto) response → OpenAI translator (F12).
  *
- * Ported from 9router open-sse/translator/response/cursor-to-openai.js. Cursor's
+ * Ported from the reference proxy open-sse/translator/response/cursor-to-openai.js. Cursor's
  * Connect-proto response is converted to OpenAI shape at the executor/provider
  * level (the proto→SSE/JSON transform happens before this translator runs), so
  * this is a passthrough boundary translator — it validates + forwards OpenAI

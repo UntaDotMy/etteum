@@ -1,6 +1,6 @@
 /**
  * MITM manager (F10) — orchestrates the MITM subsystem.
- * Ported from 9router src/mitm/manager.js (adapted: in-process server, no child
+ * Ported from the reference proxy src/mitm/manager.js (adapted: in-process server, no child
  * process / IPC since Bun has no HMR/locking concerns).
  *
  * Responsibilities:

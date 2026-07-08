@@ -1,11 +1,12 @@
 /**
- * Codex (OpenAI) provider adapter — 1:1 TS port of enowxai's codex_login.py.
+ * Codex (OpenAI) provider adapter — 1:1 TS port of the reference automation
+ * design's codex_login.py.
  *
  * Pure OAuth authorization-code flow (no browser automation — opens the user's
- * default browser + a local callback server). Follows the enowxai ProviderAdapter
+ * default browser + a local callback server). Follows the ProviderAdapter
  * contract, emitting the browser-log stream.
  */
-import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../enowxaiAdapter";
+import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../providerAdapter";
 import { runAuthorizationCodeFlow, type TokenSet } from "../oauthService";
 import { PROVIDER_OAUTH, PROVIDERS } from "../constants";
 
@@ -33,7 +34,7 @@ export class CodexAdapter extends ProviderAdapter {
     const config = PROVIDER_OAUTH[PROVIDERS.CODEX];
     if (!config) throw new Error("Codex OAuth config missing");
     // runAuthorizationCodeFlow opens the browser + runs the local callback
-    // server + exchanges the code — 1:1 with enowxai's codex_login.py main().
+    // server + exchanges the code. 1:1 with the reference codex_login.py main().
     const result = await runAuthorizationCodeFlow(config, { headless: false });
     emit({ type: "progress", provider: "codex", step: "authenticated", message: "Codex OAuth authorized" });
     return {

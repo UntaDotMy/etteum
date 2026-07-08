@@ -1,7 +1,7 @@
 /**
  * Shared system-prompt injector for OUTPUT-reducing prompt injections (F11).
  *
- * Ported from 9router `open-sse/rtk/systemInject.js`. Appends an instruction
+ * Ported from the reference proxy `open-sse/rtk/systemInject.js`. Appends an instruction
  * into the request's system message, dispatching by shape:
  *   - Claude (`body.system` string | array of {type:"text"}): splice BEFORE the
  *     last `cache_control` block so the injection stays inside the cached prefix

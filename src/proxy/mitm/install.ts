@@ -1,6 +1,6 @@
 /**
  * MITM Root-CA trust-store install (F10).
- * Ported from 9router src/mitm/cert/install.js. Installs the generated Root CA
+ * Ported from the reference proxy src/mitm/cert/install.js. Installs the generated Root CA
  * into the OS trust store so leaf certs it signs are trusted by the IDEs:
  *   - macOS:   security add-trusted-cert (System.keychain)
  *   - Linux:   copy to the distro's CA anchors dir + update-ca-certificates/trust

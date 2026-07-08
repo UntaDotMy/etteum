@@ -1,7 +1,7 @@
 import crypto from "node:crypto";
 
 /**
- * PKCE (Proof Key for Code Exchange) helpers — TS port of 9router's
+ * PKCE (Proof Key for Code Exchange) helpers — TS port of the reference proxy's
  * src/lib/oauth/utils/pkce.js, 1:1.
  */
 

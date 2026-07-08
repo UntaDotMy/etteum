@@ -1,5 +1,5 @@
 /**
- * Web search endpoint — TS port of 9router's /v1/search (searchViaChat pattern).
+ * Web search endpoint — TS port of the reference proxy's /v1/search (searchViaChat pattern).
  *
  *   POST /v1/search  { query, model?, max_results? }
  *

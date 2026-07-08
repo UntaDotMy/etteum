@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1.7
-# Bun-based production image for etteum-pool. Mirrors 9router's multi-stage
+# Bun-based production image for etteum-pool. Mirrors the reference proxy's multi-stage
 # pattern, adapted from Next.js/node to Bun.
 ARG BUN_IMAGE=oven/bun:1.2-alpine
 

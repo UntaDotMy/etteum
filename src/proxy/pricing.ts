@@ -2,7 +2,7 @@
  * Per-model USD pricing + cost calculation (F6 — wires the previously-dead
  * `request_logs.cost` / `usage_summary.total_cost` columns).
  *
- * Ported from 9router's `open-sse/providers/pricing.js` (MODEL_PRICING) +
+ * Ported from the reference proxy's `open-sse/providers/pricing.js` (MODEL_PRICING) +
  * `src/lib/db/repos/{pricingRepo,usageRepo}.js` (getPricingForModel /
  * calculateCost), adapted to our Hono/TS + drizzle stack and our existing
  * model-keyed `kv(pricing)` storage.
@@ -33,7 +33,7 @@ export interface ModelPricing {
 
 /**
  * Canonical baseline model pricing — provider-agnostic, model-keyed.
- * Ported from 9router `open-sse/providers/pricing.js` MODEL_PRICING.
+ * Ported from the reference proxy `open-sse/providers/pricing.js` MODEL_PRICING.
  * Covers the models reachable through our provider pool (Claude via
  * kiro/gitlab-duo, GPT-5 via codex/codebuddy, Gemini via antigravity, etc.).
  * Keep this curated; unknown models simply cost 0 until priced.
@@ -149,7 +149,7 @@ export async function getPricingForModel(model: string): Promise<ModelPricing | 
 
 /**
  * Compute USD cost for a request from its token breakdown + model pricing.
- * Faithful port of 9router usageRepo.js calculateCost (lines 113-151).
+ * Faithful port of the reference proxy usageRepo.js calculateCost (lines 113-151).
  *
  * Formula:
  *   nonCachedInput = max(0, prompt - cached)         × input   / 1M

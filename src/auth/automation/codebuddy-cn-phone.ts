@@ -5,7 +5,7 @@
  *
  * Wires the (already-ported) 5sim client into a real phone-login flow so the
  * bulk-import framework can create codebuddy-cn accounts without a manual step.
- * Ported from refer/9router_wyx0/src/lib/oauth/services/codebuddyCnPhoneAutomation.js.
+ * Ported from the reference proxy's src/lib/oauth/services/codebuddyCnPhoneAutomation.js.
  */
 import type { Browser, Page } from "playwright";
 import { createFiveSimClient, type FiveSimClient, type FiveSimClientOptions } from "./fiveSim";

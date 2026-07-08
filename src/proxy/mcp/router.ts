@@ -1,5 +1,5 @@
 /**
- * MCP HTTP router — TS port of 9router's src/app/api/mcp/[plugin]/{sse,message}/route.js.
+ * MCP HTTP router — TS port of the reference proxy's src/app/api/mcp/[plugin]/{sse,message}/route.js.
  *
  *   GET  /v1/mcp/:plugin/sse      — open an SSE stream; bridge spawns the plugin
  *                                   child and forwards its JSON-RPC stdout.

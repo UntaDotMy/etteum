@@ -1,5 +1,5 @@
 /**
- * Dashboard authentication routes — TS port of 9router's
+ * Dashboard authentication routes — TS port of the reference proxy's
  * src/app/api/auth/{login,logout,status,oidc/*,reset-password}/route.js.
  *
  * Establishes a server-side session via an httpOnly JWT cookie (replaces the

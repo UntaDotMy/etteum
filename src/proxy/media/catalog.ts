@@ -1,11 +1,11 @@
 /**
  * Media-provider catalog — vendor-specific ttsConfig/sttConfig/imageConfig/embeddingConfig.
- * TS port of 9router's open-sse/providers/registry media adapters, consolidated
+ * TS port of the reference proxy's open-sse/providers/registry media adapters, consolidated
  * into one data-driven catalog. Closes the media-breadth gap structurally: any
  * vendor here is servable via the generic media router once a user registers an
  * API key, instead of needing a per-vendor adapter file.
  *
- * Each entry mirrors 9router's registry shape: serviceKinds + per-modality config.
+ * Each entry mirrors the reference proxy's registry shape: serviceKinds + per-modality config.
  */
 export type MediaModality = "tts" | "stt" | "embeddings" | "images";
 

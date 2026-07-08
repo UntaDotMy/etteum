@@ -3,7 +3,7 @@ import { URL } from "node:url";
 
 /**
  * Local HTTP callback server for OAuth code-exchange flows — TS port of
- * 9router's src/lib/oauth/utils/server.js, 1:1.
+ * the reference proxy's src/lib/oauth/utils/server.js, 1:1.
  *
  * Starts a localhost server on a free port (or a fixed redirect port), waits
  * for the provider to redirect back with ?code=...&state=..., resolves with the

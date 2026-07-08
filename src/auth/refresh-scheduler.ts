@@ -1,7 +1,7 @@
 /**
  * Proactive token auto-refresh scheduler (F7).
  *
- * Ported from 9router's claudeAutoPing.js (setInterval 60s tick) +
+ * Ported from the reference proxy's claudeAutoPing.js (setInterval 60s tick) +
  * oauthCredentialManager.shouldRefreshCredentials (expiry-lead check).
  *
  * Problem it solves (the F7 gap): tokens were refreshed only reactively on a

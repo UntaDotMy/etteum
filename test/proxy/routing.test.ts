@@ -37,7 +37,7 @@ describe("getProviderForModel", () => {
     ["cb-gemini-3.5-flash", "codebuddy"],
     ["cb-deepseek-v3-2", "codebuddy"],
     ["cb-kimi-k2.5", "codebuddy"],
-    ["cb-enowx", "codebuddy"],
+    ["cb-default", "codebuddy"],
     // kiro (standard)
     ["auto", "kiro"],
     ["claude-haiku-4.5", "kiro"],

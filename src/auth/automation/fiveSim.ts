@@ -1,5 +1,5 @@
 /**
- * 5sim.net SMS-OTP client — TS port of 9router's
+ * 5sim.net SMS-OTP client — TS port of the reference proxy's
  * src/lib/oauth/services/fiveSimClient.js, 1:1.
  *
  * Rents a virtual phone number, polls for the OTP SMS, parses the code, and

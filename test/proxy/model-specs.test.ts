@@ -45,7 +45,7 @@ describe("model-specs registry", () => {
     // cb-gpt-5.2 has NO ctx/maxOut in codebuddy.ts — the registry must fill them.
     const models: ModelInfo[] = [
       { id: "cb-gpt-5.2", object: "model", created: 0, owned_by: "codebuddy" } as ModelInfo,
-      { id: "cb-enowx", object: "model", created: 0, owned_by: "codebuddy" } as ModelInfo, // not in registry
+      { id: "cb-default", object: "model", created: 0, owned_by: "codebuddy" } as ModelInfo, // not in registry specs
     ];
     const out = applyModelSpecs(models, (m) => m.id.replace(/^cb-/, ""));
     const [known, unknown] = out;

@@ -1,7 +1,7 @@
 /**
  * Playground API (F14) — basic-chat, skills, translator-live backends.
  *
- * TS port of 9router's dashboard playground routes:
+ * TS port of the reference proxy's dashboard playground routes:
  *   POST /api/playground/chat          — streaming chat playground (basic-chat)
  *   GET  /api/playground/skills        — static skills catalog
  *   POST /api/playground/translator/load    — load a saved translation sample
@@ -10,7 +10,7 @@
  *
  * The basic-chat + translator/translate routes call the live proxy (unlike the
  * existing /api/translator/debug which is a dry-run). The skills route serves a
- * static catalog (the reference's 9router agent skills).
+ * static catalog (the reference's the reference proxy agent skills).
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";

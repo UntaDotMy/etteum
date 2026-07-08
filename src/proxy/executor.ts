@@ -2,7 +2,7 @@
  * Shared provider executor (F12) — wraps the provider dispatch with per-URL
  * retry + Codex SSE-peek for 200-OK errors + error reclassification.
  *
- * Ported from 9router open-sse/executors/base.js (BaseExecutor.execute) +
+ * Ported from the reference proxy open-sse/executors/base.js (BaseExecutor.execute) +
  * executors/codex.js (SSE-peek reclassification). Adapted: the reference has
  * one executor *per provider*; the TS proxy has a single executor at the
  * router dispatch seam (router.ts) that wraps `provider.chatCompletion(Stream)`,

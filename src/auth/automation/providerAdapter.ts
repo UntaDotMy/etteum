@@ -1,5 +1,5 @@
 /**
- * enowxai ProviderAdapter contract — 1:1 TS port of enowxai's
+ * ProviderAdapter contract — TS port of the reference automation design's
  * app/providers/base.py + login.py driver architecture.
  *
  * This is the automation architecture the user directed us to follow 1:1:
@@ -16,7 +16,7 @@
 import type { Browser } from "playwright";
 import { launchBrowser, type BrowserEngine } from "./engine";
 
-/** A normalized account credential (mirrors enowxai NormalizedAccount). */
+/** A normalized account credential (mirrors the reference NormalizedAccount). */
 export interface NormalizedAccount {
   provider: string;
   identifier: string; // email
@@ -75,7 +75,7 @@ export type AutomationEvent =
 export type EmitFn = (event: AutomationEvent) => void;
 
 /**
- * The ProviderAdapter contract — 1:1 with enowxai's app/providers/base.py.
+ * The ProviderAdapter contract — 1:1 with the reference app/providers/base.py.
  * Each provider implements these methods; run_provider() drives them.
  */
 export abstract class ProviderAdapter {
@@ -116,7 +116,7 @@ export abstract class ProviderAdapter {
     try { await session.browser.close(); } catch { /* noop */ }
   }
 
-  /** Compose the final result object (mirrors enowxai build_result). */
+  /** Compose the final result object (mirrors the reference build_result). */
   buildResult(account: NormalizedAccount, tokens: AdapterTokens, quota: QuotaSnapshot | null): { success: true; provider: string; credentials: AdapterTokens; quota: QuotaSnapshot | null; email: string } {
     return { success: true, provider: this.name, credentials: tokens, quota, email: account.identifier };
   }
@@ -129,7 +129,7 @@ function hashSeed(s: string): number {
   return Math.abs(h) || 1;
 }
 
-// --- run_provider driver (1:1 with enowxai login.py) ---
+// --- run_provider driver (1:1 with the reference login.py) ---
 const BASE_DELAY = 2; // seconds
 const MAX_DELAY = 60;
 const DEFAULT_MAX_RETRIES = 3;
@@ -191,7 +191,7 @@ async function runProviderOnce(adapter: ProviderAdapter, account: NormalizedAcco
 
 /**
  * Run a provider login with retry/backoff, emitting browser-log events.
- * 1:1 with enowxai's run_provider(). The emit() stream is the automation +
+ * 1:1 with the reference run_provider(). The emit() stream is the automation +
  * browser log the dashboard renders.
  */
 export async function runProvider(

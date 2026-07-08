@@ -1,5 +1,5 @@
 /**
- * Browser automation engine — TS port of 9router's bulkImportBrowserEngine.js,
+ * Browser automation engine — TS port of the reference proxy's bulkImportBrowserEngine.js,
  * 1:1 architecture, with #410 stealth hardening layered on top of Camoufox.
  *
  * SUPPORTED_ENGINES: "chromium" (Playwright) | "camoufox" (stealth Firefox).

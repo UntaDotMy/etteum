@@ -2,7 +2,7 @@
  * Token-refresh coordinator (F8) — dedup + per-account lock + unrecoverable-error
  * classification + retry/backoff, wrapping provider.refreshToken().
  *
- * Ported from 9router:
+ * Ported from the reference proxy:
  *   - open-sse/services/tokenRefresh/dedup.js  → dedupRefresh (10s TTL map)
  *   - open-sse/services/oauthCredentialManager.js withCredentialRefreshLock
  *     → per-account promise lock

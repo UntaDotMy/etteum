@@ -66,7 +66,7 @@ export async function routeComboFusion(opts: FusionOptions): Promise<RouteResult
 
 /**
  * Flatten tool turns into prose so panel/judge models that can't handle tool
- * calls still get the conversation context. Ported from 9router
+ * calls still get the conversation context. Ported from the reference proxy
  * open-sse/services/combo.js flattenToolHistory (~line 21-55).
  *
  * Converts each tool_call + tool_result pair into a user/assistant text
@@ -104,7 +104,7 @@ export function flattenToolHistory(messages: any[]): any[] {
 /**
  * Judge-model fusion. Runs all models in parallel, collects successful
  * responses, then asks a judge model to pick the best one. Ported from
- * 9router open-sse/services/combo.js handleFusionChat (~line 440-571):
+ * the reference proxy open-sse/services/combo.js handleFusionChat (~line 440-571):
  *   - 1 success  → return it directly (no judge needed)
  *   - 0 success  → throw (all exhausted)
  *   - 2+ success → judge picks

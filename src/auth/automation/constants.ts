@@ -1,8 +1,8 @@
 /**
- * OAuth configuration constants — TS port of 9router's
+ * OAuth configuration constants — TS port of the reference proxy's
  * src/lib/oauth/constants/oauth.js, 1:1.
  *
- * Inlines the client configs that 9router sourced from open-sse/providers
+ * Inlines the client configs that the reference proxy sourced from open-sse/providers
  * (shared.js + registry/*.js) so we have no dependency on that package.
  */
 import { platform, arch } from "node:os";
