@@ -29,7 +29,12 @@ jobs:
         # Create the SQLite schema from src/db/schema.ts so the DB-backed tests
         # (pricing, BYOK, sticky round-robin, search) have tables to query. The
         # drizzle/ migrations folder is gitignored, so this is the fresh-DB path.
-        run: bunx drizzle-kit push --force
+        # mkdir first: better-sqlite3 won't create the data/ dir itself. The
+        # final test guards against drizzle-kit silently exiting 0 on error.
+        run: |
+          mkdir -p data
+          bunx drizzle-kit push --force
+          test -f data/poolprox3.db
       - name: Run tests
         # Self-contained suite (own env vars + DI-mocked providers). Hard gate.
         run: bun test
