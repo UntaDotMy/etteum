@@ -39,6 +39,9 @@ export const accounts = sqliteTable("accounts", {
   // Lower number = tried first. Enables "paid first, free fallback" ordering
   // of credentials within a provider. Default 0 preserves existing LB order.
   priority: integer("priority").notNull().default(0),
+  // --- Sticky round-robin: consecutive requests served as the active pick ---
+  // Rotates at the threshold. Persisted so stickiness survives restarts.
+  consecutiveUseCount: integer("consecutive_use_count").notNull().default(0),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 }, (table) => [

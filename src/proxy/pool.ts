@@ -17,6 +17,9 @@ const BACKOFF_MAX_MS = 5 * 60_000;
 // Terminal-error hysteresis: require this many CONSECUTIVE hard auth/persistent
 // errors before disabling an account. One transient 401 no longer kills it.
 const TERMINAL_ERROR_THRESHOLD = 3;
+// Sticky round-robin: an account is reused for up to this many consecutive
+// requests before the selector rotates. Mirrors the reference proxy rotation.
+const STICKY_MAX_CONSECUTIVE = 3;
 
 interface PoolState {
   lastIndex: Map<ProviderName, number>;
@@ -122,6 +125,18 @@ class AccountPool {
     }
 
     // Round Robin (default)
+    // Sticky: accounts are ordered priority ASC, lastUsedAt DESC, so [0] is the
+    // most-recently-used. Re-use it while under threshold + not overloaded.
+    const stickyCandidate = activeAccounts[0];
+    if (
+      stickyCandidate &&
+      Number(stickyCandidate.consecutiveUseCount || 0) < STICKY_MAX_CONSECUTIVE &&
+      this.getInFlightCount(stickyCandidate.id) === 0
+    ) {
+      this.state.lastIndex.set(provider, 0);
+      return stickyCandidate;
+    }
+
     const startIdx = ((this.state.lastIndex.get(provider) || 0) + 1) % activeAccounts.length;
     let selected = activeAccounts[startIdx];
     let selectedIdx = startIdx;
@@ -196,6 +211,17 @@ class AccountPool {
       }
 
       // Round Robin
+      // Sticky: re-use the most-recently-used eligible account under threshold.
+      const stickyCandidate = eligibleAccounts[0];
+      if (
+        stickyCandidate &&
+        Number(stickyCandidate.consecutiveUseCount || 0) < STICKY_MAX_CONSECUTIVE &&
+        this.getInFlightCount(stickyCandidate.id) === 0
+      ) {
+        this.state.lastIndex.set(provider, 0);
+        return stickyCandidate;
+      }
+
       const startIdx = ((this.state.lastIndex.get(provider) || 0) + 1) % eligibleAccounts.length;
       let selected = eligibleAccounts[startIdx];
       let selectedIdx = startIdx;
@@ -512,11 +538,32 @@ class AccountPool {
    * so consecutive transient/auth failures and any active cooldown are cleared.
    */
   async markUsed(accountId: number): Promise<void> {
+    // Increment this account's sticky count; reset siblings so a rotated-away
+    // account starts fresh when it cycles back to the sticky pick.
+    const [acct] = await db
+      .select({ provider: accounts.provider })
+      .from(accounts)
+      .where(eq(accounts.id, accountId))
+      .limit(1);
+
+    if (acct?.provider) {
+      await db
+        .update(accounts)
+        .set({ consecutiveUseCount: sql`0` })
+        .where(
+          and(
+            eq(accounts.provider, acct.provider),
+            sql`${accounts.id} <> ${accountId}`,
+          ),
+        );
+    }
+
     await db
       .update(accounts)
       .set({
         lastUsedAt: new Date(),
         updatedAt: new Date(),
+        consecutiveUseCount: sql`${accounts.consecutiveUseCount} + 1`,
         consecutiveTransientFailures: 0,
         nextBackoffMs: 0,
         consecutiveAuthErrors: 0,

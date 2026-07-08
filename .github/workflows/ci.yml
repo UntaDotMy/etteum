@@ -25,5 +25,8 @@ jobs:
       - name: Typecheck
         run: bunx tsc --noEmit
         continue-on-error: true # pre-existing baseline — tracked separately
+      - name: Run tests
+        # Self-contained suite (own env vars + DI-mocked providers). Hard gate.
+        run: bun test
       - name: Build dashboard
         run: bun run build
