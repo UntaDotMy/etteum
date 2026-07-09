@@ -35,34 +35,9 @@ function labelFor(provider: string): string {
 
 export default function Settings() {
   const [form, setForm] = useState<Record<string, string>>({
-    load_balancing_method: "round_robin",
-    auto_warmup_interval_minutes: "15",
-    warmup_concurrency: "50",
-    proxy_pool_usage: "all",
-    proxy_pool_rotation: "round_robin",
-    // Compression defaults — keep in sync with DEFAULT_COMPRESSION_CONFIG in src/proxy/compression/types.ts.
-    compression_rtk_enabled: "true",
-    compression_rtk_max_tool_chars: "500",
-    compression_rtk_keep_last_n_turns_full: "2",
-    compression_rtk_smart_truncate: "true",
-    compression_dcp_enabled: "false",
-    compression_caveman_enabled: "false",
-    compression_caveman_level: "lite",
-    compression_cache_markers_enabled: "false",
-    compression_image_dedupe_enabled: "false",
-    compression_tsc_enabled: "true",
-    compression_tsc_strip_schema_whitespace: "true",
-    compression_tsc_trim_descriptions: "true",
-    compression_tsc_drop_schema_meta: "true",
-    compression_ponytail_enabled: "false",
-    compression_caveman_injection_enabled: "false",
-    compression_caveman_injection_level: "full",
-    compression_ponytail_injection_enabled: "false",
-    compression_ponytail_injection_level: "full",
-    compression_headroom_enabled: "false",
-    compression_headroom_url: "http://localhost:8787",
-    compression_headroom_compress_user_messages: "false",
-    compression_headroom_timeout_ms: "3000",
+    // All defaults are now served by GET /api/settings — the backend merges
+    // DEFAULT_COMPRESSION_CONFIG into every response so the dashboard has zero
+    // hardcoded fallbacks. Initial state is empty; load() fills it from the API.
   });
   const [warmupStatus, setWarmupStatus] = useState<AutoWarmupStatus | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -647,7 +622,7 @@ export default function Settings() {
                         min={500}
                         max={50000}
                         step={500}
-                        value={form.compression_rtk_max_tool_chars || "500"}
+                        value={form.compression_rtk_max_tool_chars}
                         onChange={(e) => setValue("compression_rtk_max_tool_chars", e.target.value)}
                         className="mt-1"
                       />
@@ -661,7 +636,7 @@ export default function Settings() {
                         type="number"
                         min={0}
                         max={20}
-                        value={form.compression_rtk_keep_last_n_turns_full || "2"}
+                        value={form.compression_rtk_keep_last_n_turns_full}
                         onChange={(e) => setValue("compression_rtk_keep_last_n_turns_full", e.target.value)}
                         className="mt-1"
                       />
