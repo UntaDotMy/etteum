@@ -13,9 +13,8 @@ import { existsSync } from "node:fs";
 import path from "node:path";
 import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
-import { runProvider } from "./automation/enowxaiAdapter";
-import { getAdapter } from "./automation/enowxaiRegistry";
-import type { NormalizedAccount, AutomationEvent } from "./automation/enowxaiAdapter";
+import { runPythonFlow } from "./automation/pythonFlow";
+import type { AutomationEvent } from "./automation/enowxaiAdapter";
 
 // Provider ids that use the enowxai adapter architecture (Camoufox + browser-
 // log streaming). These go through runProvider() first; others fall back to
@@ -708,52 +707,65 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
   // the ProviderAdapter contract and emits browser-log events. Those events
   // are bridged to the dashboard WebSocket (the "Browser Log" live viewer).
   if (ENOWXAI_ADAPTER_PROVIDERS.has(provider)) {
-    const adapter = getAdapter(provider);
-    if (adapter) {
-      const password = decrypt(account.password);
-      const proxy = await getNextProxy("auth");
-      if (proxy?.url) (adapter as any).proxyUrl = proxy.url;
-      const startLog = addAuthLog({
-        type: "login_progress",
-        accountId: account.id,
-        email: account.email,
-        provider,
-        step: "starting",
-        message: `Starting ${provider} login (enowxai + Camoufox) for ${account.email}...`,
-      });
-      broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
+    const password = decrypt(account.password);
+    const proxy = await getNextProxy("auth");
+    const startLog = addAuthLog({
+      type: "login_progress",
+      accountId: account.id,
+      email: account.email,
+      provider,
+      step: "starting",
+      message: `Starting ${provider} login (enowxai + Camoufox) for ${account.email}...`,
+    });
+    broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
 
-      // Bridge the enowxai emit() stream → dashboard WebSocket + auth log.
-      const emit = (ev: AutomationEvent) => {
-        if (ev.type === "progress") {
-          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
-          broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: ev.step, message: ev.message } });
+    // Bridge the Python flow-runner emit() stream → dashboard WebSocket + auth log.
+    const emit = (ev: AutomationEvent) => {
+      if (ev.type === "progress") {
+        addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
+        broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: ev.step, message: ev.message } });
         } else if (ev.type === "manual_challenge") {
           addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "manual_challenge", message: ev.message });
           broadcast({ type: "manual_challenge", data: { id: account.id, email: account.email, provider, challengeType: ev.challengeType, message: ev.message } });
         } else if (ev.type === "error") {
           addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "error", message: ev.error });
           broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: "error", message: ev.error } });
+        } else if ((ev as any).type === "frame") {
+          // Live browser-log preview (JPEG screenshot from the Python runner).
+          broadcast({ type: "browser_frame", data: { id: account.id, email: account.email, provider, png: (ev as any).png } });
         }
       };
 
       try {
-        const normalized: NormalizedAccount = { provider, identifier: account.email, secret: password };
-        const result = await runProvider(adapter, normalized, emit, { maxRetries: 3 });
+        // Run the login via the Python Camoufox flow-runner (1:1 enowxai).
+        // camoufox-js hangs on this host; the Python camoufox package is what
+        // enowxai uses and launches reliably. The runner streams progress/frame/
+        // manual_challenge events back over stdio; we bridge them to the WS.
+        //
+        // Headless: enowxai runs headless by default (BATCHER_CAMOUFOX_HEADLESS
+        // env, default "true") and does NOT pop a visible window. We mirror that
+        // exactly — always headless unless the operator explicitly sets
+        // BATCHER_CAMOUFOX_HEADLESS=false in the server env. The dashboard
+        // toggle is ignored for this path (matches enowxai: no per-run popup).
+        const camoufoxHeadless = process.env.BATCHER_CAMOUFOX_HEADLESS?.toLowerCase() !== "false";
+        const result = await runPythonFlow(provider, { email: account.email, password }, emit, {
+          headless: camoufoxHeadless,
+          proxy: proxy?.url,
+        });
         if (!result.success) {
-          await markAccountError(account.id, result.error);
-          const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: result.error, message: result.error });
-          broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error } });
-          return { success: false, error: result.error };
+          await markAccountError(account.id, result.error || "login failed");
+          const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: result.error || "login failed", message: result.error || "login failed" });
+          broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error || "login failed" } });
+          return { success: false, error: result.error || "login failed" };
         }
         const providerResult: ProviderResult = {
           success: true,
           provider,
           credentials: {
-            access_token: String(result.credentials.access_token || ""),
-            refresh_token: String(result.credentials.refresh_token || ""),
-            id_token: String(result.credentials.id_token || ""),
-            profile_arn: String((result.credentials as any).profile_arn || ""),
+            access_token: String(result.tokens?.access_token || ""),
+            refresh_token: String(result.tokens?.refresh_token || ""),
+            id_token: String(result.tokens?.id_token || ""),
+            profile_arn: String((result.tokens as any)?.profile_arn || ""),
           },
           quota: result.quota ? {
             remaining_credits: (result.quota as any).remaining_credits,
@@ -773,7 +785,6 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: errorMsg } });
         return { success: false, error: errorMsg };
       }
-    }
   }
 
   // --- Native TS+Camoufox automation path (Wave 3 migration) ---

@@ -60,7 +60,7 @@ describe("Sticky round-robin (consecutiveUseCount)", () => {
     const first = await pool.getNextAccount(TEST_PROVIDER);
     expect(first).not.toBeNull();
     const firstEmail = first!.email;
-    await pool.markUsed(first!.id);
+    await pool.markUsed(first!.id, TEST_PROVIDER);
     pool.invalidate(TEST_PROVIDER);
 
     // Subsequent picks within the threshold MUST stick to the same account.
@@ -71,7 +71,7 @@ describe("Sticky round-robin (consecutiveUseCount)", () => {
       const pick = await pool.getNextAccount(TEST_PROVIDER);
       expect(pick).not.toBeNull();
       expect(pick!.email).toBe(prevEmail);
-      await pool.markUsed(pick!.id);
+      await pool.markUsed(pick!.id, TEST_PROVIDER);
       pool.invalidate(TEST_PROVIDER);
       prevEmail = pick!.email;
     }
@@ -84,7 +84,7 @@ describe("Sticky round-robin (consecutiveUseCount)", () => {
 
     // The rotated-to account starts a fresh sticky session (count begins at 0
     // because markUsed reset siblings, then increments to 1 on its first use).
-    await pool.markUsed(afterThreshold!.id);
+    await pool.markUsed(afterThreshold!.id, TEST_PROVIDER);
     pool.invalidate(TEST_PROVIDER);
     const state = await allEmailsOrdered();
     const rotated = state.find((s) => s.email === afterThreshold!.email);
