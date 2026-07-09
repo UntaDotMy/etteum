@@ -16,25 +16,21 @@
 
 /**
  * Parse a JSON string that may contain unescaped backslashes (e.g. Windows
- * paths). If the standard `JSON.parse()` succeeds, the result is returned
- * directly. If it fails, backslashes in string values are pre-escaped and
- * parsing is retried.
+ * paths). Always pre-escapes lone backslashes before calling JSON.parse()
+ * because valid JSON escapes like \n, \t, \b, \r, \f silently corrupt
+ * Windows paths (e.g. C:\Users\test\nothing → C:\Users\test<LF>othing).
  *
- * Returns `fallback` (default `undefined`) if both attempts fail.
+ * In tool call arguments, the LLM meant backslashes as literal path
+ * separators — they should never be interpreted as control characters.
+ *
+ * Used for all tool call argument parsing in the proxy.
  */
 export function safeJsonParse<T = any>(json: string, fallback?: T): T | undefined {
+  // Always pre-escape: \n, \t, \b, \r, \f are valid JSON escapes that
+  // silently corrupt paths. Only \\ and \" pass through un-doubled.
   try {
-    return JSON.parse(json) as T;
+    return JSON.parse(escapeJsonBackslashes(json)) as T;
   } catch {
-    // Try pre-escaping lone backslashes inside string values.
-    const fixed = escapeJsonBackslashes(json);
-    if (fixed !== json) {
-      try {
-        return JSON.parse(fixed) as T;
-      } catch {
-        return fallback;
-      }
-    }
     return fallback;
   }
 }
@@ -63,11 +59,13 @@ function escapeJsonBackslashes(json: string): string {
     if (inString) {
       if (ch === "\\") {
         const next = json[i + 1];
-        // Only leave \\ (already escaped) and \" (string delimiter) alone.
-        // Everything else (including \n, \t, \r, \b, \f, \/, \uXXXX) is
-        // doubled because in LLM output these are Windows path separators.
+        // \\ is an already-escaped literal backslash — keep both chars.
+        // \" is an escaped quote — keep both chars.
+        // Everything else is an LLM backslash meant literally (Windows path)
+        // — double it so JSON.parse produces a single literal backslash.
         if (next === "\\" || next === stringDelimiter) {
-          out += "\\";
+          out += ch + next;
+          i++; // consume the next character
         } else {
           out += "\\\\";
         }
