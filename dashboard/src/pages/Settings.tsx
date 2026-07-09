@@ -40,20 +40,29 @@ export default function Settings() {
     warmup_concurrency: "50",
     proxy_pool_usage: "all",
     proxy_pool_rotation: "round_robin",
-    // Compression defaults — keep in sync with DEFAULT_COMPRESSION_CONFIG.
+    // Compression defaults — keep in sync with DEFAULT_COMPRESSION_CONFIG in src/proxy/compression/types.ts.
     compression_rtk_enabled: "true",
-    compression_rtk_max_tool_chars: "4000",
+    compression_rtk_max_tool_chars: "500",
     compression_rtk_keep_last_n_turns_full: "2",
     compression_rtk_smart_truncate: "true",
     compression_dcp_enabled: "false",
     compression_caveman_enabled: "false",
     compression_caveman_level: "lite",
-    compression_cache_markers_enabled: "true",
-    compression_image_dedupe_enabled: "true",
+    compression_cache_markers_enabled: "false",
+    compression_image_dedupe_enabled: "false",
     compression_tsc_enabled: "true",
     compression_tsc_strip_schema_whitespace: "true",
     compression_tsc_trim_descriptions: "true",
     compression_tsc_drop_schema_meta: "true",
+    compression_ponytail_enabled: "false",
+    compression_caveman_injection_enabled: "false",
+    compression_caveman_injection_level: "full",
+    compression_ponytail_injection_enabled: "false",
+    compression_ponytail_injection_level: "full",
+    compression_headroom_enabled: "false",
+    compression_headroom_url: "http://localhost:8787",
+    compression_headroom_compress_user_messages: "false",
+    compression_headroom_timeout_ms: "3000",
   });
   const [warmupStatus, setWarmupStatus] = useState<AutoWarmupStatus | null>(null);
   const [savedAt, setSavedAt] = useState<Date | null>(null);
@@ -597,7 +606,7 @@ export default function Settings() {
                   {(
                     [
                       { name: "Conservative", chars: "8000", turns: "3", smart: "true", hint: "Bigger budget, more context kept. ~3% saving." },
-                      { name: "Balanced", chars: "4000", turns: "2", smart: "true", hint: "Recommended default. ~6% saving." },
+                      { name: "Balanced", chars: "500", turns: "2", smart: "true", hint: "Recommended default. Matches backend cap of 500 chars." },
                       { name: "Aggressive", chars: "2000", turns: "1", smart: "true", hint: "Smaller cap, only last turn protected. ~12% saving — model may miss older details." },
                     ] as const
                   ).map((preset) => {
@@ -638,12 +647,12 @@ export default function Settings() {
                         min={500}
                         max={50000}
                         step={500}
-                        value={form.compression_rtk_max_tool_chars || "4000"}
+                        value={form.compression_rtk_max_tool_chars || "500"}
                         onChange={(e) => setValue("compression_rtk_max_tool_chars", e.target.value)}
                         className="mt-1"
                       />
                       <p className="text-[10px] text-[var(--muted-foreground)] mt-1 leading-relaxed">
-                        ~4 chars = 1 token. Default: <code>4000</code> (≈1000 tokens).
+                        ~4 chars = 1 token. Default: <code>500</code> (≈125 tokens).
                       </p>
                     </div>
                     <div>

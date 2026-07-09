@@ -149,16 +149,16 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // `keepLastNTurnsFull` turns stay fully intact so active tool calls are
     // never touched.
     enabled: true,
-    // Aggressive cap for OLD tool results. In long agentic sessions there are
+    // 500-char cap for OLD tool results. In long agentic sessions there are
     // hundreds of tool_result messages; the median is ~240 chars but the long
-    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 150-char cap keeps the
+    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 500-char cap keeps the
     // gist (path, status, short result, error summary) while cutting the bulk.
     //
     // Note on the chars/token ratio: the proxy estimates tokens at chars/4, but
     // GLM/DeepSeek tokenizers are denser (~2.5 chars/token for code/markdown).
     // So a prompt the estimator calls "127K tokens" is really ~200K GLM tokens.
     // The cap must be aggressive enough that the REAL (GLM-counted) prompt
-    // leaves room for reasoning. 150 + TSC gets a typical long session from
+    // leaves room for reasoning. 500 + TSC gets a typical long session from
     // ~200K GLM tokens down toward ~150K; shorter sessions land in the
     // reasoning zone (~60-90K). The smart shape filters (diff hunks, grep
     // groupings, etc.) still run first within the cap, and the last
