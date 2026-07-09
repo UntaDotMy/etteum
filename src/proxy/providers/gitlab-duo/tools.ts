@@ -21,6 +21,7 @@
 
 import type { ServerAction } from "./protocol";
 import path from "path";
+import { safeJsonParse } from "../../../utils/safe-json";
 
 /**
  * Resolve a path to absolute using the given working directory.
@@ -84,7 +85,7 @@ export function resolveToolPaths(
   if (!argsJson || !cwd) return argsJson;
   
   try {
-    const args = JSON.parse(argsJson);
+    const args = safeJsonParse(argsJson, {}) ?? {};
     if (!args || typeof args !== 'object') return argsJson;
     
     // Fields that typically contain file paths
@@ -501,13 +502,8 @@ export class ToolBridge {
     a: ServerAction,
   ): string {
     if (!required || required.length === 0) return json;
-    let out: Record<string, unknown>;
-    try {
-      out = JSON.parse(json) as Record<string, unknown>;
-    } catch {
-      return json; // non-object payloads are passed through untouched
-    }
-    if (out === null || typeof out !== "object" || Array.isArray(out)) return json;
+    const out = safeJsonParse(json);
+    if (out === undefined || out === null || typeof out !== "object" || Array.isArray(out)) return json;
 
     const present = new Set(Object.keys(out).map((k) => k.toLowerCase()));
     const declared = new Set(Object.keys(props).map((k) => k.toLowerCase()));

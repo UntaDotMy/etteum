@@ -17,6 +17,7 @@
 
 import type { ChatCompletionRequest, ChatMessage } from "../providers/base";
 import type { DCPConfig } from "./types";
+import { safeJsonParse } from "../../utils/safe-json";
 
 interface ToolUseRef {
   /** Index of the message that contains the tool_use. */
@@ -63,8 +64,9 @@ function collectToolUses(messages: ChatMessage[]): ToolUseRef[] {
       for (let j = 0; j < msg.tool_calls.length; j++) {
         const tc = msg.tool_calls[j];
         if (tc?.id && tc?.function?.name) {
-          let input: any;
-          try { input = typeof tc.function.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function.arguments; } catch { input = {}; }
+          const input = typeof tc.function.arguments === "string"
+            ? (safeJsonParse(tc.function.arguments, {}) ?? {})
+            : tc.function.arguments ?? {};
           out.push({
             msgIdx: i,
             blockIdx: -1,
@@ -272,7 +274,9 @@ function getToolInput(messages: ChatMessage[], use: ToolUseRef): any {
     const tc = msg.tool_calls[use.toolCallIdx];
     if (!tc) return {};
     try {
-      return typeof tc.function?.arguments === "string" ? JSON.parse(tc.function.arguments) : tc.function?.arguments ?? {};
+      return typeof tc.function?.arguments === "string"
+    ? (safeJsonParse(tc.function.arguments, {}) ?? {})
+    : tc.function?.arguments ?? {};
     } catch {
       return {};
     }

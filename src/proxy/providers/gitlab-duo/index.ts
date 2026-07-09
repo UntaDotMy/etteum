@@ -49,6 +49,8 @@ import {
 } from "./protocol";
 import { ToolBridge, detectCwdCommand, resolveToolPaths } from "./tools";
 import { creditsPerCall } from "./credits";
+import { config } from "../../../config";
+import { safeJsonParse } from "../../../utils/safe-json";
 import {
   type DeltaEvent,
   type SessionCallbacks,
@@ -59,7 +61,6 @@ import {
   registerSession,
   touchSessionByWs,
 } from "./sessions";
-import { config } from "../../../config";
 // ─── Stored shapes ───────────────────────────────────────────────────────────
 
 interface DuoStoredTokens {
@@ -1165,20 +1166,16 @@ export class GitlabDuoProvider extends BaseProvider {
             if (matched.name.toLowerCase().includes("bash") || 
                 matched.name.toLowerCase().includes("shell") ||
                 matched.name.toLowerCase().includes("terminal")) {
-              try {
-                const args = JSON.parse(argsJson);
-                const command = args.command || args.cmd || "";
-                
-                // Detect cd command and update session working directory
-                const newCwd = detectCwdCommand(command, session?.workingDirectory || process.cwd());
-                if (newCwd && session) {
-                  session.workingDirectory = newCwd;
-                  if (config.gitlabDuoLogToolBridge) {
-                    console.warn(`[gitlab-duo] working directory changed to: ${newCwd}`);
-                  }
+              const args = safeJsonParse(argsJson, {}) ?? {};
+              const command = args.command || args.cmd || "";
+              
+              // Detect cd command and update session working directory
+              const newCwd = detectCwdCommand(command, session?.workingDirectory || process.cwd());
+              if (newCwd && session) {
+                session.workingDirectory = newCwd;
+                if (config.gitlabDuoLogToolBridge) {
+                  console.warn(`[gitlab-duo] working directory changed to: ${newCwd}`);
                 }
-              } catch {
-                // Ignore JSON parse errors
               }
             }
             

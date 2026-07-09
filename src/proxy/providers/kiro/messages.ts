@@ -6,6 +6,7 @@
  * `toolSpecification` / tool-result shapes. No provider state.
  */
 import type { ChatCompletionRequest } from "../base";
+import { safeJsonParse } from "../../../utils/safe-json";
 
 type Messages = ChatCompletionRequest["messages"];
 type Content = Messages[number]["content"];
@@ -122,7 +123,7 @@ export function toolUsesFromMessage(message: Messages[number]): any[] {
   for (const call of message.tool_calls || []) {
     let input = call?.function?.arguments || {};
     if (typeof input === "string") {
-      try { input = JSON.parse(input); } catch { input = {}; }
+      input = safeJsonParse(input, {}) ?? {};
     }
     if (call.id && call?.function?.name) uses.push({ toolUseId: call.id, name: call.function.name, input });
   }

@@ -1,5 +1,6 @@
 import type { ChatCompletionRequest, ChatMessage } from "../providers/base";
 import { createHash } from "node:crypto";
+import { safeJsonParse } from "../../utils/safe-json";
 
 /**
  * Generate a deterministic, Anthropic-like signature for a thinking block.
@@ -109,7 +110,7 @@ function parseToolInput(input: any): string {
 
 function parseToolArguments(args: any): any {
   if (typeof args === "string") {
-    try { return JSON.parse(args); } catch { return {}; }
+    return safeJsonParse(args, {}) ?? {};
   }
   return args ?? {};
 }
@@ -739,7 +740,7 @@ export function openAIToAnthropic(response: any, request: AnthropicMessagesReque
   for (const call of toolCalls) {
     let input = call?.function?.arguments || {};
     if (typeof input === "string") {
-      try { input = JSON.parse(input); } catch { input = {}; }
+      input = safeJsonParse(input, {}) ?? {};
     }
     content.push({ type: "tool_use", id: ensureToolUseId(call.id), name: call?.function?.name, input });
   }
