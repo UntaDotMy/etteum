@@ -390,16 +390,33 @@ export function normalizeMessagesToOpenAI(messages: ChatMessage[]): ChatMessage[
  * Converts Anthropic-style tools ({name, description, input_schema}) into
  * OpenAI format ({type:"function", function:{name, description, parameters}}).
  * Already-OpenAI tools pass through untouched.
+ * Anthropic built-in tools (web_search_*, bash_*, text_editor_*, etc.) throw
+ * AnthropicBuiltinToolError — they have no OpenAI equivalent and silently
+ * dropping them would cause empty-turn bugs.
  */
 export function normalizeToolsToOpenAI(tools: any[] | undefined): any[] | undefined {
   if (!Array.isArray(tools) || tools.length === 0) return undefined;
+  // Fail fast on built-in tools — silent degradation causes empty-turn bugs.
+  for (const tool of tools) {
+    if (isAnthropicBuiltinTool(tool)) {
+      throw new AnthropicBuiltinToolError(tool.type);
+    }
+  }
   return tools
     .map((tool) => {
       if (tool?.type === "function" && tool.function?.name) return tool;
       const name = tool?.name;
       if (!name) return null;
       const parameters = tool.input_schema ?? tool.parameters ?? { type: "object", properties: {} };
-      return { type: "function", function: { name, description: tool.description || "", parameters } };
+      return {
+        type: "function",
+        function: {
+          name,
+          description: tool.description || "",
+          parameters,
+          ...(tool.strict === true ? { strict: true } : {}),
+        },
+      };
     })
     .filter(Boolean);
 }

@@ -765,6 +765,42 @@ export default function Settings() {
               enabled={form.compression_tsc_enabled === "true"}
               onToggle={(v) => setValue("compression_tsc_enabled", v ? "true" : "false")}
             />
+
+            {/* Ponytail */}
+            <CompressionRow
+              title="Ponytail"
+              subtitle="Structural Compression"
+              description="Collapses repeated path prefixes and deduplicates consecutive near-identical lines in tool output. Lossless — only removes scaffolding, never semantic content. Off by default."
+              enabled={form.compression_ponytail_enabled === "true"}
+              onToggle={(v) => setValue("compression_ponytail_enabled", v ? "true" : "false")}
+            />
+
+            {/* Caveman Injection */}
+            <CompressionRow
+              title="Caveman Injection"
+              subtitle="Terse Output Prompt"
+              description="Appends instructions to the system prompt telling the model to respond tersely. ⚠️ Off by default — can cause models to skip tool calls or be too brief. Never use when tool calling matters."
+              enabled={form.compression_caveman_injection_enabled === "true"}
+              onToggle={(v) => setValue("compression_caveman_injection_enabled", v ? "true" : "false")}
+            />
+
+            {/* Ponytail Injection */}
+            <CompressionRow
+              title="Ponytail Injection"
+              subtitle="Lazy Developer Prompt"
+              description="Appends instructions to the system prompt telling the model to be a 'lazy senior developer' who avoids unnecessary code. ⚠️ Off by default — may skip tool calls. Use only for simple completions."
+              enabled={form.compression_ponytail_injection_enabled === "true"}
+              onToggle={(v) => setValue("compression_ponytail_injection_enabled", v ? "true" : "false")}
+            />
+
+            {/* Headroom */}
+            <CompressionRow
+              title="Headroom"
+              subtitle="LLM Pre-Compression"
+              description="Sends the entire message list to an external LLM for semantic compression before the upstream request. ⚠️ Off by default — the external model can rewrite tool calls, arguments, or system prompts unpredictably. Only use for simple completions without tools."
+              enabled={form.compression_headroom_enabled === "true"}
+              onToggle={(v) => setValue("compression_headroom_enabled", v ? "true" : "false")}
+            />
           </CardContent>
         </Card>
       </div>

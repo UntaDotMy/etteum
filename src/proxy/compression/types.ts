@@ -163,7 +163,7 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // reasoning zone (~60-90K). The smart shape filters (diff hunks, grep
     // groupings, etc.) still run first within the cap, and the last
     // `keepLastNTurnsFull` turns stay fully intact.
-    maxToolChars: 150,
+    maxToolChars: 500,
     keepLastNTurnsFull: 2,
     smartTruncate: true,
   },
