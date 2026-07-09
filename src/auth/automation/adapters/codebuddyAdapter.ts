@@ -1,18 +1,36 @@
 /**
- * CodeBuddy provider adapter — faithful TS reconstruction from the reference
- * automation design's readable companion files (codebuddy/_config.py + _api.py
- * + _google_oauth.py + _page_helpers.py + _utils.py). The single obfuscated file
- * (_adapter.py) is orchestration glue; the actual protocol/endpoints/selectors
- * are all in the readable companions ported here.
+ * CodeBuddy provider adapter — faithful TS reconstruction from enowxai's
+ * readable companion files (codebuddy/_config.py + _api.py + _google_oauth.py
+ * + _page_helpers.py + _utils.py). The single obfuscated file (_adapter.py) is
+ * orchestration glue; the actual protocol/endpoints/selectors are all in the
+ * readable companions ported here.
  *
- * Flow (1:1 with the reference design):
+ * Flow (1:1 with enowxai):
  *   Google login → region select (SG) → trial activate → console-login-enterprise
  *   (exchange state → accessToken) → create API key → fetch credits
  *
  * Emits the browser-log stream throughout.
  */
-import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../providerAdapter";
-import { runGoogleAccountAutomation } from "../googleAutomation";
+import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../enowxaiAdapter";
+import {
+  GOOGLE_EMAIL_SELECTORS,
+  GOOGLE_PASSWORD_SELECTORS,
+  GOOGLE_NEXT_BUTTON_SELECTORS,
+  clickFirstVisible,
+  waitForFirstVisibleLocator,
+  fillInputResilient,
+} from "../googleAutomation";
+import {
+  handleCodebuddyLanding,
+  handleCodebuddyRegionSelect,
+  captureCodebuddyState,
+  detectGoogleBlockingChallenge,
+  handleGoogleSomethingWentWrong,
+  handleGoogleGaplustos,
+  handleGoogleConsentContinue,
+} from "./codebuddyPages";
+
+function sleep(ms: number): Promise<void> { return new Promise((r) => setTimeout(r, ms)); }
 
 const EMAIL_PATTERN = /^[^@\s]+@[^@\s]+\.[^@\s]+$/;
 const CODEBUDDY_BASE_URL = "https://www.codebuddy.ai";
@@ -34,7 +52,7 @@ const WEB_HEADERS: Record<string, string> = {
 };
 
 function randName(): string {
-  return `cb-key-${Math.floor(100000 + Math.random() * 900000)}`;
+  return `enowx-${Math.floor(100000 + Math.random() * 900000)}`;
 }
 
 export class CodeBuddyAdapter extends ProviderAdapter {
@@ -49,43 +67,128 @@ export class CodeBuddyAdapter extends ProviderAdapter {
     return { provider: "codebuddy", identifier: email, secret: password };
   }
 
-  override async authenticate(account: NormalizedAccount, session: AdapterSession, emit: EmitFn): Promise<AuthState> {
-    const page = await session.browser.newPage().then((p) => p).catch(async () => {
-      const ctx = await session.browser.newContext();
-      return ctx.newPage();
-    });
+  override async bootstrapSession(account: NormalizedAccount, emit: EmitFn): Promise<AdapterSession> {
+    // CodeBuddy needs a visible-ish context for the Google login + page-fetch
+    // calls. The base bootstrapSession returns {browser}; we add a context + page.
+    const session = await super.bootstrapSession(account, emit);
+    const context = await session.browser.newContext();
+    const page = await context.newPage();
+    (session as any).context = context;
     (session as any).page = page;
+    return session;
+  }
+
+  override async authenticate(account: NormalizedAccount, session: AdapterSession, emit: EmitFn): Promise<AuthState> {
+    const page = (session as any).page;
 
     emit({ type: "progress", provider: "codebuddy", step: "navigate", message: "Opening CodeBuddy login…" });
     await page.goto(CODEBUDDY_LOGIN_URL, { waitUntil: "domcontentloaded", timeout: 60_000 });
 
-    // Stealth Google login via the shared googleAutomation recipe.
-    emit({ type: "progress", provider: "codebuddy", step: "google_login", message: "Stealth Google login…" });
-    const loginResult = await runGoogleAccountAutomation(page, {
-      email: account.identifier,
-      password: account.secret,
-      loginUrl: CODEBUDDY_LOGIN_URL,
-      onManual: (reason) => emit({ type: "manual_challenge", provider: "codebuddy", challengeType: "google_2fa", message: reason }),
-    });
-    if (!loginResult.success) {
-      const e = new Error(loginResult.error || "CodeBuddy Google login failed");
-      if (loginResult.manual) (e as any).fatal = true;
-      throw e;
+    // 1. Handle the CodeBuddy landing: terms checkbox + "Continue with Google".
+    //    This is iframe-aware (login-iframe) — the real enowxai behavior.
+    emit({ type: "progress", provider: "codebuddy", step: "landing", message: "Handling CodeBuddy landing (terms + Google)…" });
+    let landed = await handleCodebuddyLanding(page);
+    if (!landed) {
+      // Retry once after a short dwell — the iframe can mount late.
+      await sleep(1500);
+      landed = await handleCodebuddyLanding(page);
+    }
+    if (!landed) {
+      throw new Error("Could not find CodeBuddy login iframe or 'Continue with Google' button");
     }
 
-    // Region select (Singapore) + trial activation — mirrors _submit_region_via_page.
+    // 2. Google login + interstitial recovery loop. We drive the Google account
+    //    flow directly (it has launched into accounts.google.com by now), with
+    //    recovery for "something went wrong", gaplustos, and consent pages, plus
+    //    blocking-challenge detection (captcha / 2FA → manual signal).
+    emit({ type: "progress", provider: "codebuddy", step: "google_login", message: "Stealth Google login…" });
+    await this.runGoogleLoginWithRecovery(page, account, emit);
+
+    // 3. Region select (Singapore) — the /register/user/complete page.
     emit({ type: "progress", provider: "codebuddy", step: "region", message: "Setting region (Singapore)…" });
-    await this.submitRegion(page, emit);
+    await handleCodebuddyRegionSelect(page);
+
+    // 4. Trial activation.
     emit({ type: "progress", provider: "codebuddy", step: "trial", message: "Activating trial…" });
     await this.activateTrial(page, emit);
 
-    // Capture the OAuth state from the /started redirect (codebuddy:// callback).
+    // 5. Capture the OAuth state from the /started redirect (codebuddy:// callback).
     emit({ type: "progress", provider: "codebuddy", step: "await_callback", message: "Awaiting CodeBuddy OAuth callback…" });
-    const state = await this.captureState(page, emit);
+    const state = await captureCodebuddyState(page, 60_000);
     if (!state) throw new Error("CodeBuddy callback (codebuddy://) not received");
 
     emit({ type: "progress", provider: "codebuddy", step: "authenticated", message: "CodeBuddy login complete" });
     return { state, callbackUrl: state };
+  }
+
+  /**
+   * Drive the Google account login with an interstitial-recovery loop. Handles:
+   *   - "Something went wrong" → restart
+   *   - gaplustos speedbump → confirm
+   *   - consent/continue → approve
+   *   - blocking challenge (captcha/2FA) → emit manual signal, fatal-stop
+   * Types email/password humanized via the shared googleAutomation helpers.
+   */
+  private async runGoogleLoginWithRecovery(page: any, account: NormalizedAccount, emit: EmitFn): Promise<void> {
+    const deadline = Date.now() + 5 * 60_000;
+    let emailed = false;
+    let passworded = false;
+
+    while (Date.now() < deadline) {
+      // Blocking challenge → surface manual, stop.
+      const challenge = await detectGoogleBlockingChallenge(page);
+      if (challenge) {
+        emit({ type: "manual_challenge", provider: "codebuddy", challengeType: "google_2fa", message: `Google blocking challenge: ${challenge}` });
+        const e = new Error(`Google blocking challenge: ${challenge}`);
+        (e as any).fatal = true;
+        throw e;
+      }
+
+      // Recovery handlers (no-op if not on those pages).
+      if (await handleGoogleSomethingWentWrong(page)) { await sleep(1500); continue; }
+      if (await handleGoogleGaplustos(page)) { await sleep(1500); continue; }
+      if (await handleGoogleConsentContinue(page)) { await sleep(1500); continue; }
+
+      // Email step.
+      if (!emailed) {
+        const emailLoc = await waitForFirstVisibleLocator(page, GOOGLE_EMAIL_SELECTORS.join(", "), { timeout: 8_000 });
+        if (emailLoc) {
+          const ok = await fillInputResilient(emailLoc, account.identifier);
+          if (ok) {
+            await sleep(400 + Math.floor(Math.random() * 500));
+            await clickFirstVisible(page, GOOGLE_NEXT_BUTTON_SELECTORS);
+            await sleep(1500);
+            emailed = true;
+            continue;
+          }
+        }
+      }
+
+      // Password step.
+      if (emailed && !passworded) {
+        const pwLoc = await waitForFirstVisibleLocator(page, GOOGLE_PASSWORD_SELECTORS.join(", "), { timeout: 8_000 });
+        if (pwLoc) {
+          const ok = await fillInputResilient(pwLoc, account.secret);
+          if (ok) {
+            await sleep(400 + Math.floor(Math.random() * 500));
+            await clickFirstVisible(page, GOOGLE_NEXT_BUTTON_SELECTORS);
+            await sleep(2000);
+            passworded = true;
+            continue;
+          }
+        }
+      }
+
+      // If we've typed password and we're no longer on accounts.google.com,
+      // the Google flow is done.
+      if (passworded) {
+        const url = String(page.url() || "");
+        if (!url.includes("accounts.google.com")) return;
+      }
+
+      await sleep(1000);
+    }
+    throw new Error("Google login timed out");
   }
 
   override async fetchTokens(account: NormalizedAccount, authState: AuthState, session: AdapterSession, emit: EmitFn): Promise<AdapterTokens> {
@@ -155,22 +258,7 @@ export class CodeBuddyAdapter extends ProviderAdapter {
     return creditFromResourcePayload(result.json);
   }
 
-  // --- Helpers (1:1 with the reference _api.py) ---
-  private async submitRegion(page: any, emit: EmitFn): Promise<boolean> {
-    const result = await pageEvaluate(page, async ({ url, body }) => {
-      const resp = await fetch(url, {
-        method: "POST", credentials: "include",
-        headers: { Accept: "application/json, text/plain, */*", "Content-Type": "application/json", "X-Requested-With": "XMLHttpRequest" },
-        body: JSON.stringify(body),
-      });
-      const text = await resp.text();
-      let json: any = null;
-      try { json = JSON.parse(text); } catch {}
-      return { status: resp.status, json };
-    }, { url: CODEBUDDY_CONSOLE_LOGIN_ACCOUNT_ENDPOINT, body: { attributes: { countryCode: ["65"], countryFullName: ["Singapore"], countryName: ["SG"] } } });
-    return result.status === 200 && result.json?.code === 0;
-  }
-
+  // --- Helpers (1:1 with enowxai _api.py) ---
   private async activateTrial(page: any, emit: EmitFn): Promise<boolean> {
     const result = await pageEvaluate(page, async (url) => {
       const resp = await fetch(url, { method: "POST", credentials: "include", headers: { Accept: "application/json, text/plain, */*", "X-Requested-With": "XMLHttpRequest" } });
@@ -181,29 +269,9 @@ export class CodeBuddyAdapter extends ProviderAdapter {
     }, `${CODEBUDDY_BASE_URL}/billing/ide/trial`);
     return result.status === 200;
   }
-
-  private async captureState(page: any, emit: EmitFn): Promise<string | null> {
-    // Navigate to /started and wait for the codebuddy:// redirect carrying ?state=.
-    try {
-      await page.goto(`${CODEBUDDY_BASE_URL}/started`, { waitUntil: "domcontentloaded", timeout: 15_000 });
-    } catch { /* may redirect immediately */ }
-    const deadline = Date.now() + 30_000;
-    while (Date.now() < deadline) {
-      const url: string = String(page.url() || "");
-      if (url.startsWith(CODEBUDDY_REDIRECT_SCHEME) || url.includes("codebuddy://")) {
-        const q = url.indexOf("?");
-        if (q >= 0) {
-          const params = new URLSearchParams(url.slice(q + 1));
-          return params.get("state");
-        }
-      }
-      await new Promise((r) => setTimeout(r, 500));
-    }
-    return null;
-  }
 }
 
-/** Run a function in the page context (mirrors page.evaluate in the reference). */
+/** Run a function in the page context (mirrors page.evaluate in enowxai). */
 async function pageEvaluate(page: any, fn: (arg: any) => any, arg?: any): Promise<any> {
   if (!page?.evaluate) return { status: 0, json: null };
   try {

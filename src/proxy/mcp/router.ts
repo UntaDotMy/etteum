@@ -1,5 +1,5 @@
 /**
- * MCP HTTP router — TS port of the reference proxy's src/app/api/mcp/[plugin]/{sse,message}/route.js.
+ * MCP HTTP router — TS port of 9router's src/app/api/mcp/[plugin]/{sse,message}/route.js.
  *
  *   GET  /v1/mcp/:plugin/sse      — open an SSE stream; bridge spawns the plugin
  *                                   child and forwards its JSON-RPC stdout.
@@ -12,7 +12,6 @@ import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";
 import { registerSession, unregisterSession, sendToChild, findPlugin, listPlugins } from "./stdioSseBridge";
 import { DEFAULT_REMOTE_PLUGINS, buildManagedMcpServers } from "./marketplace";
-import { probeMcp } from "./probe";
 
 export const mcpRouter = new Hono();
 
@@ -32,16 +31,6 @@ mcpRouter.get("/v1/mcp/marketplace", (c) => {
 /** GET /v1/mcp/managed-servers — emit the managedMcpServers config for clients. */
 mcpRouter.get("/v1/mcp/managed-servers", (c) => {
   return c.json({ managedMcpServers: buildManagedMcpServers() });
-});
-
-/** POST /v1/mcp/probe — probe a remote MCP server URL for its tool list. */
-mcpRouter.post("/v1/mcp/probe", async (c) => {
-  const { url } = await c.req.json<{ url?: string }>().catch(() => ({}) as { url?: string });
-  if (!url || typeof url !== "string") {
-    return c.json({ error: "url required", tools: [] }, 400);
-  }
-  const result = await probeMcp(url);
-  return c.json(result);
 });
 
 /** GET /v1/mcp/:plugin/sse — SSE stream bridging the plugin's JSON-RPC stdout. */

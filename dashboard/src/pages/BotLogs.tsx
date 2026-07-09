@@ -19,7 +19,7 @@ export default function BotLogs() {
   const [sessions, setSessions] = useState<BrowserSessionInfo[]>([]);
   const [challenges, setChallenges] = useState<Record<string, Challenge>>({});
   const [loading, setLoading] = useState(true);
-  // emit() live event log. The automation browser log stream.
+  // enowxai emit() live event log — the automation browser log stream.
   const [events, setEvents] = useState<Array<{ ts: number; provider: string; step: string; message: string; level: string }>>([]);
 
   // Poll the session list every 2s.
@@ -39,7 +39,7 @@ export default function BotLogs() {
     return () => clearInterval(interval);
   }, [load]);
 
-  // Capture the emit() stream (login_progress / login_failed /
+  // Capture the enowxai emit() stream (login_progress / login_failed /
   // login_success / manual_challenge) into a live event log so the browser log
   // is populated even without frame-preview sessions.
   useWsEvent("login_progress", (data: unknown) => {
@@ -122,10 +122,10 @@ export default function BotLogs() {
         </div>
       </div>
 
-      {/* automation live event log (browser log stream) */}
+      {/* enowxai automation live event log (browser log stream) */}
       {events.length > 0 && (
         <div className="border-b border-[var(--border)] bg-black/95 px-4 py-2 max-h-48 overflow-auto">
-          <div className="text-xs text-gray-500 mb-1 font-mono">automation log · Camoufox</div>
+          <div className="text-xs text-gray-500 mb-1 font-mono">automation log · enowxai + Camoufox</div>
           {events.slice(-50).map((ev, i) => (
             <div key={i} className={`font-mono text-xs whitespace-pre-wrap break-all ${ev.level === "error" ? "text-red-400" : ev.level === "success" ? "text-green-400" : "text-gray-300"}`}>
               <span className="text-gray-600">[{new Date(ev.ts).toLocaleTimeString()}]</span>{" "}
