@@ -404,12 +404,14 @@ authRouter.post("/warmup-stop", (c) => {
 });
 
 /**
- * PUT /api/auth/warmup-queue/concurrency - Set WarmUp concurrency
+ * PUT /api/auth/warmup-queue/concurrency - Set WarmUp concurrency.
+ * No upper clamp — governed by the same settings path that the scheduler uses.
+ * 0 = unbounded.
  */
 authRouter.put("/warmup-queue/concurrency", async (c) => {
   const body = await c.req.json<{ concurrency: number }>();
-  if (!body.concurrency || body.concurrency < 1 || body.concurrency > 20) {
-    return c.json({ error: "concurrency must be between 1 and 20" }, 400);
+  if (typeof body.concurrency !== "number" || body.concurrency < 0 || !Number.isFinite(body.concurrency)) {
+    return c.json({ error: "concurrency must be >= 0 (0 = unbounded)" }, 400);
   }
   warmupQueue.setConcurrency(body.concurrency);
   return c.json({ message: `WarmUp concurrency set to ${body.concurrency}` });

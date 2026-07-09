@@ -14,6 +14,7 @@ import {
   type UpdateStatus,
   type ApplyResult,
 } from "@/lib/api";
+import { useWsEvent } from "@/hooks/useWebSocket";
 import { useApi } from "@/hooks/useApi";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 
@@ -118,6 +119,21 @@ export default function Settings() {
 
   useEffect(() => {
     load().catch(() => {});
+  }, []);
+
+  // Keep warmup status live via WebSocket — the Settings page is long-lived
+  // and the scheduler broadcasts every tick, reload, and stop. Without this
+  // the dashboard freezes on the first fetch indefinitely.
+  useWsEvent("auto_warmup_status", (msg: any) => {
+    if (msg.data) setWarmupStatus(msg.data);
+  });
+
+  // Fallback poll: refresh warmup status every 60s in case WS is disconnected.
+  useEffect(() => {
+    const id = setInterval(() => {
+      fetchAutoWarmupStatus().then(setWarmupStatus).catch(() => {});
+    }, 60_000);
+    return () => clearInterval(id);
   }, []);
 
   function setValue(key: string, value: string) {

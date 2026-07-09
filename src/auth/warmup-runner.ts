@@ -50,7 +50,7 @@ interface AccountWarmupUpdate {
 const QODER_PROBE_THROTTLE_MS = 60 * 60 * 1000; // 1 hour
 
 /** How long a probe-passed quota override remains trusted before we re-probe. */
-const QODER_QUOTA_OVERRIDE_TTL_MS = 24 * 60 * 60 * 1000; // 24 hours
+const QODER_QUOTA_OVERRIDE_TTL_MS = 4 * 60 * 60 * 1000; // 4 hours
 
 /**
  * Drift thresholds.

@@ -116,9 +116,19 @@ class WarmupQueue {
     const rows = await db.select().from(accounts).where(inArray(accounts.id, newIds));
     const accountMap = new Map(rows.map((a) => [a.id, a]));
 
-    // Reset progress for affected providers
+    // Reset progress for providers that are being enqueued for the first
+    // time in this batch so each auto-tick shows fresh counters. Providers
+    // that still have in-flight work from a previous batch are left alone —
+    // their active/completed counters survive the reset so the dashboard
+    // doesn't jump to 0% mid-warmup.
+    const seen = new Set<string>();
     for (const row of rows) {
-      this.progressByProvider[row.provider] = { total: 0, completed: 0 };
+      if (seen.has(row.provider)) continue;
+      seen.add(row.provider);
+      const existing = this.progressByProvider[row.provider];
+      if (!existing || existing.completed >= existing.total) {
+        this.progressByProvider[row.provider] = { total: 0, completed: 0 };
+      }
     }
 
     // Add all items to queue
