@@ -741,8 +741,15 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
         // camoufox-js hangs on this host; the Python camoufox package is what
         // enowxai uses and launches reliably. The runner streams progress/frame/
         // manual_challenge events back over stdio; we bridge them to the WS.
+        //
+        // Headless: enowxai runs headless by default (BATCHER_CAMOUFOX_HEADLESS
+        // env, default "true") and does NOT pop a visible window. We mirror that
+        // exactly — always headless unless the operator explicitly sets
+        // BATCHER_CAMOUFOX_HEADLESS=false in the server env. The dashboard
+        // toggle is ignored for this path (matches enowxai: no per-run popup).
+        const camoufoxHeadless = process.env.BATCHER_CAMOUFOX_HEADLESS?.toLowerCase() !== "false";
         const result = await runPythonFlow(provider, { email: account.email, password }, emit, {
-          headless: options.headless ?? config.headless,
+          headless: camoufoxHeadless,
           proxy: proxy?.url,
         });
         if (!result.success) {
