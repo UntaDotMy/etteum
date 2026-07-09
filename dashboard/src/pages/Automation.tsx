@@ -37,10 +37,9 @@ const PROVIDERS: ProviderConfig[] = [
     value: "codebuddy",
     label: "CodeBuddy",
     subtitle: "Auto-add CodeBuddy accounts using empas.",
-    description: "Standalone CodeBuddy autologin flow with shared Browser Logs.",
+    description: "Standalone CodeBuddy autologin flow with shared Browser Logs (enowxai + Camoufox stealth).",
     icon: "🤖",
     color: "from-cyan-500/20 to-cyan-600/20",
-    comingSoon: true,
   },
   {
     value: "codebuddy-cn",
@@ -94,7 +93,6 @@ export default function Automation() {
     try {
       await importAccounts(text, [modalProvider!.value], {
         headless: config.headless,
-        browserEngine: "nodriver",
         concurrency: config.concurrent,
       });
       setModalProvider(null);

@@ -17,7 +17,7 @@ const DEFAULT_SHORT_TIMEOUT_MS = 90_000;
 const DEFAULT_MANUAL_TIMEOUT_MS = 15 * 60_000;
 
 // --- Google account-input selectors (multi-language) ---
-const GOOGLE_EMAIL_SELECTORS = [
+export const GOOGLE_EMAIL_SELECTORS = [
   'input[type="email"]',
   'input[name="identifier"]',
   'input[id="identifierId"]',
@@ -28,7 +28,7 @@ const GOOGLE_EMAIL_SELECTORS = [
   'input[placeholder*="email" i]',
 ];
 
-const GOOGLE_PASSWORD_SELECTORS = [
+export const GOOGLE_PASSWORD_SELECTORS = [
   'input[type="password"]',
   'input[name="Passwd"]',
   'input[name="password"]',
@@ -37,7 +37,7 @@ const GOOGLE_PASSWORD_SELECTORS = [
   'input[aria-label*="password" i]',
 ];
 
-const GOOGLE_NEXT_BUTTON_SELECTORS = [
+export const GOOGLE_NEXT_BUTTON_SELECTORS = [
   '#identifierNext',
   '#passwordNext',
   'button:has-text("Next")',
