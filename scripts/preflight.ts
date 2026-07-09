@@ -34,15 +34,13 @@ console.log("\n  Etteum Pool — Preflight\n");
 const bunCheck = spawnSync("bun", ["--version"], { encoding: "utf8" });
 const bunVersion = bunCheck.status === 0 ? bunCheck.stdout.trim() : "";
 if (bunVersion === "1.3.14") {
-  const hint = IS_WIN
-    ? "Run: bun upgrade --canary in PowerShell"
-    : "Run: bun upgrade --canary";
+  const hint = "Run: bun upgrade --canary";
   check("Bun runtime", false, hint);
 } else {
   check("Bun runtime", bunCheck.status === 0, "Re-run installer or install Bun manually");
 }
 
-// 2. .env exists & has required keys
+// 2. .env exists
 const envFile = join(ROOT, ".env");
 check(".env file", existsSync(envFile), "Re-run installer to recreate .env");
 
@@ -53,27 +51,24 @@ check("Dashboard node_modules", existsSync(join(ROOT, "dashboard", "node_modules
 // 4. Dashboard build
 check("Dashboard build", existsSync(join(ROOT, "dashboard", "dist", "index.html")), "Run: cd dashboard && bun run build");
 
-// 5. Python venv — auto-detect layout (Windows Scripts/ vs Linux bin/).
-// A venv created in WSL has bin/python; one created natively on Windows
-// has Scripts/python.exe. Don't assume platform == layout.
-const venvRoot = join(ROOT, "scripts", "auth", ".venv");
-const venvCandidates = [
-  join(venvRoot, "Scripts", "python.exe"),  // native Windows
-  join(venvRoot, "bin", "python"),            // Linux / macOS / WSL
-  join(venvRoot, "bin", "python3"),
-];
-const venvPy = venvCandidates.find(existsSync) || "";
-check("Python venv", Boolean(venvPy), `Re-run installer to rebuild venv. Looked in: ${venvCandidates.join(", ")}`);
+// 5. Camoufox (optional stealth dep)
+const cfo = spawnSync("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"], { encoding: "utf8" });
+check("Camoufox (stealth browser auth)", cfo.status === 0, "Run: bun install (camoufox-js is in optionalDependencies)");
 
-// 6. Python imports
-if (venvPy && existsSync(venvPy)) {
-  const pyImport = spawnSync(venvPy, ["-c", "import nodriver, aiohttp, httpx, cbor2, pydantic"], { encoding: "utf8" });
-  const pipHint = venvPy.replace(/python(?:3)?(?:\.exe)?$/, "pip");
-  check(
-    "Python packages (nodriver/aiohttp/httpx/cbor2/pydantic)",
-    pyImport.status === 0,
-    `Run: ${pipHint} install -r scripts/auth/requirements.txt`,
-  );
+// 6. Canva worker (curl_cffi)
+const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
+if (existsSync(workerPath)) {
+  // Find system Python for canva_worker.py
+  const pyCandidates = IS_WIN ? ["python", "python3", "py"] : ["python3", "python"];
+  let sysPy = "";
+  for (const cmd of pyCandidates) {
+    const out = spawnSync(IS_WIN ? "where" : "command", IS_WIN ? [cmd] : ["-v", cmd], { encoding: "utf8", shell: true });
+    if (out.status === 0) { sysPy = cmd; break; }
+  }
+  if (sysPy) {
+    const cf = spawnSync(sysPy, ["-c", "import curl_cffi"], { encoding: "utf8" });
+    check("Canva worker (curl_cffi)", cf.status === 0, `Run: ${sysPy} -m pip install curl_cffi`);
+  }
 }
 
 console.log("");

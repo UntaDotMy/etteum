@@ -19,7 +19,7 @@ interface ChallengeData {
 
 /**
  * Renders a modal whenever a `manual_challenge` WebSocket event arrives from a
- * running antigravity manual-login session (the visible nodriver 'frame').
+ * running antigravity manual-login session (the visible browser frame).
  * Shows the CAPTCHA image (base64) + a text input; Submit sends the answer to
  * the running script via POST /api/accounts/:id/challenge-answer; Cancel writes
  * the cancel-signal-file via POST /api/accounts/:id/cancel-manual.

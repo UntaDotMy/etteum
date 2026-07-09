@@ -48,19 +48,8 @@ function resolveBuildInfo(): { version: string; commit: string } {
 const buildInfo = resolveBuildInfo();
 
 /**
- * Resolve the Python interpreter path.
- *
- * Priority:
- *   1. PYTHON_PATH env var (explicit override)
- *   2. The venv that lives inside scripts/auth/.venv — but we auto-detect
- *      the correct sub-directory because a venv created on Linux has
- *      `bin/python` while one created on Windows has `Scripts/python.exe`.
- *      If the venv was created in WSL and the server is now running under
- *      native Windows (or vice-versa), the hard-coded platform check would
- *      point at a non-existent file → ENOENT on Bun.spawn.
- *   3. System Python (`python3` / `python`) as a last-resort fallback so
- *      the server still starts and can run warmup/proxy even if the auth
- *      bot (which needs the venv packages) is unavailable.
+ * Resolve the Python interpreter path (used only by canva_worker.py for
+ * curl_cffi TLS impersonation — auth automation is now TS+Camoufox).
  */
 function resolvePythonPath(): string {
   // 1. Explicit env override
@@ -99,9 +88,8 @@ export const config = {
     const p = process.env.DATABASE_PATH || path.join(projectRoot, "data/poolprox3.db");
     return path.isAbsolute(p) ? p : path.resolve(projectRoot, p);
   })(),
-  // Resolve env-var paths against projectRoot so relative values like
-  // "./scripts/auth/login.py" don't get doubled when Bun.spawn resolves
-  // them against cwd.  Absolute paths are preserved by path.resolve().
+  // Resolve env-var paths against projectRoot. Python is only used by
+  // canva_worker.py (curl_cffi TLS impersonation). Auth is TS+Camoufox.
   authScriptPath: (() => {
     const p = process.env.AUTH_SCRIPT_PATH || path.join(projectRoot, "scripts/auth/login.py");
     return path.isAbsolute(p) ? p : path.resolve(projectRoot, p);
@@ -217,7 +205,7 @@ export const config = {
   // Kiro Pro upgrade settings
   kiroProUpgrade: process.env.KIRO_PRO_UPGRADE === "true",
   billingAddress: JSON.parse(process.env.BILLING_ADDRESS || '{"name":"John Doe","country":"US","line1":"123 Main St","city":"New York","state":"NY","postal_code":"10001"}'),
-  browserEngine: process.env.BROWSER_ENGINE || "nodriver",
+  browserEngine: process.env.BROWSER_ENGINE || "camoufox",
   captchaService: process.env.CAPTCHA_SERVICE || "none",
   captchaApiKey: process.env.CAPTCHA_API_KEY || "",
   // Providers: kiro, kiro-pro, codebuddy, codebuddy-china, canva, codex, qoder, gitlab-duo, youmind, byok

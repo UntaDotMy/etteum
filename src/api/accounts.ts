@@ -2666,7 +2666,7 @@ accountsRouter.post("/:id/open-panel", async (c) => {
         } catch { /* ignore */ }
       }
 
-      // Set cookies via nodriver CDP
+      // Set cookies via browser CDP
       const page = browser.pages[0] || await browser.get("about:blank");
       await page.send("Network.setCookie", {
         name: "AccessToken", value: accessToken || "", domain: "app.kiro.dev", path: "/",

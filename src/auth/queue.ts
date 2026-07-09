@@ -1,7 +1,7 @@
 import { db } from "../db/index";
 import { accounts } from "../db/schema";
 import { eq, inArray } from "drizzle-orm";
-import { loginAccount, loginAllProviders, applyProviderResult, markLoginFailed } from "./runner";
+import { loginAccount, applyProviderResult, markLoginFailed } from "./runner";
 import { registerSession, getSession, listSessions, updateFrame, updatePhase, updateChallenge, clearChallenge, deleteSession, appendStep } from "./browserSession";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";

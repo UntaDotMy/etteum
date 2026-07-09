@@ -2,10 +2,6 @@
 /**
  * doctor.ts — Health diagnostic for Etteum Pool installation
  *
- * Run this any time something feels off. It validates every prerequisite,
- * config value, and runtime asset, then prints a remediation hint when
- * something is missing or broken.
- *
  *   bun scripts/doctor.ts           # human-readable report
  *   bun scripts/doctor.ts --json    # machine-readable
  *   bun scripts/doctor.ts --strict  # exit 1 on any warning (CI mode)
@@ -48,33 +44,6 @@ function which(cmd: string): string | null {
   return null;
 }
 
-/**
- * Auto-detect the venv Python path.
- * A venv created on Linux has bin/python; one created on Windows has
- * Scripts/python.exe. We check both regardless of the current platform
- * so the doctor works even when a venv was created in WSL and the server
- * is running under native Windows (or vice-versa).
- */
-function venvPython(): string | null {
-  const venvRoot = join(ROOT, "scripts", "auth", ".venv");
-  const candidates = [
-    join(venvRoot, "Scripts", "python.exe"),  // Windows venv
-    join(venvRoot, "bin", "python"),            // Linux/macOS venv
-    join(venvRoot, "bin", "python3"),           // Linux/macOS venv (alt)
-  ];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
-}
-
-/** The venv's pip path (for remediation hints). */
-function venvPipHint(): string {
-  const py = venvPython();
-  if (!py) return "scripts/auth/.venv/bin/pip";
-  return py.replace(/python(?:3)?(?:\.exe)?$/, "pip");
-}
-
 function run(cmd: string, args: string[]): { ok: boolean; stdout: string; stderr: string } {
   const r = spawnSync(cmd, args, { encoding: "utf8" });
   return { ok: r.status === 0, stdout: r.stdout || "", stderr: r.stderr || "" };
@@ -112,76 +81,10 @@ function checkBun() {
     pushFail(
       "Bun runtime",
       `v${version} detected — this version has known issues with this project`,
-      IS_WIN
-        ? 'Upgrade canary: bun upgrade --canary'
-        : "Upgrade canary: bun upgrade --canary",
+      "Upgrade: bun upgrade --canary",
     );
   } else {
     pushOk("Bun runtime", `v${version} at ${path}`);
-  }
-}
-
-function checkPython() {
-  const env = parseEnv(join(ROOT, ".env"));
-  const venvPy = venvPython();
-
-  if (!venvPy) {
-    return pushFail(
-      "Python venv",
-      `No venv found at scripts/auth/.venv/ (checked Scripts/python.exe and bin/python)`,
-      "Run with --fix to auto-create, or manually: python -m venv scripts/auth/.venv && "
-      + `${IS_WIN ? "scripts/auth/.venv/Scripts/pip" : "scripts/auth/.venv/bin/pip"} install -r scripts/auth/requirements.txt`,
-    );
-  }
-  const v = run(venvPy, ["--version"]);
-  if (!v.ok) {
-    return pushFail("Python venv", `Cannot execute ${venvPy}`, "Run with --fix to rebuild the venv");
-  }
-  pushOk("Python venv", `${v.stdout.trim() || v.stderr.trim()} at ${venvPy}`);
-
-  // PYTHON_PATH config sanity
-  const cfgPath = (env.PYTHON_PATH || "").trim();
-  if (cfgPath && !existsSync(cfgPath)) {
-    pushWarn(
-      "PYTHON_PATH config",
-      `PYTHON_PATH=${cfgPath} does not exist`,
-      "Clear it (auto-detect): set PYTHON_PATH= in .env",
-    );
-  }
-}
-
-function checkPyPackages() {
-  const venvPy = venvPython();
-  if (!venvPy) return;
-  const required = ["nodriver", "aiohttp", "httpx", "cbor2", "pydantic"];
-  for (const pkg of required) {
-    const r = run(venvPy, ["-c", `import ${pkg}`]);
-    if (!r.ok) {
-      pushFail(
-        `Python pkg: ${pkg}`,
-        `Import failed`,
-        `Run: ${venvPipHint()} install -r scripts/auth/requirements.txt`,
-      );
-    } else {
-      pushOk(`Python pkg: ${pkg}`, "import ok");
-    }
-  }
-}
-
-function checkBrowsers() {
-  const venvPy = venvPython();
-  if (!venvPy) return;
-
-  // nodriver Chrome
-  const nd = run(venvPy, ["-c", "import nodriver; print('ok')"]);
-  if (nd.ok) {
-    pushOk("nodriver", "installed");
-  } else {
-    pushFail(
-      "nodriver",
-      "Not installed",
-      `Run: ${venvPipHint()} install nodriver`,
-    );
   }
 }
 
@@ -191,10 +94,20 @@ function checkDotenv() {
     return pushFail(".env", "Missing .env", "Copy from .env.example and re-run installer");
   }
   const env = parseEnv(envPath);
-  const required = ["PORT", "DASHBOARD_PORT", "API_KEY", "DATABASE_PATH", "ENCRYPTION_KEY", "AUTH_SCRIPT_PATH", "AUTH_SCRIPT_CWD"];
+  const required = ["PORT", "DASHBOARD_PORT", "API_KEY", "DATABASE_PATH", "ENCRYPTION_KEY"];
   for (const k of required) {
     if (!(k in env) || !env[k]) {
-      pushWarn(`.env: ${k}`, "missing or empty", "Copy from .env.example and re-run installer");
+      pushFail(`.env: ${k}`, "missing or empty", "Copy from .env.example and re-run installer");
+    }
+  }
+  // Warn on stale Python-centric keys from the pre-camoufox era
+  for (const stale of ["AUTH_SCRIPT_PATH", "AUTH_SCRIPT_CWD", "PYTHON_PATH"]) {
+    if (stale in env && env[stale]) {
+      pushWarn(
+        `.env: ${stale}`,
+        `Obsolete key (${env[stale]}) — auth is now TS+Camoufox, not Python scripts`,
+        "Remove this line from .env — it is unused",
+      );
     }
   }
   if (env.ENCRYPTION_KEY === "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6") {
@@ -213,20 +126,13 @@ function checkDotenv() {
       "Set API_KEY in .env to a long random string",
     );
   }
-}
-
-function checkDashboardBuild() {
-  const dist = join(ROOT, "dashboard", "dist", "index.html");
-  if (!existsSync(dist)) {
-    return pushFail(
-      "Dashboard build",
-      "dashboard/dist not found",
-      "Run: cd dashboard && bun install && bun run build",
+  if (env.BROWSER_ENGINE === "nodriver") {
+    pushWarn(
+      ".env: BROWSER_ENGINE",
+      "Set to 'nodriver' which is no longer supported — change to 'camoufox' or 'chromium'",
+      "Set BROWSER_ENGINE=camoufox in .env",
     );
   }
-  const age = (Date.now() - statSync(dist).mtimeMs) / 1000 / 60 / 60 / 24;
-  if (age > 30) pushWarn("Dashboard build", `Built ${age.toFixed(0)} days ago`, "Consider rebuilding: bun run build");
-  else pushOk("Dashboard build", "present");
 }
 
 function checkNodeModules() {
@@ -243,7 +149,39 @@ function checkNodeModules() {
   }
 }
 
-function checkDataDir() {
+function checkCamoufox() {
+  const engine = parseEnv(join(ROOT, ".env")).BROWSER_ENGINE || "camoufox";
+  if (engine === "chromium") {
+    pushOk("Camoufox", "skipped (BROWSER_ENGINE=chromium)");
+    return;
+  }
+  const r = run("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"]);
+  if (r.ok) {
+    pushOk("Camoufox", "camoufox-js importable");
+  } else {
+    pushFail(
+      "Camoufox",
+      "camoufox-js not found (optional dependency for stealth browser auth)",
+      "Run: bun install — camoufox-js is in optionalDependencies",
+    );
+  }
+}
+
+function checkDashboardBuild() {
+  const dist = join(ROOT, "dashboard", "dist", "index.html");
+  if (!existsSync(dist)) {
+    return pushFail(
+      "Dashboard build",
+      "dashboard/dist not found",
+      "Run: cd dashboard && bun install && bun run build",
+    );
+  }
+  const age = (Date.now() - statSync(dist).mtimeMs) / 1000 / 60 / 60 / 24;
+  if (age > 30) pushWarn("Dashboard build", `Built ${age.toFixed(0)} days ago`, "Consider rebuilding: cd dashboard && bun run build");
+  else pushOk("Dashboard build", "present");
+}
+
+function checkDatabase() {
   const env = parseEnv(join(ROOT, ".env"));
   const dbPath = (env.DATABASE_PATH || "./data/poolprox3.db").replace(/^\.\//, "");
   const fullPath = resolve(ROOT, dbPath);
@@ -255,8 +193,35 @@ function checkDataDir() {
   }
 }
 
+function checkCanvaWorker() {
+  // canva_worker.py still uses Python for curl_cffi TLS impersonation
+  const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
+  if (!existsSync(workerPath)) {
+    pushOk("Canva worker", "canva_worker.py not present (optional)");
+    return;
+  }
+  const sysPy = findSystemPython();
+  if (!sysPy) {
+    pushWarn(
+      "Canva worker",
+      "Python not found — canva media generation will fail",
+      "Install Python 3.10+ and: pip install curl_cffi",
+    );
+    return;
+  }
+  const cf = run(sysPy, ["-c", "import curl_cffi"]);
+  if (cf.ok) {
+    pushOk("Canva worker", `Python ${sysPy}, curl_cffi ready`);
+  } else {
+    pushFail(
+      "Canva worker",
+      "curl_cffi not installed",
+      `Run: ${sysPy} -m pip install curl_cffi`,
+    );
+  }
+}
+
 function checkPrivateProviders() {
-  // Private build only — these are optional but warn if a recent clone is missing them
   const duoDir = join(ROOT, "src", "proxy", "providers", "gitlab-duo");
   const youmindFile = join(ROOT, "src", "proxy", "providers", "youmind.ts");
 
@@ -272,19 +237,9 @@ function checkPrivateProviders() {
   }
 }
 
-/**
- * Built-in web_search shim health.
- *
- * - If WEB_SEARCH_ENABLED is off → report as off (ok).
- * - If SEARXNG_URL is set → probe it (?q=test&format=json) and report
- *   reachability + JSON. This catches a missing/stopped SearXNG container
- *   before it silently degrades searches.
- * - If SEARXNG_URL is unset → the keyless DuckDuckGo fallback is active;
- *   report ok with a hint that SearXNG is the optional robust upgrade.
- */
 function checkWebSearch() {
   const env = parseEnv(join(ROOT, ".env"));
-  const enabled = env.WEB_SEARCH_ENABLED !== "false"; // default on
+  const enabled = env.WEB_SEARCH_ENABLED !== "false";
   if (!enabled) {
     pushOk("Web search", "disabled (WEB_SEARCH_ENABLED=false)");
     return;
@@ -294,11 +249,9 @@ function checkWebSearch() {
     pushOk(
       "Web search",
       "enabled, using keyless DuckDuckGo backend (zero-config)",
-      "For more robust results, run SearXNG and set SEARXNG_URL — see README 'Web search'",
     );
     return;
   }
-  // Probe the configured SearXNG instance.
   const base = searxngUrl.replace(/\/+$/, "");
   const probeUrl = `${base}/search?q=test&format=json`;
   const curl = which("curl");
@@ -315,7 +268,6 @@ function checkWebSearch() {
     );
     return;
   }
-  // Confirm it actually returned JSON (not the HTML theme, which means format=json is disabled).
   let isJson = false;
   try { JSON.parse(r.stdout); isJson = true; } catch { /* not json */ }
   if (!isJson) {
@@ -331,25 +283,27 @@ function checkWebSearch() {
 
 // ── Auto-heal (--fix) ──────────────────────────────────────────────────
 
-/** Find a system Python via PATH (any 3.10-3.12). */
 function findSystemPython(): string | null {
   const candidates = IS_WIN
-    ? ["python", "python3", "py", "py -3"]
+    ? ["py", "python3", "python"]
     : ["python3", "python"];
   for (const cmd of candidates) {
-    const py = which(cmd === "py -3" ? "py" : cmd);
-    if (py) {
-      const v = run(cmd === "py -3" ? "py" : py, cmd === "py -3" ? ["-3", "--version"] : ["--version"]);
-      if (v.ok) return py;
-    }
+    const py = which(cmd);
+    if (!py) continue;
+    const args = cmd === "py" ? ["-3", "--version"] : ["--version"];
+    const v = run(py, args);
+    if (!v.ok) continue;
+    const pipCheck = run(py, cmd === "py" ? ["-3", "-m", "pip", "--version"] : ["-m", "pip", "--version"]);
+    if (pipCheck.ok) return py;
+    const ensurepip = run(py, cmd === "py" ? ["-3", "-m", "ensurepip", "--default-pip"] : ["-m", "ensurepip", "--default-pip"]);
+    if (ensurepip.ok) return py;
   }
   return null;
 }
 
-/** Run a fix step with a timeout. Returns true if it succeeded. */
-function runFix(cmd: string, args: string[], name: string, timeoutSec = 300): boolean {
+function runFix(cmd: string, args: string[], name: string, timeoutSec = 300, cwd?: string): boolean {
   process.stdout.write(`  \x1b[2m→ ${name}...\x1b[0m`);
-  const r = spawnSync(cmd, args, { encoding: "utf8", timeout: timeoutSec * 1000 });
+  const r = spawnSync(cmd, args, { encoding: "utf8", timeout: timeoutSec * 1000, cwd });
   if (r.status === 0) {
     process.stdout.write(" \x1b[32mOK\x1b[0m\n");
     return true;
@@ -362,64 +316,67 @@ function runFix(cmd: string, args: string[], name: string, timeoutSec = 300): bo
 function autoFix() {
   console.log(`\n\x1b[1m🔧 Auto-fix mode\x1b[0m\n`);
 
-  // ── 1. Venv ──────────────────────────────────────────────────────────
-  const venvPy = venvPython();
-  const venvRoot = join(ROOT, "scripts", "auth", ".venv");
-  let venvOk = venvPy !== null && run(venvPy, ["--version"]).ok;
+  // 1. node_modules
+  const depsFixed: string[] = [];
+  for (const dir of ["node_modules", "dashboard/node_modules"]) {
+    if (!existsSync(join(ROOT, dir))) {
+      process.stdout.write(`  \x1b[33m! ${dir} missing — installing...\x1b[0m\n`);
+      if (dir.startsWith("dashboard")) {
+        runFix("bun", ["install"], "bun install (dashboard)", 300, join(ROOT, "dashboard"));
+      } else {
+        runFix("bun", ["install"], "bun install (root)", 300);
+      }
+      depsFixed.push(dir);
+    }
+  }
 
-  if (!venvOk) {
-    process.stdout.write("  \x1b[33m! Venv broken or missing — rebuilding...\x1b[0m\n");
+  // 2. Dashboard build
+  if (!existsSync(join(ROOT, "dashboard", "dist", "index.html"))) {
+    process.stdout.write("  \x1b[33m! Dashboard build missing — building...\x1b[0m\n");
+    runFix("bun", ["run", "build"], "bun run build (dashboard)", 300, join(ROOT, "dashboard"));
+  }
+
+  // 3. Canva worker: install curl_cffi if Python is available
+  const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
+  if (existsSync(workerPath)) {
     const sysPy = findSystemPython();
-    if (!sysPy) {
-      console.log("  \x1b[31m✗ No system Python found on PATH. Install Python 3.10–3.12 first.\x1b[0m\n");
-      process.exit(1);
-    }
-    // Remove broken venv
-    if (existsSync(venvRoot)) {
-      // Windows: use rm -rf via shell; Bun's fs.rmSync can struggle with long paths
-      const rm = spawnSync(IS_WIN ? "cmd" : "rm", IS_WIN ? ["/c", "rmdir", "/s", "/q", venvRoot] : ["-rf", venvRoot], { encoding: "utf8" });
-      if (rm.status !== 0) {
-        // fallback: try recursive removal
-        try { import("node:fs").then(fs => (fs as any).rmSync(venvRoot, { recursive: true, force: true })); } catch { /* best effort */ }
-      }
-    }
-    // Recreate venv
-    if (!runFix(sysPy, ["-m", "venv", venvRoot], "Creating venv", 60)) {
-      console.log("  \x1b[31m✗ Failed to create venv. Try: re-run installer.\x1b[0m\n");
-      process.exit(1);
-    }
-    // Re-evaluate
-    const newPy = venvPython();
-    if (!newPy || !run(newPy, ["--version"]).ok) {
-      console.log("  \x1b[31m✗ Venv created but python not found — platform mismatch?\x1b[0m\n");
-      process.exit(1);
-    }
-    venvOk = true;
-  }
-
-  const pipPath = venvPipHint();
-  const vpy = venvPython()!;
-
-  // ── 2. Python packages ──────────────────────────────────────────────
-  const required = ["nodriver", "aiohttp", "httpx", "cbor2", "pydantic"];
-  const missingPkgs = required.filter(pkg => !run(vpy, ["-c", `import ${pkg}`]).ok);
-  if (missingPkgs.length > 0) {
-    process.stdout.write(`  \x1b[33m! Installing ${missingPkgs.length} missing packages...\x1b[0m\n`);
-    runFix(pipPath, ["install", "-r", join(ROOT, "scripts/auth/requirements.txt")], "pip install", 300);
-    // Verify each
-    for (const pkg of missingPkgs) {
-      if (!run(vpy, ["-c", `import ${pkg}`]).ok) {
-        console.log(`    \x1b[31m✗ ${pkg} still fails to import\x1b[0m`);
+    if (sysPy) {
+      const cf = run(sysPy, ["-c", "import curl_cffi"]);
+      if (!cf.ok) {
+        process.stdout.write("  \x1b[33m! Installing curl_cffi for Canva worker...\x1b[0m\n");
+        runFix(sysPy, ["-m", "pip", "install", "curl_cffi"], "pip install curl_cffi", 120);
       }
     }
   }
 
-  // ── 3. nodriver Chrome ──────────────────────────────────────────
-  const nd = run(vpy, ["-c", "import nodriver"]);
-  if (!nd.ok) {
-    process.stdout.write("  \x1b[33m! Installing nodriver...\x1b[0m\n");
-    runFix(pipPath, ["install", "nodriver>=0.50"], "pip install nodriver", 300);
+  // 4. .env: strip stale keys (AUTH_SCRIPT_PATH, AUTH_SCRIPT_CWD, PYTHON_PATH)
+  const envPath = join(ROOT, ".env");
+  if (existsSync(envPath)) {
+    const env = parseEnv(envPath);
+    const staleKeys = ["AUTH_SCRIPT_PATH", "AUTH_SCRIPT_CWD", "PYTHON_PATH"];
+    const hasStale = staleKeys.some((k) => k in env && env[k]);
+    if (hasStale) {
+      process.stdout.write("  \x1b[33m! Stripping stale AUTH_SCRIPT/PYTHON keys from .env...\x1b[0m\n");
+      let content = readFileSync(envPath, "utf8");
+      for (const k of staleKeys) {
+        content = content.replace(new RegExp(`^${k}=.*$`, "gm"), `# ${k}= (removed — auth is now TS+Camoufox)`);
+      }
+      Bun.write(envPath, content);
+      process.stdout.write("  \x1b[2m→ Stripped stale keys\x1b[0m \x1b[32mOK\x1b[0m\n");
+    }
+    // Fix nodriver → camoufox
+    if (env.BROWSER_ENGINE === "nodriver") {
+      process.stdout.write("  \x1b[33m! Fixing BROWSER_ENGINE=nodriver → camoufox...\x1b[0m\n");
+      let content = readFileSync(envPath, "utf8");
+      content = content.replace(/^BROWSER_ENGINE=nodriver$/m, "BROWSER_ENGINE=camoufox");
+      Bun.write(envPath, content);
+      process.stdout.write("  \x1b[2m→ Fixed BROWSER_ENGINE\x1b[0m \x1b[32mOK\x1b[0m\n");
+    }
   }
+
+  // 5. Database migrations
+  process.stdout.write("  \x1b[33m! Running database migrations...\x1b[0m\n");
+  runFix("bun", ["src/db/migrate.ts"], "db migrate", 60);
 
   console.log("");
 }
@@ -433,18 +390,16 @@ const wantFix = args.includes("--fix");
 
 if (wantFix) {
   autoFix();
-  // Re-run all checks after fixing
   checks.length = 0;
 }
 
 checkBun();
-checkPython();
-checkPyPackages();
-checkBrowsers();
 checkDotenv();
 checkNodeModules();
+checkCamoufox();
 checkDashboardBuild();
-checkDataDir();
+checkDatabase();
+checkCanvaWorker();
 checkPrivateProviders();
 checkWebSearch();
 
@@ -474,7 +429,7 @@ if (wantJson) {
   } else if (failCount === 0) {
     console.log("  \x1b[33mInstallation works but has warnings. Read them above.\x1b[0m\n");
   } else {
-    console.log("  \x1b[31m\x1b[1m✗ Installation has errors. Run remediation hints above.\x1b[0m\n");
+    console.log("  \x1b[31m\x1b[1m✗ Installation has errors. Run with --fix to auto-heal.\x1b[0m\n");
   }
 }
 

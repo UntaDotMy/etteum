@@ -126,7 +126,7 @@ export default function Accounts() {
   const [settingsMap, setSettingsMap] = useState<Record<string, string>>({});
   const [now, setNow] = useState<number>(Date.now());
 
-  const [addForm, setAddForm] = useState({ email: "", password: "", provider: "kiro" as Provider, browserEngine: "nodriver", headless: false });
+  const [addForm, setAddForm] = useState({ email: "", password: "", provider: "kiro" as Provider, browserEngine: "camoufox", headless: false });
   const [addDialogProvider, setAddDialogProvider] = useState<Provider | null>(null);
   const [instantTokens, setInstantTokens] = useState("");
   const [cookieValue, setCookieValue] = useState("");
@@ -2449,7 +2449,8 @@ sk-ws-H.zzzzzzzz..."
               <div>
                 <label className="text-sm text-[var(--foreground)]">Browser Engine</label>
                 <select value={addForm.browserEngine} onChange={(e) => setAddForm({ ...addForm, browserEngine: e.target.value })} className="mt-1 w-full h-9 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 text-sm text-[var(--foreground)]">
-                  <option value="nodriver">nodriver (default)</option>
+                  <option value="camoufox">camoufox (default)</option>
+                  <option value="chromium">chromium</option>
                 </select>
               </div>
               <label className="flex items-center gap-2 text-sm text-[var(--foreground)]">
