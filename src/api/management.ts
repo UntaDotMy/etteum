@@ -1,5 +1,5 @@
 /**
- * Management API — TS port of the reference proxy's model/pricing/sync/tunnel/system routes.
+ * Management API — TS port of 9router's model/pricing/sync/tunnel/system routes.
  *
  * Closes the remaining API-surface gaps (Wave 7):
  *   - /api/models/{disabled,custom,availability,test} — model management
@@ -198,7 +198,7 @@ managementRouter.get("/system/specs", (c) => {
 });
 
 // --- Settings upsert (for dashboard config like oidc_config) ---
-// Generic key/value settings store (mirrors the reference proxy settings). Admin-guarded
+// Generic key/value settings store (mirrors 9router settings). Admin-guarded
 // because oidc_config can carry a client secret.
 managementRouter.post("/settings", async (c) => {
   const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);

@@ -26,8 +26,6 @@ const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> 
   { table: "request_logs", column: "savings_by_technique",    ddl: "ALTER TABLE request_logs ADD COLUMN savings_by_technique TEXT" },
   // 2026-07-07 — sticky response-id pinning (previous_response_id → account)
   { table: "request_logs", column: "response_id", ddl: "ALTER TABLE request_logs ADD COLUMN response_id TEXT" },
-  // 2026-07-08: sticky round-robin (consecutive-use count for rotation)
-  { table: "accounts", column: "consecutive_use_count", ddl: "ALTER TABLE accounts ADD COLUMN consecutive_use_count INTEGER NOT NULL DEFAULT 0" },
 ];
 
 function tableHasColumn(table: string, column: string): boolean {

@@ -1,5 +1,5 @@
 /**
- * MCP plugin marketplace — TS port of the reference proxy's
+ * MCP plugin marketplace — TS port of 9router's
  * src/shared/constants/coworkPlugins.js + buildManagedMcpServers.
  *
  * Closes the MCP marketplace/registry HIGH gap:
@@ -51,7 +51,7 @@ export const DEFAULT_REMOTE_PLUGINS: RemoteMcpPlugin[] = [
 ];
 
 /**
- * Build the managedMcpServers config (1:1 with the reference proxy buildManagedMcpServers).
+ * Build the managedMcpServers config (1:1 with 9router buildManagedMcpServers).
  * Emits the list a client consumes to register remote MCP servers. Dedupes by
  * name, infers transport from URL if missing, and includes toolPolicy allow-
  * lists where declared.

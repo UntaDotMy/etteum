@@ -1,8 +1,8 @@
 /**
- * Kiro provider adapter — 1:1 TS port of the reference automation design's
+ * Kiro provider adapter — 1:1 TS port of enowxai's
  * app/providers/kiro/_adapter.py + _google_oauth.py + _helpers.py.
  *
- * Implements the ProviderAdapter contract: stealth Google OAuth login
+ * Implements the enowxai ProviderAdapter contract: stealth Google OAuth login
  * (via the Camoufox engine + googleAutomation stealth recipe), kiro:// callback
  * capture, token exchange, and quota fetch with token refresh.
  *
@@ -10,7 +10,7 @@
  * authenticated → tokens → quota, with manual_challenge for captchas).
  */
 import crypto from "node:crypto";
-import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../providerAdapter";
+import { ProviderAdapter, type NormalizedAccount, type AdapterSession, type AuthState, type AdapterTokens, type QuotaSnapshot, type EmitFn } from "../enowxaiAdapter";
 import { runGoogleAccountAutomation, createKiroCallbackMonitor, type GoogleLoginResult } from "../googleAutomation";
 
 const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -184,7 +184,7 @@ async function refreshKiroAccessToken(tokens: AdapterTokens): Promise<boolean> {
   }
 }
 
-/** Parse the Kiro usage payload into a QuotaSnapshot (1:1 with the reference). */
+/** Parse the Kiro usage payload into a QuotaSnapshot (1:1 with enowxai). */
 function parseKiroUsagePayload(payload: any): QuotaSnapshot {
   // Kiro's usage API returns a free-credit bucket + a per-account capacity.
   const free = payload?.freeCredits ?? payload?.free_credits ?? {};

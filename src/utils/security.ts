@@ -133,7 +133,7 @@ export class RateLimiter {
 }
 
 // --- Access-control tier (closes management-API exposure HIGH cluster) ---
-// Mirrors the reference proxy's dashboardGuard.js: spawn-capable + secret-reading routes
+// Mirrors 9router's dashboardGuard.js: spawn-capable + secret-reading routes
 // must be reachable only from localhost, OR via a machine-bound CLI token.
 // Without this, a leaked API key → remote code execution (update.ts spawns
 // git/build/migrate) and host-secret reads.
