@@ -214,11 +214,9 @@ export async function routeRequest(
     if (providerName === "byok") attemptedByokAccountIds.add(account.id);
 
     const startTime = Date.now();
-    let tracked = false;
 
     try {
       pool.trackRequestStart(account.id);
-      tracked = true;
       // F12: dispatch through the shared executor (per-status retry + Codex
       // SSE-peek for 200-OK overload errors + uniform reclassification).
       const result = await execute({ provider, providerName, account, request: compressedRequest, stream });
@@ -230,12 +228,9 @@ export async function routeRequest(
         if (result.tokens) {
           await pool.updateTokens(account.id, result.tokens);
         }
-        await pool.markUsed(account.id);
+        await pool.markUsed(account.id, providerName);
         return { result, account, provider: providerName, durationMs, compressionStats, compressedRequest };
       }
-
-      pool.trackRequestEnd(account.id);
-      tracked = false;
 
       // Client-side model errors should not poison accounts. A wrong model ID
       // is a bad request, not an account/session failure, so stop retrying and
@@ -309,23 +304,24 @@ export async function routeRequest(
           await pool.updateTokens(account.id, refreshResult.tokens);
           invalidateRefreshDedup(account, providerName);
           // Retry with same account after refresh
-          pool.trackRequestStart(account.id);
-          tracked = true;
-          const retryResult = await execute({ provider, providerName, account, request: compressedRequest, stream });
+          try {
+            pool.trackRequestStart(account.id);
+            const retryResult = await execute({ provider, providerName, account, request: compressedRequest, stream });
 
-          if (retryResult.success) {
-            await pool.markUsed(account.id);
-            return {
-              result: retryResult,
-              account,
-              provider: providerName,
-              durationMs: Date.now() - startTime,
-              compressionStats,
-              compressedRequest,
-            };
+            if (retryResult.success) {
+              await pool.markUsed(account.id, providerName);
+              return {
+                result: retryResult,
+                account,
+                provider: providerName,
+                durationMs: Date.now() - startTime,
+                compressionStats,
+                compressedRequest,
+              };
+            }
+          } finally {
+            pool.trackRequestEnd(account.id);
           }
-          pool.trackRequestEnd(account.id);
-          tracked = false;
           // Refresh succeeded but retry failed — treat as transient (token
           // might work on next request after propagation).
           await pool.markTransientFailure(account.id, result.error || "Auth failed");
@@ -378,16 +374,10 @@ export async function routeRequest(
     } catch (error) {
       const errMsg =
         error instanceof Error ? error.message : String(error);
-      if (tracked) {
-        pool.trackRequestEnd(account.id);
-        tracked = false;
-      }
       if (isNonAccountRequestError(errMsg)) {
         throw error;
       }
       if (errMsg.includes("expired") || errMsg.includes("401")) {
-        // Check if this provider supports token refresh. If not, mark as
-        // error so the dead account is excluded from the pool.
         const refreshCheck = await provider.refreshToken(account);
         const noRefresh = !refreshCheck.success && (
           refreshCheck.error?.includes("re-login") ||
@@ -406,6 +396,8 @@ export async function routeRequest(
         await pool.markError(account.id, errMsg);
       }
       lastError = errMsg;
+    } finally {
+      pool.trackRequestEnd(account.id);
     }
   }
 

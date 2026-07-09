@@ -537,26 +537,17 @@ class AccountPool {
    * resilience counters — a successful request proves the account is healthy,
    * so consecutive transient/auth failures and any active cooldown are cleared.
    */
-  async markUsed(accountId: number): Promise<void> {
-    // Increment this account's sticky count; reset siblings so a rotated-away
-    // account starts fresh when it cycles back to the sticky pick.
-    const [acct] = await db
-      .select({ provider: accounts.provider })
-      .from(accounts)
-      .where(eq(accounts.id, accountId))
-      .limit(1);
-
-    if (acct?.provider) {
-      await db
-        .update(accounts)
-        .set({ consecutiveUseCount: sql`0` })
-        .where(
-          and(
-            eq(accounts.provider, acct.provider),
-            sql`${accounts.id} <> ${accountId}`,
-          ),
-        );
-    }
+  async markUsed(accountId: number, providerName: ProviderName): Promise<void> {
+    // Reset siblings' sticky count so a rotated-away account starts fresh.
+    await db
+      .update(accounts)
+      .set({ consecutiveUseCount: sql`0` })
+      .where(
+        and(
+          eq(accounts.provider, providerName),
+          sql`${accounts.id} <> ${accountId}`,
+        ),
+      );
 
     await db
       .update(accounts)
@@ -571,6 +562,8 @@ class AccountPool {
         errorMessage: null,
       })
       .where(eq(accounts.id, accountId));
+
+    this.invalidate(providerName);
   }
 
   /**

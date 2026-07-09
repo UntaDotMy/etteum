@@ -14,6 +14,23 @@ const cache: CacheStore = new Map();
 // Default stale time: 5 seconds
 const DEFAULT_STALE_TIME = 5000;
 
+// Coalesce WS-triggered revalidations across multiple useApiCache instances.
+// When request_log fires, dashboard-stats + dashboard-models + requests-*
+// + analytics all want to revalidate. Instead of each scheduling independently,
+// we batch all pending revalidations on a single 300ms timer tick.
+let coalesceTimer: ReturnType<typeof setTimeout> | null = null;
+const coalescedCallbacks = new Set<() => void>();
+
+function scheduleCoalesced(revalidateCb: () => void) {
+  coalescedCallbacks.add(revalidateCb);
+  if (coalesceTimer) return;
+  coalesceTimer = setTimeout(() => {
+    coalesceTimer = null;
+    for (const cb of coalescedCallbacks) cb();
+    coalescedCallbacks.clear();
+  }, 300);
+}
+
 /**
  * Fast structural comparison — checks if two values are "the same" for
  * rendering purposes. Handles primitives, arrays, and plain objects
@@ -203,34 +220,32 @@ export function useApiCache<T>(
     return () => document.removeEventListener('visibilitychange', handleFocus);
   }, [key, revalidateOnFocus, isStale, revalidate]);
 
-  // Invalidate on WebSocket events — throttled to max once per 2 seconds
+  // Invalidate on WebSocket events — coalesced across all useApiCache instances.
+  // When request_log fires, 4+ different caches all need revalidation. Instead
+  // of each scheduling independently, we batch all pending calls on a single
+  // 300ms timer tick, reducing the spike from O(n) separate API calls to one
+  // burst of calls within a single JS microtask cycle.
   useWsEvent(wsEvents, () => {
     if (!key) return;
-    
+
     const now = Date.now();
     const timeSinceLastRevalidate = now - lastRevalidateRef.current;
-    
-    // If we revalidated recently (< 2 seconds ago), skip this event
+
     if (timeSinceLastRevalidate < 2000) {
-      // Clear any pending revalidation
       if (revalidateTimerRef.current) {
         clearTimeout(revalidateTimerRef.current);
       }
-      
-      // Schedule a revalidation for when the throttle window expires
       const delay = 2000 - timeSinceLastRevalidate;
       revalidateTimerRef.current = setTimeout(() => {
         revalidateTimerRef.current = null;
         lastRevalidateRef.current = Date.now();
-        revalidate();
+        scheduleCoalesced(revalidate);
       }, delay);
-      
       return;
     }
-    
-    // Enough time has passed, revalidate immediately
+
     lastRevalidateRef.current = now;
-    revalidate();
+    scheduleCoalesced(revalidate);
   });
   
   // Cleanup timer on unmount

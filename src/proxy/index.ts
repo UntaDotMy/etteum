@@ -109,9 +109,6 @@ async function pruneRequestLogs() {
   }
 }
 
-// Prune every 10 requests to avoid running DELETE on every single insert
-let requestCounter = 0;
-
 /** Extract the upstream response id for sticky response-id pinning. */
 function extractResponseId(result: ProviderResult | undefined): string | undefined {
   if (!result?.response) return undefined;
@@ -316,11 +313,15 @@ async function logProxyError(entry: NewRequestLog, label: string) {
       provider: entry.provider || "unknown", model: entry.model || "unknown", status: "error",
       promptTokens: 0, completionTokens: 0, totalTokens: 0, creditsUsed: 0, cost: 0, durationMs: entry.durationMs || 0,
     });
-    if (++requestCounter % 10 === 0) void pruneRequestLogs();
   } catch (logError) {
     console.error(`[Proxy] Failed to log ${label}:`, logError);
   }
 }
+
+// Prune request_logs periodically (every 60s) instead of inline on the hot
+// path. The DELETE-with-subquery pattern competes with other writes for
+// SQLite's single-writer lock — moving it to a background timer avoids that.
+setInterval(() => { void pruneRequestLogs(); }, 60_000);
 
 function wrapStreamWithUsageFinalizer(
   stream: ReadableStream<Uint8Array>,
@@ -533,7 +534,6 @@ function wrapStreamWithUsageFinalizer(
           promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens,
           totalTokens: finalTotalTokens, creditsUsed, cost, durationMs,
         });
-        if (++requestCounter % 10 === 0) void pruneRequestLogs();
       } catch (error) {
         console.error("[Proxy] Failed to finalize stream usage:", error);
       } finally {
@@ -719,11 +719,13 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     provider, model: body.model, status: "success",
     promptTokens, completionTokens, totalTokens, creditsUsed, cost, durationMs,
   });
-  if (++requestCounter % 10 === 0) void pruneRequestLogs();
 
+  // Broadcast lightweight event — strip heavy fields (requestBody/responseBody)
+  // that can be 10s of KB each. Clients fetch detail on demand via /api/stats/requests/:id.
+  const { requestBody: _rb, responseBody: _rsb, ...lightweightLog } = logEntry;
   broadcast({
     type: "request_log",
-    data: { ...logEntry, email: account.email, createdAt: new Date().toISOString() },
+    data: { ...lightweightLog, email: account.email, createdAt: new Date().toISOString() },
   });
 
     return { result, isStream };

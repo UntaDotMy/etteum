@@ -26,3 +26,11 @@ sqlite.exec(`
 export const db = drizzle(sqlite, { schema });
 export { sqlite as client };
 export type DB = typeof db;
+
+// Periodic WAL checkpoint to prevent unbounded WAL file growth under sustained
+// write load. TRUNCATE mode keeps the WAL file small (typically <1MB) by
+// flushing committed pages back to the main DB file. Run every 60s — frequent
+// enough to bound WAL size but infrequent enough to avoid checkpoint contention.
+setInterval(() => {
+  try { sqlite.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* best-effort */ }
+}, 60_000);

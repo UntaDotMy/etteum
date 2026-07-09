@@ -11,16 +11,21 @@
  * blocking, randomized but coherent viewport + screen, and humanized input. The
  * Google-login service (kiroGoogleAutomation.ts) adds behavioral stealth on top.
  */
-import { firefox as playwrightFirefox, chromium as playwrightChromium } from "playwright";
+import { chromium as playwrightChromium } from "playwright";
 // camoufox-js is an optional stealth dependency. Resolve lazily so the module
 // typechecks/loads even when the package isn't installed (e.g. CI, slim images).
 // The engine falls back to chromium if camoufox is unavailable at runtime.
-let camoufoxLaunchOptions: ((opts?: { headless?: boolean }) => Promise<any>) | null = null;
+let camoufoxLaunch: ((opts?: any) => Promise<import("playwright").Browser>) | null = null;
 try {
-  // @ts-expect-error — optional dependency, may be absent
-  ({ launchOptions: camoufoxLaunchOptions } = await import("camoufox-js"));
+  // camoufox-js exports Camoufox(opts) which BOTH generates the stealth
+  // fingerprint options AND launches the browser — mirroring Python's
+  // AsyncCamoufox context manager. Do NOT call launchOptions() then
+  // playwrightFirefox.launch(): that passes Camoufox's internal config to
+  // Playwright's plain firefox launcher, which hangs forever (root cause of
+  // the "codebuddy does nothing" bug).
+  ({ Camoufox: camoufoxLaunch } = await import("camoufox-js"));
 } catch {
-  camoufoxLaunchOptions = null;
+  camoufoxLaunch = null;
 }
 
 export type BrowserEngine = "chromium" | "camoufox";
@@ -144,22 +149,40 @@ async function applyStealthHardening(
 
 async function launchCamoufox(opts: LaunchBrowserOptions) {
   const { proxyUrl, headless = true, args = [], stealthSeed = 1 } = opts;
-  if (!camoufoxLaunchOptions) {
+  if (!camoufoxLaunch) {
     // Package not installed — fall back to chromium so the engine still works
     // (e.g. in CI without the optional dep). The stealth profile is still
     // applied via applyStealthHardening on the chromium context.
     console.warn("[engine] camoufox-js not installed — falling back to chromium");
     return launchChromium(opts);
   }
-  // Camoufox generates the stealth Firefox launch options; Playwright's firefox
-  // driver actually launches the browser.
-  const camoufoxOptions = await camoufoxLaunchOptions({ headless });
-  const launchOptions: import("playwright").LaunchOptions = { ...(camoufoxOptions as any) };
-  if (args.length) launchOptions.args = [...(launchOptions.args || []), ...args];
+  // Camoufox() generates the stealth Firefox fingerprint AND launches the
+  // browser in one call (mirrors Python's `AsyncCamoufox(**kwargs)`). kwargs
+  // ported 1:1 from enowxai kiro/_adapter.py bootstrap_session.
   const proxy = buildBrowserProxyOption(proxyUrl);
-  if (proxy) launchOptions.proxy = proxy;
+  const camoufoxOpts: Record<string, any> = {
+    headless,
+    // enowxai: block_webrtc=True (prevents the WebRTC IP leak that exposes the
+    // real LAN/public IP — a classic bot tell).
+    block_webrtc: true,
+    // enowxai: humanize=False (we do humanized typing in googleAutomation.ts;
+    // enabling Camoufox's own humanize double-throttles input).
+    humanize: false,
+    // enowxai: randomizes the target OS fingerprint. Passing the full set lets
+    // Camoufox pick a coherent one per launch.
+    os: ["windows", "macos", "linux"],
+    // enowxai: Screen(1920, 1080). Bounds the generated viewport/screen.
+    screen: { maxWidth: 1920, maxHeight: 1080 },
+  };
+  if (args.length) camoufoxOpts.args = args;
+  if (proxy) {
+    camoufoxOpts.proxy = proxy;
+    // geoip=True pairs the fingerprint locale/timezone with the proxy's exit
+    // IP (enowxai sets this whenever a proxy is configured).
+    camoufoxOpts.geoip = true;
+  }
 
-  const browser = await playwrightFirefox.launch(launchOptions);
+  const browser = await camoufoxLaunch(camoufoxOpts);
   const profile = buildStealthProfile(stealthSeed);
   // Apply the consistency/behavioral hardening to every new context.
   // Patch newContext to auto-apply stealth.
