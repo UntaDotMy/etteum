@@ -22,7 +22,7 @@ import { sql, inArray } from "drizzle-orm";
 import { PUDIDIL_FILTERS } from "./proxy/filters";
 import { loadFilterCache } from "./proxy/filter-cache";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
-import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes } from "./proxy/providers/registry";
+import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
 import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
 import { disableMitm } from "./proxy/mitm/manager";
@@ -177,6 +177,13 @@ try {
   await refreshCompatibleNodes();
 } catch (e) {
   console.error("[CompatibleNodes] load skipped:", e instanceof Error ? e.message : e);
+}
+
+// F15: load dashboard-added custom + disabled models so they route + list from boot.
+try {
+  await refreshCustomModels();
+} catch (e) {
+  console.error("[CustomModels] load skipped:", e instanceof Error ? e.message : e);
 }
 
 // Pre-warm GitLab Duo provider cache (model list is per-account, queried at

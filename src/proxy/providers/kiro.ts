@@ -117,13 +117,18 @@ export class KiroProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     if (this.variant === "pro") return model.toLowerCase().startsWith("kp-");
+    // Strict ownership: kiro owns ONLY the models in its hardcoded
+    // supportedModels (plus their -thinking variants via the strip below).
+    // Previously this also wildcard-matched any claude/sonnet/haiku/minimax-/
+    // qwen string and acted as a global catch-all (isFallback). That silent
+    // catch-all is removed (F15): a model no provider genuinely owns returns
+    // null from getProviderForModel → 404 model_not_found, instead of routing
+    // to kiro and failing upstream. To serve a new model on kiro, add it to
+    // supportedModels (or register it as a custom model for kiro).
     const m = model.toLowerCase().replace("-thinking", "");
     if (this.getModelInfo(model)) return true;
-    if (m === "auto") return true;
-    if (m === "deepseek-3.2" || m === "glm-5") return true;
-    if (m.startsWith("minimax-") || m.startsWith("qwen")) return true;
-    // bare claude family (no provider prefix) belongs to kiro standard tier
-    return m.includes("claude") || m.includes("sonnet") || m.includes("haiku");
+    if (this.getModelInfo(m)) return true;
+    return m === "auto";
   }
 
   /** For the pro variant, resolve kp- ids to the real Kiro API model names. */

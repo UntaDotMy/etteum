@@ -251,6 +251,86 @@ export async function fetchModels() {
   return fetchApi("/v1/models");
 }
 
+// --- F15: dashboard-driven model catalog (custom / disabled / pricing CRUD) ---
+
+export interface CustomModelSpec {
+  context_window?: number;
+  max_output?: number;
+  thinking?: boolean;
+  vision?: boolean;
+}
+export interface CustomModelEntry {
+  provider: string;
+  displayName?: string;
+  spec?: CustomModelSpec;
+}
+export type CustomModelsMap = Record<string, CustomModelEntry>;
+export type DisabledModelsMap = Record<string, { provider: string; model: string; disabledAt?: number }>;
+export interface ModelPricingEntry {
+  inputPer1M: number;
+  outputPer1M: number;
+  cachedInputPer1M: number;
+  reasoningPer1M?: number;
+  cacheCreationPer1M?: number;
+}
+export type PricingMap = Record<string, ModelPricingEntry>;
+
+/** All dashboard-added custom models (kv(customModels)). */
+export async function fetchCustomModels(): Promise<{ custom: CustomModelsMap }> {
+  return fetchApi("/api/models/custom");
+}
+
+/** Add (or update) a custom model for a provider. Carries an optional spec override. */
+export async function saveCustomModel(input: {
+  model: string;
+  provider: string;
+  displayName?: string;
+  spec?: CustomModelSpec;
+}): Promise<{ success: boolean }> {
+  return fetchApi("/api/models/custom", {
+    method: "POST",
+    body: JSON.stringify(input),
+  });
+}
+
+/** Remove a custom model. */
+export async function deleteCustomModel(model: string): Promise<{ success: boolean }> {
+  return fetchApi(`/api/models/custom/${encodeURIComponent(model)}`, { method: "DELETE" });
+}
+
+/** All disabled models (kv(disabledModels), keyed provider:model). */
+export async function fetchDisabledModels(): Promise<{ disabled: DisabledModelsMap }> {
+  return fetchApi("/api/models/disabled");
+}
+
+/** Enable (disabled=false) or disable (disabled=true) a model. */
+export async function setModelDisabled(
+  provider: string,
+  model: string,
+  disabled: boolean,
+): Promise<{ success: boolean }> {
+  return fetchApi("/api/models/disabled", {
+    method: "POST",
+    body: JSON.stringify({ provider, model, disabled }),
+  });
+}
+
+/** Per-model USD pricing (kv(pricing), $/1M tokens). */
+export async function fetchModelPricing(): Promise<{ pricing: PricingMap }> {
+  return fetchApi("/api/pricing");
+}
+
+/** Set per-model pricing. Any of the rate fields may be omitted to keep existing. */
+export async function setModelPricing(
+  model: string,
+  rates: Omit<ModelPricingEntry, never>,
+): Promise<{ success: boolean }> {
+  return fetchApi("/api/pricing", {
+    method: "POST",
+    body: JSON.stringify({ model, ...rates }),
+  });
+}
+
 export interface ModelMappingDTO {
   id?: number;
   sourcePattern: string;
