@@ -53,6 +53,11 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "claude-sonnet-4.6":            { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 22.50,  cacheCreation: 3.00  },
   "claude-opus-4.5":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 37.50,  cacheCreation: 5.00  },
   "claude-opus-4.6":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 37.50,  cacheCreation: 5.00  },
+  "claude-opus-4.7":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 37.50,  cacheCreation: 5.00  },
+  "claude-opus-4.8":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 37.50,  cacheCreation: 5.00  },
+  "claude-sonnet-5":              { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 22.50,  cacheCreation: 3.00  },
+  "claude-fable-5":               { input: 10.00, output: 50.00, cached: 1.00,  reasoning: 75.00,  cacheCreation: 12.50 },
+  "claude-mythos-5":              { input: 5.00,  output: 25.00, cached: 0.50,  reasoning: 37.50,  cacheCreation: 5.00  },
   "claude-haiku-4.5":             { input: 0.50,  output: 2.50,  cached: 0.05,  reasoning: 3.75,   cacheCreation: 0.50  },
 
   // === OpenAI / GPT (codex / codebuddy upstreams) ===
@@ -68,6 +73,17 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gpt-5.3-codex":                { input: 6.00,  output: 24.00, cached: 3.00,  reasoning: 36.00,  cacheCreation: 6.00  },
   "gpt-5.3-codex-high":           { input: 8.00,  output: 32.00, cached: 4.00,  reasoning: 48.00,  cacheCreation: 8.00  },
   "gpt-5.3-codex-xhigh":          { input: 10.00, output: 40.00, cached: 5.00,  reasoning: 60.00,  cacheCreation: 10.00 },
+  // GPT-5.6 family — developers.openai.com (short-context rates; long-context ~2×)
+  "gpt-5.6-sol":                  { input: 5.00,  output: 30.00, cached: 0.50,  reasoning: 30.00,  cacheCreation: 6.25  },
+  "gpt-5.6-terra":                { input: 2.50,  output: 15.00, cached: 0.25,  reasoning: 15.00,  cacheCreation: 3.125 },
+  "gpt-5.6-luna":                 { input: 1.00,  output: 6.00,  cached: 0.10,  reasoning: 6.00,   cacheCreation: 1.25  },
+  "gpt-5.5-pro":                  { input: 30.00, output: 180.00, cached: 1.50, reasoning: 180.00, cacheCreation: 30.00 },
+  "gpt-5.5":                      { input: 5.00,  output: 30.00, cached: 0.50,  reasoning: 30.00,  cacheCreation: 6.25  },
+  "gpt-5.4-pro":                  { input: 30.00, output: 180.00, cached: 1.50, reasoning: 180.00, cacheCreation: 30.00 },
+  "gpt-5.4":                      { input: 2.50,  output: 15.00, cached: 0.25,  reasoning: 15.00,  cacheCreation: 3.125 },
+  "gpt-5.4-mini":                 { input: 0.75,  output: 4.50,  cached: 0.075, reasoning: 4.50,   cacheCreation: 0.75  },
+  "gpt-5.4-nano":                 { input: 0.20,  output: 1.25,  cached: 0.02,  reasoning: 1.25,   cacheCreation: 0.20  },
+  "gpt-5.3-codex":                { input: 1.75,  output: 14.00, cached: 0.175, reasoning: 14.00,  cacheCreation: 1.75  },
   "gpt-4o":                       { input: 2.50,  output: 10.00, cached: 1.25,  reasoning: 15.00,  cacheCreation: 2.50  },
   "gpt-4o-mini":                  { input: 0.15,  output: 0.60,  cached: 0.075, reasoning: 0.90,   cacheCreation: 0.15  },
 
@@ -78,6 +94,14 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gemini-2.5-pro":               { input: 2.00,  output: 12.00, cached: 0.25,  reasoning: 18.00,  cacheCreation: 2.00  },
   "gemini-2.5-flash":             { input: 0.30,  output: 2.50,  cached: 0.03,  reasoning: 3.75,   cacheCreation: 0.30  },
   "gemini-2.5-flash-lite":        { input: 0.15,  output: 1.25,  cached: 0.015, reasoning: 1.875,  cacheCreation: 0.15  },
+  // Gemini 3.1 / 3.5 — ai.google.dev (latest, 2026)
+  "gemini-3.1-pro":               { input: 2.50,  output: 15.00, cached: 0.25,  reasoning: 22.50,  cacheCreation: 2.50  },
+  "gemini-3.5-flash":             { input: 0.30,  output: 2.50,  cached: 0.03,  reasoning: 3.75,   cacheCreation: 0.30  },
+
+  // === xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ===
+  "grok-4.5":                     { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.00  },
+  "grok-4.3":                     { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.25  },
+  "grok-build-0.1":               { input: 1.00,  output: 2.00,  cached: 0.10,  reasoning: 2.00,   cacheCreation: 1.00  },
 
   // === F13 OpenAI-compatible catalog (verified per provider docs, 2026-07) ===
   // DeepSeek — api-docs.deepseek.com (deepseek-chat = v4-flash, deepseek-reasoner = thinking)
@@ -91,8 +115,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gpt-4":                        { input: 30.00, output: 60.00, cached: 15.00,  reasoning: 60.00, cacheCreation: 30.00 },
   "gpt-3.5-turbo":                { input: 0.50,  output: 1.50,  cached: 0.25,   reasoning: 1.50,  cacheCreation: 0.50  },
   "o1":                           { input: 15.00, output: 60.00, cached: 7.50,   reasoning: 60.00, cacheCreation: 15.00 },
-  "o1-mini":                      { input: 3.00,  output: 12.00, cached: 1.50,   reasoning: 12.00, cacheCreation: 3.00  },
-  "o3-mini":                      { input: 3.00,  output: 12.00, cached: 1.50,   reasoning: 12.00, cacheCreation: 3.00  },
+  "o1-mini":                      { input: 1.10,  output: 4.40,  cached: 0.55,   reasoning: 4.40,  cacheCreation: 1.10  },
+  "o3-mini":                      { input: 1.10,  output: 4.40,  cached: 0.55,   reasoning: 4.40,  cacheCreation: 1.10  },
   // Mistral — mistral.ai/pricing/api
   "mistral-large-latest":         { input: 0.50,  output: 1.50,  cached: 0.25,   reasoning: 1.50,  cacheCreation: 0.50  },
   "mistral-small-latest":         { input: 0.15,  output: 0.60,  cached: 0.075,  reasoning: 0.60,  cacheCreation: 0.15  },
@@ -109,11 +133,25 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "command-r-plus":               { input: 2.50,  output: 10.00, cached: 0.25,   reasoning: 10.00, cacheCreation: 2.50  },
   "command-r":                    { input: 0.50,  output: 1.50,  cached: 0.05,   reasoning: 1.50,  cacheCreation: 0.50  },
   "command-r7b":                  { input: 0.0375, output: 0.15, cached: 0.00375, reasoning: 0.15,  cacheCreation: 0.0375 },
-  // Qwen — help.aliyun.com (RMB → USD ~7.1)
-  "qwen3-max":                    { input: 2.80,  output: 8.40,  cached: 0.28,   reasoning: 8.40,  cacheCreation: 2.80  },
-  "qwen-turbo":                   { input: 0.04,  output: 0.08,  cached: 0.004,  reasoning: 0.08,  cacheCreation: 0.04  },
-  "qwen3-coder":                  { input: 0.28,  output: 0.84,  cached: 0.028,  reasoning: 0.84,  cacheCreation: 0.28  },
-  "qwen-vl-max":                  { input: 2.80,  output: 2.80,  cached: 0.28,   reasoning: 2.80,  cacheCreation: 2.80  },
+  // Qwen — alibabacloud.com/help/en/model-studio/billing (international USD, ≤32K tier)
+  "qwen3-max":                    { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.20  },
+  "qwen-turbo":                   { input: 0.05,  output: 0.20,  cached: 0.005,  reasoning: 0.50,  cacheCreation: 0.05  },
+  "qwen3-coder":                  { input: 1.00,  output: 5.00,  cached: 0.10,   reasoning: 5.00,  cacheCreation: 1.00  },
+  "qwen-vl-max":                  { input: 0.20,  output: 1.60,  cached: 0.02,   reasoning: 1.60,  cacheCreation: 0.20  },
+  // MiniMax — platform.minimaxi.com (M3 flagship, standard tier; CNY→USD ~7.2)
+  "minimax-m3":                   { input: 0.58,  output: 2.33,  cached: 0.058,  reasoning: 2.33,  cacheCreation: 0.58  },
+  "minimax-m2.7":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.29  },
+  // Kimi (Moonshot) — platform.kimi.ai (k2.6 general, k2.7-code same price)
+  "kimi-k2.6":                    { input: 0.95,  output: 4.00,  cached: 0.16,   reasoning: 4.00,  cacheCreation: 0.95  },
+  "kimi-k2.7-code":               { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 0.95  },
+  "moonshot-v1-8k":               { input: 0.20,  output: 2.00,  cached: 0.02,   reasoning: 2.00,  cacheCreation: 0.20  },
+  "moonshot-v1-32k":              { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.00  },
+  "moonshot-v1-128k":             { input: 2.00,  output: 5.00,  cached: 0.20,   reasoning: 5.00,  cacheCreation: 2.00  },
+  // GLM (Zhipu) — docs.bigmodel.cn (glm-4-flash free; GLM-5.x paid, CNY→USD ~7.2)
+  "glm-5.2":                      { input: 0.69,  output: 2.08,  cached: 0.069,  reasoning: 2.08,  cacheCreation: 0.69  },
+  "glm-5.1":                      { input: 0.55,  output: 1.66,  cached: 0.055,  reasoning: 1.66,  cacheCreation: 0.55  },
+  "glm-5":                        { input: 0.42,  output: 1.25,  cached: 0.042,  reasoning: 1.25,  cacheCreation: 0.42  },
+  "glm-4-flash":                  { input: 0.00,  output: 0.00,  cached: 0.00,   reasoning: 0.00,  cacheCreation: 0.00  },
 };
 
 /** Token breakdown captured from the upstream `usage` object. */

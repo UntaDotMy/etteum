@@ -75,12 +75,16 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "kimi-k2.7-code":         { contextWindow: 262_144,   maxOutput: 98_304,  thinking: false, vision: false },
   "kimi-k2.6":              { contextWindow: 262_144,   maxOutput: 65_536,  thinking: false, vision: true },
 
-  // ── MiniMax ──
+  // ── MiniMax — platform.minimaxi.com (M3 is current flagship, June 2026) ──
+  "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "minimax-m2.7":           { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: true },
   "minimax-m2.5":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "minimax-m2.1":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },
 
-  // ── Claude (Anthropic) — docs.claude.com ──
+  // ── Claude (Anthropic) — docs.claude.com / platform.claude.com ──
+  "claude-fable-5":         { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "claude-mythos-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "claude-sonnet-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "claude-opus-4.8":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "claude-opus-4.7":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "claude-opus-4.6":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
@@ -91,9 +95,15 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "claude-haiku-4.5":       { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true },
 
   // ── OpenAI GPT — developers.openai.com ──
+  "gpt-5.6-sol":            { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "gpt-5.6-terra":          { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "gpt-5.6-luna":           { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "gpt-5.5-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.5":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "gpt-5.4-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.4":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.4-mini":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
+  "gpt-5.4-nano":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.3":                { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.2":                { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-4o":                 { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
@@ -106,6 +116,14 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "gemini-3-pro":           { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-3-pro-high":      { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-3-flash":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3.1-pro":         { contextWindow: 2_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3.5-flash":       { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-2.5-flash-lite":  { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+
+  // ── xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ──
+  "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
+  "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
+  "grok-build-0.1":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
 
   // ── OpenAI legacy / F13 catalog — developers.openai.com ──
   "gpt-4o-mini":            { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
@@ -116,10 +134,10 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "o1-mini":                { contextWindow: 128_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "o3-mini":                { contextWindow: 200_000,   maxOutput: 100_000, thinking: true,  vision: false },
 
-  // ── Mistral — docs.mistral.ai ──
-  "mistral-large-latest":   { contextWindow: 128_000,   maxOutput: 8_192,   thinking: false, vision: true },
-  "mistral-small-latest":   { contextWindow: 32_000,    maxOutput: 8_192,   thinking: false, vision: true },
-  "codestral-latest":       { contextWindow: 256_000,   maxOutput: 8_192,   thinking: false, vision: false },
+  // ── Mistral — docs.mistral.ai (Large 3 / Small 4 / Codestral) ──
+  "mistral-large-latest":   { contextWindow: 256_000,   maxOutput: 8_192,   thinking: false, vision: true },
+  "mistral-small-latest":   { contextWindow: 256_000,   maxOutput: 8_192,   thinking: true,  vision: true },
+  "codestral-latest":       { contextWindow: 128_000,   maxOutput: 8_192,   thinking: false, vision: false },
 
   // ── Groq-hosted open models — groq.com/pricing ──
   "llama-3.3-70b-versatile":  { contextWindow: 128_000, maxOutput: 32_768,  thinking: false, vision: false },

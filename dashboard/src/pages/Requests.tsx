@@ -19,6 +19,7 @@ interface RequestLog {
   completionTokens: number | null;
   totalTokens: number | null;
   creditsUsed?: number | null;
+  cost?: number | null;
   accountId: number | null;
   accountEmail?: string | null;
   accountQuotaBefore?: number | null;
@@ -168,6 +169,7 @@ export default function Requests() {
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden md:table-cell">Duration</th>
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Tokens</th>
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Credits</th>
+                  <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Cost</th>
                   <th className="text-left text-xs font-medium text-[var(--muted-foreground)] uppercase tracking-wide p-4 hidden lg:table-cell">Account</th>
                 </tr>
               </thead>
@@ -181,11 +183,12 @@ export default function Requests() {
                     <td className="p-4 text-sm text-[var(--muted-foreground)] hidden md:table-cell">{((req.durationMs ?? 0) / 1000).toFixed(1)}s</td>
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{req.totalTokens || 0}</td>
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{Number(req.creditsUsed || 0).toFixed(2)}</td>
+                    <td className="p-4 text-xs text-[var(--primary)] hidden lg:table-cell">{Number(req.cost || 0) > 0 ? `$${Number(req.cost).toFixed(4)}` : "-"}</td>
                     <td className="p-4 text-xs text-[var(--muted-foreground)] hidden lg:table-cell">{req.accountEmail || (req.accountId ? `#${req.accountId}` : "-")}</td>
                   </tr>
                 ))}
                 {filtered.length === 0 && (
-                  <tr><td colSpan={8} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No request logs yet</td></tr>
+                  <tr><td colSpan={9} className="p-8 text-center text-sm text-[var(--muted-foreground)]">No request logs yet</td></tr>
                 )}
               </tbody>
             </table>
@@ -223,11 +226,12 @@ export default function Requests() {
               <span className="text-[var(--muted-foreground)]">{labelProvider(selected.provider)}</span>
             </div>
 
-            <div className="mt-4 grid grid-cols-4 gap-2">
+            <div className="mt-4 grid grid-cols-5 gap-2">
               <Metric label="Total" value={selected.totalTokens || 0} color="blue" />
               <Metric label="Prompt" value={selected.promptTokens || 0} color="green" />
               <Metric label="Completion" value={selected.completionTokens || 0} color="indigo" />
               <Metric label="Credit" value={(selected.creditsUsed || 0).toFixed(2)} color="yellow" />
+              <Metric label="Cost" value={Number(selected.cost || 0) > 0 ? `$${Number(selected.cost).toFixed(4)}` : "-"} color="green" />
             </div>
 
             <div className="mt-3 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 p-3 text-xs text-[var(--muted-foreground)]">
