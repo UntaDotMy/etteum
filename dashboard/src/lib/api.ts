@@ -298,6 +298,25 @@ export async function deleteCustomModel(model: string): Promise<{ success: boole
   return fetchApi(`/api/models/custom/${encodeURIComponent(model)}`, { method: "DELETE" });
 }
 
+/**
+ * Resolve a provider-prefixed alias to its CANONICAL model name -- mirrors the
+ * backend toCanonicalModelName (pricing.ts). The catalog (specs/pricing) is
+ * keyed by canonical name, so edits/overrides must be stored under the model,
+ * NOT the provider alias (cbc-/qd-/kp-/...), so they apply across providers.
+ */
+export function toCanonicalModelName(model: string | undefined | null): string {
+  if (!model) return '';
+  let m = model;
+  if (m.startsWith('kp-')) m = 'claude-' + m.slice(3);
+  if (m.startsWith('cbc-')) m = m.slice(4);
+  else if (m.startsWith('cb-')) m = m.slice(3);
+  else if (m.startsWith('qd-')) m = m.slice(3);
+  else if (m.startsWith('ym-')) m = m.slice(3);
+  else if (m.startsWith('gitlab-duo:')) m = m.slice(11);
+  m = m.replace(/-thinking$/, '');
+  return m;
+}
+
 /** All disabled models (kv(disabledModels), keyed provider:model). */
 export async function fetchDisabledModels(): Promise<{ disabled: DisabledModelsMap }> {
   return fetchApi("/api/models/disabled");

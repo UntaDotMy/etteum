@@ -193,6 +193,41 @@ async function getUserPricing(): Promise<Record<string, any>> {
   userPricingCache = { value, expiresAt: now + CACHE_TTL_MS };
   return value;
 }
+/**
+ * Resolve a provider-prefixed alias to its CANONICAL model name.
+ *
+ * The catalog (MODEL_PRICING / MODEL_SPECS) is keyed by canonical model name
+ * (e.g. "glm-5.2", "claude-opus-4.8") -- a model context/price is a property
+ * of the MODEL, not the provider. But a request body.model can be a prefixed
+ * alias (e.g. "cbc-glm-5.2", "kp-opus-4.8"). Without canonicalization,
+ * pricing/spec lookups miss and cost is silently 0; dashboard edits stored
+ * under the alias would not apply across providers.
+ *
+ * Prefixes mirror the providers own toCanonical maps + isNativeProviderId
+ * (model-mapping.ts). This is a RESOLUTION layer for the shared catalog;
+ * provider-specific canonicalization for routing still lives in each provider.
+ */
+export function toCanonicalModelName(model: string | undefined | null): string {
+  if (!model) return "";
+  let m = model;
+  // Kiro Pro: kp-<anthropic> -> claude-<anthropic> (kp-opus-4.8 -> claude-opus-4.8).
+  if (m.startsWith("kp-")) {
+    m = "claude-" + m.slice(3);
+  }
+  // Provider routing prefixes (strip, do not swap):
+  if (m.startsWith("cbc-")) m = m.slice(4);
+  else if (m.startsWith("cb-")) m = m.slice(3);
+  else if (m.startsWith("qd-")) m = m.slice(3);
+  else if (m.startsWith("ym-")) m = m.slice(3);
+  else if (m.startsWith("gitlab-duo:")) m = m.slice(11);
+  // -thinking variant shares the base model pricing/spec.
+  m = m.replace(/-thinking$/, "");
+  // NOTE: date suffixes are NOT stripped here (some keys ARE dated).
+
+
+  return m;
+}
+
 
 /**
  * Resolve pricing for a model. User override wins; baseline is the fallback.
@@ -205,8 +240,9 @@ async function getUserPricing(): Promise<Record<string, any>> {
  */
 export async function getPricingForModel(model: string): Promise<ModelPricing | null> {
   if (!model) return null;
+  const canonical = toCanonicalModelName(model);
   const userPricing = await getUserPricing();
-  const userEntry = userPricing[model];
+  const userEntry = userPricing[canonical];
   if (userEntry) {
     // User override — accept both legacy ($/1M named *Per1M) and baseline-named.
     const input = Number(userEntry.inputPer1M ?? userEntry.input ?? 0);
@@ -218,7 +254,12 @@ export async function getPricingForModel(model: string): Promise<ModelPricing | 
       return { input, output, cached, reasoning, cacheCreation };
     }
   }
-  return MODEL_PRICING[model] ?? null;
+  // Try the exact canonical key first; then a date-stripped fallback so a dated
+  // request id (claude-sonnet-4-5-20250929) inherits its base entry when only the
+  // dated key OR only the base key exists in the catalog.
+  if (MODEL_PRICING[canonical]) return MODEL_PRICING[canonical];
+  const dateless = canonical.replace(/-\d{4}-\d{2}-\d{2}.*$/, "").replace(/-\d{8}$/, "");
+  return MODEL_PRICING[dateless] ?? null;
 }
 
 /**

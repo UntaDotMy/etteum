@@ -15,6 +15,7 @@ import {
   fetchModelPricing,
   setModelPricing,
   testModel,
+  toCanonicalModelName,
   type CustomModelsMap,
   type DisabledModelsMap,
   type PricingMap,
@@ -482,15 +483,18 @@ function EditModelDialog({
       newSpec.thinking = thinking;
       newSpec.vision = vision;
       // Persist name + spec override via the custom-model store (idempotent).
+      // Store the override under the CANONICAL model name (not the provider alias)
+      // so it applies across providers (cbc-glm-5.2 -> glm-5.2).
+      const canonicalId = toCanonicalModelName(model.id);
       await saveCustomModel({
-        model: model.id,
+        model: canonicalId,
         provider: custom?.provider || model.owned_by,
         displayName: displayName.trim() || undefined,
         spec: newSpec,
       });
       // Persist pricing if any rate was entered.
       if (inputPer1M.trim() || outputPer1M.trim() || cachedPer1M.trim()) {
-        await setModelPricing(model.id, {
+        await setModelPricing(canonicalId, {
           inputPer1M: Number(inputPer1M || 0),
           outputPer1M: Number(outputPer1M || 0),
           cachedInputPer1M: Number(cachedPer1M || 0),
@@ -523,7 +527,7 @@ function EditModelDialog({
         <DialogHeader>
           <DialogTitle className="flex items-center gap-2"><Pencil className="w-4 h-4" /> Edit Model</DialogTitle>
           <DialogDescription>
-            <code className="text-xs">{model.id}</code> · owner <span className="font-medium">{custom?.provider || model.owned_by}</span>
+            <code className="text-xs">{model.id}</code>{(() => { const c = toCanonicalModelName(model.id); return c !== model.id ? <span className="text-[var(--muted-foreground)]"> → canonical <code className="text-xs text-[var(--primary)]">{c}</code></span> : null; })()} · owner <span className="font-medium">{custom?.provider || model.owned_by}</span>
           </DialogDescription>
         </DialogHeader>
 
