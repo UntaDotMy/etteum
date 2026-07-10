@@ -2,9 +2,10 @@ import { useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Plus, Trash2, GripVertical, Save, RotateCcw, Layers } from "lucide-react";
+import { Plus, Trash2, GripVertical, Save, RotateCcw, Layers, Loader2, AlertCircle } from "lucide-react";
 import { useApiCache } from "@/hooks/useApiCache";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+import { fetchApi } from "@/lib/api";
 
 interface Combo {
   id: number;
@@ -21,9 +22,12 @@ const KINDS = [
 ];
 
 export default function Combos() {
-  const { data: combos, mutate } = useApiCache<Combo[]>(
+  const { data: combos, error, mutate } = useApiCache<Combo[]>(
     "combos",
-    async () => (await fetch("/api/combos")).json(),
+    async () => {
+      const j = await fetchApi<{ combos?: Combo[] }>("/api/combos");
+      return Array.isArray(j.combos) ? j.combos : [];
+    },
   );
   const { message, setMessage } = useTimedMessage<string>(null, 3000);
   const [newName, setNewName] = useState("");
@@ -31,39 +35,50 @@ export default function Combos() {
 
   async function createCombo() {
     if (!newName.trim()) return;
-    const res = await fetch("/api/combos", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ name: newName.trim(), models: [], kind: newKind }),
-    });
-    if (res.ok) {
+    try {
+      await fetchApi("/api/combos", {
+        method: "POST",
+        body: JSON.stringify({ name: newName.trim(), models: [], kind: newKind }),
+      });
       setMessage("Combo created");
       setNewName("");
       mutate();
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to create combo");
     }
   }
 
   async function toggleCombo(id: number, enabled: boolean) {
-    await fetch(`/api/combos/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ enabled: !enabled }),
-    });
-    mutate();
+    try {
+      await fetchApi(`/api/combos/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ enabled: !enabled }),
+      });
+      mutate();
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to toggle combo");
+    }
   }
 
   async function deleteCombo(id: number) {
-    await fetch(`/api/combos/${id}`, { method: "DELETE" });
-    mutate();
+    try {
+      await fetchApi(`/api/combos/${id}`, { method: "DELETE" });
+      mutate();
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to delete combo");
+    }
   }
 
   async function updateModels(id: number, models: string[]) {
-    await fetch(`/api/combos/${id}`, {
-      method: "PATCH",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ models }),
-    });
-    mutate();
+    try {
+      await fetchApi(`/api/combos/${id}`, {
+        method: "PATCH",
+        body: JSON.stringify({ models }),
+      });
+      mutate();
+    } catch (e: any) {
+      setMessage(e?.message || "Failed to update models");
+    }
   }
 
   return (
@@ -106,7 +121,23 @@ export default function Combos() {
       </Card>
 
       <div className="space-y-3">
-        {(combos || []).map((combo) => (
+        {error && (
+          <Card>
+            <CardContent className="py-8 text-center text-red-500 flex items-center justify-center gap-2">
+              <AlertCircle className="w-4 h-4" />
+              {error.message}
+            </CardContent>
+          </Card>
+        )}
+        {!error && combos === null && (
+          <Card>
+            <CardContent className="py-8 text-center text-muted-foreground flex items-center justify-center gap-2">
+              <Loader2 className="w-4 h-4 animate-spin" />
+              Loading combos…
+            </CardContent>
+          </Card>
+        )}
+        {Array.isArray(combos) && combos.map((combo) => (
           <ComboEditor
             key={combo.id}
             combo={combo}
@@ -115,7 +146,7 @@ export default function Combos() {
             onUpdateModels={(m) => updateModels(combo.id, m)}
           />
         ))}
-        {(!combos || combos.length === 0) && (
+        {Array.isArray(combos) && combos.length === 0 && (
           <Card>
             <CardContent className="py-8 text-center text-muted-foreground">
               No combos yet. Create one above.

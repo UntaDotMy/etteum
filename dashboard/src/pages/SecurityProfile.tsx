@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Shield, KeyRound, Database, Globe, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+import { fetchApi } from "@/lib/api";
 
 interface AuthStatus {
   authenticated: boolean;
@@ -36,8 +37,8 @@ export default function SecurityProfile() {
   async function fetchStatus() {
     setLoading(true);
     try {
-      const res = await fetch("/api/dashboard-auth/status");
-      if (res.ok) setStatus(await res.json());
+      const status = await fetchApi<AuthStatus>("/api/dashboard-auth/status");
+      setStatus(status);
     } catch {}
     setLoading(false);
   }
@@ -46,15 +47,14 @@ export default function SecurityProfile() {
   async function changePassword() {
     setChangingPw(true);
     try {
-      const res = await fetch("/api/dashboard-auth/reset-password", {
+      await fetchApi("/api/dashboard-auth/reset-password", {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify({ current: currentPw, newPassword: newPw }),
       });
-      const j = await res.json();
-      if (res.ok) { ok("Password changed"); setCurrentPw(""); setNewPw(""); }
-      else err(j.error || "Failed");
-    } catch (e: any) { err(e.message); }
+      ok("Password changed");
+      setCurrentPw("");
+      setNewPw("");
+    } catch (e: any) { err(e?.message || "Failed"); }
     setChangingPw(false);
   }
 
@@ -62,24 +62,22 @@ export default function SecurityProfile() {
     setSavingOidc(true);
     try {
       const cfg = JSON.stringify({ enabled: !!oidcIssuer, issuer: oidcIssuer, clientId: oidcClientId, clientSecret: oidcClientSecret, scopes: ["openid", "profile", "email"] });
-      const sres = await fetch("/api/settings", {
+      await fetchApi("/api/settings", {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify({ key: "oidc_config", value: cfg }),
       });
-      if (sres.ok) { ok("OIDC config saved"); fetchStatus(); }
-      else { const j = await sres.json().catch(() => ({})); err(j.error || "Save failed (needs local access)"); }
-    } catch (e: any) { err(e.message); }
+      ok("OIDC config saved");
+      fetchStatus();
+    } catch (e: any) { err(e?.message || "Save failed (needs local access)"); }
     setSavingOidc(false);
   }
 
   async function testOidc() {
     setTestingOidc(true);
     try {
-      const res = await fetch("/api/dashboard-auth/oidc/test");
-      const j = await res.json();
+      const j = await fetchApi<{ success?: boolean; issuer?: string; error?: string }>("/api/dashboard-auth/oidc/test");
       if (j.success) ok(`OIDC OK: ${j.issuer}`); else err(j.error || "OIDC test failed");
-    } catch (e: any) { err(e.message); }
+    } catch (e: any) { err(e?.message || "OIDC test failed"); }
     setTestingOidc(false);
   }
 

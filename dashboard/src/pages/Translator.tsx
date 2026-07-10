@@ -3,6 +3,7 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Textarea } from "@/components/ui/textarea";
 import { Bug, Play, ChevronRight } from "lucide-react";
+import { fetchApi } from "@/lib/api";
 
 const PIPELINE_STAGES = [
   { id: "raw", label: "1. Raw Input", desc: "Client request as received" },
@@ -29,25 +30,19 @@ export default function Translator() {
     setStages({ raw: input });
     try {
       // Send the request through the translator endpoint (dry-run mode).
-      const res = await fetch("/api/translator/debug", {
+      const data = await fetchApi<Record<string, any>>("/api/translator/debug", {
         method: "POST",
-        headers: { "content-type": "application/json" },
         body: JSON.stringify({ request: JSON.parse(input), dryRun: true }),
       });
-      if (res.ok) {
-        const data = await res.json();
-        setStages({
-          raw: JSON.stringify(data.raw ?? JSON.parse(input), null, 2),
-          normalized: JSON.stringify(data.normalized, null, 2),
-          filtered: JSON.stringify(data.filtered, null, 2),
-          compressed: JSON.stringify(data.compressed, null, 2),
-          mapped: JSON.stringify(data.mapped, null, 2),
-          transformed: JSON.stringify(data.transformed, null, 2),
-          response: JSON.stringify(data.response, null, 2),
-        });
-      } else {
-        setStages({ raw: `Error: ${await res.text()}` });
-      }
+      setStages({
+        raw: JSON.stringify(data.raw ?? JSON.parse(input), null, 2),
+        normalized: JSON.stringify(data.normalized, null, 2),
+        filtered: JSON.stringify(data.filtered, null, 2),
+        compressed: JSON.stringify(data.compressed, null, 2),
+        mapped: JSON.stringify(data.mapped, null, 2),
+        transformed: JSON.stringify(data.transformed, null, 2),
+        response: JSON.stringify(data.response, null, 2),
+      });
     } catch (err: any) {
       setStages({ raw: `Error: ${err.message}` });
     } finally {
