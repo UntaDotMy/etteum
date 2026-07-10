@@ -121,7 +121,19 @@ export function getAllModels(): ModelInfo[] {
   // Custom entries are layered on top of the hardcoded provider lists; disabled
   // models are removed so they don't appear in /v1/models or route.
   const base = PROVIDER_ORDER.flatMap((provider) => provider.getModels());
-  return applyCustomModelsToList(base);
+  // Dedup by model id, keeping the FIRST occurrence. Some bare generic ids
+  // (gpt-4, gpt-4o, gpt-4-turbo, gpt-3.5-turbo, claude-3.5-sonnet) are declared
+  // by more than one provider (e.g. cursor AND the openai F13 catalog). Without
+  // dedup, flatMap emits duplicate rows that leak into /v1/models + the
+  // dashboard as "model X leaking to all providers". The first occurrence is
+  // the routing winner (PROVIDER_ORDER priority), so the list matches routing.
+  const seen = new Set<string>();
+  const deduped = base.filter((m) => {
+    if (seen.has(m.id)) return false;
+    seen.add(m.id);
+    return true;
+  });
+  return applyCustomModelsToList(deduped);
 }
 
 /** Iterable list of provider instances (priority order). */
