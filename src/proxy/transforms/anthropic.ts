@@ -777,6 +777,22 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   let accumulatedThinking = "";  // track thinking text for deterministic signature
   const toolBlocks = new Map<number, number>();
   const closedToolBlocks = new Set<number>();
+  // F15: accumulate raw tool-call argument fragments per call index. We CANNOT
+  // emit each fragment as an input_json_delta directly because:
+  //  (a) upstream OpenAI providers (Kiro/CodeBuddy/…) sometimes emit Windows
+  //      paths with UNESCAPED backslashes (C:\Users\test) — \t/\n/\b corrupt
+  //      the assembled JSON and Claude Code's parse fails ("Invalid escape
+  //      character U"). The non-streaming path already uses safeJsonParse;
+  //      the streaming path must too.
+  //  (b) escapeJsonBackslashes tracks inString state, so it can only run on a
+  //      COMPLETE JSON string, not a fragment that may start/end mid-string.
+  // So we buffer fragments and emit ONE escaped input_json_delta per tool call
+  // when the block closes. Per the Anthropic streaming spec, partial_json
+  // fragments concatenate into the parseable result — a single consolidated
+  // fragment is a valid degenerate case, so this does not break Claude Code's
+  // assembly.
+  const toolArgs = new Map<number, string>();
+
   let stopReason = "end_turn";
   let usageFromUpstream = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
 
@@ -832,6 +848,29 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
     async start(controller) {
       const reader = stream.getReader();
       let heartbeat: ReturnType<typeof setInterval> | null = null;
+
+      /**
+       * F15: emit the accumulated tool-call arguments as a single input_json_delta.
+       * Parses the buffered raw string with safeJsonParse (which pre-escapes lone
+       * Windows-path backslashes) and re-stringifies, guaranteeing the emitted
+       * partial_json is valid JSON that Claude Code can parse after concatenation.
+       * Defined inside start() so it closes over `controller`.
+       */
+      const flushToolArgs = (callIndex: number, toolBlockIndex: number): void => {
+        const raw = toolArgs.get(callIndex);
+        if (!raw) return;
+        toolArgs.delete(callIndex);
+        // safeJsonParse returns undefined on total failure; fall back to the raw
+        // string so the tool call still surfaces (better a visible bad arg than a
+        // dropped one). On success, re-stringify for canonical, valid JSON.
+        const parsed = safeJsonParse(raw);
+        const safe = parsed !== undefined ? JSON.stringify(parsed) : raw;
+        controller.enqueue(event("content_block_delta", {
+          type: "content_block_delta",
+          index: toolBlockIndex,
+          delta: { type: "input_json_delta", partial_json: safe },
+        }));
+      };
 
       const startMessage = () => {
         if (started) return;
@@ -1023,19 +1062,18 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   }));
                 }
                 const toolBlockIndex = toolBlocks.get(callIndex)!;
+                // F15: buffer the fragment — emit the full escaped args once at
+                // block close (see toolArgs comment above).
                 const partialJson = call.function?.arguments || "";
                 if (partialJson) {
-                  controller.enqueue(event("content_block_delta", {
-                    type: "content_block_delta",
-                    index: toolBlockIndex,
-                    delta: { type: "input_json_delta", partial_json: partialJson },
-                  }));
+                  toolArgs.set(callIndex, (toolArgs.get(callIndex) || "") + partialJson);
                 }
               }
               if (finishReason === "tool_calls") {
                 stopReason = "tool_use";
-                for (const toolBlockIndex of toolBlocks.values()) {
+                for (const [ci, toolBlockIndex] of toolBlocks) {
                   if (!closedToolBlocks.has(toolBlockIndex)) {
+                    flushToolArgs(ci, toolBlockIndex);
                     controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
                     closedToolBlocks.add(toolBlockIndex);
                   }
@@ -1054,9 +1092,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
         if (heartbeat) clearInterval(heartbeat);
         if (textBlockOpen) controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: blockIndex }));
         if (thinkingBlockOpen) closeThinkingBlock();
-        for (const toolBlockIndex of toolBlocks.values()) {
+        for (const [ci, toolBlockIndex] of toolBlocks) {
           if (!closedToolBlocks.has(toolBlockIndex)) {
+            flushToolArgs(ci, toolBlockIndex);
             controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
+            closedToolBlocks.add(toolBlockIndex);
           }
         }
         const outputTokens = usageFromUpstream.completion_tokens > 0
