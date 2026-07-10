@@ -2,7 +2,8 @@ import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, DollarSign } from "lucide-react";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
+import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, DollarSign, FlaskConical, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 import {
   fetchModels,
@@ -13,6 +14,7 @@ import {
   setModelDisabled,
   fetchModelPricing,
   setModelPricing,
+  testModel,
   type CustomModelsMap,
   type DisabledModelsMap,
   type PricingMap,
@@ -75,6 +77,8 @@ export default function Models() {
   const [search, setSearch] = useState("");
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
+  // Per-row test state: model id → { status, error? }
+  const [testing, setTesting] = useState<Record<string, { status: "loading" | "ok" | "fail"; error?: string }>>({});
   const { message: copiedModel, setMessage: setCopiedModel } = useTimedMessage<string>(null, 1500);
   const { message: statusMsg, setMessage: setStatusMsg } = useTimedMessage<string>(null, 3000);
 
@@ -147,6 +151,16 @@ export default function Models() {
     }
   }
 
+  async function handleTest(provider: string, id: string) {
+    setTesting((t) => ({ ...t, [id]: { status: "loading" } }));
+    try {
+      const res = await testModel(provider, id);
+      setTesting((t) => ({ ...t, [id]: res.ok ? { status: "ok" } : { status: "fail", error: res.error || "Test failed" } }));
+    } catch (e: any) {
+      setTesting((t) => ({ ...t, [id]: { status: "fail", error: e?.message || "Test failed" } }));
+    }
+  }
+
   if (loading) {
     return (
       <div className="flex items-center justify-center h-64">
@@ -189,7 +203,7 @@ export default function Models() {
       )}
 
       {editing && (
-        <EditModelForm
+        <EditModelDialog
           model={models.find((m) => m.id === editing)!}
           custom={customMap[editing]}
           pricing={pricingMap[editing]}
@@ -277,7 +291,29 @@ export default function Models() {
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center justify-end gap-1">
-                          <button type="button" onClick={() => setEditing(model.id)} title="Edit spec / pricing" className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors">
+                          <button
+                            type="button"
+                            onClick={() => handleTest(model.owned_by, model.id)}
+                            disabled={testing[model.id]?.status === "loading"}
+                            title="Test connectivity"
+                            className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors"
+                          >
+                            {testing[model.id]?.status === "loading" ? (
+                              <Loader2 className="w-4 h-4 text-[var(--info)] animate-spin" />
+                            ) : testing[model.id]?.status === "ok" ? (
+                              <CheckCircle2 className="w-4 h-4 text-[var(--success)]" />
+                            ) : testing[model.id]?.status === "fail" ? (
+                              <AlertCircle className="w-4 h-4 text-[var(--error)]" />
+                            ) : (
+                              <FlaskConical className="w-4 h-4 text-[var(--muted-foreground)]" />
+                            )}
+                          </button>
+                          {testing[model.id]?.status === "fail" && testing[model.id]?.error && (
+                            <span className="text-[10px] text-[var(--error)] max-w-[120px] truncate" title={testing[model.id]!.error}>
+                              {testing[model.id]!.error}
+                            </span>
+                          )}
+                          <button type="button" onClick={() => setEditing(model.id)} title="Edit name / spec / pricing" className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors">
                             <Pencil className="w-4 h-4 text-[var(--muted-foreground)]" />
                           </button>
                           <button type="button" onClick={() => handleToggleDisabled(model.owned_by, model.id)} title="Disable / enable" className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors">
@@ -409,8 +445,10 @@ function AddModelForm({
   );
 }
 
-// --- Edit model form (spec override + pricing) ---
-function EditModelForm({
+// --- Edit model dialog (name + spec override + pricing + test) ---
+// Modal (Radix Dialog) so editing a model in a 300-row list doesn't force a
+// scroll to the top — the dialog centers on screen.
+function EditModelDialog({
   model,
   custom,
   pricing,
@@ -424,6 +462,7 @@ function EditModelForm({
   setStatus: (s: string) => void;
 }) {
   const spec = custom?.spec;
+  const [displayName, setDisplayName] = useState(custom?.displayName ?? model.display_name ?? "");
   const [contextWindow, setContextWindow] = useState(spec?.context_window?.toString() ?? model.context_window?.toString() ?? "");
   const [maxOutput, setMaxOutput] = useState(spec?.max_output?.toString() ?? model.max_output?.toString() ?? "");
   const [thinking, setThinking] = useState(spec?.thinking ?? model.thinking ?? false);
@@ -432,6 +471,7 @@ function EditModelForm({
   const [outputPer1M, setOutputPer1M] = useState(pricing?.outputPer1M?.toString() ?? "");
   const [cachedPer1M, setCachedPer1M] = useState(pricing?.cachedInputPer1M?.toString() ?? "");
   const [saving, setSaving] = useState(false);
+  const [testState, setTestState] = useState<{ status: "idle" | "loading" | "ok" | "fail"; error?: string }>({ status: "idle" });
 
   async function save() {
     setSaving(true);
@@ -441,11 +481,11 @@ function EditModelForm({
       if (maxOutput.trim()) newSpec.max_output = Number(maxOutput);
       newSpec.thinking = thinking;
       newSpec.vision = vision;
-      // Persist spec override via the custom-model store (idempotent: creates or updates).
+      // Persist name + spec override via the custom-model store (idempotent).
       await saveCustomModel({
         model: model.id,
         provider: custom?.provider || model.owned_by,
-        displayName: custom?.displayName,
+        displayName: displayName.trim() || undefined,
         spec: newSpec,
       });
       // Persist pricing if any rate was entered.
@@ -467,54 +507,100 @@ function EditModelForm({
     }
   }
 
+  async function runTest() {
+    setTestState({ status: "loading" });
+    try {
+      const res = await testModel(custom?.provider || model.owned_by, model.id);
+      setTestState(res.ok ? { status: "ok" } : { status: "fail", error: res.error || "Test failed" });
+    } catch (e: any) {
+      setTestState({ status: "fail", error: e?.message || "Test failed" });
+    }
+  }
+
   return (
-    <Card>
-      <CardHeader>
-        <CardTitle className="text-base flex items-center gap-2"><Pencil className="w-4 h-4" /> Edit: {model.id}</CardTitle>
-        <CardDescription>Override spec + pricing. Overrides persist to the database and take precedence over model-specs.ts defaults.</CardDescription>
-      </CardHeader>
-      <CardContent className="space-y-4">
-        <div>
-          <p className="text-xs text-[var(--muted-foreground)] mb-2 uppercase tracking-wider">Spec override</p>
-          <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
-            <div>
-              <label className="text-xs text-[var(--muted-foreground)]">Context window</label>
-              <Input type="number" value={contextWindow} onChange={(e) => setContextWindow(e.target.value)} />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--muted-foreground)]">Max output</label>
-              <Input type="number" value={maxOutput} onChange={(e) => setMaxOutput(e.target.value)} />
-            </div>
-            <label className="flex items-center gap-2 text-sm self-end pb-2">
-              <input type="checkbox" checked={thinking} onChange={(e) => setThinking(e.target.checked)} /> Thinking
-            </label>
-            <label className="flex items-center gap-2 text-sm self-end pb-2">
-              <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} /> Vision
-            </label>
+    <Dialog open onOpenChange={(o) => { if (!o) onDone(); }}>
+      <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
+        <DialogHeader>
+          <DialogTitle className="flex items-center gap-2"><Pencil className="w-4 h-4" /> Edit Model</DialogTitle>
+          <DialogDescription>
+            <code className="text-xs">{model.id}</code> · owner <span className="font-medium">{custom?.provider || model.owned_by}</span>
+          </DialogDescription>
+        </DialogHeader>
+
+        <div className="space-y-4">
+          {/* Name */}
+          <div>
+            <label className="text-xs text-[var(--muted-foreground)]">Display name</label>
+            <Input value={displayName} onChange={(e) => setDisplayName(e.target.value)} placeholder={model.id} />
           </div>
-        </div>
-        <div>
-          <p className="text-xs text-[var(--muted-foreground)] mb-2 uppercase tracking-wider flex items-center gap-1"><DollarSign className="w-3 h-3" /> Pricing ($/1M tokens)</p>
-          <div className="grid grid-cols-3 gap-3">
-            <div>
-              <label className="text-xs text-[var(--muted-foreground)]">Input</label>
-              <Input type="number" step="0.01" value={inputPer1M} onChange={(e) => setInputPer1M(e.target.value)} placeholder="0.00" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--muted-foreground)]">Output</label>
-              <Input type="number" step="0.01" value={outputPer1M} onChange={(e) => setOutputPer1M(e.target.value)} placeholder="0.00" />
-            </div>
-            <div>
-              <label className="text-xs text-[var(--muted-foreground)]">Cached input</label>
-              <Input type="number" step="0.01" value={cachedPer1M} onChange={(e) => setCachedPer1M(e.target.value)} placeholder="0.00" />
+
+          {/* Spec override */}
+          <div>
+            <p className="text-xs text-[var(--muted-foreground)] mb-2 uppercase tracking-wider">Spec</p>
+            <div className="grid grid-cols-2 md:grid-cols-4 gap-3">
+              <div>
+                <label className="text-xs text-[var(--muted-foreground)]">Context window</label>
+                <Input type="number" value={contextWindow} onChange={(e) => setContextWindow(e.target.value)} />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--muted-foreground)]">Max output</label>
+                <Input type="number" value={maxOutput} onChange={(e) => setMaxOutput(e.target.value)} />
+              </div>
+              <label className="flex items-center gap-2 text-sm self-end pb-2">
+                <input type="checkbox" checked={thinking} onChange={(e) => setThinking(e.target.checked)} /> Thinking
+              </label>
+              <label className="flex items-center gap-2 text-sm self-end pb-2">
+                <input type="checkbox" checked={vision} onChange={(e) => setVision(e.target.checked)} /> Vision
+              </label>
             </div>
           </div>
+
+          {/* Pricing */}
+          <div>
+            <p className="text-xs text-[var(--muted-foreground)] mb-2 uppercase tracking-wider flex items-center gap-1"><DollarSign className="w-3 h-3" /> Pricing ($/1M tokens)</p>
+            <div className="grid grid-cols-3 gap-3">
+              <div>
+                <label className="text-xs text-[var(--muted-foreground)]">Input</label>
+                <Input type="number" step="0.01" value={inputPer1M} onChange={(e) => setInputPer1M(e.target.value)} placeholder="0.00" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--muted-foreground)]">Output</label>
+                <Input type="number" step="0.01" value={outputPer1M} onChange={(e) => setOutputPer1M(e.target.value)} placeholder="0.00" />
+              </div>
+              <div>
+                <label className="text-xs text-[var(--muted-foreground)]">Cached input</label>
+                <Input type="number" step="0.01" value={cachedPer1M} onChange={(e) => setCachedPer1M(e.target.value)} placeholder="0.00" />
+              </div>
+            </div>
+          </div>
+
+          {/* Test result */}
+          {testState.status !== "idle" && (
+            <div className={`text-sm flex items-center gap-2 rounded-md px-3 py-2 ${
+              testState.status === "ok" ? "bg-[var(--success)]/10 text-[var(--success)]"
+              : testState.status === "fail" ? "bg-[var(--error)]/10 text-[var(--error)]"
+              : "bg-[var(--info)]/10 text-[var(--info)]"
+            }`}>
+              {testState.status === "loading" && <Loader2 className="w-4 h-4 animate-spin" />}
+              {testState.status === "ok" && <CheckCircle2 className="w-4 h-4" />}
+              {testState.status === "fail" && <AlertCircle className="w-4 h-4" />}
+              {testState.status === "ok" ? "Model reachable — connectivity OK"
+                : testState.status === "loading" ? "Testing connectivity…"
+                : testState.error || "Test failed"}
+            </div>
+          )}
         </div>
-        <div className="flex gap-2">
-          <Button onClick={save} disabled={saving}>{saving ? "Saving…" : <><Save className="w-4 h-4 mr-1" /> Save</>}</Button>
+
+        <DialogFooter className="gap-2 sm:gap-2">
+          <Button variant="outline" onClick={runTest} disabled={testState.status === "loading"}>
+            {testState.status === "loading" ? <Loader2 className="w-4 h-4 mr-1 animate-spin" /> : <FlaskConical className="w-4 h-4 mr-1" />}
+            Test
+          </Button>
+          <div className="flex-1" />
           <Button variant="outline" onClick={onDone}>Cancel</Button>
-        </div>
-      </CardContent>
-    </Card>
+          <Button onClick={save} disabled={saving}>{saving ? "Saving…" : <><Save className="w-4 h-4 mr-1" /> Save</>}</Button>
+        </DialogFooter>
+      </DialogContent>
+    </Dialog>
   );
 }

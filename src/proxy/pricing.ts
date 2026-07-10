@@ -78,6 +78,42 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gemini-2.5-pro":               { input: 2.00,  output: 12.00, cached: 0.25,  reasoning: 18.00,  cacheCreation: 2.00  },
   "gemini-2.5-flash":             { input: 0.30,  output: 2.50,  cached: 0.03,  reasoning: 3.75,   cacheCreation: 0.30  },
   "gemini-2.5-flash-lite":        { input: 0.15,  output: 1.25,  cached: 0.015, reasoning: 1.875,  cacheCreation: 0.15  },
+
+  // === F13 OpenAI-compatible catalog (verified per provider docs, 2026-07) ===
+  // DeepSeek — api-docs.deepseek.com (deepseek-chat = v4-flash, deepseek-reasoner = thinking)
+  "deepseek-chat":                { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.014 },
+  "deepseek-reasoner":            { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.014 },
+  "deepseek-coder":               { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.014 },
+  "deepseek-v4-flash":            { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.014 },
+  "deepseek-v4-pro":              { input: 0.435, output: 0.87,  cached: 0.0036, reasoning: 0.87,  cacheCreation: 0.0435 },
+  // OpenAI legacy — developers.openai.com
+  "gpt-4-turbo":                  { input: 10.00, output: 30.00, cached: 5.00,   reasoning: 30.00, cacheCreation: 10.00 },
+  "gpt-4":                        { input: 30.00, output: 60.00, cached: 15.00,  reasoning: 60.00, cacheCreation: 30.00 },
+  "gpt-3.5-turbo":                { input: 0.50,  output: 1.50,  cached: 0.25,   reasoning: 1.50,  cacheCreation: 0.50  },
+  "o1":                           { input: 15.00, output: 60.00, cached: 7.50,   reasoning: 60.00, cacheCreation: 15.00 },
+  "o1-mini":                      { input: 3.00,  output: 12.00, cached: 1.50,   reasoning: 12.00, cacheCreation: 3.00  },
+  "o3-mini":                      { input: 3.00,  output: 12.00, cached: 1.50,   reasoning: 12.00, cacheCreation: 3.00  },
+  // Mistral — mistral.ai/pricing/api
+  "mistral-large-latest":         { input: 0.50,  output: 1.50,  cached: 0.25,   reasoning: 1.50,  cacheCreation: 0.50  },
+  "mistral-small-latest":         { input: 0.15,  output: 0.60,  cached: 0.075,  reasoning: 0.60,  cacheCreation: 0.15  },
+  "codestral-latest":             { input: 0.30,  output: 0.90,  cached: 0.15,   reasoning: 0.90,  cacheCreation: 0.30  },
+  // Groq — groq.com/pricing
+  "llama-3.3-70b-versatile":      { input: 0.59,  output: 0.79,  cached: 0.059,  reasoning: 0.79,  cacheCreation: 0.59  },
+  "llama-3.1-70b-versatile":      { input: 0.59,  output: 0.79,  cached: 0.059,  reasoning: 0.79,  cacheCreation: 0.59  },
+  "mixtral-8x7b-32768":           { input: 0.24,  output: 0.24,  cached: 0.024,  reasoning: 0.24,  cacheCreation: 0.24  },
+  // xAI Grok — docs.x.ai (grok-2 legacy rates)
+  "grok-2":                       { input: 2.00,  output: 10.00, cached: 0.20,   reasoning: 10.00, cacheCreation: 2.00  },
+  "grok-2-latest":                { input: 2.00,  output: 10.00, cached: 0.20,   reasoning: 10.00, cacheCreation: 2.00  },
+  "grok-beta":                    { input: 5.00,  output: 15.00, cached: 0.50,   reasoning: 15.00, cacheCreation: 5.00  },
+  // Cohere — docs.cohere.com
+  "command-r-plus":               { input: 2.50,  output: 10.00, cached: 0.25,   reasoning: 10.00, cacheCreation: 2.50  },
+  "command-r":                    { input: 0.50,  output: 1.50,  cached: 0.05,   reasoning: 1.50,  cacheCreation: 0.50  },
+  "command-r7b":                  { input: 0.0375, output: 0.15, cached: 0.00375, reasoning: 0.15,  cacheCreation: 0.0375 },
+  // Qwen — help.aliyun.com (RMB → USD ~7.1)
+  "qwen3-max":                    { input: 2.80,  output: 8.40,  cached: 0.28,   reasoning: 8.40,  cacheCreation: 2.80  },
+  "qwen-turbo":                   { input: 0.04,  output: 0.08,  cached: 0.004,  reasoning: 0.08,  cacheCreation: 0.04  },
+  "qwen3-coder":                  { input: 0.28,  output: 0.84,  cached: 0.028,  reasoning: 0.84,  cacheCreation: 0.28  },
+  "qwen-vl-max":                  { input: 2.80,  output: 2.80,  cached: 0.28,   reasoning: 2.80,  cacheCreation: 2.80  },
 };
 
 /** Token breakdown captured from the upstream `usage` object. */
