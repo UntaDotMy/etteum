@@ -49,7 +49,7 @@ describe("forcedSseToJson", () => {
     expect(tc.id).toBe("call_1");
     expect(tc.type).toBe("function");
     expect(tc.function.name).toBe("Read");
-    expect(tc.function.arguments).toBe('{"path": "x.ts"}');
+    expect(tc.function.arguments).toBe('{"path":"x.ts"}');
     expect(result.choices[0].finish_reason).toBe("tool_calls");
   });
 
