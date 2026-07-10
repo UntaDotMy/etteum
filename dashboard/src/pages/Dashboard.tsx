@@ -44,6 +44,7 @@ export default function Dashboard() {
     prompt: Number(stats?.tokens?.prompt || 0),
     completion: Number(stats?.tokens?.completion || 0),
     credits: Number(stats?.tokens?.credits || 0),
+    cost: Number(stats?.cost?.total || 0),
   };
 
   const modelUsage = modelStats
@@ -56,6 +57,7 @@ export default function Dashboard() {
       promptTokens: Number(m.promptTokens || 0),
       completionTokens: Number(m.completionTokens || 0),
       credits: Number(m.credits || 0),
+      cost: Number(m.totalCost || 0),
       requests: Number(m.totalRequests || 0),
       creditSource: m.creditSource || "estimated",
       color: modelColor(`${m.provider || "unknown"}/${m.model || "unknown"}`, idx),

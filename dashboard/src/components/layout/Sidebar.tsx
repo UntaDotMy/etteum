@@ -88,7 +88,6 @@ const navSections: NavSection[] = [
       { label: "Analytics", path: "/analytics", icon: BarChart3 },
       { label: "Browser Log", path: "/bot-logs", icon: MonitorSmartphone },
       { label: "Live Console", path: "/console", icon: Terminal },
-      { label: "Usage", path: "/usage", icon: BarChart3 },
     ],
   },
 ];

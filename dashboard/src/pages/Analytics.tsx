@@ -12,6 +12,7 @@ interface ProviderActivity {
   requests: number;
   tokens: number;
   credits: number;
+  cost: number;
   errors: number;
   color: string;
   activeNow: boolean;
@@ -74,6 +75,7 @@ export default function Analytics() {
               requests: row.totalRequests || 0,
               tokens: row.totalTokens || 0,
               credits: row.creditsUsed || 0,
+              cost: Number(row.totalCost || 0),
               errors: row.errorRequests || 0,
               color: providerColor(row.provider),
               activeNow: false,
@@ -98,6 +100,7 @@ export default function Analytics() {
               input: r.promptTokens || 0,
               output: r.completionTokens || 0,
               tokens: r.totalTokens || 0,
+              cost: Number(r.cost || 0),
               status: r.status === "error" ? "error" : "success",
               timestamp: r.createdAt ? new Date(r.createdAt).getTime() : Date.now(),
             })),
@@ -123,6 +126,7 @@ export default function Analytics() {
     const outputTokens = d.completionTokens || 0;
     const tokens = d.totalTokens || inputTokens + outputTokens || 0;
     const credits = d.creditsUsed || 0;
+    const cost = Number(d.cost || 0);
     const isError = msg.type === "request_error" || d.status === "error";
 
     // Update provider stats
@@ -132,6 +136,7 @@ export default function Analytics() {
         requests: 0,
         tokens: 0,
         credits: 0,
+        cost: 0,
         errors: 0,
         color: providerColor(provider),
         activeNow: false,
@@ -143,6 +148,7 @@ export default function Analytics() {
           requests: existing.requests + 1,
           tokens: existing.tokens + tokens,
           credits: existing.credits + credits,
+          cost: Number(existing.cost || 0) + cost,
           errors: existing.errors + (isError ? 1 : 0),
         },
       };
@@ -181,6 +187,7 @@ export default function Analytics() {
         input: inputTokens,
         output: outputTokens,
         tokens,
+        cost,
         status: isError ? "error" : "success",
         timestamp: Date.now(),
       }, ...prev];
@@ -279,6 +286,7 @@ export default function Analytics() {
                     <th className="text-left font-medium px-2.5 py-1.5">Model</th>
                     <th className="text-right font-medium px-2.5 py-1.5 w-[14%] text-[var(--primary)]">Input ↑</th>
                     <th className="text-right font-medium px-2.5 py-1.5 w-[14%]">Output ↓</th>
+                    <th className="text-right font-medium px-2.5 py-1.5 w-[12%] text-[var(--success)]">Cost</th>
                     <th className="text-right font-medium px-2.5 py-1.5 w-[10%]">Status</th>
                   </tr>
                 </thead>
@@ -309,6 +317,9 @@ export default function Analytics() {
                       </td>
                       <td className="px-2.5 py-1.5 text-right text-[var(--muted-foreground)]" title="Output tokens (completion)">
                         {(r.output || 0).toLocaleString()}
+                      </td>
+                      <td className="px-2.5 py-1.5 text-right text-[var(--success)]" title="USD cost">
+                        {Number(r.cost || 0) > 0 ? `$${Number(r.cost).toFixed(4)}` : "-"}
                       </td>
                       <td className="px-2.5 py-1.5 text-right">
                         <span className={r.status === "error" ? "text-[var(--destructive)]" : "text-[var(--success)]"}>

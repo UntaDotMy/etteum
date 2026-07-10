@@ -12,7 +12,6 @@ const ByokAccountList = lazy(() => import("./pages/ByokAccountList"));
 const Models = lazy(() => import("./pages/Models"));
 const ApiKey = lazy(() => import("./pages/ApiKey"));
 const Requests = lazy(() => import("./pages/Requests"));
-const Usage = lazy(() => import("./pages/Usage"));
 const Settings = lazy(() => import("./pages/Settings"));
 const BotLogs = lazy(() => import("./pages/BotLogs"));
 const Automation = lazy(() => import("./pages/Automation"));
@@ -88,7 +87,6 @@ export default function App() {
           <Route path="/api-key" element={<ApiKey />} />
           <Route path="/requests" element={<Requests />} />
           <Route path="/bot-logs" element={<BotLogs />} />
-          <Route path="/usage" element={<Usage />} />
           <Route path="/settings" element={<Settings />} />
           <Route path="/vcc-pool" element={<VccPool />} />
           <Route path="/proxy-pool" element={<ProxyPool />} />

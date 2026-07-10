@@ -11,6 +11,7 @@ interface TokenStats {
   prompt: number;
   completion: number;
   credits?: number;
+  cost?: number;
 }
 
 interface ModelUsage {
@@ -20,6 +21,7 @@ interface ModelUsage {
   promptTokens?: number;
   completionTokens?: number;
   credits?: number;
+  cost?: number;
   requests?: number;
   creditSource?: string;
   color: string;
@@ -316,7 +318,7 @@ export default function TokenUsage({
       </CardHeader>
       <CardContent className="space-y-6">
         {/* Summary cards */}
-        <div className="grid grid-cols-3 gap-4">
+        <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
           <div className="rounded-lg bg-[var(--secondary)] p-4">
             <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Total</p>
             <p className="text-xl font-bold mt-1">{formatNumber(stats.total)}</p>
@@ -328,6 +330,12 @@ export default function TokenUsage({
           <div className="rounded-lg bg-[var(--secondary)] p-4">
             <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Completion</p>
             <p className="text-xl font-bold mt-1">{formatNumber(stats.completion)}</p>
+          </div>
+          <div className="rounded-lg bg-[var(--primary)]/10 p-4 border border-[var(--primary)]/20">
+            <p className="text-xs text-[var(--muted-foreground)] uppercase tracking-wide">Cost (USD)</p>
+            <p className="text-xl font-bold mt-1 text-[var(--primary)]">
+              ${Number(stats.cost || 0).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 4 })}
+            </p>
           </div>
         </div>
 
@@ -349,7 +357,7 @@ export default function TokenUsage({
                     <span className="ml-2 text-[10px] uppercase text-[var(--muted-foreground)]">{model.creditSource || "estimated"}</span>
                   </div>
                   <span className="shrink-0 text-[var(--muted-foreground)]">
-                    {formatNumber(model.tokens)} tokens · {model.requests || 0} req
+                    {formatNumber(model.tokens)} tokens · {model.requests || 0} req{Number(model.cost || 0) > 0 ? ` · $${Number(model.cost).toFixed(4)}` : ""}
                   </span>
                 </div>
                 <div className="h-2 rounded-full bg-[var(--secondary)] overflow-hidden">
