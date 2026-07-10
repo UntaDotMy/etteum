@@ -60,6 +60,11 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "deepseek-v4-pro":        { contextWindow: 1_000_000, maxOutput: 384_000, thinking: true,  vision: false },
   "deepseek-v3.2":          { contextWindow: 128_000,   maxOutput: 8_192,   thinking: false, vision: false },
   "deepseek-3.2":           { contextWindow: 164_000,   maxOutput: 8_192,   thinking: false, vision: false },
+  // DeepSeek F13 API aliases — deepseek-chat = v4-flash (non-thinking),
+  // deepseek-reasoner = v4-flash thinking mode. Verified api-docs.deepseek.com.
+  "deepseek-chat":          { contextWindow: 1_000_000, maxOutput: 8_192,   thinking: false, vision: false },
+  "deepseek-reasoner":      { contextWindow: 1_000_000, maxOutput: 384_000, thinking: true,  vision: false },
+  "deepseek-coder":         { contextWindow: 128_000,   maxOutput: 8_192,   thinking: false, vision: false },
 
   // ── GLM (Zhipu) — docs.z.ai + DashScope ──
   "glm-5.2":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
@@ -101,6 +106,35 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "gemini-3-pro":           { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-3-pro-high":      { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-3-flash":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+
+  // ── OpenAI legacy / F13 catalog — developers.openai.com ──
+  "gpt-4o-mini":            { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
+  "gpt-4-turbo":            { contextWindow: 128_000,   maxOutput: 4_096,   thinking: false, vision: true },
+  "gpt-4":                  { contextWindow: 8_192,     maxOutput: 4_096,   thinking: false, vision: false },
+  "gpt-3.5-turbo":          { contextWindow: 16_384,    maxOutput: 4_096,   thinking: false, vision: false },
+  "o1":                     { contextWindow: 200_000,   maxOutput: 100_000, thinking: true,  vision: false },
+  "o1-mini":                { contextWindow: 128_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "o3-mini":                { contextWindow: 200_000,   maxOutput: 100_000, thinking: true,  vision: false },
+
+  // ── Mistral — docs.mistral.ai ──
+  "mistral-large-latest":   { contextWindow: 128_000,   maxOutput: 8_192,   thinking: false, vision: true },
+  "mistral-small-latest":   { contextWindow: 32_000,    maxOutput: 8_192,   thinking: false, vision: true },
+  "codestral-latest":       { contextWindow: 256_000,   maxOutput: 8_192,   thinking: false, vision: false },
+
+  // ── Groq-hosted open models — groq.com/pricing ──
+  "llama-3.3-70b-versatile":  { contextWindow: 128_000, maxOutput: 32_768,  thinking: false, vision: false },
+  "llama-3.1-70b-versatile":  { contextWindow: 128_000, maxOutput: 32_768,  thinking: false, vision: false },
+  "mixtral-8x7b-32768":       { contextWindow: 32_768,  maxOutput: 32_768,  thinking: false, vision: false },
+
+  // ── xAI Grok — docs.x.ai (grok-2 legacy; current is grok-4.x) ──
+  "grok-2":                 { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
+  "grok-2-latest":          { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
+  "grok-beta":              { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
+
+  // ── Cohere — docs.cohere.com ──
+  "command-r-plus":         { contextWindow: 128_000,   maxOutput: 4_096,   thinking: false, vision: false },
+  "command-r":              { contextWindow: 128_000,   maxOutput: 4_096,   thinking: false, vision: false },
+  "command-r7b":            { contextWindow: 128_000,   maxOutput: 4_096,   thinking: false, vision: false },
 };
 
 /**

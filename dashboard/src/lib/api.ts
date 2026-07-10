@@ -315,6 +315,17 @@ export async function setModelDisabled(
   });
 }
 
+/** Probe a model's connectivity (1-token completion via the provider). */
+export async function testModel(
+  provider: string,
+  model: string,
+): Promise<{ ok: boolean; error?: string }> {
+  return fetchApi("/api/models/test", {
+    method: "POST",
+    body: JSON.stringify({ provider, model }),
+  });
+}
+
 /** Per-model USD pricing (kv(pricing), $/1M tokens). */
 export async function fetchModelPricing(): Promise<{ pricing: PricingMap }> {
   return fetchApi("/api/pricing");
