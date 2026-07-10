@@ -11,7 +11,7 @@ import { providers } from "../../src/proxy/providers/registry";
  * means routing for some OTHER provider shifted unintentionally.
  */
 describe("getProviderForModel", () => {
-  const cases: Array<[string, string]> = [
+  const cases: Array<[string, string | null]> = [
     // canva
     ["canva-image", "canva"],
     ["CANVA-IMAGE", "canva"],
@@ -55,11 +55,12 @@ describe("getProviderForModel", () => {
     ["glm-5-thinking", "kiro"],
     ["minimax-m2.1", "kiro"],
     ["qwen3-coder-next", "kiro"],
-    // claude fallback → kiro
-    ["claude-opus-4.1", "kiro"],
-    ["some-unknown-sonnet-model", "kiro"],
-    // unknown default → kiro
-    ["totally-unknown-model", "kiro"],
+    // F15: strict per-provider routing — no implicit kiro catch-all. Models no
+    // provider genuinely owns return null (→ 404 model_not_found), NOT kiro.
+    ["claude-opus-4.1", null],
+    ["claude-opus-4.8", null],
+    ["some-unknown-sonnet-model", null],
+    ["totally-unknown-model", null],
   ];
 
   for (const [model, expected] of cases) {

@@ -24,11 +24,15 @@ describe("kiro nativeFormat + routing flags", () => {
     expect(kiro.nativeFormat).toBe("anthropic");
   });
 
-  test("ownsModel matches standard-tier + bare claude, not other providers' prefixes", () => {
-    for (const m of ["auto", "claude-sonnet-4.5", "claude-sonnet-4.5-thinking", "deepseek-3.2", "glm-5", "minimax-m2.1", "qwen3-coder-next", "claude-opus-4.1"]) {
+  test("ownsModel matches only the models kiro genuinely serves (strict, no wildcard)", () => {
+    // F15: kiro no longer wildcard-matches any claude/sonnet/haiku string. It
+    // owns ONLY its hardcoded supportedModels (+ their -thinking variants).
+    for (const m of ["auto", "claude-sonnet-4.5", "claude-sonnet-4.5-thinking", "deepseek-3.2", "glm-5", "glm-5-thinking", "minimax-m2.1", "qwen3-coder-next"]) {
       expect(kiro.ownsModel(m)).toBe(true);
     }
-    for (const m of ["qd-Lite", "kp-opus-4.8", "cb-opus-4.6", "codex-auto", "canva-image"]) {
+    // claude-opus-4.1 is NOT served by kiro standard (only kiro-pro/kp- does),
+    // so it must NOT be owned — previously the wildcard claimed it.
+    for (const m of ["qd-Lite", "kp-opus-4.8", "cb-opus-4.6", "codex-auto", "canva-image", "claude-opus-4.1", "claude-opus-4.8", "some-unknown-sonnet-model"]) {
       expect(kiro.ownsModel(m)).toBe(false);
     }
   });

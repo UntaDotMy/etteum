@@ -13,6 +13,12 @@ import { AntigravityProvider } from "./antigravity";
 import { CursorProvider } from "./cursor/cursorProvider";
 import { createOpenAICompatibleProviders } from "./openai-compatible";
 import { compatibleNodeRegistry, ensureCompatibleNodesLoaded } from "./compatible-node";
+import {
+  customModelsRegistry,
+  ensureCustomModelsLoaded,
+  getCustomModelProvider,
+  applyCustomModelsToList,
+} from "./custom-models";
 
 /**
  * Single source of truth for the provider set.
@@ -94,13 +100,28 @@ export function getProviderForModel(model: string): ProviderName | null {
     const nodeProvider = compatibleNodeRegistry.getProviderForModel(model);
     if (nodeProvider) return nodeProvider.name as ProviderName;
   } catch { /* registry not loaded yet — fall through */ }
-  const fallback = PROVIDER_ORDER.find((p) => p.isFallback);
-  return (fallback?.name as ProviderName) ?? null;
+  // F15: dashboard-added custom models. Checked after built-ins + compatible
+  // nodes so a manually-added model routes to its assigned provider.
+  try {
+    const customProvider = getCustomModelProvider(model);
+    if (customProvider) return customProvider as ProviderName;
+  } catch { /* registry not loaded yet — fall through */ }
+  // F15: NO implicit kiro catch-all. If no provider genuinely owns the model
+  // (not via ownsModel, not a compatible-node, not a custom entry), return null
+  // so the edge surfaces a clean 404 model_not_found instead of silently routing
+  // to kiro and failing upstream. Explicit cross-provider fallback is opt-in via
+  // Combos (combo.ts). The isFallback flag is retained on the provider class
+  // for documentation but is no longer consulted here.
+  return null;
 }
 
 /** All models across every registered provider. */
 export function getAllModels(): ModelInfo[] {
-  return PROVIDER_ORDER.flatMap((provider) => provider.getModels());
+  // F15: merge dashboard-added custom models + apply disabled-model filter.
+  // Custom entries are layered on top of the hardcoded provider lists; disabled
+  // models are removed so they don't appear in /v1/models or route.
+  const base = PROVIDER_ORDER.flatMap((provider) => provider.getModels());
+  return applyCustomModelsToList(base);
 }
 
 /** Iterable list of provider instances (priority order). */
@@ -125,6 +146,12 @@ export async function refreshAlibabaModels(): Promise<void> {
 export async function refreshCompatibleNodes(): Promise<void> {
   await ensureCompatibleNodesLoaded();
   await compatibleNodeRegistry.refresh();
+}
+
+/** F15: refresh dashboard-added custom + disabled models from the kv table (call at boot + after model CRUD). */
+export async function refreshCustomModels(): Promise<void> {
+  await ensureCustomModelsLoaded();
+  await customModelsRegistry.refresh();
 }
 
 /** Get BYOK provider instance. */

@@ -1,0 +1,123 @@
+/**
+ * Tests for the custom-models registry (F15: dashboard-driven model catalog).
+ *
+ * These cover the PURE resolution layer — the functions that turn loaded
+ * custom/disabled entries into routing + listing decisions. The DB-loading
+ * half (refresh() from the kv table) is exercised via the management API
+ * integration path; here we inject the in-memory entries directly so the
+ * routing/listing logic is tested in isolation, mirroring how
+ * compatible-node's getProviderForModel reads its in-memory cache.
+ */
+import { describe, test, expect, beforeEach } from "bun:test";
+import {
+  resetCustomModelsRegistry,
+  __setCustomModelsForTest,
+  __setDisabledModelsForTest,
+  getCustomModelProvider,
+  getCustomModels,
+  isModelDisabled,
+  applyCustomModelsToList,
+} from "./custom-models";
+import type { ModelInfo } from "./base";
+
+const baseModel = (id: string, owned_by: string): ModelInfo => ({
+  id,
+  object: "model",
+  created: 0,
+  owned_by,
+  context_window: 200_000,
+  max_output: 8_192,
+});
+
+describe("custom-models registry — routing", () => {
+  beforeEach(() => {
+    resetCustomModelsRegistry();
+  });
+
+  test("returns the assigned provider for a custom model id", () => {
+    __setCustomModelsForTest({
+      "my-custom-model": { provider: "qoder", displayName: "My Custom Model" },
+    });
+    expect(getCustomModelProvider("my-custom-model")).toBe("qoder");
+  });
+
+  test("returns null for a model id that is not custom-registered", () => {
+    __setCustomModelsForTest({
+      "my-custom-model": { provider: "qoder", displayName: "My Custom Model" },
+    });
+    expect(getCustomModelProvider("not-registered")).toBeNull();
+  });
+
+  test("returns null when the registry is empty", () => {
+    expect(getCustomModelProvider("anything")).toBeNull();
+  });
+
+  test("honors a per-model spec override on the returned ModelInfo", () => {
+    __setCustomModelsForTest({
+      "glm-5.2-custom": {
+        provider: "alibaba",
+        displayName: "GLM 5.2 Custom",
+        spec: { context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true },
+      },
+    });
+    const models = getCustomModels();
+    const m = models.find((x) => x.id === "glm-5.2-custom");
+    expect(m).toBeDefined();
+    expect(m!.owned_by).toBe("alibaba");
+    expect(m!.context_window).toBe(1_000_000);
+    expect(m!.max_output).toBe(65_536);
+    expect(m!.thinking).toBe(true);
+    expect(m!.vision).toBe(true);
+  });
+});
+
+describe("custom-models registry — listing", () => {
+  beforeEach(() => {
+    resetCustomModelsRegistry();
+  });
+
+  test("appends custom models to a provider model list", () => {
+    __setCustomModelsForTest({
+      "extra-qoder-model": { provider: "qoder", displayName: "Extra Qoder" },
+    });
+    const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
+    const ids = result.map((m) => m.id);
+    expect(ids).toContain("qd-existing");
+    expect(ids).toContain("extra-qoder-model");
+  });
+
+  test("does not duplicate a custom model whose id already exists in the list", () => {
+    // A provider may already hardcode a model; a custom entry for the same id
+    // must not create a duplicate row in /v1/models.
+    __setCustomModelsForTest({
+      "qd-existing": { provider: "qoder", displayName: "Existing" },
+    });
+    const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
+    const matches = result.filter((m) => m.id === "qd-existing");
+    expect(matches).toHaveLength(1);
+  });
+});
+
+describe("custom-models registry — disabled filter", () => {
+  beforeEach(() => {
+    resetCustomModelsRegistry();
+  });
+
+  test("a disabled model is removed from the list", () => {
+    __setDisabledModelsForTest({ "qoder:qd-existing": { provider: "qoder", model: "qd-existing" } });
+    const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
+    expect(result.find((m) => m.id === "qd-existing")).toBeUndefined();
+  });
+
+  test("a non-disabled model is kept", () => {
+    __setDisabledModelsForTest({ "qoder:other": { provider: "qoder", model: "other" } });
+    const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
+    expect(result.find((m) => m.id === "qd-existing")).toBeDefined();
+  });
+
+  test("isModelDisabled reflects the disabled set", () => {
+    __setDisabledModelsForTest({ "qoder:qd-existing": { provider: "qoder", model: "qd-existing" } });
+    expect(isModelDisabled("qd-existing")).toBe(true);
+    expect(isModelDisabled("qd-other")).toBe(false);
+  });
+});

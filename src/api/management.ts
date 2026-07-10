@@ -18,6 +18,7 @@ import { getAllModels, providers } from "../proxy/router";
 import { pool } from "../proxy/pool";
 import { adminGuard } from "../utils/security";
 import { invalidatePricingCache } from "../proxy/pricing";
+import { refreshCustomModels } from "../proxy/providers/registry";
 
 export const managementRouter = new Hono();
 
@@ -66,27 +67,44 @@ managementRouter.get("/models/disabled", async (c) => {
 });
 managementRouter.post("/models/disabled", async (c) => {
   const body = await c.req.json<{ provider: string; model: string; disabled?: boolean }>();
+  if (!body.provider || !body.model) return c.json({ error: "provider and model required" }, 400);
   const key = `${body.provider}:${body.model}`;
   if (body.disabled === false) {
     await kvDelete("disabledModels", key);
   } else {
     await kvSet("disabledModels", key, { provider: body.provider, model: body.model, disabledAt: Date.now() });
   }
+  await refreshCustomModels();
   return c.json({ success: true });
 });
 
 // --- Custom model definitions (register model ids not in upstream /models) ---
+// A custom entry MAY carry a `spec` override (context_window / max_output /
+// thinking / vision). When absent, the model-specs.ts canonical default applies.
+// The spec is persisted here and overrides the source defaults at list time
+// (the model-specs.ts file is never mutated).
 managementRouter.get("/models/custom", async (c) => {
   return c.json({ custom: await kvGet("customModels") });
 });
 managementRouter.post("/models/custom", async (c) => {
-  const body = await c.req.json<{ model: string; provider: string; displayName?: string }>();
+  const body = await c.req.json<{
+    model: string;
+    provider: string;
+    displayName?: string;
+    spec?: { context_window?: number; max_output?: number; thinking?: boolean; vision?: boolean };
+  }>();
   if (!body.model || !body.provider) return c.json({ error: "model and provider required" }, 400);
-  await kvSet("customModels", body.model, { provider: body.provider, displayName: body.displayName || body.model });
+  await kvSet("customModels", body.model, {
+    provider: body.provider,
+    displayName: body.displayName || body.model,
+    ...(body.spec ? { spec: body.spec } : {}),
+  });
+  await refreshCustomModels();
   return c.json({ success: true });
 });
 managementRouter.delete("/models/custom/:model", async (c) => {
   await kvDelete("customModels", c.req.param("model"));
+  await refreshCustomModels();
   return c.json({ success: true });
 });
 

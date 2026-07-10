@@ -851,6 +851,22 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
 
+    // F15: no provider owns this model (strict routing, no kiro catch-all).
+    // Surface a clean 404 model_not_found so the client sees the
+    // misconfiguration instead of a 503 proxy_error.
+    if (errorMessage.startsWith("No provider found for model:")) {
+      return c.json(
+        {
+          error: {
+            message: `Model not found: ${mappedModel}. No provider owns this model id. Add it via the dashboard Models page or check the id.`,
+            type: "invalid_request_error",
+            code: "model_not_found",
+          },
+        },
+        404
+      );
+    }
+
     return c.json(
       {
         error: {
@@ -1036,6 +1052,18 @@ proxyRouter.post("/v1/messages", async (c) => {
 
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
+
+    // F15: no provider owns this model → 404 model_not_found (strict routing).
+    if (errorMessage.startsWith("No provider found for model:")) {
+      return c.json({
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: `Model not found: ${mappedModel}. No provider owns this model id.`,
+        },
+      }, 404);
+    }
+
     return c.json({
       type: "error",
       error: {
@@ -1126,6 +1154,18 @@ proxyRouter.post("/v1/responses", async (c) => {
 
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
+
+    // F15: no provider owns this model → 404 model_not_found (strict routing).
+    if (errorMessage.startsWith("No provider found for model:")) {
+      return c.json({
+        type: "error",
+        error: {
+          type: "invalid_request_error",
+          message: `Model not found: ${mappedModel}. No provider owns this model id.`,
+        },
+      }, 404);
+    }
+
     return c.json({
       type: "error",
       error: {
