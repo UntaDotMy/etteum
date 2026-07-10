@@ -1,5 +1,5 @@
 import { describe, test, expect } from "bun:test";
-import { calculateCost, MODEL_PRICING } from "./pricing";
+import { calculateCost, MODEL_PRICING, toCanonicalModelName, getPricingForModel } from "./pricing";
 
 describe("pricing calculateCost", () => {
   test("returns 0 for unknown model (never throws)", async () => {
@@ -127,5 +127,69 @@ describe("MODEL_PRICING baseline", () => {
     for (const [model, p] of Object.entries(MODEL_PRICING)) {
       expect(p.cached, `${model}: cached should be <= input`).toBeLessThanOrEqual(p.input);
     }
+  });
+});
+
+/**
+ * Canonicalization: strip provider alias prefixes so pricing/spec lookups
+ * resolve a model by its CANONICAL name, not the provider alias.
+ *
+ * The catalog (MODEL_PRICING / MODEL_SPECS) is keyed by canonical model name
+ * (e.g. "glm-5.2", "claude-opus-4.8"). But a request's body.model can be a
+ * provider-prefixed alias (e.g. "cbc-glm-5.2", "kp-opus-4.8"). Without
+ * canonicalization, getPricingForModel("cbc-glm-5.2") returns null → cost = 0,
+ * and the dashboard edit would store the override under the alias (wrong: it
+ * wouldn't apply to glm-5.2 served by another provider).
+ */
+describe("toCanonicalModelName — strip provider aliases", () => {
+  test("strips CodeBuddy (cb-) prefix", () => {
+    expect(toCanonicalModelName("cb-claude-opus-4.6")).toBe("claude-opus-4.6");
+  });
+  test("strips CodeBuddy China (cbc-) prefix", () => {
+    expect(toCanonicalModelName("cbc-glm-5.2")).toBe("glm-5.2");
+  });
+  test("strips Qoder (qd-) prefix", () => {
+    expect(toCanonicalModelName("qd-claude-sonnet-4.6")).toBe("claude-sonnet-4.6");
+  });
+  test("strips YouMind (ym-) prefix", () => {
+    expect(toCanonicalModelName("ym-gpt-5")).toBe("gpt-5");
+  });
+  test("maps Kiro Pro (kp-) → claude- prefix", () => {
+    expect(toCanonicalModelName("kp-opus-4.8")).toBe("claude-opus-4.8");
+    expect(toCanonicalModelName("kp-sonnet-4.6")).toBe("claude-sonnet-4.6");
+  });
+  test("strips -thinking variant", () => {
+    expect(toCanonicalModelName("claude-opus-4.8-thinking")).toBe("claude-opus-4.8");
+    expect(toCanonicalModelName("kp-opus-4.8-thinking")).toBe("claude-opus-4.8");
+  });
+  test("keeps date suffix (date fallback is in getPricingForModel)", () => {
+    expect(toCanonicalModelName("claude-3-5-sonnet-20241022")).toBe("claude-3-5-sonnet-20241022");
+    expect(toCanonicalModelName("qwen3.7-max-2026-06-08")).toBe("qwen3.7-max-2026-06-08");
+  });
+  test("returns the canonical name unchanged when no alias", () => {
+    expect(toCanonicalModelName("glm-5.2")).toBe("glm-5.2");
+    expect(toCanonicalModelName("gpt-5.6-sol")).toBe("gpt-5.6-sol");
+  });
+  test("handles empty/undefined", () => {
+    expect(toCanonicalModelName("")).toBe("");
+    expect(toCanonicalModelName(undefined as any)).toBe("");
+  });
+});
+
+describe("getPricingForModel — resolves via canonical name", () => {
+  test("resolves a prefixed alias to its canonical pricing", async () => {
+    // cbc-glm-5.2 → glm-5.2 (which has a baseline entry).
+    const pricing = await getPricingForModel("cbc-glm-5.2");
+    expect(pricing).not.toBeNull();
+    expect(pricing!.input).toBeGreaterThan(0);
+  });
+  test("resolves a kp- alias to claude- pricing", async () => {
+    const pricing = await getPricingForModel("kp-opus-4.8");
+    expect(pricing).not.toBeNull();
+    expect(pricing!.input).toBe(5.0);
+  });
+  test("canonical name still resolves", async () => {
+    const pricing = await getPricingForModel("glm-5.2");
+    expect(pricing).not.toBeNull();
   });
 });
