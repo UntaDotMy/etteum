@@ -10,6 +10,7 @@ import type { Account } from "../../db/schema";
 import { decrypt } from "../../utils/crypto";
 import { normalizeMessagesToOpenAI } from "../transforms/anthropic";
 import { applyModelSpecs } from "../model-specs";
+import { safeJsonParse } from "../../utils/safe-json";
 
 // ============================================================================
 // YouMind Provider — youmind.com OpenAPI Relay
@@ -666,7 +667,7 @@ export class YouMindProvider extends BaseProvider {
           let input: any = {};
           try {
             input = typeof tc.function?.arguments === "string"
-              ? JSON.parse(tc.function.arguments)
+              ? safeJsonParse(tc.function.arguments) ?? {}
               : tc.function?.arguments || {};
           } catch {
             input = { _raw: tc.function?.arguments };

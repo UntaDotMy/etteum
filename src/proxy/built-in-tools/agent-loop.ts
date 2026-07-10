@@ -25,6 +25,7 @@ import type { ChatCompletionRequest } from "../providers/base";
 import type { AnthropicMessagesRequest } from "../transforms/anthropic";
 import { searchWeb, type WebSearchResult } from "./web-search";
 import { config } from "../../config";
+import { safeJsonParse } from "../../utils/safe-json";
 
 const WEB_SEARCH_FN_NAME = "web_search";
 // Agent-driven: high ceiling, not a low fixed cap. Bounds cost/abuse; the 2-min
@@ -156,7 +157,7 @@ function prependSystemInstruction(
 /** Parse streamed tool_call arguments fragments into a final {query}. */
 function parseWebSearchInput(args: string): { query: string } {
   try {
-    const obj = JSON.parse(args || "{}");
+    const obj = safeJsonParse(args || "{}") ?? {};
     return { query: typeof obj.query === "string" ? obj.query : "" };
   } catch {
     return { query: "" };
@@ -288,7 +289,7 @@ function finalizeNonStreaming(response: any, request: AnthropicMessagesRequest, 
   for (const call of toolCalls) {
     let input = call?.function?.arguments || {};
     if (typeof input === "string") {
-      try { input = JSON.parse(input); } catch { input = {}; }
+      input = safeJsonParse(input, {}) ?? {};
     }
     content.push({ type: "tool_use", id: call.id, name: call?.function?.name, input });
   }
@@ -454,13 +455,23 @@ export function runWebSearchLoopStreaming(
             closeTextBlock(controller);
             blockIndex += 1;
             let input: any = call.args;
-            try { input = JSON.parse(call.args || "{}"); } catch { input = {}; }
+            if (typeof input === "string") {
+              input = safeJsonParse(input, {}) ?? {};
+            }
+            // F15: sanitize the accumulated args for Windows backslash repair
+            // before emitting as partial_json, so Claude Code doesn't see
+            // corrupted JSON (C:\Users → C:\\Users).
+            const rawJson = typeof call.args === "string" ? call.args : JSON.stringify(call.args);
+            const partialJson = (() => {
+              if (!rawJson) return "";
+              const parsed = safeJsonParse(rawJson);
+              return parsed !== undefined ? JSON.stringify(parsed) : rawJson;
+            })();
             controller.enqueue(event("content_block_start", {
               type: "content_block_start",
               index: blockIndex,
               content_block: { type: "tool_use", id: call.id, name: call.name, input: {} },
             }));
-            const partialJson = typeof call.args === "string" ? call.args : JSON.stringify(call.args);
             if (partialJson) {
               controller.enqueue(event("content_block_delta", {
                 type: "content_block_delta",

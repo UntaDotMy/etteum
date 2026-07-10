@@ -104,7 +104,12 @@ function normalizeImageBlock(block: any): any | null {
 }
 
 function parseToolInput(input: any): string {
-  if (typeof input === "string") return input;
+  if (typeof input === "string") {
+    // If a string was passed (unusual — most clients send an object), sanitize
+    // for Windows backslashes before emitting as tool_calls[].function.arguments.
+    const parsed = safeJsonParse(input);
+    return parsed !== undefined ? JSON.stringify(parsed) : input;
+  }
   try { return JSON.stringify(input ?? {}); } catch { return "{}"; }
 }
 

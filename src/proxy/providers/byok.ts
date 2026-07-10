@@ -12,6 +12,7 @@ import { accounts } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import { config } from "../../config";
 import { decrypt } from "../../utils/crypto";
+import { safeJsonParse } from "../../utils/safe-json";
 
 /**
  * BYOK (Bring Your Own Key) Provider
@@ -962,7 +963,7 @@ export class ByokProvider extends BaseProvider {
             let input: any = {};
             try {
               input = typeof tc.function.arguments === "string"
-                ? JSON.parse(tc.function.arguments)
+                ? safeJsonParse(tc.function.arguments) ?? {}
                 : (tc.function.arguments ?? {});
             } catch { input = {}; }
             contentBlocks.push({

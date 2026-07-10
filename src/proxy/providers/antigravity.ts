@@ -29,6 +29,7 @@ import {
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
 import { applyModelSpecs, resolveModelSpec } from "../model-specs";
+import { safeJsonParse } from "../../utils/safe-json";
 
 // ── OAuth (Antigravity CLI's public client) ────────────────────────────────
 // The client_id is public (ships in the Antigravity CLI binary + public
@@ -140,7 +141,7 @@ export function openAIToGemini(request: ChatCompletionRequest, model: string): R
       const name = call?.function?.name;
       if (!name) continue;
       let args: any = {};
-      try { args = typeof call.function?.arguments === "string" ? JSON.parse(call.function.arguments) : (call.function?.arguments || {}); } catch { /* keep {} */ }
+      try { args = typeof call.function?.arguments === "string" ? safeJsonParse(call.function.arguments) ?? {} : (call.function?.arguments || {}); } catch { /* keep {} */ }
       parts.push({ functionCall: { name, args } });
     }
     if (parts.length > 0) {
