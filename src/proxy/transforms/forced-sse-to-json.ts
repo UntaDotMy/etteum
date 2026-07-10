@@ -12,6 +12,7 @@
  * `finish_reason`, and indexes `tool_calls` across chunks via a map.
  */
 import type { ChatCompletionResponse } from "../providers/base";
+import { safeJsonParse } from "../../utils/safe-json";
 
 interface ToolCallAccumulator {
   index: number;
@@ -96,7 +97,19 @@ export async function forcedSseToJson(
     .map((tc) => ({
       id: tc.id || `call_${tc.index}`,
       type: tc.type || "function",
-      function: { name: tc.function?.name || "", arguments: tc.function?.arguments || "" },
+      function: {
+        name: tc.function?.name || "",
+        // F15: run the concatenated arguments through safeJsonParse to repair
+        // Windows backslashes (C:\Users -> C:\\Users). Re-stringify so the
+        // output is valid JSON, falling back to the raw string on parse failure
+        // so tool calls are never silently dropped.
+        arguments: (() => {
+          const raw = tc.function?.arguments || "";
+          if (!raw) return "";
+          const parsed = safeJsonParse(raw);
+          return parsed !== undefined ? JSON.stringify(parsed) : raw;
+        })(),
+      },
     }));
 
   const message: any = { role: "assistant" };

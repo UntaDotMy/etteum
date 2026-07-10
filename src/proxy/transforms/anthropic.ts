@@ -1079,9 +1079,13 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   }
                 }
               } else if (finishReason) {
-                // length → max_tokens; content_filter/refusal/stop → end_turn.
-                // (Has-tool-calls path already set tool_use above and wins.)
-                stopReason = mapFinishReasonToStopReason(finishReason, false, "");
+                // Some providers (e.g. Kiro, CodeBuddy) send tool call deltas
+                // but emit finish_reason="stop" instead of "tool_calls". The
+                // tool_calls themselves were already set; override the stop
+                // reason to "tool_use" so the client doesn't think it's done.
+                stopReason = toolBlocks.size > 0
+                  ? "tool_use"
+                  : mapFinishReasonToStopReason(finishReason, false, "");
               }
             } catch {
               // ignore malformed upstream stream chunk

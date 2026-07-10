@@ -28,6 +28,7 @@ import type {
   ChatMessage,
   StreamChunk,
 } from "../providers/base";
+import { safeJsonParse } from "../../utils/safe-json";
 
 /* ------------------------------------------------------------------ */
 /* Request types                                                       */
@@ -776,15 +777,22 @@ export function chatStreamToResponsesStream(
           const outputIndex = (reasoningItemEmitted ? 1 : 0) + (messageItemEmitted ? 1 : 0) + tc.index;
           const callId = tc.id ?? `call_${responseId.slice(5)}_${tc.index}`;
           const itemId = `fc_${callId}`;
+          // F15: sanitize accumulated tool arguments for Windows backslash
+          // repair before emitting the final completed arguments string.
+          const safeArgs = (() => {
+            if (!tc.arguments) return "";
+            const parsed = safeJsonParse(tc.arguments);
+            return parsed !== undefined ? JSON.stringify(parsed) : tc.arguments;
+          })();
           emit("response.function_call_arguments.done", {
-            output_index: outputIndex, item_id: itemId, arguments: tc.arguments,
+            output_index: outputIndex, item_id: itemId, arguments: safeArgs,
           });
           emit("response.output_item.done", {
             output_index: outputIndex,
             item: {
               id: itemId, type: "function_call", status: "completed",
               call_id: callId,
-              name: tc.name ?? "", arguments: tc.arguments,
+              name: tc.name ?? "", arguments: safeArgs,
             },
           });
         }
@@ -798,7 +806,12 @@ export function chatStreamToResponsesStream(
         if (messageItemEmitted) output.push({ type: "message", id: messageItemId, status: "completed", role: "assistant", content: [{ type: "output_text", text: textAccum, annotations: [] }] });
         for (const tc of toolCalls) {
           const callId = tc.id ?? `call_${responseId.slice(5)}_${tc.index}`;
-          output.push({ type: "function_call", id: `fc_${callId}`, call_id: callId, name: tc.name ?? "", arguments: tc.arguments, status: "completed" });
+          const safeArgs = (() => {
+            if (!tc.arguments) return "";
+            const parsed = safeJsonParse(tc.arguments);
+            return parsed !== undefined ? JSON.stringify(parsed) : tc.arguments;
+          })();
+          output.push({ type: "function_call", id: `fc_${callId}`, call_id: callId, name: tc.name ?? "", arguments: safeArgs, status: "completed" });
         }
         const usage: ResponsesUsage = finalUsage ?? { input_tokens: 0, input_tokens_details: { cached_tokens: 0 }, output_tokens: 0, output_tokens_details: { reasoning_tokens: 0 }, total_tokens: 0 };
         emit("response.completed", {
