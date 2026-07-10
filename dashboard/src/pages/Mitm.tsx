@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { ShieldCheck, ShieldAlert, Play, Square, Power, Key, Network, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
+import { fetchApi } from "@/lib/api";
 
 interface MitmStatus {
   running: boolean;
@@ -28,8 +29,8 @@ export default function Mitm() {
   async function fetchStatus() {
     setLoading(true);
     try {
-      const res = await fetch("/api/mitm/status");
-      if (res.ok) setStatus(await res.json());
+      const status = await fetchApi<MitmStatus>("/api/mitm/status");
+      setStatus(status);
     } catch {}
     setLoading(false);
   }
@@ -42,15 +43,13 @@ export default function Mitm() {
   async function call(endpoint: string, method = "POST", body?: any) {
     setBusy(endpoint);
     try {
-      const res = await fetch(`/api/mitm/${endpoint}`, {
+      const j = await fetchApi<any>(`/api/mitm/${endpoint}`, {
         method,
-        headers: body ? { "content-type": "application/json" } : {},
         body: body ? JSON.stringify(body) : undefined,
       });
-      const j = await res.json().catch(() => ({}));
-      if (res.ok) { ok(j.message || `${endpoint} OK`); fetchStatus(); }
-      else err(j.error || j.message || `${endpoint} failed`);
-    } catch (e: any) { err(e.message); }
+      ok(j?.message || `${endpoint} OK`);
+      fetchStatus();
+    } catch (e: any) { err(e?.message || `${endpoint} failed`); }
     setBusy(null);
   }
 

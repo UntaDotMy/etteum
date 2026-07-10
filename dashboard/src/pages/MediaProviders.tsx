@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Mic, Volume2, Image, Type, Plus, Trash2 } from "lucide-react";
 import { useApiCache } from "@/hooks/useApiCache";
+import { fetchApi } from "@/lib/api";
 
 interface MediaAccount {
   id: number;
@@ -25,16 +26,17 @@ export default function MediaProviders() {
   const { data: accounts, mutate } = useApiCache<MediaAccount[]>(
     "media-accounts",
     async () => {
-      const res = await fetch("/api/accounts?provider=media");
-      const j = await res.json();
-      return Array.isArray(j) ? j : j.accounts || [];
+      const j = await fetchApi<{ accounts?: MediaAccount[] } | MediaAccount[]>("/api/accounts?provider=media");
+      return Array.isArray(j) ? j : (j.accounts || []);
     },
   );
 
   // Vendor catalog from the backend (the ~20 supported media providers).
   const [catalog, setCatalog] = useState<Array<{ id: string; name: string; serviceKinds: string[]; category: string }>>([]);
   useEffect(() => {
-    fetch("/api/media/catalog").then((r) => r.json()).then((j) => setCatalog(j.providers || [])).catch(() => {});
+    fetchApi<{ providers?: Array<{ id: string; name: string; serviceKinds: string[]; category: string }> }>("/api/media/catalog")
+      .then((j) => setCatalog(j.providers || []))
+      .catch(() => {});
   }, []);
 
   const [baseUrl, setBaseUrl] = useState("https://api.openai.com");
@@ -47,22 +49,25 @@ export default function MediaProviders() {
 
   async function addMediaAccount() {
     if (!baseUrl || !apiKey) return;
-    await fetch("/api/accounts/byok", {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({
-        provider: "media",
-        email: `${new URL(baseUrl).hostname}-media`,
-        password: apiKey,
-        tokens: JSON.stringify({ base_url: baseUrl, format: "openai", modalities, default_models: {} }),
-      }),
-    });
-    setApiKey("");
-    mutate();
+    try {
+      await fetchApi("/api/accounts/byok", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "media",
+          email: `${new URL(baseUrl).hostname}-media`,
+          password: apiKey,
+          tokens: JSON.stringify({ base_url: baseUrl, format: "openai", modalities, default_models: {} }),
+        }),
+      });
+      setApiKey("");
+      mutate();
+    } catch {}
   }
 
   async function removeAccount(id: number) {
-    await fetch(`/api/accounts/${id}`, { method: "DELETE" });
+    try {
+      await fetchApi(`/api/accounts/${id}`, { method: "DELETE" });
+    } catch {}
     mutate();
   }
 
