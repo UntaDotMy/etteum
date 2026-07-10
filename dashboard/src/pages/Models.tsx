@@ -40,6 +40,22 @@ const providerColors: Record<string, string> = {
   canva: "bg-[var(--chart-6)]/15 text-[var(--chart-6)] border-[var(--chart-6)]/30",
   codex: "bg-[var(--chart-1)]/15 text-[var(--chart-1)] border-[var(--chart-1)]/30",
   qoder: "bg-[var(--chart-4)]/15 text-[var(--chart-4)] border-[var(--chart-4)]/30",
+  cursor: "bg-[var(--chart-5)]/15 text-[var(--chart-5)] border-[var(--chart-5)]/30",
+  byok: "bg-[var(--info)]/15 text-[var(--info)] border-[var(--info)]/30",
+  "gitlab-duo": "bg-orange-500/15 text-orange-400 border-orange-400/30",
+  youmind: "bg-teal-500/15 text-teal-400 border-teal-400/30",
+  alibaba: "bg-[var(--success)]/15 text-[var(--success)] border-[var(--success)]/30",
+  antigravity: "bg-fuchsia-500/15 text-fuchsia-400 border-fuchsia-400/30",
+  // F13 OpenAI-compatible catalog providers
+  openai: "bg-emerald-500/15 text-emerald-400 border-emerald-400/30",
+  deepseek: "bg-blue-500/15 text-blue-400 border-blue-400/30",
+  groq: "bg-amber-500/15 text-amber-400 border-amber-400/30",
+  openrouter: "bg-purple-500/15 text-purple-400 border-purple-400/30",
+  grok: "bg-slate-500/15 text-slate-300 border-slate-400/30",
+  mistral: "bg-rose-500/15 text-rose-400 border-rose-400/30",
+  together: "bg-indigo-500/15 text-indigo-400 border-indigo-400/30",
+  fireworks: "bg-pink-500/15 text-pink-400 border-pink-400/30",
+  cohere: "bg-cyan-500/15 text-cyan-400 border-cyan-400/30",
 };
 
 function formatNumber(n: number | undefined): string {
