@@ -3,16 +3,20 @@
  *
  * Ported from grok2api (jiujiu532/grok2api) reverse-engineering of grok.com.
  *
- * Two upstream surfaces:
+ * Three upstream surfaces:
  *   1. grok.com web  — POST /rest/app-chat/conversations/new (SSE)
  *      Auth: SSO cookies (sso + sso-rw). Free web quota.
  *   2. console.x.ai  — POST /v1/chat/completions (OpenAI-compatible SSE)
  *      Auth: same SSO token as Bearer, OR an xAI API key.
  *      Separate console quota (free for basic accounts).
+ *   3. cli-chat-proxy.grok.com — POST /v1/responses (OpenAI Responses API, SSE)
+ *      Auth: OAuth2/OIDC access token from auth.x.ai (Bearer).
+ *      Used by the official Grok CLI. Auto-refreshed via refresh_token.
  *
  * Model routing:
- *   - Models with modeId CONSOLE  → console.x.ai API
- *   - All other models            → grok.com web app-chat
+ *   - OAuth accounts (auth_method:"oauth")  → cli-chat-proxy Responses API
+ *   - Models with modeId CONSOLE            → console.x.ai API
+ *   - All other (SSO) models                → grok.com web app-chat
  */
 
 import {
@@ -21,6 +25,7 @@ import {
   type ChatCompletionResponse,
   type ModelInfo,
   type ProviderResult,
+  type ProviderHealthResult,
 } from "../base";
 import type { Account } from "../../../db/schema";
 import {
@@ -32,6 +37,16 @@ import {
   parseSseEvents,
   consoleChunkToEvents,
 } from "./protocol";
+import {
+  GROK_OAUTH,
+  isOAuthAccount,
+  getOAuthTokens,
+  ensureFreshAccessToken,
+  exchangeRefreshToken,
+  validateOAuthToken,
+  getGrokCliVersion,
+  type GrokOAuthTokens,
+} from "./oauth";
 
 // ---------------------------------------------------------------------------
 // Token structure
@@ -47,6 +62,27 @@ export interface GrokTokens {
   /** Account tier: basic / super / heavy — controls which models are available. */
   tier?: "basic" | "super" | "heavy";
   email?: string;
+}
+
+/**
+ * Conservative prompt-token estimate when the upstream reports no usage
+ * (i.e. the SSO web surface). Uses a char/4 heuristic summed across all
+ * message content. Used only as a fallback — OAuth/Responses surface reports
+ * real usage.
+ */
+function estimatePromptTokens(request: ChatCompletionRequest): number {
+  let chars = 0;
+  for (const msg of request.messages ?? []) {
+    if (typeof msg.content === "string") {
+      chars += msg.content.length;
+    } else if (Array.isArray(msg.content)) {
+      for (const part of msg.content) {
+        if (typeof part === "string") chars += part.length;
+        else if (part && typeof part.text === "string") chars += part.text.length;
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
 }
 
 // ---------------------------------------------------------------------------
@@ -122,8 +158,9 @@ export class GrokProvider extends BaseProvider {
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
     try {
-      const tokens = this.getTokens(account);
-      if (!tokens) throw new Error("expired: no tokens");
+      const oauthAccount = isOAuthAccount(account);
+      const tokens = oauthAccount ? null : this.getTokens(account);
+      if (!oauthAccount && !tokens) throw new Error("expired: no tokens");
 
       const id = `chatcmpl-grok-${Date.now()}`;
       const created = now();
@@ -133,12 +170,16 @@ export class GrokProvider extends BaseProvider {
       // Collect the full stream into a single response.
       let text = "";
       let reasoning = "";
+      /** Real upstream usage if reported (OAuth/Responses surface); null = estimate. */
+      const usageHolder: { value: { prompt_tokens: number; completion_tokens: number } | null } = { value: null };
       const encoder = new TextEncoder();
       const decoder = new TextDecoder();
 
-      const stream = useConsole
-        ? await this.makeConsoleStream(account, tokens, request, id, created)
-        : await this.makeWebStream(account, tokens, request, id, created);
+      const stream = oauthAccount
+        ? await this.makeCliProxyStream(account, request, id, created, (u) => { usageHolder.value = u; })
+        : useConsole
+          ? await this.makeConsoleStream(account, tokens!, request, id, created)
+          : await this.makeWebStream(account, tokens!, request, id, created);
 
       if (!stream) {
         return { success: false, error: "Failed to create upstream stream" };
@@ -161,8 +202,13 @@ export class GrokProvider extends BaseProvider {
         }
       }
 
-      const promptTokens = (request.messages?.length ?? 0) * 100;
-      const completionTokens = Math.ceil(text.length / 4);
+      // Token accounting: prefer the upstream-reported usage (OAuth/Responses
+      // surface returns a real usage object). Fall back to a conservative
+      // estimate only when the upstream reports nothing (SSO web surface).
+      const promptTokens = usageHolder.value?.prompt_tokens
+        ?? estimatePromptTokens(request);
+      const completionTokens = usageHolder.value?.completion_tokens
+        ?? Math.ceil(text.length / 4);
 
       const response: ChatCompletionResponse = {
         id,
@@ -202,17 +248,20 @@ export class GrokProvider extends BaseProvider {
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
     try {
-      const tokens = this.getTokens(account);
-      if (!tokens) throw new Error("expired: no tokens");
+      const oauthAccount = isOAuthAccount(account);
+      const tokens = oauthAccount ? null : this.getTokens(account);
+      if (!oauthAccount && !tokens) throw new Error("expired: no tokens");
 
       const id = `chatcmpl-grok-${Date.now()}`;
       const created = now();
       const model = request.model;
       const useConsole = this.isConsoleModel(model);
 
-      const stream = useConsole
-        ? await this.makeConsoleStream(account, tokens, request, id, created)
-        : await this.makeWebStream(account, tokens, request, id, created);
+      const stream = oauthAccount
+        ? await this.makeCliProxyStream(account, request, id, created)
+        : useConsole
+          ? await this.makeConsoleStream(account, tokens!, request, id, created)
+          : await this.makeWebStream(account, tokens!, request, id, created);
 
       if (!stream) {
         return { success: false, error: "Failed to create upstream stream" };
@@ -222,6 +271,171 @@ export class GrokProvider extends BaseProvider {
     } catch (err: any) {
       return this.classifyError(err);
     }
+  }
+
+  // -------------------------------------------------------------------------
+  // cli-chat-proxy.grok.com Responses API → ReadableStream<Uint8Array> (SSE)
+  // OAuth surface used by the official Grok CLI. OpenAI-compatible SSE.
+  // -------------------------------------------------------------------------
+
+  /**
+   * Stream a chat completion from the cli-chat-proxy Responses API.
+   * Auth: OAuth access token (auto-refreshed before expiry).
+   *
+   * Verified against the official Grok CLI v0.2.93 (binary strings + debug log):
+   *   - Endpoint: POST /v1/responses (NOT /chat/completions, which 426s).
+   *   - Required header: x-grok-client-version: 0.2.93 (version gate; without
+   *     it the proxy returns 426 "version (none) is outdated").
+   *   - Model routing: x-grok-model-override header (grok-build = default cluster).
+   *   - Request body: Responses API format ({ input, ... }), not { messages }.
+   *   - SSE events: response.output_text.delta (text), response.completed (usage).
+   *
+   * @param onUsage optional callback receiving the upstream usage object when
+   *                the stream completes (used for real token/credit accounting).
+   */
+  private async makeCliProxyStream(
+    account: Account,
+    request: ChatCompletionRequest,
+    id: string,
+    created: number,
+    onUsage?: (usage: { prompt_tokens: number; completion_tokens: number }) => void
+  ): Promise<ReadableStream<Uint8Array> | null> {
+    const bearer = await ensureFreshAccessToken(account, async (fresh) => {
+      // Persist the refreshed token bundle back to the account row.
+      account.tokens = fresh as unknown as Account["tokens"];
+      try {
+        const { db } = await import("../../../db/index");
+        const { accounts } = await import("../../../db/schema");
+        const { eq } = await import("drizzle-orm");
+        await db.update(accounts).set({ tokens: fresh as unknown as Account["tokens"] }).where(eq(accounts.id, account.id));
+      } catch { /* best-effort persist; in-memory token still refreshed */ }
+    });
+    if (!bearer) throw new Error("expired: OAuth access token could not be refreshed");
+
+    // Resolve the CLI version dynamically (rot-proof against CLI updates).
+    const cliVersion = await getGrokCliVersion();
+
+    // Build the Responses API request body. Convert OpenAI chat messages →
+    // the Responses `input` format (array of role/content messages).
+    const input = request.messages.map((m) => ({
+      role: m.role,
+      content: typeof m.content === "string"
+        ? m.content
+        : Array.isArray(m.content)
+          ? (m.content as any[]).map((p) => (typeof p === "string" ? p : p.text ?? "")).join("")
+          : "",
+    }));
+
+    const body: Record<string, unknown> = {
+      model: "grok-build",
+      input,
+      stream: true,
+    };
+    if (request.temperature != null) body.temperature = request.temperature;
+    if (request.max_tokens != null) body.max_output_tokens = request.max_tokens;
+    if (request.top_p != null) body.top_p = request.top_p;
+    if (request.tools) body.tools = request.tools;
+    if (request.tool_choice) body.tool_choice = request.tool_choice;
+
+    const upstream = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Authorization": `Bearer ${bearer}`,
+        "Accept": "text/event-stream",
+        // Required version gate — resolved dynamically so it never rots.
+        "x-grok-client-version": cliVersion,
+        "x-grok-client-surface": "grok-shell",
+        // Model routing header (always safe; grok-build = default cluster).
+        "x-grok-model-override": "grok-build",
+      },
+      body: JSON.stringify(body),
+    });
+
+    if (!upstream.ok || !upstream.body) {
+      const text = await upstream.text().catch(() => "");
+      throw new Error(`cli-chat-proxy error ${upstream.status}: ${text.slice(0, 200)}`);
+    }
+
+    const reader = upstream.body.getReader();
+    const encoder = new TextEncoder();
+    let buffer = "";
+
+    return new ReadableStream<Uint8Array>({
+      async start(controller) {
+        try {
+          for (;;) {
+            const { done, value } = await reader.read();
+            if (done) break;
+            buffer += new TextDecoder().decode(value, { stream: true });
+
+            // Process complete SSE events (separated by blank lines).
+            let boundary: number;
+            while ((boundary = buffer.indexOf("\n\n")) !== -1) {
+              const rawEvent = buffer.slice(0, boundary);
+              buffer = buffer.slice(boundary + 2);
+
+              // Responses API SSE: "event: <type>\ndata: <json>"
+              const lines = rawEvent.split("\n");
+              const eventType = lines.find((l) => l.startsWith("event: "))?.slice(7).trim();
+              const dataLine = lines.find((l) => l.startsWith("data: "));
+              if (!dataLine) continue;
+              const payload = dataLine.slice(6).trim();
+              if (payload === "[DONE]") continue;
+
+              try {
+                const chunk = JSON.parse(payload);
+
+                // Capture upstream usage on the completed event (real token
+                // accounting: input/output/reasoning/cached tokens).
+                if (eventType === "response.completed") {
+                  const usage = chunk.response?.usage ?? chunk.usage;
+                  if (usage) {
+                    onUsage?.({
+                      prompt_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
+                      completion_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
+                    });
+                  }
+                }
+
+                // Convert Responses API text deltas → OpenAI chat-completion chunks.
+                // response.output_text.delta carries the incremental text.
+                if (eventType === "response.output_text.delta" && typeof chunk.delta === "string") {
+                  const out = {
+                    id,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: request.model,
+                    choices: [{ index: 0, delta: { content: chunk.delta }, finish_reason: null }],
+                  };
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
+                } else if (eventType === "response.completed") {
+                  const out = {
+                    id,
+                    object: "chat.completion.chunk",
+                    created,
+                    model: request.model,
+                    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                  };
+                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
+                }
+                // Other event types (response.created, response.in_progress,
+                // response.output_item.added, etc.) carry no chat text — skip.
+              } catch {
+                /* skip malformed chunk */
+              }
+            }
+          }
+        } catch (err) {
+          controller.error(err);
+          return;
+        } finally {
+          try { reader.releaseLock(); } catch { /* ignore */ }
+        }
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+    });
   }
 
   // -------------------------------------------------------------------------
@@ -567,11 +781,26 @@ export class GrokProvider extends BaseProvider {
     tokens?: string;
     error?: string;
   }> {
+    // OAuth path — exchange refresh token for a fresh access token.
+    if (isOAuthAccount(account)) {
+      const oauthTokens = getOAuthTokens(account);
+      if (!oauthTokens?.refresh_token) {
+        return { success: false, error: "No refresh token to renew OAuth access" };
+      }
+      try {
+        const fresh = await exchangeRefreshToken(oauthTokens.refresh_token);
+        const tokensStr = JSON.stringify(fresh);
+        return { success: true, tokens: tokensStr };
+      } catch (err) {
+        return { success: false, error: err instanceof Error ? err.message : String(err) };
+      }
+    }
+
+    // SSO path — cookies don't have a refresh-token flow. Validate as-is.
     const tokens = this.getTokens(account);
     if (!tokens?.sso) {
       return { success: false, error: "No SSO cookie to refresh" };
     }
-    // SSO cookies don't have a refresh-token flow. Validate and return as-is.
     const valid = await this.validateAccount(account);
     if (!valid) {
       return { success: false, error: "expired: SSO cookie invalid" };
@@ -594,14 +823,49 @@ export class GrokProvider extends BaseProvider {
 
   async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
-    quota?: {
-      limit: number;
-      remaining: number;
-      used: number;
-      resetAt?: Date | string | null;
-    };
+    quota?: { limit: number; remaining: number; used: number; resetAt: Date | null };
     error?: string;
   }> {
+    // OAuth path — fetch subscription/credit state from the CLI proxy.
+    // The CLI logs show a subscription.check + billing call returning
+    // onDemandUsed / prepaidBalance. Probe the models endpoint as a
+    // lightweight liveness check (no token cost) and report quota if a
+    // dedicated billing endpoint is reachable.
+    if (isOAuthAccount(account)) {
+      const bearer = await ensureFreshAccessToken(account);
+      if (!bearer) {
+        return { success: false, error: "expired: OAuth access token needs refresh" };
+      }
+      try {
+        const cliVersion = await getGrokCliVersion();
+        // The CLI surface exposes credit state via /v1/models (lightweight).
+        // A 200 means the account is alive and has API access; a 402 means
+        // out of credits. We report remaining=0 on 402 so the pool can route
+        // away from exhausted accounts.
+        const response = await fetch(GROK_OAUTH.modelsEndpoint, {
+          headers: {
+            Authorization: `Bearer ${bearer}`,
+            Accept: "application/json",
+            "x-grok-client-version": cliVersion,
+          },
+          signal,
+        });
+        if (response.status === 402) {
+          return { success: true, quota: { limit: 0, remaining: 0, used: 0, resetAt: null } };
+        }
+        if (!response.ok) {
+          return { success: false, error: `HTTP ${response.status}` };
+        }
+        // Alive with access — report as healthy (no hard limit known without
+        // the billing endpoint; the pool treats remaining>0 as usable).
+        return { success: true, quota: { limit: 100, remaining: 100, used: 0, resetAt: null } };
+      } catch (err: any) {
+        if (err?.name === "AbortError") return { success: false, error: "aborted" };
+        return { success: false, error: err?.message ?? String(err) };
+      }
+    }
+
+    // SSO path — grok.com rate-limits endpoint.
     const tokens = this.getTokens(account);
     if (!tokens?.sso) {
       return { success: false, error: "No SSO cookie" };
@@ -646,10 +910,58 @@ export class GrokProvider extends BaseProvider {
   }
 
   /**
-   * Check if an account's tokens are still valid by hitting the rate-limits
-   * endpoint. Returns true if the account is alive.
+   * Check if an account's tokens are still valid. Returns true if alive.
+   *
+   * - OAuth accounts: validated via GET /v1/models on cli-chat-proxy (no token
+   *   cost), with proactive refresh if the access token is near expiry.
+   * - SSO accounts: validated via the grok.com rate-limits endpoint.
    */
+  /**
+   * Override healthCheck so the BASE class's direct-refresh path (base.ts:195,
+   * which calls this.refreshToken WITHOUT the coordinator lock and WITHOUT
+   * persisting) can NEVER run for grok OAuth accounts. The base path would
+   * brick rotating refresh tokens. We validate + fetch quota ourselves,
+   * routing any needed refresh through validateOAuthToken → ensureFreshAccessToken
+   * (which never rotates; it returns false and lets the scheduler/router handle it).
+   */
+  override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
+    // OAuth path — safe validation (no rotation, free /v1/models probe).
+    if (isOAuthAccount(account)) {
+      const { alive } = await validateOAuthToken(account);
+      if (!alive) {
+        return { kind: "missing_tokens", success: false, error: "OAuth access token invalid or refresh failed" };
+      }
+      // Fetch quota (credits) via the OAuth path if available.
+      const quota = await this.fetchQuota(account, signal);
+      return {
+        kind: quota.success ? "healthy" : "unsupported",
+        success: true,
+        quota: quota.success && quota.quota
+          ? { ...quota.quota, source: "cli-chat-proxy" }
+          : undefined,
+      };
+    }
+
+    // SSO path — delegate to the base implementation.
+    return super.healthCheck(account, signal);
+  }
+
   async validateAccount(account: Account): Promise<boolean> {
+    // OAuth path — refresh proactively, then probe /v1/models (free).
+    if (isOAuthAccount(account)) {
+      const { alive } = await validateOAuthToken(account, async (fresh) => {
+        account.tokens = fresh as unknown as Account["tokens"];
+        try {
+          const { db } = await import("../../../db/index");
+          const { accounts } = await import("../../../db/schema");
+          const { eq } = await import("drizzle-orm");
+          await db.update(accounts).set({ tokens: fresh as unknown as Account["tokens"] }).where(eq(accounts.id, account.id));
+        } catch { /* best-effort */ }
+      });
+      return alive;
+    }
+
+    // SSO path.
     const tokens = this.getTokens(account);
     if (!tokens?.sso) return false;
 

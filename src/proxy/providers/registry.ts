@@ -84,6 +84,7 @@ export const providers = {
   alibaba,
   antigravity,
   cursor,
+  grok,
   // F13: API-key catalog.
   ...Object.fromEntries(openaiCompatibleProviders.map((p) => [p.name, p])),
 } as const;

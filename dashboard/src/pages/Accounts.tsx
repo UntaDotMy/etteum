@@ -428,16 +428,20 @@ export default function Accounts() {
     const tokens = instantTokens.trim().split("\n").map((l) => l.trim()).filter(Boolean);
     if (tokens.length === 0) { showError(new Error("No valid tokens found")); return; }
 
+    const isGrok = addDialogProvider === "grok";
+    if (isGrok) setGrokBusy(true);
     try {
       const res = await fetchApi<{ success: number; failed: number; errors?: string[] }>("/api/accounts/instant-login", {
         method: "POST",
         body: JSON.stringify({ tokens, provider: addDialogProvider }),
       });
       showSuccess(`Instant login: ${res.success} success, ${res.failed} failed`);
+      if (res.failed > 0 && res.errors?.length) showError(new Error(res.errors.join("; ")));
       setInstantTokens("");
       setAddDialogProvider(null);
       await load();
     } catch (err) { showError(err); }
+    finally { if (isGrok) setGrokBusy(false); }
   }
 
   async function handleCookieLogin() {
@@ -2175,8 +2179,11 @@ export default function Accounts() {
 ) : addDialogProvider === "grok" ? (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
               <button onClick={() => setAddMode("apikey")}
-                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "apikey" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}  
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "apikey" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >SSO Cookie</button>
+              <button onClick={() => setAddMode("instant")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "instant" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >OAuth Token</button>
             </div>
           ) : (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
@@ -2403,6 +2410,34 @@ sk-ws-H.zzzzzzzz..."
                 <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={grokBusy}>Cancel</Button>
                 <Button onClick={handleGrokSsoLogin} disabled={grokBusy || !grokSso.trim()}>
                   {grokBusy ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Adding...</>) : "Add Account"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {addMode === "instant" && addDialogProvider === "grok" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">OAuth Tokens (one per line)</label>
+                <textarea
+                  value={instantTokens}
+                  onChange={(e) => setInstantTokens(e.target.value)}
+                  rows={7}
+                  className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
+                  placeholder={"Paste refresh tokens (durable) or access tokens (JWT starting eyJ...).\nOne per line. Refresh tokens are preferred — they auto-refresh and never expire.\n\nGet them from the Grok CLI at ~/.grok/auth.json (refresh_token field)."}
+                  disabled={grokBusy}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  <strong>Refresh tokens</strong> (recommended): durable, auto-refreshed before the 6h access-token expiry.
+                  Accounts stay alive indefinitely — no re-import needed. <br/>
+                  <strong>Access tokens</strong> (eyJ… JWT): expire in ~6h, no auto-refresh. Quick testing only.
+                  Uses the same <code>cli-chat-proxy.grok.com</code> surface as the official Grok CLI.
+                </p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={grokBusy}>Cancel</Button>
+                <Button onClick={handleInstantLogin} disabled={grokBusy || !instantTokens.trim()}>
+                  {grokBusy ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Importing...</>) : `Import ${instantTokens.trim().split("\n").filter(l => l.trim()).length || ""} Account(s)`}
                 </Button>
               </div>
             </div>

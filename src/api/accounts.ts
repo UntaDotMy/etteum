@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
 import { accounts, requestLogs, vccCards, vccTransactions, settings } from "../db/schema";
-import { eq, inArray } from "drizzle-orm";
+import { eq, inArray, and } from "drizzle-orm";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
 import { adminGuardFromPeer, peerIpFromHonoContext, RateLimiter } from "../utils/security";
@@ -12,6 +12,11 @@ import { warmupAccount } from "../auth/warmup-runner";
 import { pool, type ProviderName } from "../proxy/pool";
 import { activateQoderPat } from "../proxy/providers/qoder";
 import { activateYouMindKey } from "../proxy/providers/youmind";
+import {
+  exchangeRefreshToken,
+  bundleFromAccessToken,
+  GROK_OAUTH,
+} from "../proxy/providers/grok/oauth";
 
 export const accountsRouter = new Hono();
 
@@ -1854,13 +1859,16 @@ accountsRouter.post("/", async (c) => {
 /**
  * POST /api/accounts/instant-login - Instant login via refresh token (bulk)
  * No browser needed — just exchange refresh token for access token
- * Body: { tokens: ["refreshToken1", ...], provider?: "kiro-pro" | "codex" }
+ * Body: { tokens: ["refreshToken1", ...], provider?: "kiro-pro" | "codex" | "grok" }
  *
  * - kiro-pro (default): tokens are Kiro AWS Identity refresh tokens
  * - codex: tokens are OpenAI OAuth refresh tokens (start with rt_*, ~200 chars)
+ * - grok: tokens are xAI OIDC refresh tokens (auth.x.ai). Exchange → ES256 JWT
+ *         access token (~6h) + durable refresh token. Stored as auth_method:"oauth".
+ *         Also accepts raw access tokens (JWT starting "eyJ") — stored as-is.
  */
 accountsRouter.post("/instant-login", async (c) => {
-  const body = await c.req.json<{ tokens: string[]; provider?: "kiro-pro" | "codex" }>();
+  const body = await c.req.json<{ tokens: string[]; provider?: "kiro-pro" | "codex" | "grok" }>();
   const provider = body.provider || "kiro-pro";
 
   if (!body.tokens || !Array.isArray(body.tokens) || body.tokens.length === 0) {
@@ -1869,6 +1877,10 @@ accountsRouter.post("/instant-login", async (c) => {
 
   if (provider === "codex") {
     return await handleCodexInstantLogin(c, body.tokens);
+  }
+
+  if (provider === "grok") {
+    return await handleGrokInstantLogin(c, body.tokens);
   }
 
   const REFRESH_URL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
@@ -2684,6 +2696,95 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
 async function handleCodexInstantLogin(c: any, tokens: string[]) {
   const result = await exchangeCodexRefreshTokens(tokens);
   return c.json(result);
+}
+
+/**
+ * Bulk-import Grok accounts via refresh tokens (preferred) or access tokens.
+ * Mirrors exchangeCodexRefreshTokens: exchange → upsert → invalidate → broadcast.
+ *
+ * - Refresh tokens (durable): exchanged at auth.x.ai for a fresh access token.
+ *   Account stays alive; etteum auto-refreshes before the 6h expiry.
+ * - Access tokens (JWT, "eyJ..."): stored as-is with no refresh capability.
+ *   Will expire in ~6h — useful only for quick testing.
+ */
+async function handleGrokInstantLogin(c: any, tokens: string[]) {
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed) { failed++; continue; }
+
+    try {
+      let oauthTokens;
+      let email = "";
+
+      if (trimmed.startsWith("eyJ")) {
+        // Looks like a JWT access token — bundle as-is (no refresh).
+        oauthTokens = bundleFromAccessToken(trimmed);
+        email = oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${trimmed.slice(-8)}@token.local`;
+      } else {
+        // Treat as a refresh token — exchange for a fresh access token.
+        oauthTokens = await exchangeRefreshToken(trimmed);
+        email = oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${trimmed.slice(-8)}@token.local`;
+      }
+
+      await upsertGrokOAuthAccount(email, oauthTokens);
+      success++;
+    } catch (err) {
+      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  pool.invalidate("grok" as ProviderName);
+  if (success > 0) {
+    broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
+  }
+
+  return c.json({ success, failed, errors: errors.length > 0 ? errors : undefined });
+}
+
+/**
+ * Upsert a Grok OAuth account. Dedupes by (provider, email); preserves existing id.
+ * Tokens stored in the existing `accounts.tokens` JSON column (no migration).
+ */
+async function upsertGrokOAuthAccount(email: string, oauthTokens: import("../proxy/providers/grok/oauth").GrokOAuthTokens) {
+  const existing = await db.select().from(accounts)
+    .where(and(eq(accounts.provider, "grok"), eq(accounts.email, email)))
+    .limit(1);
+
+  const tokensBlob = {
+    auth_method: "oauth" as const,
+    access_token: oauthTokens.access_token,
+    refresh_token: oauthTokens.refresh_token,
+    expires_at: oauthTokens.expires_at,
+    oidc_client_id: oauthTokens.oidc_client_id,
+    sub: oauthTokens.sub,
+  };
+
+  if (existing.length > 0) {
+    await db.update(accounts)
+      .set({
+        tokens: tokensBlob,
+        status: "active",
+        enabled: true,
+        lastLoginAt: new Date(),
+      })
+      .where(eq(accounts.id, existing[0]!.id));
+  } else {
+    await db.insert(accounts).values({
+      provider: "grok",
+      email,
+      // password is NOT NULL but unused for OAuth — store a sentinel.
+      password: "oauth:no-password",
+      status: "active",
+      enabled: true,
+      tokens: tokensBlob,
+      metadata: { auth_method: "oauth", oidc_client_id: oauthTokens.oidc_client_id },
+    });
+  }
 }
 
 /**
