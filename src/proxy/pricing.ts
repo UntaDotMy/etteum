@@ -100,6 +100,20 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
   // === xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ===
   "grok-4.5":                     { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.00  },
+  // === xAI Grok — grok.com web surface (free web quota; cost = 0) ===
+  "grok-4.20":                    { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.20-fast":               { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.20-reasoning":          { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.20-super":              { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.20-heavy":              { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.3-beta":                { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.3-reasoning":           { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-4.3-heavy":               { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-auto":                    { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-fast":                    { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-reasoning":               { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+  "grok-heavy":                   { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
+
   "grok-4.3":                     { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.25  },
   "grok-build-0.1":               { input: 1.00,  output: 2.00,  cached: 0.10,  reasoning: 2.00,   cacheCreation: 1.00  },
 

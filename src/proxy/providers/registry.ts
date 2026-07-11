@@ -8,6 +8,7 @@ import { QoderProvider } from "./qoder";
 import { ByokProvider } from "./byok";
 import { GitlabDuoProvider } from "./gitlab-duo";
 import { YouMindProvider } from "./youmind";
+import { GrokProvider } from "./grok";
 import { AlibabaProvider } from "./alibaba";
 import { AntigravityProvider } from "./antigravity";
 import { CursorProvider } from "./cursor/cursorProvider";
@@ -48,6 +49,7 @@ const youmind = new YouMindProvider();
 const alibaba = new AlibabaProvider();
 const antigravity = new AntigravityProvider();
 const cursor = new CursorProvider();
+const grok = new GrokProvider();
 
 // F13: API-key LLM catalog (openai, deepseek, groq, openrouter, …). Each is a
 // generic OpenAI-compatible relay instantiated from OPENAI_COMPATIBLE_CATALOG.
@@ -63,7 +65,7 @@ const openaiCompatibleProviders = createOpenAICompatibleProviders();
 // owns the `ym-*` prefix exclusively — also position-independent, but slotted
 // alongside the other prefix-based providers for readability.
 const PROVIDER_ORDER = [
-  gitlabDuo, canva, qoder, codex, kiroPro, youmind, antigravity, cursor,
+  gitlabDuo, canva, qoder, codex, kiroPro, youmind, grok, antigravity, cursor,
   ...openaiCompatibleProviders,
   byok, alibaba, codebuddyChina, codebuddy, kiro,
 ] as const;
