@@ -32,6 +32,21 @@ export const GROK_OAUTH = {
   apiBaseUrl: "https://cli-chat-proxy.grok.com/v1",
   /** Live model-catalog endpoint (ETag-cached by the CLI). */
   modelsEndpoint: "https://cli-chat-proxy.grok.com/v1/models",
+  /**
+   * Live billing/credits for Grok Build OAuth (JSON).
+   * Verified: GET returns { config: { monthlyLimit:{val}, used:{val}, ... } }.
+   * Values are the same units the CLI's x.ai/billing RPC uses (credit cents /
+   * pool units — never a hardcoded 100 placeholder).
+   */
+  billingEndpoint: "https://cli-chat-proxy.grok.com/v1/billing",
+  /**
+   * Shared weekly usage pool as gRPC-web protobuf (used % + reset timestamps).
+   * Same surface CodexBar / OmniRoute poll: GrokBuildBilling/GetGrokCreditsConfig.
+   * Used when monthlyLimit is 0 (free / non-invoiced pool) so we still report
+   * real percent-of-pool remaining instead of a fake 100.
+   */
+  creditsConfigEndpoint:
+    "https://grok.com/grok_api_v2.GrokBuildBilling/GetGrokCreditsConfig",
   /** Scopes observed in the CLI's auth.json token request. */
   scopes: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
   /** CLI version gate. The cli-chat-proxy requires an x-grok-client-version
@@ -317,6 +332,337 @@ export async function ensureFreshAccessToken(
 // ---------------------------------------------------------------------------
 // Upstream API helpers (cli-chat-proxy.grok.com/v1)
 // ---------------------------------------------------------------------------
+
+/** Money/credit amount as returned by xAI billing APIs (`{ val: number }`). */
+export interface GrokBillingAmount {
+  val?: number;
+}
+
+/** JSON body of GET cli-chat-proxy /v1/billing (verified live). */
+export interface GrokBillingConfig {
+  monthlyLimit?: GrokBillingAmount;
+  used?: GrokBillingAmount;
+  onDemandCap?: GrokBillingAmount;
+  billingPeriodStart?: string;
+  billingPeriodEnd?: string;
+  history?: Array<{
+    billingCycle?: { year?: number; month?: number };
+    includedUsed?: GrokBillingAmount;
+    onDemandUsed?: GrokBillingAmount;
+    totalUsed?: GrokBillingAmount;
+  }>;
+}
+
+export interface GrokBillingResponse {
+  config?: GrokBillingConfig;
+}
+
+/** Normalized quota for the pool/dashboard (no placeholders). */
+export interface GrokOAuthQuota {
+  limit: number;
+  remaining: number;
+  used: number;
+  resetAt: Date | null;
+  /** Provenance so callers can tell paid vs percent-scale pool. */
+  source: string;
+  /** True when numbers are percent-of-pool (limit always 100). */
+  percentScale: boolean;
+  raw?: unknown;
+}
+
+function moneyVal(v: GrokBillingAmount | undefined): number {
+  const n = Number(v?.val);
+  return Number.isFinite(n) ? n : 0;
+}
+
+/**
+ * Parse GET /v1/billing JSON into a quota snapshot when monthlyLimit > 0.
+ * Returns null when the response is free-tier shaped (limit 0) so the caller
+ * can fall through to the shared-pool percent source.
+ */
+export function parseGrokBillingJson(
+  data: GrokBillingResponse | null | undefined,
+  now: Date = new Date(),
+): GrokOAuthQuota | null {
+  const cfg = data?.config;
+  if (!cfg) return null;
+
+  const limit = moneyVal(cfg.monthlyLimit);
+  const used = moneyVal(cfg.used);
+  const periodEnd = cfg.billingPeriodEnd ? new Date(cfg.billingPeriodEnd) : null;
+  const resetAt =
+    periodEnd && !Number.isNaN(periodEnd.getTime()) && periodEnd > now
+      ? periodEnd
+      : periodEnd && !Number.isNaN(periodEnd.getTime())
+        ? periodEnd
+        : null;
+
+  // Paid / invoiced pool: real absolute units from the API.
+  if (limit > 0) {
+    const remaining = Math.max(0, limit - used);
+    return {
+      limit,
+      used: Math.max(0, used),
+      remaining,
+      resetAt,
+      source: "cli-chat-proxy/billing",
+      percentScale: false,
+      raw: data,
+    };
+  }
+
+  // Free / non-invoiced: monthlyLimit=0. Absolute units are not the source of
+  // truth — the shared weekly pool % lives on GetGrokCreditsConfig.
+  return null;
+}
+
+// ── gRPC-web protobuf scanner for GetGrokCreditsConfig ─────────────────────
+// Ported in spirit from CodexBar's GrokWebBillingFetcher: recover used %
+// (fixed32 float 0..100) and the soonest future unix reset timestamp.
+
+function readVarint(bytes: Uint8Array, index: { i: number }): number | null {
+  let value = 0;
+  let shift = 0;
+  while (index.i < bytes.length && shift < 64) {
+    const byte = bytes[index.i]!;
+    index.i += 1;
+    value |= (byte & 0x7f) << shift;
+    if ((byte & 0x80) === 0) return value >>> 0;
+    shift += 7;
+  }
+  return null;
+}
+
+function grpcWebDataFrames(data: Uint8Array): Uint8Array[] {
+  const frames: Uint8Array[] = [];
+  let i = 0;
+  while (i + 5 <= data.length) {
+    const flags = data[i]!;
+    const length =
+      (data[i + 1]! << 24) |
+      (data[i + 2]! << 16) |
+      (data[i + 3]! << 8) |
+      data[i + 4]!;
+    const start = i + 5;
+    const end = start + length;
+    if (length < 0 || end > data.length) break;
+    if ((flags & 0x80) === 0) frames.push(data.subarray(start, end));
+    i = end;
+  }
+  return frames;
+}
+
+interface ProtoScan {
+  fixed32: Array<{ path: number[]; value: number }>;
+  varints: Array<{ path: number[]; value: number }>;
+}
+
+function scanProtobuf(data: Uint8Array, depth: number, path: number[]): ProtoScan {
+  const scan: ProtoScan = { fixed32: [], varints: [] };
+  const index = { i: 0 };
+  while (index.i < data.length) {
+    const fieldStart = index.i;
+    const key = readVarint(data, index);
+    if (key == null || key === 0) {
+      index.i = fieldStart + 1;
+      continue;
+    }
+    const fieldNumber = key >>> 3;
+    const wireType = key & 0x07;
+    const fieldPath = [...path, fieldNumber];
+    switch (wireType) {
+      case 0: {
+        const value = readVarint(data, index);
+        if (value != null) scan.varints.push({ path: fieldPath, value });
+        else index.i = fieldStart + 1;
+        break;
+      }
+      case 1: {
+        if (index.i + 8 > data.length) return scan;
+        index.i += 8;
+        break;
+      }
+      case 2: {
+        const length = readVarint(data, index);
+        if (length == null || index.i + length > data.length) {
+          index.i = fieldStart + 1;
+          break;
+        }
+        const start = index.i;
+        const end = index.i + length;
+        if (depth < 4) {
+          const nested = scanProtobuf(data.subarray(start, end), depth + 1, fieldPath);
+          scan.fixed32.push(...nested.fixed32);
+          scan.varints.push(...nested.varints);
+        }
+        index.i = end;
+        break;
+      }
+      case 5: {
+        if (index.i + 4 > data.length) return scan;
+        const bits =
+          data[index.i]! |
+          (data[index.i + 1]! << 8) |
+          (data[index.i + 2]! << 16) |
+          (data[index.i + 3]! << 24);
+        // IEEE-754 float32 little-endian (credit_usage_percent).
+        const buf = new ArrayBuffer(4);
+        new DataView(buf).setUint32(0, bits >>> 0, true);
+        const f = new DataView(buf).getFloat32(0, true);
+        scan.fixed32.push({ path: fieldPath, value: f });
+        index.i += 4;
+        break;
+      }
+      default:
+        index.i = fieldStart + 1;
+    }
+  }
+  return scan;
+}
+
+/**
+ * Parse GetGrokCreditsConfig gRPC-web (or raw protobuf) into a percent-scale
+ * quota. Omitted credit_usage_percent in a current period → 0% used (proto3).
+ */
+export function parseGrokCreditsProtobuf(
+  data: Uint8Array,
+  now: Date = new Date(),
+): GrokOAuthQuota | null {
+  if (!data.length) return null;
+
+  let payloads = grpcWebDataFrames(data);
+  if (payloads.length === 0 && data.length > 0 && (data[0]! >> 3) > 0) {
+    payloads = [data];
+  }
+  if (payloads.length === 0) return null;
+
+  const scan: ProtoScan = { fixed32: [], varints: [] };
+  for (const p of payloads) {
+    const s = scanProtobuf(p, 0, []);
+    scan.fixed32.push(...s.fixed32);
+    scan.varints.push(...s.varints);
+  }
+
+  const percentCandidates = scan.fixed32.filter(
+    (f) => Number.isFinite(f.value) && f.value >= 0 && f.value <= 100,
+  );
+  // Prefer shallowest field-1 float (credit_usage_percent is typically path ends with 1).
+  percentCandidates.sort((a, b) => {
+    const aEnd = a.path[a.path.length - 1] === 1 ? 0 : 1;
+    const bEnd = b.path[b.path.length - 1] === 1 ? 0 : 1;
+    if (aEnd !== bEnd) return aEnd - bEnd;
+    return a.path.length - b.path.length;
+  });
+  let usedPercent: number | null =
+    percentCandidates.length > 0 ? percentCandidates[0]!.value : null;
+
+  const nowSec = Math.floor(now.getTime() / 1000);
+  const resetCandidates = scan.varints
+    .map((v) => v.value)
+    .filter((ts) => ts >= 1_700_000_000 && ts <= 2_100_000_000)
+    .map((ts) => new Date(ts * 1000))
+    .filter((d) => d.getTime() > now.getTime() - 60_000); // allow just-past for clock skew
+
+  const futureResets = resetCandidates.filter((d) => d.getTime() > now.getTime());
+  const resetAt =
+    (futureResets.length ? futureResets : resetCandidates)
+      .sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
+
+  // Period present (unix timestamps found) + no percent field → 0% used (proto3 omit).
+  if (usedPercent == null && resetCandidates.length > 0) {
+    usedPercent = 0;
+  }
+  if (usedPercent == null) return null;
+
+  const used = Math.min(100, Math.max(0, Math.round(usedPercent)));
+  const limit = 100;
+  const remaining = Math.max(0, limit - used);
+  // silence unused nowSec (kept for future period-window filters)
+  void nowSec;
+
+  return {
+    limit,
+    used,
+    remaining,
+    resetAt,
+    source: "grok.com/GetGrokCreditsConfig",
+    percentScale: true,
+    raw: { usedPercent, resetAt: resetAt?.toISOString() ?? null },
+  };
+}
+
+/**
+ * Fetch real OAuth quota for a Grok Build account.
+ *
+ * 1. GET /v1/billing — absolute monthlyLimit/used when paid (limit > 0).
+ * 2. Else POST GetGrokCreditsConfig — shared pool percent (limit=100 scale).
+ * 3. Never invent a fake 100/100 placeholder.
+ */
+export async function fetchOAuthBillingQuota(
+  bearer: string,
+  signal?: AbortSignal,
+): Promise<GrokOAuthQuota | null> {
+  const cliVersion = await getGrokCliVersion();
+
+  // 1) JSON billing (paid monthly pool).
+  try {
+    const response = await fetch(GROK_OAUTH.billingEndpoint, {
+      method: "GET",
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        Accept: "application/json",
+        "x-grok-client-version": cliVersion,
+      },
+      signal,
+    });
+    if (response.ok) {
+      const json = (await response.json()) as GrokBillingResponse;
+      const paid = parseGrokBillingJson(json);
+      if (paid) return paid;
+    } else if (response.status === 402) {
+      return {
+        limit: 0,
+        remaining: 0,
+        used: 0,
+        resetAt: null,
+        source: "cli-chat-proxy/billing",
+        percentScale: false,
+        raw: { status: 402 },
+      };
+    }
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw err;
+    // fall through to credits config
+  }
+
+  // 2) Shared weekly pool percent (free / SuperGrok shared pool).
+  try {
+    const response = await fetch(GROK_OAUTH.creditsConfigEndpoint, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        Origin: "https://grok.com",
+        Referer: "https://grok.com/?_s=usage",
+        Accept: "*/*",
+        "Content-Type": "application/grpc-web+proto",
+        "x-grpc-web": "1",
+        "x-user-agent": "connect-es/2.1.1",
+      },
+      // Empty gRPC-web data frame (flags=0, length=0).
+      body: new Uint8Array([0, 0, 0, 0, 0]),
+      signal,
+    });
+    if (response.ok) {
+      const buf = new Uint8Array(await response.arrayBuffer());
+      const pool = parseGrokCreditsProtobuf(buf);
+      if (pool) return pool;
+    }
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw err;
+  }
+
+  return null;
+}
 
 /**
  * Fetch the live model catalog from the CLI upstream. ETag-cached like the
