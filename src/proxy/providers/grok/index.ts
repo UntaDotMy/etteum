@@ -261,21 +261,32 @@ export class GrokProvider extends BaseProvider {
   }
 
   // -------------------------------------------------------------------------
-  // cli-chat-proxy.grok.com Responses API → ReadableStream<Uint8Array> (SSE)
+  // cli-chat-proxy.grok.com chat/completions → ReadableStream<Uint8Array> (SSE)
   // OAuth surface used by the official Grok CLI. OpenAI-compatible SSE.
   // -------------------------------------------------------------------------
 
   /**
-   * Stream a chat completion from the cli-chat-proxy Responses API.
+   * Stream a chat completion from the cli-chat-proxy chat/completions endpoint.
    * Auth: OAuth access token (auto-refreshed before expiry).
    *
-   * Verified against the official Grok CLI v0.2.93 (binary strings + debug log):
-   *   - Endpoint: POST /v1/responses (NOT /chat/completions, which 426s).
-   *   - Required header: x-grok-client-version: 0.2.93 (version gate; without
-   *     it the proxy returns 426 "version (none) is outdated").
-   *   - Model routing: x-grok-model-override header (grok-build = default cluster).
-   *   - Request body: Responses API format ({ input, ... }), not { messages }.
-   *   - SSE events: response.output_text.delta (text), response.completed (usage).
+   * Verified against the official Grok CLI v0.2.93 (binary strings + debug log
+   * + live endpoint testing):
+   *   - Endpoint: POST /v1/chat/completions (OpenAI-compatible; returns SSE
+   *     in standard chat.completion.chunk format WITH usage).
+   *   - Required header: x-grok-client-version (version gate; without it the
+   *     proxy returns 426 "version (none) is outdated"). Resolved dynamically.
+   *   - Model routing: x-grok-model-override header.
+   *   - Model: "grok-4.5" (free tier works, returns model "grok-4.5-build-free").
+   *     The "grok-build" alias 402s on free accounts (spending-limit).
+   *   - Usage: real token accounting from the final chunk's `usage` field —
+   *     prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
+   *     cost_in_usd_ticks (0 on free tier).
+   *
+   * Verified live: cli-chat-proxy /chat/completions accepts the OAuth bearer
+   * + x-grok-client-version header and returns OpenAI-format SSE WITH usage
+   * (prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
+   * cost_in_usd_ticks). Model must be "grok-4.5" (free tier works); the
+   * "grok-build" alias 402s on free accounts.
    *
    * @param onUsage optional callback receiving the upstream usage object when
    *                the stream completes (used for real token/credit accounting).
@@ -302,29 +313,27 @@ export class GrokProvider extends BaseProvider {
     // Resolve the CLI version dynamically (rot-proof against CLI updates).
     const cliVersion = await getGrokCliVersion();
 
-    // Build the Responses API request body. Convert OpenAI chat messages →
-    // the Responses `input` format (array of role/content messages).
-    const input = request.messages.map((m) => ({
-      role: m.role,
-      content: typeof m.content === "string"
-        ? m.content
-        : Array.isArray(m.content)
-          ? (m.content as any[]).map((p) => (typeof p === "string" ? p : p.text ?? "")).join("")
-          : "",
-    }));
+    // Map the etteum model slug to the upstream model id. "grok-4.5" works on
+    // the free tier; the "grok-build" alias 402s on free accounts. The CLI's
+    // own debug log confirmed: grok-build → 402, grok-4.5 → 200.
+    const upstreamModel = request.model.startsWith("grok-4.5")
+      ? "grok-4.5"
+      : request.model;
 
     const body: Record<string, unknown> = {
-      model: "grok-build",
-      input,
+      model: upstreamModel,
+      messages: request.messages,
       stream: true,
     };
     if (request.temperature != null) body.temperature = request.temperature;
-    if (request.max_tokens != null) body.max_output_tokens = request.max_tokens;
+    if (request.max_tokens != null) body.max_tokens = request.max_tokens;
     if (request.top_p != null) body.top_p = request.top_p;
+    if (request.frequency_penalty != null) body.frequency_penalty = request.frequency_penalty;
+    if (request.presence_penalty != null) body.presence_penalty = request.presence_penalty;
     if (request.tools) body.tools = request.tools;
     if (request.tool_choice) body.tool_choice = request.tool_choice;
 
-    const upstream = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
+    const upstream = await fetch(`${GROK_OAUTH.apiBaseUrl}/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
@@ -333,8 +342,8 @@ export class GrokProvider extends BaseProvider {
         // Required version gate — resolved dynamically so it never rots.
         "x-grok-client-version": cliVersion,
         "x-grok-client-surface": "grok-shell",
-        // Model routing header (always safe; grok-build = default cluster).
-        "x-grok-model-override": "grok-build",
+        // Route to the requested model's cluster.
+        "x-grok-model-override": upstreamModel,
       },
       body: JSON.stringify(body),
     });
@@ -361,11 +370,7 @@ export class GrokProvider extends BaseProvider {
             while ((boundary = buffer.indexOf("\n\n")) !== -1) {
               const rawEvent = buffer.slice(0, boundary);
               buffer = buffer.slice(boundary + 2);
-
-              // Responses API SSE: "event: <type>\ndata: <json>"
-              const lines = rawEvent.split("\n");
-              const eventType = lines.find((l) => l.startsWith("event: "))?.slice(7).trim();
-              const dataLine = lines.find((l) => l.startsWith("data: "));
+              const dataLine = rawEvent.split("\n").find((l) => l.startsWith("data: "));
               if (!dataLine) continue;
               const payload = dataLine.slice(6).trim();
               if (payload === "[DONE]") continue;
@@ -373,41 +378,28 @@ export class GrokProvider extends BaseProvider {
               try {
                 const chunk = JSON.parse(payload);
 
-                // Capture upstream usage on the completed event (real token
-                // accounting: input/output/reasoning/cached tokens).
-                if (eventType === "response.completed") {
-                  const usage = chunk.response?.usage ?? chunk.usage;
-                  if (usage) {
-                    onUsage?.({
-                      prompt_tokens: usage.input_tokens ?? usage.prompt_tokens ?? 0,
-                      completion_tokens: usage.output_tokens ?? usage.completion_tokens ?? 0,
-                    });
-                  }
+                // Capture upstream usage when present (final chunk or a
+                // usage-only chunk). Real token accounting:
+                //   prompt_tokens / completion_tokens / total_tokens
+                //   + reasoning_tokens + cached_tokens + cost_in_usd_ticks
+                const usage = chunk.usage;
+                if (usage && typeof usage.prompt_tokens === "number") {
+                  onUsage?.({
+                    prompt_tokens: usage.prompt_tokens,
+                    completion_tokens: usage.completion_tokens ?? 0,
+                  });
                 }
 
-                // Convert Responses API text deltas → OpenAI chat-completion chunks.
-                // response.output_text.delta carries the incremental text.
-                if (eventType === "response.output_text.delta" && typeof chunk.delta === "string") {
-                  const out = {
-                    id,
-                    object: "chat.completion.chunk",
-                    created,
-                    model: request.model,
-                    choices: [{ index: 0, delta: { content: chunk.delta }, finish_reason: null }],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
-                } else if (eventType === "response.completed") {
-                  const out = {
-                    id,
-                    object: "chat.completion.chunk",
-                    created,
-                    model: request.model,
-                    choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
-                  };
-                  controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
-                }
-                // Other event types (response.created, response.in_progress,
-                // response.output_item.added, etc.) carry no chat text — skip.
+                // Pass the OpenAI-format chunk straight through (re-tagged
+                // with our id/created/model for consistency).
+                const out = {
+                  id,
+                  object: "chat.completion.chunk",
+                  created,
+                  model: request.model,
+                  choices: chunk.choices ?? [],
+                };
+                controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
               } catch {
                 /* skip malformed chunk */
               }
