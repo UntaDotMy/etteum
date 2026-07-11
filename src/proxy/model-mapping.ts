@@ -136,6 +136,7 @@ function isNativeProviderId(model: string): boolean {
   // Explicit alias prefixes used by routed providers:
   if (model.startsWith("gitlab-duo:")) return true;
   if (model.startsWith("qd-")) return true;          // Qoder
+  if (model.startsWith("grok-")) return true;       // Grok
   if (model.startsWith("cb-")) return true;          // CodeBuddy
   if (model.startsWith("ym-")) return true;          // YouMind
   if (model.startsWith("kiro:")) return true;        // Kiro Pro variant

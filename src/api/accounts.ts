@@ -1514,7 +1514,7 @@ accountsRouter.get("/:id", async (c) => {
  */
 accountsRouter.post("/", async (c) => {
   const body = await c.req.json<{
-    provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity";
+    provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity" | "grok";
     email?: string;
     password?: string;
     personalToken?: string;
@@ -1628,6 +1628,53 @@ accountsRouter.post("/", async (c) => {
       const msg = error instanceof Error ? error.message : String(error);
       return c.json({ error: `YouMind API key activation failed: ${msg}` }, 400);
     }
+  }
+
+  // ── Grok: SSO cookie paste flow ───────────────────────────────────
+  // Accept an SSO cookie value (and optional sso-rw), store it as the
+  // account token. No upstream validation here — the warmup/refresh
+  // scheduler will validate via /rest/rate-limits.
+  if (body.provider === "grok" && body.tokens) {
+    const sso = (body.tokens as Record<string, unknown>).sso as string | undefined;
+    const ssoRw = (body.tokens as Record<string, unknown>).ssoRw as string | undefined;
+    if (!sso || !sso.trim()) return c.json({ error: "SSO cookie is required" }, 400);
+
+    const tokens = JSON.stringify({
+      sso: sso.trim(),
+      ssoRw: (ssoRw || sso).trim(),
+      tier: (body.tokens as Record<string, unknown>).tier || "basic",
+    });
+    const email = body.email || `grok-${Date.now()}@sso`;
+
+    const existing = await db.select().from(accounts)
+      .where(eq(accounts.email, email))
+      .then((rows) => rows.find((r) => r.provider === "grok"));
+
+    if (existing) {
+      await db.update(accounts).set({
+        status: "active",
+        tokens: tokens as unknown,
+        errorMessage: null,
+        lastLoginAt: new Date(),
+        updatedAt: new Date(),
+      }).where(eq(accounts.id, existing.id));
+      pool.invalidate("grok");
+      broadcast({ type: "account_updated", data: { id: existing.id, provider: "grok", status: "active" } });
+      return c.json({ id: existing.id, provider: "grok", email, status: "active", updated: true }, 200);
+    }
+
+    const inserted = await db.insert(accounts).values({
+      provider: "grok",
+      email,
+      password: encrypt("sso-cookie"),
+      status: "active",
+      tokens: tokens as unknown,
+      lastLoginAt: new Date(),
+    }).returning();
+    const created = inserted[0]!;
+    pool.invalidate("grok");
+    broadcast({ type: "account_created", data: { id: created.id, provider: "grok", email } });
+    return c.json({ ...created, password: "***", tokens: "[set]" }, 201);
   }
 
   // ── CodeBuddy China: Bulk API key flow (ck_...) ─────────────────────

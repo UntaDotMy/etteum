@@ -45,7 +45,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity";
+type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity" | "grok";
 
 type ByokFormKey = {
   id?: number;
@@ -96,10 +96,10 @@ interface AlibabaQuotaTokens {
   updatedAt: string;
 }
 
-const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "alibaba", "antigravity"];
+const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "alibaba", "antigravity", "grok"];
 
 /** Providers that authenticate with static API keys / PATs — no browser login. */
-const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "alibaba"]);
+const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "alibaba", "grok"]);
 
 function labelProvider(provider: string) {
   if (provider === "kiro-pro") return "Kiro Pro";
@@ -108,6 +108,7 @@ function labelProvider(provider: string) {
   if (provider === "codex") return "Codex";
   if (provider === "qoder") return "Qoder";
   if (provider === "antigravity") return "Antigravity";
+  if (provider === "grok") return "Grok";
   if (provider === "gitlab-duo") return "GitLab Duo";
   if (provider === "youmind") return "YouMind";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
@@ -143,7 +144,10 @@ export default function Accounts() {
   const [gitlabLabel, setGitlabLabel] = useState("");
   const [gitlabBusy, setGitlabBusy] = useState(false);
   const [youmindApiKey, setYoumindApiKey] = useState("");
+  const [grokSso, setGrokSso] = useState("");
+  const [grokSsoRw, setGrokSsoRw] = useState("");
   const [youmindBusy, setYoumindBusy] = useState(false);
+  const [grokBusy, setGrokBusy] = useState(false);
   const [codebuddyChinaApiKey, setCodebuddyChinaApiKey] = useState("");
   const [codebuddyChinaBulkApiKeys, setCodebuddyChinaBulkApiKeys] = useState("");
   const [codebuddyChinaBusy, setCodebuddyChinaBusy] = useState(false);
@@ -504,6 +508,32 @@ export default function Accounts() {
     finally { setYoumindBusy(false); }
   }
 
+  async function handleGrokSsoLogin() {
+    const sso = grokSso.trim();
+    if (!sso) { showError(new Error("Paste your grok.com SSO cookie value")); return; }
+    setYoumindBusy(true);
+    try {
+      const res = await fetchApi<any>("/api/accounts", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "grok",
+          email: `grok-${Date.now()}@sso`,
+          tokens: { sso, ssoRw: grokSsoRw.trim() || sso, tier: "basic" },
+        }),
+      });
+      const labelText = res?.email || "account";
+      showSuccess(res?.updated
+        ? `Grok account updated (${labelText})`
+        : `Grok ${labelText} added successfully`);
+      setGrokSso(""); setGrokSsoRw("");
+      setAddDialogProvider(null);
+      await load();
+    } catch (err) { showError(err); }
+    finally { setGrokBusy(false); }
+  }
+
+
+
   async function handleCodebuddyChinaApiKeyLogin() {
     const apiKey = codebuddyChinaApiKey.trim();
     if (!apiKey) { showError(new Error("Paste CodeBuddy China API key")); return; }
@@ -792,6 +822,9 @@ export default function Accounts() {
     }
     if (provider === "youmind") {
       setAddMode("pat");
+    }
+    if (provider === "grok") {
+      setAddMode("apikey");
     }
     if (provider === "antigravity") {
       setAddMode("bulk");
@@ -2063,6 +2096,8 @@ export default function Accounts() {
                 ? "Paste CodeBuddy China API keys (ck_...). Satu key per baris untuk bulk import."
                 : addDialogProvider === "alibaba"
                 ? "Paste Alibaba DashScope API keys (sk-ws-...). Satu key per baris untuk bulk import. Server akan memvalidasi key dan menyimpannya terenkripsi."
+                : addDialogProvider === "grok"
+                ? "Paste your grok.com SSO cookie (from DevTools > Application > Cookies > sso). Optional: sso-rw cookie. Free web quota, no API key needed."
                 : `Add account for ${addDialogProvider ? labelProvider(addDialogProvider) : "this provider"}.`}
             </DialogDescription>
           </DialogHeader>
@@ -2136,6 +2171,12 @@ export default function Accounts() {
               <button onClick={() => setAddMode("apikey")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "apikey" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >Bulk API Key (sk-...)</button>
+            </div>
+) : addDialogProvider === "grok" ? (
+            <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
+              <button onClick={() => setAddMode("apikey")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "apikey" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}  
+              >SSO Cookie</button>
             </div>
           ) : (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
@@ -2329,6 +2370,44 @@ sk-ws-H.zzzzzzzz..."
               </div>
             </div>
           )}
+
+          {addMode === "apikey" && addDialogProvider === "grok" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">SSO Cookie</label>
+                <input
+                  type="text"
+                  value={grokSso}
+                  onChange={(e) => setGrokSso(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
+                  placeholder="sso cookie value from grok.com"
+                  disabled={grokBusy}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  Get this from DevTools &gt; Application &gt; Cookies &gt; grok.com &gt; <code>sso</code>.
+                  Free web quota — no API key needed.
+                </p>
+              </div>
+              <div>
+                <label className="text-sm text-[var(--foreground)]">SSO-RW Cookie (optional)</label>
+                <input
+                  type="text"
+                  value={grokSsoRw}
+                  onChange={(e) => setGrokSsoRw(e.target.value)}
+                  className="mt-1 w-full rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
+                  placeholder="sso-rw cookie value (defaults to sso)"
+                  disabled={grokBusy}
+                />
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={grokBusy}>Cancel</Button>
+                <Button onClick={handleGrokSsoLogin} disabled={grokBusy || !grokSso.trim()}>
+                  {grokBusy ? (<><Loader2 className="w-4 h-4 mr-2 animate-spin" /> Adding...</>) : "Add Account"}
+                </Button>
+              </div>
+            </div>
+          )}
+
 
           {addMode === "pat" && addDialogProvider === "codex" && (
             <div className="space-y-3">

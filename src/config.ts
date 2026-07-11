@@ -214,11 +214,11 @@ export const config = {
   browserEngine: process.env.BROWSER_ENGINE || "camoufox",
   captchaService: process.env.CAPTCHA_SERVICE || "none",
   captchaApiKey: process.env.CAPTCHA_API_KEY || "",
-  // Providers: kiro, kiro-pro, codebuddy, codebuddy-china, canva, codex, qoder, gitlab-duo, youmind, byok
+  // Providers: kiro, kiro-pro, codebuddy, codebuddy-china, canva, codex, qoder, gitlab-duo, youmind, byok, grok
   // NOTE: This list must match the provider registry (src/proxy/providers/registry.ts).
   // It is used by the auto-warmup scheduler to generate per-provider setting keys
   // and by the warmup queue fallback when no explicit provider list is passed.
-  providers: ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "byok", "alibaba", "antigravity"] as const,
+  providers: ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "byok", "alibaba", "antigravity", "grok"] as const,
   // ── Built-in web_search server tool shim ──────────────────────────────────
   // Anthropic's server-side web_search_* tool executes on Anthropic's servers.
   // When enabled, the proxy shims it locally: converts it to a function tool,
