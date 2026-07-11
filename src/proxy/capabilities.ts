@@ -51,6 +51,9 @@ const DB: Record<string, CapEntry[]> = {
     ["gemini*", { vision: true, thinking: true, search: true, computerUse: false }],
     ["*", { vision: true, thinking: true }],
   ],
+  grok: [
+    ["*", { thinking: true }],
+  ],
 };
 
 function matchPattern(pattern: string, model: string): boolean {
