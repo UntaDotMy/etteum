@@ -91,12 +91,29 @@ function estimatePromptTokens(request: ChatCompletionRequest): number {
 
 const now = () => Math.floor(Date.now() / 1000);
 
+const GROK_CREATED = 1_718_000_000;
+
+/** Catalog entries shown in /v1/models and the dashboard. owned_by is always
+ *  "grok" (single provider — no parallel "xai" group). Keep in sync with
+ *  MODEL_TO_MODE in protocol.ts and ownsModel() below so active-account
+ *  filtering (`?active=1`) surfaces every model an active grok account can serve. */
 const GROK_MODELS: ModelInfo[] = [
-  // OAuth / cli-chat-proxy surface (grok-4.5 — the latest). owned_by matches
-  // the provider name so the dashboard groups everything under "grok" (not
-  // a separate "xai" group from the model-level owned_by field).
-  { id: "grok-4.5", object: "model", created: 1718000000, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
-  { id: "grok-4.5-reasoning", object: "model", created: 1718000000, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  // OAuth / cli-chat-proxy (latest free-tier model)
+  { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  // grok.com web app-chat modes (SSO)
+  { id: "grok-4.3", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true },
+  { id: "grok-4.3-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  { id: "grok-4.3-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  { id: "grok-4.20", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
+  { id: "grok-4.20-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
+  { id: "grok-4.20-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  { id: "grok-4.20-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  // Convenience aliases → web app-chat modes
+  { id: "grok-auto", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
+  { id: "grok-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
+  { id: "grok-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  { id: "grok-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
 ];
 
 // ---------------------------------------------------------------------------

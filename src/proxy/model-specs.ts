@@ -120,14 +120,15 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "gemini-3.5-flash":       { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-2.5-flash-lite":  { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
 
-  // ── xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ──
+  // ── Grok (first-party GrokProvider only — OAuth + SSO web) ──
   "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  // ── xAI Grok — grok.com web surface (reverse-engineered app-chat via GrokProvider) ──
+  "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.20":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "grok-4.20-fast":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "grok-4.20-reasoning":    { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "grok-4.20-super":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "grok-4.20-heavy":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.3-beta":          { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "grok-4.3-reasoning":     { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "grok-4.3-heavy":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
@@ -135,9 +136,6 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "grok-fast":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "grok-reasoning":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "grok-heavy":             { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-
-  "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-build-0.1":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
 
   // ── OpenAI legacy / F13 catalog — developers.openai.com ──
   "gpt-4o-mini":            { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
@@ -157,11 +155,6 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "llama-3.3-70b-versatile":  { contextWindow: 128_000, maxOutput: 32_768,  thinking: false, vision: false },
   "llama-3.1-70b-versatile":  { contextWindow: 128_000, maxOutput: 32_768,  thinking: false, vision: false },
   "mixtral-8x7b-32768":       { contextWindow: 32_768,  maxOutput: 32_768,  thinking: false, vision: false },
-
-  // ── xAI Grok — docs.x.ai (grok-2 legacy; current is grok-4.x) ──
-  "grok-2":                 { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
-  "grok-2-latest":          { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
-  "grok-beta":              { contextWindow: 131_072,   maxOutput: 8_192,   thinking: false, vision: false },
 
   // ── Cohere — docs.cohere.com ──
   "command-r-plus":         { contextWindow: 128_000,   maxOutput: 4_096,   thinking: false, vision: false },
