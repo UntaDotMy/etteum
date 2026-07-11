@@ -92,24 +92,11 @@ function estimatePromptTokens(request: ChatCompletionRequest): number {
 const now = () => Math.floor(Date.now() / 1000);
 
 const GROK_MODELS: ModelInfo[] = [
-  // grok.com web surface
-  { id: "grok-4.20", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.20-fast", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.20-reasoning", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.20-super", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.20-heavy", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.3", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.3-beta", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.3-reasoning", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.3-heavy", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  // Console API surface
-  { id: "grok-4.5", object: "model", created: 1718000000, owned_by: "xai", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
-  { id: "grok-4.5-reasoning", object: "model", created: 1718000000, owned_by: "xai", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
-  // Web-surface aliases
-  { id: "grok-auto", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-fast", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-reasoning", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-heavy", object: "model", created: 1718000000, owned_by: "xai", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
+  // OAuth / cli-chat-proxy surface (grok-4.5 — the latest). owned_by matches
+  // the provider name so the dashboard groups everything under "grok" (not
+  // a separate "xai" group from the model-level owned_by field).
+  { id: "grok-4.5", object: "model", created: 1718000000, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  { id: "grok-4.5-reasoning", object: "model", created: 1718000000, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
 ];
 
 // ---------------------------------------------------------------------------
@@ -823,14 +810,15 @@ export class GrokProvider extends BaseProvider {
 
   async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
-    quota?: { limit: number; remaining: number; used: number; resetAt: Date | null };
+    quota?: { limit: number; remaining: number; used: number; resetAt: Date | null; source: string };
     error?: string;
   }> {
-    // OAuth path — fetch subscription/credit state from the CLI proxy.
-    // The CLI logs show a subscription.check + billing call returning
-    // onDemandUsed / prepaidBalance. Probe the models endpoint as a
-    // lightweight liveness check (no token cost) and report quota if a
-    // dedicated billing endpoint is reachable.
+    // OAuth path — probe the models endpoint as a liveness check (no token
+    // cost). A 200 means the account is alive and has API access; a 402 means
+    // out of credits (report remaining=0 so the pool routes away from
+    // exhausted accounts). `source` is set to a non-fallback value so warmup
+    // persists the quota to the DB (warmup skips quota with source in
+    // tracked/fallback/stale/empty).
     if (isOAuthAccount(account)) {
       const bearer = await ensureFreshAccessToken(account);
       if (!bearer) {
@@ -838,10 +826,6 @@ export class GrokProvider extends BaseProvider {
       }
       try {
         const cliVersion = await getGrokCliVersion();
-        // The CLI surface exposes credit state via /v1/models (lightweight).
-        // A 200 means the account is alive and has API access; a 402 means
-        // out of credits. We report remaining=0 on 402 so the pool can route
-        // away from exhausted accounts.
         const response = await fetch(GROK_OAUTH.modelsEndpoint, {
           headers: {
             Authorization: `Bearer ${bearer}`,
@@ -851,14 +835,15 @@ export class GrokProvider extends BaseProvider {
           signal,
         });
         if (response.status === 402) {
-          return { success: true, quota: { limit: 0, remaining: 0, used: 0, resetAt: null } };
+          return { success: true, quota: { limit: 0, remaining: 0, used: 0, resetAt: null, source: "cli-chat-proxy" } };
         }
         if (!response.ok) {
           return { success: false, error: `HTTP ${response.status}` };
         }
-        // Alive with access — report as healthy (no hard limit known without
-        // the billing endpoint; the pool treats remaining>0 as usable).
-        return { success: true, quota: { limit: 100, remaining: 100, used: 0, resetAt: null } };
+        // Alive with access. No hard credit limit is exposed by /v1/models
+        // (that needs the billing endpoint); report a healthy placeholder so
+        // the pool treats the account as usable and the dashboard shows it.
+        return { success: true, quota: { limit: 100, remaining: 100, used: 0, resetAt: null, source: "cli-chat-proxy" } };
       } catch (err: any) {
         if (err?.name === "AbortError") return { success: false, error: "aborted" };
         return { success: false, error: err?.message ?? String(err) };
@@ -899,7 +884,7 @@ export class GrokProvider extends BaseProvider {
 
       return {
         success: true,
-        quota: { limit, remaining, used, resetAt },
+        quota: { limit, remaining, used, resetAt, source: "grok.com-rate-limits" },
       };
     } catch (err: any) {
       if (err?.name === "AbortError") {
@@ -936,9 +921,7 @@ export class GrokProvider extends BaseProvider {
       return {
         kind: quota.success ? "healthy" : "unsupported",
         success: true,
-        quota: quota.success && quota.quota
-          ? { ...quota.quota, source: "cli-chat-proxy" }
-          : undefined,
+        quota: quota.success ? quota.quota : undefined,
       };
     }
 
