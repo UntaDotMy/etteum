@@ -45,6 +45,7 @@ import {
   exchangeRefreshToken,
   validateOAuthToken,
   getGrokCliVersion,
+  fetchOAuthBillingQuota,
   type GrokOAuthTokens,
 } from "./oauth";
 
@@ -823,37 +824,29 @@ export class GrokProvider extends BaseProvider {
     quota?: { limit: number; remaining: number; used: number; resetAt: Date | null; source: string };
     error?: string;
   }> {
-    // OAuth path — probe the models endpoint as a liveness check (no token
-    // cost). A 200 means the account is alive and has API access; a 402 means
-    // out of credits (report remaining=0 so the pool routes away from
-    // exhausted accounts). `source` is set to a non-fallback value so warmup
-    // persists the quota to the DB (warmup skips quota with source in
-    // tracked/fallback/stale/empty).
+    // OAuth path — real billing from cli-chat-proxy /v1/billing (paid monthly
+    // pool) and/or grok.com GetGrokCreditsConfig (shared weekly pool %).
+    // Never invent a fake 100/100 placeholder.
     if (isOAuthAccount(account)) {
       const bearer = await ensureFreshAccessToken(account);
       if (!bearer) {
         return { success: false, error: "expired: OAuth access token needs refresh" };
       }
       try {
-        const cliVersion = await getGrokCliVersion();
-        const response = await fetch(GROK_OAUTH.modelsEndpoint, {
-          headers: {
-            Authorization: `Bearer ${bearer}`,
-            Accept: "application/json",
-            "x-grok-client-version": cliVersion,
-          },
-          signal,
-        });
-        if (response.status === 402) {
-          return { success: true, quota: { limit: 0, remaining: 0, used: 0, resetAt: null, source: "cli-chat-proxy" } };
+        const quota = await fetchOAuthBillingQuota(bearer, signal);
+        if (quota) {
+          return {
+            success: true,
+            quota: {
+              limit: quota.limit,
+              remaining: quota.remaining,
+              used: quota.used,
+              resetAt: quota.resetAt,
+              source: quota.source,
+            },
+          };
         }
-        if (!response.ok) {
-          return { success: false, error: `HTTP ${response.status}` };
-        }
-        // Alive with access. No hard credit limit is exposed by /v1/models
-        // (that needs the billing endpoint); report a healthy placeholder so
-        // the pool treats the account as usable and the dashboard shows it.
-        return { success: true, quota: { limit: 100, remaining: 100, used: 0, resetAt: null, source: "cli-chat-proxy" } };
+        return { success: false, error: "billing endpoints returned no usable quota" };
       } catch (err: any) {
         if (err?.name === "AbortError") return { success: false, error: "aborted" };
         return { success: false, error: err?.message ?? String(err) };
