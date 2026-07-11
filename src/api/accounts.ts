@@ -2777,8 +2777,10 @@ async function upsertGrokOAuthAccount(email: string, oauthTokens: import("../pro
     await db.insert(accounts).values({
       provider: "grok",
       email,
-      // password is NOT NULL but unused for OAuth — store a sentinel.
-      password: "oauth:no-password",
+      // password is NOT NULL but unused for OAuth — store an encrypted sentinel
+      // (never plaintext: legacy decrypt() of "oauth:no-password" yields binary
+      // garbage that Bun rejects as an Authorization header value).
+      password: encrypt("oauth:no-password"),
       status: "active",
       enabled: true,
       tokens: tokensBlob,
