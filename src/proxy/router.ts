@@ -387,17 +387,36 @@ export async function routeRequest(
         throw error;
       }
       if (errMsg.includes("expired") || errMsg.includes("401")) {
-        const refreshCheck = await provider.refreshToken(account);
-        const noRefresh = !refreshCheck.success && (
-          refreshCheck.error?.includes("re-login") ||
-          refreshCheck.error?.includes("no refresh") ||
-          refreshCheck.error?.includes("static") ||
-          refreshCheck.error?.includes("browser")
-        );
-        if (noRefresh) {
-          await pool.markError(account.id, errMsg);
-        } else {
+        // F8: route through the refresh coordinator (NOT direct
+        // provider.refreshToken) so the per-account lock prevents concurrent
+        // rotations, and the rotated token is persisted. Calling
+        // provider.refreshToken directly here would (a) race the try-block's
+        // coordinatedRefresh on the same account and (b) discard the rotated
+        // refresh token (never persisted) → account permanently bricked for
+        // providers with rotating refresh tokens (grok OAuth, kiro-pro, codex).
+        const refreshResult = await coordinatedRefresh(provider, account);
+        if (refreshResult.success && refreshResult.tokens) {
+          await pool.updateTokens(account.id, refreshResult.tokens);
+          invalidateRefreshDedup(account, providerName);
+          // Token rotated successfully — account is healthy again. Mark
+          // transient so it stays in the pool for the next request (the
+          // try-block path handles the immediate retry for non-thrown errors).
           await pool.markTransientFailure(account.id, errMsg);
+        } else {
+          const refreshErrorMsg = refreshResult.error || "";
+          const noRefresh = !refreshResult.success && (
+            refreshErrorMsg.includes("re-login") ||
+            refreshErrorMsg.includes("no refresh") ||
+            refreshErrorMsg.includes("static") ||
+            refreshErrorMsg.includes("browser")
+          );
+          // Unrecoverable (invalid_grant / revoked refresh token) OR
+          // static-key providers whose credential is genuinely dead.
+          if (noRefresh || refreshResult.unrecoverable) {
+            await pool.markError(account.id, errMsg);
+          } else {
+            await pool.markTransientFailure(account.id, errMsg);
+          }
         }
       } else if (isTransientError(errMsg)) {
         await pool.markTransientFailure(account.id, errMsg);
