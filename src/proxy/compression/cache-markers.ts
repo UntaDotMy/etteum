@@ -22,6 +22,19 @@ import type { CacheMarkerConfig } from "./types";
 const TIMESTAMP_RE = /\b\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}/;
 const UUID_RE = /\b[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}\b/i;
 
+/**
+ * Detect whether the request is Anthropic/Claude-shape (carries a `system`
+ * field) or OpenAI-shape (system prompt lives inside `messages[]` as a
+ * system/developer role). Mirrors detectFormat in system-inject.ts.
+ *
+ * `cache_control` is an Anthropic-specific field. Adding it to OpenAI-shape
+ * payloads is ignored by OpenAI and pollutes the request body, so we only
+ * apply cache markers for Claude-shape requests.
+ */
+function isClaudeShape(body: any): boolean {
+  return body?.system !== undefined;
+}
+
 function looksUnstable(text: string | undefined | null): boolean {
   if (!text) return false;
   return TIMESTAMP_RE.test(text) || UUID_RE.test(text);
@@ -44,6 +57,14 @@ export function applyCacheMarkers(
 ): { request: ChatCompletionRequest; saved: number } {
   if (!cfg.enabled) return { request, saved: 0 };
   if (providerName && cfg.providerOverrides[providerName] === false) {
+    return { request, saved: 0 };
+  }
+
+  // cache_control is an Anthropic-specific field. Only apply cache markers
+  // for Claude-shape requests (body.system present). For OpenAI-shape
+  // requests (system prompt in messages[] as system/developer role), the
+  // field is ignored by the upstream and pollutes the payload — skip.
+  if (!isClaudeShape(request)) {
     return { request, saved: 0 };
   }
 

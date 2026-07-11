@@ -18,8 +18,12 @@ import { config } from "../config";
 import { db } from "../db/index";
 import { settings } from "../db/schema";
 import { eq } from "drizzle-orm";
+import { constantTimeEqual } from "../utils/security";
 
-const DEFAULT_PASSWORD = "123456";
+// NOTE: no hard-coded default password. First-boot login requires either a
+// stored hash (set via CLI / Settings) or INITIAL_PASSWORD in the env. This
+// closes CWE-259 (Use of Hard-coded Password) — a fresh deploy with no
+// password configured simply refuses login until the operator sets one.
 const SESSION_COOKIE_NAME = "auth_token";
 const SESSION_TTL_HOURS = 24;
 
@@ -116,8 +120,11 @@ export function verifyDashboardPassword(password: string, stored: string): boole
     if (hash.length !== storedHash.length) return false;
     return crypto.timingSafeEqual(hash, storedHash);
   }
-  // No stored hash yet → initial-password fallback (mirrors reference).
-  return password === (process.env.INITIAL_PASSWORD || DEFAULT_PASSWORD);
+  // No stored hash yet → first-boot. Allow login ONLY via an explicit
+  // INITIAL_PASSWORD env var set by the operator. Never a hard-coded default.
+  const initial = process.env.INITIAL_PASSWORD;
+  if (!initial) return false;
+  return constantTimeEqual(password, initial);
 }
 
 export async function getStoredPasswordHash(): Promise<string | null> {
@@ -127,6 +134,54 @@ export async function getStoredPasswordHash(): Promise<string | null> {
 
 // --- OIDC/SSO (mirrors reference's oidc.js) ---
 export const OIDC_COOKIE_NAMES = { state: "oidc_state", nonce: "oidc_nonce", verifier: "oidc_code_verifier" };
+
+/**
+ * SSRF guard for OIDC issuer URLs. Rejects internal/loopback/link-local
+ * addresses before we ever `fetch()` them. Pragmatic reduction — full
+ * DNS-rebinding prevention would need resolution pinning (out of scope).
+ */
+function assertPublicIssuer(url: string): void {
+  let parsed: URL;
+  try {
+    parsed = new URL(url);
+  } catch {
+    throw new Error("OIDC issuer is not a valid URL");
+  }
+  const host = parsed.hostname.toLowerCase();
+  const isLocalDev = (host === "localhost" || host === "127.0.0.1" || host === "::1") && process.env.NODE_ENV !== "production";
+  if (parsed.protocol !== "https:" && !isLocalDev) {
+    throw new Error("OIDC issuer must use https (http only allowed for localhost in non-production)");
+  }
+  if (host.endsWith(".local")) {
+    throw new Error("OIDC issuer .local mDNS hostnames are not allowed");
+  }
+  if (isLocalDev) return; // localhost/127.0.0.1 explicitly allowed for dev
+  // Reject IP literals in private/loopback/link-local ranges.
+  if (isPrivateIpLiteral(host)) {
+    throw new Error(`OIDC issuer resolves to a disallowed internal/loopback address: ${host}`);
+  }
+}
+
+function isPrivateIpLiteral(host: string): boolean {
+  // IPv4 dotted quad
+  const v4 = host.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (v4) {
+    const a = parseInt(v4[1]!, 10);
+    const b = parseInt(v4[2]!, 10);
+    if (a === 127) return true; // loopback
+    if (a === 10) return true; // private 10.0.0.0/8
+    if (a === 172 && b >= 16 && b <= 31) return true; // private 172.16.0.0/12
+    if (a === 192 && b === 168) return true; // private 192.168.0.0/16
+    if (a === 169 && b === 254) return true; // link-local 169.254.0.0/16
+    if (a === 0) return true; // 0.0.0.0/8
+  }
+  // IPv6 (bracket-stripped already by URL.hostname). Block ::1, fc00::/7, fe80::/10.
+  const v6 = host.replace(/^\[|\]$/g, "").toLowerCase();
+  if (v6 === "::1") return true; // loopback
+  if (v6.startsWith("fc") || v6.startsWith("fd")) return true; // unique-local fc00::/7
+  if (v6.startsWith("fe8") || v6.startsWith("fe9") || v6.startsWith("fea") || v6.startsWith("feb")) return true; // link-local fe80::/10
+  return false;
+}
 
 export interface OidcRuntimeConfig {
   enabled: boolean;
@@ -143,6 +198,7 @@ export async function getOidcRuntimeConfig(): Promise<OidcRuntimeConfig> {
 }
 
 export async function fetchOidcDiscovery(issuer: string): Promise<any> {
+  assertPublicIssuer(issuer);
   const url = issuer.endsWith("/") ? `${issuer}.well-known/openid-configuration` : `${issuer}/.well-known/openid-configuration`;
   const res = await fetch(url, { headers: { accept: "application/json" } });
   if (!res.ok) throw new Error(`OIDC discovery failed (${res.status})`);
@@ -211,7 +267,9 @@ export async function verifyOidcIdToken(idToken: string, discovery: any, clientI
     const payload = JSON.parse(base64urlDecode(payloadB64).toString("utf8"));
     if (payload.aud !== clientId) return null;
     if (payload.iss !== discovery.issuer) return null;
-    if (payload.exp && Math.floor(Date.now() / 1000) >= payload.exp) return null;
+    const now = Math.floor(Date.now() / 1000);
+    if (payload.exp && now >= payload.exp) return null;
+    if (payload.nbf && now < payload.nbf) return null;
     // Fetch JWKS and verify with the matching key.
     // FAIL-CLOSED: any inability to fetch JWKS, find the matching key, or verify
     // the signature returns null (no session) — never the unverified payload.
@@ -221,7 +279,12 @@ export async function verifyOidcIdToken(idToken: string, discovery: any, clientI
     const jwks = (await jwksRes.json()) as any;
     const key = jwks.keys?.find((k: any) => k.kid === header.kid);
     if (!key) return null; // no key for token's kid → refuse login
-    const cryptoKey = await crypto.subtle.importKey("jwk", key as any, { name: "RSASSA-PKCS1-v1_5", hash: header.alg === "RS256" ? "SHA-256" : "SHA-384" }, false, ["verify"]);
+    // SECURITY: pin the supported alg set (RFC 8725 §3.1). Only RS256/RS384
+    // are allowed; 'none'/HS256/ES256/unknown algorithms are rejected.
+    const ALLOWED_ALGS: Record<string, string> = { RS256: "SHA-256", RS384: "SHA-384" };
+    const hash = ALLOWED_ALGS[header.alg];
+    if (!hash) return null; // unsupported alg → refuse login
+    const cryptoKey = await crypto.subtle.importKey("jwk", key as any, { name: "RSASSA-PKCS1-v1_5", hash }, false, ["verify"]);
     const sigBytes = new Uint8Array(base64urlDecode(sigB64));
     const valid = await crypto.subtle.verify("RSASSA-PKCS1-v1_5", cryptoKey, sigBytes, new TextEncoder().encode(`${headerB64}.${payloadB64}`));
     return valid ? payload : null;
@@ -241,6 +304,9 @@ export function pickOidcDisplayName(payload: any = {}): string {
 const MAX_FAILS_BEFORE_LOCK = 5;
 const LOCK_STEPS_MS = [30_000, 120_000, 600_000, 1_800_000];
 const FAIL_WINDOW_MS = 60 * 60 * 1000;
+// Reset lockLevel/fails if the last failure was more than this long ago, so a
+// legitimate user recovers after the window and lockLevel cannot grow unbounded.
+const LOCK_LEVEL_RESET_MS = 60 * 60 * 1000;
 
 interface LockEntry { fails: number; lockUntil: number; lockLevel: number; lastFailAt: number }
 const attempts = new Map<string, LockEntry>();
@@ -256,12 +322,19 @@ export function checkLock(ip: string): { locked: boolean; retryAfter?: number } 
 
 export function recordFail(ip: string): { remainingBeforeLock: number } {
   const e = attempts.get(ip) || { fails: 0, lockUntil: 0, lockLevel: 0, lastFailAt: 0 };
+  // Reset after the inactivity window so lockLevel can't grow without bound
+  // and a user recovers after the cooldown.
+  if (e.lastFailAt && Date.now() - e.lastFailAt > LOCK_LEVEL_RESET_MS) {
+    e.fails = 0;
+    e.lockLevel = 0;
+  }
   e.fails += 1;
   e.lastFailAt = Date.now();
   if (e.fails >= MAX_FAILS_BEFORE_LOCK) {
     const step = LOCK_STEPS_MS[Math.min(e.lockLevel, LOCK_STEPS_MS.length - 1)] ?? 30_000;
     e.lockUntil = Date.now() + step;
-    e.lockLevel += 1;
+    // Cap lockLevel at the array length so it never indexes past LOCK_STEPS_MS.
+    e.lockLevel = Math.min(e.lockLevel + 1, LOCK_STEPS_MS.length);
     e.fails = 0;
   }
   attempts.set(ip, e);
@@ -273,9 +346,13 @@ export function recordSuccess(ip: string): void {
 }
 
 export function getClientIp(headers: Headers): string {
-  const realIp = headers.get("x-9r-real-ip") || headers.get("x-real-ip");
-  if (realIp) return realIp;
+  // SECURITY: forwarding headers are client-controllable. Only trust them
+  // behind an explicitly-trusted reverse proxy. Previously x-9r-real-ip /
+  // x-real-ip were read unconditionally, allowing a remote attacker to
+  // spoof their IP and bypass the loginLimiter (CWE-348).
   if (process.env.TRUST_PROXY === "true") {
+    const realIp = headers.get("x-9r-real-ip") || headers.get("x-real-ip");
+    if (realIp) return realIp;
     const xff = headers.get("x-forwarded-for");
     if (xff) return (xff.split(",")[0] || "").trim();
   }

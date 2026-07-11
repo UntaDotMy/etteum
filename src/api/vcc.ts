@@ -2,9 +2,44 @@ import { Hono } from "hono";
 import { db } from "../db/index";
 import { vccCards, vccTransactions, accounts } from "../db/schema";
 import { eq, desc } from "drizzle-orm";
-import { encrypt, decrypt } from "../utils/crypto";
+import { encrypt, decrypt, isGcm } from "../utils/crypto";
 
 const vccRouter = new Hono();
+
+// --- PCI scope reduction: card fields are encrypted at rest (AES-256-GCM) ---
+// number / expMonth / expYear / cvv are stored as `g1:` ciphertext. Legacy
+// plaintext rows (pre-fix) are transparently readable via safeDecrypt and
+// re-encrypted on next write. CVV storage is unavoidable for the charging
+// flow today, but it is now encrypted — not plaintext on disk. PCI DSS
+// Req 3.4 (render PAN unreadable) + Req 3.2.2 (CVV storage minimized).
+function safeDecrypt(field: string): string {
+  if (!field) return "";
+  // g1: prefix → AES-256-GCM. Otherwise legacy plaintext (pre-fix row).
+  if (isGcm(field)) {
+    try { return decrypt(field); } catch { return ""; }
+  }
+  return field;
+}
+
+/** Detect brand from a plaintext card number. */
+function detectBrand(num: string): string {
+  const n = num.replace(/\D/g, "");
+  if (n.startsWith("4")) return "visa";
+  if (/^5[1-5]/.test(n) || /^2[2-7]/.test(n)) return "mastercard";
+  if (/^3[47]/.test(n)) return "amex";
+  if (/^6(?:011|5|22126|4[4-9])/.test(n)) return "discover";
+  if (/^35(?:2[89]|[3-8])/.test(n)) return "jcb";
+  if (/^62/.test(n)) return "unionpay";
+  return "unknown";
+}
+
+/** Decrypted card representation (only for the charging callsite). */
+interface DecryptedCard {
+  number: string;
+  exp: string;
+  cvv: string;
+  name: string;
+}
 
 vccRouter.get("/pool", async (c) => {
   const cards = await db
@@ -15,22 +50,13 @@ vccRouter.get("/pool", async (c) => {
   return c.json({
     count: cards.length,
     cards: cards.map((card) => {
-      // Detect brand from card number
-      const num = card.number.replace(/\D/g, "");
-      let brand = "unknown";
-      if (num.startsWith("4")) brand = "visa";
-      else if (/^5[1-5]/.test(num) || /^2[2-7]/.test(num)) brand = "mastercard";
-      else if (/^3[47]/.test(num)) brand = "amex";
-      else if (/^6(?:011|5|22126|4[4-9])/.test(num)) brand = "discover";
-      else if (/^35(?:2[89]|[3-8])/.test(num)) brand = "jcb";
-      else if (/^62/.test(num)) brand = "unionpay";
-
+      const num = safeDecrypt(card.number);
       return {
         id: card.id,
-        last4: card.number.slice(-4),
-        bin: card.number.slice(0, 6),
-        brand,
-        exp: `${card.expMonth}/${card.expYear.slice(-2)}`,
+        last4: num.slice(-4),
+        bin: num.slice(0, 6),
+        brand: detectBrand(num),
+        exp: `${safeDecrypt(card.expMonth)}/${safeDecrypt(card.expYear).slice(-2)}`,
         name: card.name || "John Doe",
         status: card.status,
         createdAt: card.createdAt,
@@ -61,10 +87,10 @@ vccRouter.post("/pool", async (c) => {
     }
 
     await db.insert(vccCards).values({
-      number,
-      expMonth,
-      expYear,
-      cvv: card.cvv,
+      number: encrypt(number),
+      expMonth: encrypt(expMonth),
+      expYear: encrypt(expYear),
+      cvv: encrypt(card.cvv),
       name: card.name || "John Doe",
       status: "active",
     });
@@ -110,13 +136,13 @@ export function getVccPool(): { number: string; exp: string; cvv: string; name: 
   return [];
 }
 
-export async function getVccPoolFromDb(): Promise<{ number: string; exp: string; cvv: string; name: string }[]> {
+export async function getVccPoolFromDb(): Promise<DecryptedCard[]> {
   const activeCards = await db.select().from(vccCards).where(eq(vccCards.status, "active"));
 
-  const cards = activeCards.map((card) => ({
-    number: card.number,
-    exp: `${card.expMonth}/${card.expYear.slice(-2)}`,
-    cvv: card.cvv,
+  const cards: DecryptedCard[] = activeCards.map((card) => ({
+    number: safeDecrypt(card.number),
+    exp: `${safeDecrypt(card.expMonth)}/${safeDecrypt(card.expYear).slice(-2)}`,
+    cvv: safeDecrypt(card.cvv),
     name: card.name || "John Doe",
   }));
 
@@ -129,20 +155,25 @@ export async function getVccPoolFromDb(): Promise<{ number: string; exp: string;
   return cards;
 }
 
-export async function reserveCardForAccount(accountId: number): Promise<{ number: string; exp: string; cvv: string; name: string } | null> {
-  const [card] = await db.select().from(vccCards).where(eq(vccCards.status, "active")).limit(1);
+export async function reserveCardForAccount(accountId: number): Promise<DecryptedCard | null> {
+  // Atomic claim: UPDATE ... WHERE status='active' RETURNING * — avoids the
+  // read-then-write race where two concurrent reservations grab the same card.
+  const claimed = await db
+    .update(vccCards)
+    .set({
+      status: "reserved",
+      usedByAccountId: accountId,
+      updatedAt: new Date(),
+    })
+    .where(eq(vccCards.status, "active"))
+    .returning();
+  const card = claimed[0];
   if (!card) return null;
 
-  await db.update(vccCards).set({
-    status: "reserved",
-    usedByAccountId: accountId,
-    updatedAt: new Date(),
-  }).where(eq(vccCards.id, card.id));
-
   return {
-    number: card.number,
-    exp: `${card.expMonth}/${card.expYear.slice(-2)}`,
-    cvv: card.cvv,
+    number: safeDecrypt(card.number),
+    exp: `${safeDecrypt(card.expMonth)}/${safeDecrypt(card.expYear).slice(-2)}`,
+    cvv: safeDecrypt(card.cvv),
     name: card.name || "John Doe",
   };
 }
@@ -161,7 +192,8 @@ export async function handleCardResult(
   status: "success" | "declined" | "error"
 ): Promise<void> {
   const allCards = await db.select().from(vccCards);
-  const match = allCards.find((c) => c.number.endsWith(cardLast4));
+  // Match by decrypted last4 (cards are now encrypted at rest).
+  const match = allCards.find((c) => safeDecrypt(c.number).endsWith(cardLast4));
   if (match) {
     if (status === "declined") {
       await db.delete(vccCards).where(eq(vccCards.id, match.id));
@@ -185,6 +217,28 @@ export async function handleCardResult(
     currency: "usd",
     status,
   });
+}
+
+/**
+ * One-time migration: encrypt any legacy plaintext card rows still on disk.
+ * Safe to call repeatedly — skips rows already in `g1:` format. Called at boot
+ * from the migration runner. Returns the count of rows re-encrypted.
+ */
+export async function migrateVccEncryption(): Promise<number> {
+  const allCards = await db.select().from(vccCards);
+  let migrated = 0;
+  for (const card of allCards) {
+    if (isGcm(card.number) && isGcm(card.cvv)) continue; // already encrypted
+    await db.update(vccCards).set({
+      number: isGcm(card.number) ? card.number : encrypt(safeDecrypt(card.number)),
+      expMonth: isGcm(card.expMonth) ? card.expMonth : encrypt(safeDecrypt(card.expMonth)),
+      expYear: isGcm(card.expYear) ? card.expYear : encrypt(safeDecrypt(card.expYear)),
+      cvv: isGcm(card.cvv) ? card.cvv : encrypt(safeDecrypt(card.cvv)),
+      updatedAt: new Date(),
+    }).where(eq(vccCards.id, card.id));
+    migrated++;
+  }
+  return migrated;
 }
 
 export { vccRouter };

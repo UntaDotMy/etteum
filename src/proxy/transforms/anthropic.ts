@@ -104,12 +104,7 @@ function normalizeImageBlock(block: any): any | null {
 }
 
 function parseToolInput(input: any): string {
-  if (typeof input === "string") {
-    // If a string was passed (unusual — most clients send an object), sanitize
-    // for Windows backslashes before emitting as tool_calls[].function.arguments.
-    const parsed = safeJsonParse(input);
-    return parsed !== undefined ? JSON.stringify(parsed) : input;
-  }
+  if (typeof input === "string") return input;
   try { return JSON.stringify(input ?? {}); } catch { return "{}"; }
 }
 
@@ -799,6 +794,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   const toolArgs = new Map<number, string>();
 
   let stopReason = "end_turn";
+  let errored = false;
   let usageFromUpstream = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0, cache_creation_input_tokens: 0, cache_read_input_tokens: 0 };
 
   // Estimate input tokens from request content (system + messages)
@@ -849,9 +845,12 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
       .trim();
   }
 
+  // Hoisted so cancel() can release the upstream reader on client disconnect.
+  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
+      upstreamReader = reader;
       let heartbeat: ReturnType<typeof setInterval> | null = null;
 
       /**
@@ -973,7 +972,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   type: "error",
                   error: { type: "api_error", message },
                 }));
-                continue;
+                // An error event is terminal (Anthropic streaming spec): it
+                // must NOT be followed by message_delta/message_stop. Stop
+                // reading and skip the success emissions in finally.
+                errored = true;
+                break;
               }
               const finishReason = chunk?.choices?.[0]?.finish_reason;
               const delta = chunk?.choices?.[0]?.delta || {};
@@ -1084,13 +1087,9 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   }
                 }
               } else if (finishReason) {
-                // Some providers (e.g. Kiro, CodeBuddy) send tool call deltas
-                // but emit finish_reason="stop" instead of "tool_calls". The
-                // tool_calls themselves were already set; override the stop
-                // reason to "tool_use" so the client doesn't think it's done.
-                stopReason = toolBlocks.size > 0
-                  ? "tool_use"
-                  : mapFinishReasonToStopReason(finishReason, false, "");
+                // length → max_tokens; content_filter/refusal/stop → end_turn.
+                // (Has-tool-calls path already set tool_use above and wins.)
+                stopReason = mapFinishReasonToStopReason(finishReason, false, "");
               }
             } catch {
               // ignore malformed upstream stream chunk
@@ -1107,6 +1106,13 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
             controller.enqueue(event("content_block_stop", { type: "content_block_stop", index: toolBlockIndex }));
             closedToolBlocks.add(toolBlockIndex);
           }
+        }
+        // On a terminal error event, do NOT emit the success tail
+        // (message_delta + message_stop) — the Anthropic streaming spec defines
+        // `error` as an alternative terminal signal. Just close.
+        if (errored) {
+          controller.close();
+          return;
         }
         const outputTokens = usageFromUpstream.completion_tokens > 0
           ? usageFromUpstream.completion_tokens
@@ -1135,6 +1141,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
         controller.enqueue(event("message_stop", { type: "message_stop" }));
         controller.close();
       }
+    },
+    async cancel(reason) {
+      try {
+        await upstreamReader?.cancel(reason).catch(() => {});
+      } catch { /* never throw from cancel */ }
     },
   });
 }

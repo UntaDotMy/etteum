@@ -687,6 +687,13 @@ export class CodexProvider extends BaseProvider {
                 inputTokens = Number(usage.input_tokens) || 0;
                 outputTokens = Number(usage.output_tokens) || 0;
               }
+            } else if (t === "response.failed" || t === "response.error" || t === "error") {
+              // Terminal upstream failure (content filter, overload, policy).
+              // Without this, the loop ends with whatever partial text accrued
+              // and returns {success:true} — a silent empty/partial success.
+              const errObj = obj.error || obj.response?.error || obj;
+              const errMsg = (typeof errObj === "string" ? errObj : (errObj?.message || errObj?.code || t)) || "upstream response failed";
+              return { success: false, error: typeof errMsg === "string" ? errMsg : String(errMsg) };
             }
           } catch { /* skip malformed */ }
         }

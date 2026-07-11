@@ -251,6 +251,11 @@ export async function fetchModels() {
   return fetchApi("/v1/models");
 }
 
+/** Fetch ONLY models backed by an active+enabled account (leaner than fetchModels). */
+export async function fetchActiveModels() {
+  return fetchApi("/api/models/active");
+}
+
 // --- F15: dashboard-driven model catalog (custom / disabled / pricing CRUD) ---
 
 export interface CustomModelSpec {
@@ -263,6 +268,10 @@ export interface CustomModelEntry {
   provider: string;
   displayName?: string;
   spec?: CustomModelSpec;
+  /** Old catalog id this entry renames (catalog rename feature). */
+  renameFrom?: string;
+  /** Upstream API model name to send to the provider. */
+  upstreamName?: string;
 }
 export type CustomModelsMap = Record<string, CustomModelEntry>;
 export type DisabledModelsMap = Record<string, { provider: string; model: string; disabledAt?: number }>;
@@ -280,12 +289,15 @@ export async function fetchCustomModels(): Promise<{ custom: CustomModelsMap }> 
   return fetchApi("/api/models/custom");
 }
 
-/** Add (or update) a custom model for a provider. Carries an optional spec override. */
+/** Add (or update) a custom model for a provider. Carries an optional spec override,
+ *  and optional rename/upstream-name for catalog edits. */
 export async function saveCustomModel(input: {
   model: string;
   provider: string;
   displayName?: string;
   spec?: CustomModelSpec;
+  renameFrom?: string;
+  upstreamName?: string;
 }): Promise<{ success: boolean }> {
   return fetchApi("/api/models/custom", {
     method: "POST",
@@ -338,10 +350,11 @@ export async function setModelDisabled(
 export async function testModel(
   provider: string,
   model: string,
-): Promise<{ ok: boolean; error?: string }> {
+  accountId?: number,
+): Promise<{ ok: boolean; error?: string; account?: { id: number; email: string; provider: string } }> {
   return fetchApi("/api/models/test", {
     method: "POST",
-    body: JSON.stringify({ provider, model }),
+    body: JSON.stringify({ provider, model, accountId }),
   });
 }
 

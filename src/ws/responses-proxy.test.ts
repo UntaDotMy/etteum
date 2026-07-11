@@ -1,10 +1,10 @@
 import { describe, test, expect } from "bun:test";
-// The handler's pure helpers are not exported individually, so we test the
-// public surface via the module. We re-implement the two pure parsers here
-// as spec mirrors and assert the handler wires them correctly by importing
-// the module (which must at least load without error).
+import { parseSseEvents } from "./responses-proxy";
 
-import "./responses-proxy";
+// NOTE: this previously re-implemented parseSseEvents as a "spec mirror" and
+// only asserted the module loaded. It now tests the REAL exported parser, so
+// the SSE-wire-format contract is actually pinned (including the multi-line
+// data: join + single-space-strip fix per the WHATWG event-stream spec).
 
 describe("responses-proxy module", () => {
   test("loads without error (imports resolve)", () => {
@@ -13,25 +13,7 @@ describe("responses-proxy module", () => {
   });
 });
 
-/* ---------- SSE parsing (spec mirror of parseSseEvents) ---------- */
-
-// Mirror of the private parseSseEvents — kept in sync to lock the wire format.
-function parseSseEvents(text: string): { event: string; data: string }[] {
-  const out: { event: string; data: string }[] = [];
-  for (const block of text.split("\n\n")) {
-    if (!block.trim()) continue;
-    let event = "";
-    let data = "";
-    for (const line of block.split("\n")) {
-      if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
-    }
-    if (event) out.push({ event, data });
-  }
-  return out;
-}
-
-describe("parseSseEvents (spec mirror)", () => {
+describe("parseSseEvents (real implementation)", () => {
   test("parses a single response.create event", () => {
     const frame = 'event: response.create\ndata: {"type":"response.create","response":{"model":"gpt-5","input":"hi"}}\n\n';
     const events = parseSseEvents(frame);
@@ -51,46 +33,34 @@ describe("parseSseEvents (spec mirror)", () => {
       "response.output_text.delta",
       "response.completed",
     ]);
+    expect(JSON.parse(events[2].data).status).toBe("completed");
   });
 
-  test("ignores empty blocks and comment frames", () => {
-    const frame = ": keepalive\n\nevent: response.completed\ndata: {}\n\n";
+  test("joins multiple data: lines with \\n (WHATWG spec) and strips only one leading space", () => {
+    // Two data: lines must join with a single \n between values (not concat
+    // with no separator, which the old code did). Also: only ONE leading space
+    // is stripped, so " data:  two" → value " two" (leading-space strip is once).
+    const frame = 'event: response.create\ndata: line1\ndata: line2\n\n';
     const events = parseSseEvents(frame);
     expect(events).toHaveLength(1);
-    expect(events[0].event).toBe("response.completed");
-  });
-});
-
-/* ---------- response.create extraction (spec mirror of extractResponsesRequest) ---------- */
-
-function extractResponsesRequest(data: string): any | null {
-  try {
-    const parsed = JSON.parse(data);
-    const req = parsed?.response ?? parsed;
-    if (!req?.model) return null;
-    return req;
-  } catch {
-    return null;
-  }
-}
-
-describe("extractResponsesRequest (spec mirror)", () => {
-  test("unwraps the response field (Realtime protocol)", () => {
-    const req = extractResponsesRequest('{"type":"response.create","response":{"model":"gpt-5","input":"hi"}}');
-    expect(req.model).toBe("gpt-5");
-    expect(req.input).toBe("hi");
+    expect(events[0].data).toBe("line1\nline2");
   });
 
-  test("accepts a flat request (no response wrapper)", () => {
-    const req = extractResponsesRequest('{"model":"gpt-5","input":"hi"}');
-    expect(req.model).toBe("gpt-5");
+  test("strips only one leading space from a data: value", () => {
+    // Per spec: strip exactly one U+0020 after "data:". "data:  x" → " x".
+    const frame = 'event: e\ndata:  x\n\n';
+    const events = parseSseEvents(frame);
+    expect(events[0].data).toBe(" x");
   });
 
-  test("returns null when model is missing", () => {
-    expect(extractResponsesRequest('{"input":"hi"}')).toBeNull();
+  test("ignores blocks with no event field", () => {
+    const frame = 'data: {"no":"event"}\n\n';
+    const events = parseSseEvents(frame);
+    expect(events).toHaveLength(0);
   });
 
-  test("returns null on invalid JSON", () => {
-    expect(extractResponsesRequest("not json")).toBeNull();
+  test("handles empty / whitespace input", () => {
+    expect(parseSseEvents("")).toEqual([]);
+    expect(parseSseEvents("\n\n  \n\n")).toEqual([]);
   });
 });

@@ -28,7 +28,7 @@ const projectRoot = path.resolve(import.meta.dir, "../..");
 // from origin/HEAD at runtime, with a hard fallback chain, so it survives
 // upstream renames and never crashes if origin/HEAD is unset.
 let _fetchBranch: string | null = null;
-import { adminGuard } from "../utils/security";
+import { adminGuardFromPeer, peerIpFromHonoContext, realClientIp } from "../utils/security";
 function fetchBranch(): string {
   if (_fetchBranch) return _fetchBranch;
   const r = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
@@ -364,6 +364,12 @@ import { RateLimiter } from "../utils/security";
 
 export const updateRouter = new Hono();
 
+/** Trusted-proxy header IP — only under TRUST_PROXY, else null. */
+function trustedProxyIp(headers: Headers): string | null {
+  const ip = realClientIp(headers);
+  return ip === "unknown" ? null : ip;
+}
+
 // Rate-limit the destructive /apply endpoint: at most 3 applies/hour per IP.
 const applyLimiter = new RateLimiter(3, 3);
 
@@ -376,7 +382,10 @@ updateRouter.post("/apply", async (c) => {
   // Access-control: this endpoint runs git pull + rebuild + migrate + restart
   // (remote code execution). Restrict to local origin OR a machine-bound CLI
   // admin token — a leaked API key alone must NOT be able to trigger it.
-  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  // Use the TCP socket peer (non-spoofable) for the loopback decision; header
+  // IPs are trusted only under TRUST_PROXY (CWE-348).
+  const peerIp = peerIpFromHonoContext(c);
+  const guard = adminGuardFromPeer(peerIp, c.req.raw.headers, new URL(c.req.url).searchParams);
   if (!guard.allowed) {
     return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   }
@@ -390,10 +399,9 @@ updateRouter.post("/apply", async (c) => {
       400,
     );
   }
-  const ip =
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    c.req.header("x-real-ip") ||
-    "unknown";
+  // Rate-limit by TCP peer when available (non-spoofable); fall back to a
+  // trusted-proxy header IP, never a raw untrusted client header.
+  const ip = peerIp || trustedProxyIp(c.req.raw.headers) || "unknown";
   const rl = applyLimiter.check(ip);
   if (!rl.allowed) {
     return c.json(

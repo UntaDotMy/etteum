@@ -23,11 +23,19 @@ export interface StdioPlugin {
 // Preset, code-defined plugins only. Users cannot add arbitrary commands.
 // (These are safe, well-known MCP servers; extend this list in code, never via
 // untrusted input.)
+// NOTE: package versions are unpinned (npx -y fetches latest). Pinning would
+// guard against drift but risks breakage when the maintainers deprecate a
+// version; instead, getOrSpawn enforces a spawn-readiness timeout so a slow
+// first-run npm fetch can't hang the bridge forever.
 export const LOCAL_STDIO_PLUGINS: StdioPlugin[] = [
   { name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."], description: "Local filesystem access" },
   { name: "fetch", command: "npx", args: ["-y", "@modelcontextprotocol/server-fetch"], description: "HTTP fetch tool" },
   { name: "sqlite", command: "npx", args: ["-y", "@modelcontextprotocol/server-sqlite"], description: "SQLite explorer" },
 ];
+
+/** Max ms to wait for a freshly-spawned plugin to emit its first stdout line
+ *  (npx -y fetches the package on first run; this bounds that wait). */
+const SPAWN_READINESS_MS = 30_000;
 
 const G_KEY = "__etteumMcpBridges";
 const MAX_TEXT_CHARS = 50_000;
@@ -149,7 +157,20 @@ function getOrSpawn(name: string): BridgeEntry {
   const entry: BridgeEntry = { proc, sessions: new Map(), buffer: "" };
   store.set(name, entry);
 
+  // Spawn-readiness timeout: if the child produces no stdout within the window
+  // (e.g. npx still fetching the package on first run, or a hung install),
+  // kill it so the bridge fails fast instead of hanging the SSE client.
+  let becameReady = false;
+  const readinessTimer = setTimeout(() => {
+    if (!becameReady && !proc.killed && proc.exitCode === null) {
+      console.error(`[mcp:${name}] spawn-readiness timeout (${SPAWN_READINESS_MS}ms) — killing. Is npx able to fetch the package?`);
+      try { proc.kill("SIGKILL"); } catch { /* ignore */ }
+      store.delete(name);
+    }
+  }, SPAWN_READINESS_MS);
+
   proc.stdout?.on("data", (chunk: Buffer) => {
+    if (!becameReady) { becameReady = true; clearTimeout(readinessTimer); }
     entry.buffer += chunk.toString("utf8");
     let idx: number;
     while ((idx = entry.buffer.indexOf("\n")) >= 0) {
@@ -165,6 +186,7 @@ function getOrSpawn(name: string): BridgeEntry {
 
   proc.stderr?.on("data", (d: Buffer) => console.log(`[mcp:${name}]`, d.toString().trim()));
   proc.on("exit", (code) => {
+    clearTimeout(readinessTimer);
     console.log(`[mcp:${name}] exited`, code);
     store.delete(name);
   });
@@ -183,6 +205,17 @@ export function unregisterSession(name: string, sid: string): void {
   const entry = getStore().get(name);
   if (!entry) return;
   entry.sessions.delete(sid);
+}
+
+/**
+ * Is there an active SSE session `sid` for plugin `name`?
+ * Used to gate POST /message — only a caller who opened the SSE stream
+ * (and thus holds a valid sid) may drive the plugin child's stdin.
+ */
+export function hasSession(name: string, sid: string | null | undefined): boolean {
+  if (!sid) return false;
+  const entry = getStore().get(name);
+  return !!entry?.sessions.has(sid);
 }
 
 export function sendToChild(name: string, jsonRpc: unknown): void {

@@ -99,11 +99,16 @@ integrationRouter.put("/", async (c) => {
       });
     }
 
-    // Bulk replace: clear then insert.
-    await db.delete(modelMappings);
-    if (rows.length > 0) {
-      await db.insert(modelMappings).values(rows);
-    }
+    // Bulk replace: clear then insert — atomically, so a crash between the
+    // delete and the insert cannot wipe all model mappings (CWE-362 /
+    // race-condition data loss). Drizzle's bun-sqlite transaction wraps both
+    // statements in a single BEGIN/COMMIT.
+    await db.transaction(async (tx) => {
+      await tx.delete(modelMappings);
+      if (rows.length > 0) {
+        await tx.insert(modelMappings).values(rows);
+      }
+    });
   }
 
   if (typeof body.enabled === "boolean") {

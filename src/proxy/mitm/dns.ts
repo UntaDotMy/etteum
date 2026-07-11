@@ -129,7 +129,7 @@ export function addDNSEntry(hosts: string[], password?: string): { ok: boolean; 
 
   const linesToAdd: string[] = [];
   for (const h of allHosts) {
-    if (content.includes(h)) continue;
+    if (hostMappedToLoopback(content, h)) continue;
     linesToAdd.push(`127.0.0.1 ${h}  ${ETTEUM_TAG}`);
   }
   if (linesToAdd.length === 0) return { ok: true, needsPassword: false };
@@ -195,9 +195,12 @@ export function removeAllDNSEntriesSync(): void {
     const content = readFileSync(HOSTS_FILE, "utf8");
     const eol = IS_WIN ? "\r\n" : "\n";
     const allHosts = allToolHosts();
+    // Remove a line iff it maps any tool host to 127.0.0.1 (token-exact) OR
+    // carries our tag. Token-exact matching avoids stripping unrelated lines
+    // that merely contain a tool hostname as a substring.
     const filtered = content
       .split(/\r?\n/)
-      .filter((l) => !allHosts.some((h) => l.includes(h)) && !l.includes(ETTEUM_TAG))
+      .filter((l) => !allHosts.some((h) => hostMappedToLoopback(l, h)) && !l.includes(ETTEUM_TAG))
       .join(eol);
     const next = filtered.replace(/[\r\n\s]+$/g, "") + eol;
     if (next === content) return;
@@ -212,11 +215,26 @@ export function removeAllDNSEntriesSync(): void {
   } catch { /* best effort during shutdown */ }
 }
 
+/**
+ * Token-exact check: is `host` an alias on a 127.0.0.1 line in `content`?
+ * Uses whitespace-delimited token matching (per hosts(5)), NOT substring
+ * matching — `l.includes(host)` would false-match (e.g. checking "foo.com"
+ * would match a line for "api.foo.com"). Comments (#…) are stripped first.
+ */
+function hostMappedToLoopback(content: string, host: string): boolean {
+  return content.split(/\r?\n/).some((line) => {
+    const hash = line.indexOf("#");
+    const data = hash >= 0 ? line.slice(0, hash) : line;
+    const tokens = data.trim().split(/\s+/);
+    return tokens[0] === "127.0.0.1" && tokens.slice(1).includes(host);
+  });
+}
+
 /** Check whether a host is currently mapped to 127.0.0.1 in the hosts file. */
 export function checkDNSEntry(host: string): boolean {
   try {
     const content = readFileSync(HOSTS_FILE, "utf8");
-    return content.split(/\r?\n/).some((l) => /^\s*127\.0\.0\.1\s+/.test(l) && l.includes(host));
+    return hostMappedToLoopback(content, host);
   } catch {
     return false;
   }

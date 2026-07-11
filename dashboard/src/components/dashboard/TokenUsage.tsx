@@ -37,6 +37,7 @@ const defaultStats: TokenStats = {
   prompt: 0,
   completion: 0,
   credits: 0,
+  cost: 0,
 };
 
 const defaultModelUsage: ModelUsage[] = [];
@@ -152,6 +153,7 @@ interface UsageRow {
   promptTokens?: number;
   completionTokens?: number;
   credits?: number;
+  cost?: number;
   count?: number;
 }
 
@@ -197,17 +199,20 @@ function processUsageData(rows: UsageRow[], period: string) {
   let promptTokens = 0;
   let completionTokens = 0;
   let credits = 0;
+  let cost = 0;
   for (const row of visibleRows) {
     totalTokens += Number(row.tokens || 0);
     promptTokens += Number(row.promptTokens || 0);
     completionTokens += Number(row.completionTokens || 0);
     credits += Number(row.credits || 0);
+    cost += Number(row.cost || 0);
   }
   const stats: TokenStats = {
     total: totalTokens,
     prompt: promptTokens,
     completion: completionTokens,
     credits,
+    cost,
   };
 
   // ── 4. Compute per-model breakdown from visible rows only ─────────
@@ -218,6 +223,7 @@ function processUsageData(rows: UsageRow[], period: string) {
     promptTokens: number;
     completionTokens: number;
     credits: number;
+    cost: number;
     requests: number;
   }>();
   for (const row of visibleRows) {
@@ -228,6 +234,7 @@ function processUsageData(rows: UsageRow[], period: string) {
       existing.promptTokens += Number(row.promptTokens || 0);
       existing.completionTokens += Number(row.completionTokens || 0);
       existing.credits += Number(row.credits || 0);
+      existing.cost += Number(row.cost || 0);
       existing.requests += Number(row.count || 0);
     } else {
       modelMap.set(key, {
@@ -237,6 +244,7 @@ function processUsageData(rows: UsageRow[], period: string) {
         promptTokens: Number(row.promptTokens || 0),
         completionTokens: Number(row.completionTokens || 0),
         credits: Number(row.credits || 0),
+        cost: Number(row.cost || 0),
         requests: Number(row.count || 0),
       });
     }

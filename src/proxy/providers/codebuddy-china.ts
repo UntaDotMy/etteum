@@ -10,6 +10,7 @@ import {
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
 import { resolveModelSpec } from "../model-specs";
+import { getUpstreamNameOverride } from "./custom-models";
 
 interface CodeBuddyChinaTokens {
   api_key?: string;
@@ -65,6 +66,9 @@ export class CodeBuddyChinaProvider extends BaseProvider {
    * knows to enable extended thinking.
    */
   private resolveModel(model: string): string {
+    // Operator-set upstream-name override (catalog rename) wins.
+    const override = getUpstreamNameOverride(model);
+    if (override) return override;
     const isThinking = model.endsWith("-thinking");
     const base = isThinking ? model.replace(/-thinking$/, "") : model;
     const resolved = CBC_MODEL_MAP[base.toLowerCase()] || base;

@@ -86,11 +86,32 @@ function normalizeBrave(data: any, searchType: string): NormalizedSearchResponse
 }
 
 function normalizePerplexity(data: any): NormalizedSearchResponse {
-  const items = data.results;
-  if (!Array.isArray(items)) return { results: [], totalResults: null };
-  const results = items.map((item: any, idx: number) =>
-    makeResult("perplexity", { title: item.title, url: item.url, snippet: item.snippet, published_at: item.date || item.last_updated }, idx),
+  // Perplexity Sonar returns an OpenAI-style chat completion:
+  //   { choices: [{ message: { content } }], citations: [url, ...] }
+  // NOT a { results: [...] } search payload. Build search results from the
+  // citations list; the model's synthesized answer is the top snippet.
+  if (!data || typeof data !== "object") return { results: [], totalResults: null };
+
+  // Tolerate a legacy { results: [...] } shape just in case upstream changes.
+  if (Array.isArray(data.results)) {
+    const items = data.results;
+    const results = items.map((item: any, idx: number) =>
+      makeResult("perplexity", { title: item.title, url: item.url, snippet: item.snippet, published_at: item.date || item.last_updated }, idx),
+    );
+    return { results, totalResults: results.length };
+  }
+
+  const content: string = data.choices?.[0]?.message?.content ?? "";
+  const citations: string[] = Array.isArray(data.citations) ? data.citations : [];
+  if (citations.length === 0 && !content) return { results: [], totalResults: null };
+
+  const results = citations.map((url: string, idx: number) =>
+    makeResult("perplexity", { title: url, url, snippet: idx === 0 ? content.slice(0, 500) : "" }, idx),
   );
+  // If there are no citations but we have content, surface the answer itself.
+  if (results.length === 0 && content) {
+    results.push(makeResult("perplexity", { title: "Perplexity Sonar answer", url: "", snippet: content.slice(0, 500) }, 0));
+  }
   return { results, totalResults: results.length };
 }
 

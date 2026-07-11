@@ -48,6 +48,10 @@ export async function applyHeadroom(
     return { request, saved: 0, applied: false };
   }
 
+  const endpoint = `${cfg.url.replace(/\/$/, "")}/v1/compress`;
+  // The URL is operator-configurable, so log it for SSRF auditability.
+  console.info(`[headroom] fetching external compression proxy: ${endpoint}`);
+
   try {
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), cfg.timeoutMs);
@@ -60,7 +64,7 @@ export async function applyHeadroom(
       body.config = { compress_user_messages: true };
     }
 
-    const res = await fetch(`${cfg.url.replace(/\/$/, "")}/v1/compress`, {
+    const res = await fetch(endpoint, {
       method: "POST",
       headers: { "content-type": "application/json", accept: "application/json" },
       body: JSON.stringify(body),
@@ -74,6 +78,22 @@ export async function applyHeadroom(
 
     const data = (await res.json()) as { messages?: any[]; tokens_saved?: number };
     if (!Array.isArray(data.messages) || data.messages.length === 0) {
+      return { request, saved: 0, applied: false };
+    }
+
+    // Structural validation: every entry must be a message object with a
+    // `role` string and a `content` field (string or array). If the proxy
+    // returns garbage, keep the original messages rather than replacing with
+    // invalid data (data-integrity guard).
+    const valid = data.messages.every(
+      (m) =>
+        m !== null &&
+        typeof m === "object" &&
+        typeof m.role === "string" &&
+        m.role.length > 0 &&
+        (typeof m.content === "string" || Array.isArray(m.content)),
+    );
+    if (!valid) {
       return { request, saved: 0, applied: false };
     }
 

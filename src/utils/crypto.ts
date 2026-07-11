@@ -84,6 +84,11 @@ function decryptGcm(b64: string): string {
  */
 function decryptLegacyXor(ciphertext: string): string {
   const passphrase = process.env.ENCRYPTION_KEY || config.encryptionKey;
+  // Guard: a missing/empty passphrase would make `key[i % 0]` a NaN index and
+  // produce garbage rather than throwing. Refuse instead of returning noise.
+  if (!passphrase) {
+    throw new Error("decrypt: legacy ciphertext encountered but ENCRYPTION_KEY is missing.");
+  }
   const key = new TextEncoder().encode(passphrase);
   const data = new Uint8Array(Buffer.from(ciphertext, "base64"));
   const decrypted = new Uint8Array(data.length);

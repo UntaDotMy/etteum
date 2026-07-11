@@ -4,6 +4,7 @@ import { accounts, requestLogs, vccCards, vccTransactions, settings } from "../d
 import { eq, inArray } from "drizzle-orm";
 import { encrypt, decrypt } from "../utils/crypto";
 import { broadcast } from "../ws/index";
+import { adminGuardFromPeer, peerIpFromHonoContext, RateLimiter } from "../utils/security";
 import type { NewAccount } from "../db/schema";
 import { loginQueue } from "../auth/queue";
 import { warmupQueue } from "../auth/warmup-queue";
@@ -13,6 +14,12 @@ import { activateQoderPat } from "../proxy/providers/qoder";
 import { activateYouMindKey } from "../proxy/providers/youmind";
 
 export const accountsRouter = new Hono();
+
+/** Thrown inside a transaction to abort + surface an HTTP status to the client. */
+class HttpError extends Error {
+  status: 400 | 404 | 409 | 500;
+  constructor(status: 400 | 404 | 409 | 500, message: string) { super(message); this.status = status; }
+}
 
 type ByokKeyInput = {
   id?: number;
@@ -367,6 +374,10 @@ accountsRouter.get("/byok", async (c) => {
  * secret is not sent with normal page loads or websocket refreshes.
  */
 accountsRouter.post("/byok/:id/reveal", async (c) => {
+  // Secret disclosure: require local origin / CLI admin token.
+  const guard = adminGuardFromPeer(peerIpFromHonoContext(c), c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
+
   const id = Number(c.req.param("id"));
   if (!Number.isFinite(id)) return c.json({ error: "Invalid BYOK key id" }, 400);
 
@@ -430,83 +441,89 @@ accountsRouter.patch("/byok/:id", async (c) => {
     const desiredKeys = keyPayloadProvided ? (body.api_keys || []) : [];
     const touchedIds = new Set<number>();
 
-    if (keyPayloadProvided) {
-      const seenLabels = new Set<string>();
-      for (const [index, keyInput] of desiredKeys.entries()) {
-        const keyLabel = String(keyInput.label || `key-${index + 1}`).trim().toLowerCase();
-        const keySecret = String(keyInput.key || keyInput.api_key || "").trim();
-        if (!BYOK_KEY_LABEL_RE.test(keyLabel)) {
-          return c.json({ error: "key label must start with lowercase alphanumeric and contain only lowercase letters, numbers, hyphen, or underscore" }, 400);
-        }
-        if (seenLabels.has(keyLabel)) return c.json({ error: `duplicate BYOK key label: ${keyLabel}` }, 400);
-        seenLabels.add(keyLabel);
+    // Run all key mutations inside a single transaction so a crash or error
+    // between add/update/delete cannot leave a half-reconciled BYOK group
+    // (CWE-362). Post-transaction side-effects (cache refresh, broadcast) run
+    // after commit.
+    await db.transaction(async (tx) => {
+      if (keyPayloadProvided) {
+        const seenLabels = new Set<string>();
+        for (const [index, keyInput] of desiredKeys.entries()) {
+          const keyLabel = String(keyInput.label || `key-${index + 1}`).trim().toLowerCase();
+          const keySecret = String(keyInput.key || keyInput.api_key || "").trim();
+          if (!BYOK_KEY_LABEL_RE.test(keyLabel)) {
+            throw new HttpError(400, "key label must start with lowercase alphanumeric and contain only lowercase letters, numbers, hyphen, or underscore");
+          }
+          if (seenLabels.has(keyLabel)) throw new HttpError(400, `duplicate BYOK key label: ${keyLabel}`);
+          seenLabels.add(keyLabel);
 
-        const existing = groupAccounts.find((acc) =>
-          (keyInput.id && acc.id === keyInput.id) || getByokKeyLabel(acc) === keyLabel
-        );
-        const tokens: ByokTokensShape = {
-          ...parseByokTokens(existing?.tokens),
-          base_url: nextBaseUrl,
-          format: nextFormat,
-          models: nextModels,
-          model_prefix: prefix,
-          headers: nextHeaders,
-          key_label: keyLabel,
-          weight: Number.isFinite(Number(keyInput.weight)) ? Number(keyInput.weight) : undefined,
-          priority: Number.isFinite(Number(keyInput.priority)) ? Number(keyInput.priority) : index,
-          load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method),
-        };
-
-        if (existing) {
-          const updateData: Record<string, unknown> = {
-            email: buildByokEmail(prefix, keyLabel),
-            tokens,
-            enabled: typeof keyInput.enabled === "boolean" ? keyInput.enabled : existing.enabled,
-            updatedAt: new Date(),
-          };
-          if (keySecret) updateData.password = encrypt(keySecret);
-          await db.update(accounts).set(updateData).where(eq(accounts.id, existing.id));
-          touchedIds.add(existing.id);
-        } else {
-          if (!keySecret) return c.json({ error: `new key "${keyLabel}" requires a secret` }, 400);
-          const inserted = await db.insert(accounts).values({
-            provider: "byok",
-            email: buildByokEmail(prefix, keyLabel),
-            password: encrypt(keySecret),
-            status: "active",
-            enabled: keyInput.enabled ?? true,
-            tokens,
-            quotaLimit: -1,
-            quotaRemaining: -1,
-          }).returning();
-          if (inserted[0]) touchedIds.add(inserted[0].id);
-        }
-      }
-
-      const toDelete = groupAccounts.filter((acc) => !touchedIds.has(acc.id));
-      for (const acc of toDelete) {
-        await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
-        await db.delete(accounts).where(eq(accounts.id, acc.id));
-      }
-    } else {
-      for (const acc of groupAccounts) {
-        const tokens = parseByokTokens(acc.tokens);
-        const updateData: Record<string, unknown> = {
-          tokens: {
-            ...tokens,
+          const existing = groupAccounts.find((acc) =>
+            (keyInput.id && acc.id === keyInput.id) || getByokKeyLabel(acc) === keyLabel
+          );
+          const tokens: ByokTokensShape = {
+            ...parseByokTokens(existing?.tokens),
             base_url: nextBaseUrl,
             format: nextFormat,
             models: nextModels,
             model_prefix: prefix,
             headers: nextHeaders,
-            load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || tokens.load_balancing_method),
-          },
-          updatedAt: new Date(),
-        };
-        if (body.api_key && acc.id === id) updateData.password = encrypt(body.api_key);
-        await db.update(accounts).set(updateData).where(eq(accounts.id, acc.id));
+            key_label: keyLabel,
+            weight: Number.isFinite(Number(keyInput.weight)) ? Number(keyInput.weight) : undefined,
+            priority: Number.isFinite(Number(keyInput.priority)) ? Number(keyInput.priority) : index,
+            load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method),
+          };
+
+          if (existing) {
+            const updateData: Record<string, unknown> = {
+              email: buildByokEmail(prefix, keyLabel),
+              tokens,
+              enabled: typeof keyInput.enabled === "boolean" ? keyInput.enabled : existing.enabled,
+              updatedAt: new Date(),
+            };
+            if (keySecret) updateData.password = encrypt(keySecret);
+            await tx.update(accounts).set(updateData).where(eq(accounts.id, existing.id));
+            touchedIds.add(existing.id);
+          } else {
+            if (!keySecret) throw new HttpError(400, `new key "${keyLabel}" requires a secret`);
+            const inserted = await tx.insert(accounts).values({
+              provider: "byok",
+              email: buildByokEmail(prefix, keyLabel),
+              password: encrypt(keySecret),
+              status: "active",
+              enabled: keyInput.enabled ?? true,
+              tokens,
+              quotaLimit: -1,
+              quotaRemaining: -1,
+            }).returning();
+            if (inserted[0]) touchedIds.add(inserted[0].id);
+          }
+        }
+
+        const toDelete = groupAccounts.filter((acc) => !touchedIds.has(acc.id));
+        for (const acc of toDelete) {
+          await tx.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+          await tx.delete(accounts).where(eq(accounts.id, acc.id));
+        }
+      } else {
+        for (const acc of groupAccounts) {
+          const tokens = parseByokTokens(acc.tokens);
+          const updateData: Record<string, unknown> = {
+            tokens: {
+              ...tokens,
+              base_url: nextBaseUrl,
+              format: nextFormat,
+              models: nextModels,
+              model_prefix: prefix,
+              headers: nextHeaders,
+              load_balancing_method: normalizeByokLbMethod(body.load_balancing_method || tokens.load_balancing_method),
+            },
+            updatedAt: new Date(),
+          };
+          if (body.api_key && acc.id === id) updateData.password = encrypt(body.api_key);
+          await tx.update(accounts).set(updateData).where(eq(accounts.id, acc.id));
+        }
       }
-    }
+    });
 
     await setByokLbMethod(prefix, normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method));
     await refreshByokRuntime();
@@ -519,6 +536,7 @@ accountsRouter.patch("/byok/:id", async (c) => {
       models: nextModels.map((m) => `${prefix}-${m}`),
     });
   } catch (error) {
+    if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
     return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
   }
 });
@@ -580,8 +598,16 @@ async function autoFixAccountIfError(accountId: number, accountStatus: string) {
  * Accepts optional { model?: string } body to test a specific model.
  * Returns latency_ms and auto_fixed status.
  */
+// Rate-limit BYOK /test: it burns real upstream credits/quota. 3 tests/min per account id.
+const byokTestLimiter = new RateLimiter(3, 3);
+
 accountsRouter.post("/byok/:id/test", async (c) => {
   const id = Number(c.req.param("id"));
+  const rlKey = `byok-test-${id}`;
+  const rl = byokTestLimiter.check(rlKey);
+  if (!rl.allowed) {
+    return c.json({ error: "Too many test requests. Wait a minute and retry.", retryAfterMs: rl.retryAfterMs }, 429);
+  }
   const reqBody = await c.req.json().catch(() => ({})) as { model?: string };
 
   const account = await db.select().from(accounts)
@@ -650,6 +676,7 @@ accountsRouter.post("/byok/:id/test", async (c) => {
       method: "POST",
       headers,
       body: JSON.stringify(body),
+      signal: AbortSignal.timeout(15_000),
     });
     const latencyMs = Date.now() - startTime;
 
@@ -793,7 +820,7 @@ accountsRouter.post("/byok/:id/fetch-models", async (c) => {
   }
 
   try {
-    const response = await fetch(url, { method: "GET", headers });
+    const response = await fetch(url, { method: "GET", headers, signal: AbortSignal.timeout(15_000) });
     if (!response.ok) {
       const text = await response.text();
       return c.json({ error: `HTTP ${response.status}: ${text.slice(0, 300)}` }, 400);
@@ -1036,7 +1063,7 @@ export async function createGitlabDuoAccount(
 
   // 1. Validate PAT — must have `api` scope and not be revoked.
   try {
-    const r = await fetch(`${baseUrl}/api/v4/personal_access_tokens/self`, { headers });
+    const r = await fetch(`${baseUrl}/api/v4/personal_access_tokens/self`, { headers, signal: AbortSignal.timeout(15_000) });
     if (!r.ok) return { ok: false, status: 400, error: `PAT invalid (HTTP ${r.status})` };
     const j = (await r.json()) as { scopes?: string[]; revoked?: boolean };
     if (j.revoked) return { ok: false, status: 400, error: "PAT is revoked" };
@@ -1071,6 +1098,7 @@ export async function createGitlabDuoAccount(
       method: "POST",
       headers,
       body: JSON.stringify(gqlBody),
+      signal: AbortSignal.timeout(20_000),
     });
     const json = (await r.json()) as any;
     if (json.errors) return { ok: false, status: 400, error: `GraphQL: ${JSON.stringify(json.errors)}` };
@@ -1115,6 +1143,7 @@ export async function createGitlabDuoAccount(
       method: "POST",
       headers,
       body: JSON.stringify(gqlBody),
+      signal: AbortSignal.timeout(20_000),
     });
     const json = (await r.json()) as any;
     gitlabVersion = json.data?.metadata?.version ?? "";
@@ -1169,6 +1198,7 @@ export async function createGitlabDuoAccount(
         }`,
         variables: { namespacePath },
       }),
+      signal: AbortSignal.timeout(20_000),
     });
     if (r.ok) {
       const j = (await r.json()) as any;
@@ -1362,6 +1392,7 @@ accountsRouter.post("/gitlab-duo/:id/refresh", async (c) => {
         }`,
         variables: {},
       }),
+      signal: AbortSignal.timeout(20_000),
     });
     const userJson = (await userR.json()) as any;
     const cu = userJson.data?.currentUser;
@@ -1388,6 +1419,7 @@ accountsRouter.post("/gitlab-duo/:id/refresh", async (c) => {
         }`,
         variables: { rootNamespaceId: `gid://gitlab/Group/${namespaceId}` },
       }),
+      signal: AbortSignal.timeout(20_000),
     });
     const modelsJson = (await modelsR.json()) as any;
     const dm = modelsJson.data?.aiChatAvailableModels?.defaultModel;
@@ -2061,13 +2093,14 @@ accountsRouter.post("/bulk-delete", async (c) => {
   const foundIds = targets.map((t) => t.id);
   const providersAffected = Array.from(new Set(targets.map((t) => t.provider)));
 
-  // Nullify / clean foreign keys before the delete (mirrors DELETE /:id).
-  await db.update(requestLogs).set({ accountId: null }).where(inArray(requestLogs.accountId, foundIds));
-  await db.update(vccCards).set({ usedByAccountId: null }).where(inArray(vccCards.usedByAccountId, foundIds));
-  await db.delete(vccTransactions).where(inArray(vccTransactions.accountId, foundIds));
-
-  const result = await db.delete(accounts).where(inArray(accounts.id, foundIds)).returning();
-  const deletedIds = result.map((r) => r.id);
+  // Atomic: FK cleanup + delete in one transaction (CWE-362).
+  const deletedIds = await db.transaction(async (tx) => {
+    await tx.update(requestLogs).set({ accountId: null }).where(inArray(requestLogs.accountId, foundIds));
+    await tx.update(vccCards).set({ usedByAccountId: null }).where(inArray(vccCards.usedByAccountId, foundIds));
+    await tx.delete(vccTransactions).where(inArray(vccTransactions.accountId, foundIds));
+    const result = await tx.delete(accounts).where(inArray(accounts.id, foundIds)).returning();
+    return result.map((r) => r.id);
+  });
 
   for (const provider of providersAffected) {
     pool.invalidate(provider as ProviderName);
@@ -2097,21 +2130,33 @@ accountsRouter.post("/bulk-delete", async (c) => {
 accountsRouter.delete("/:id", async (c) => {
   const id = Number(c.req.param("id"));
 
-  // Nullify foreign key references before deleting
-  await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-  await db.update(vccCards).set({ usedByAccountId: null }).where(eq(vccCards.usedByAccountId, id));
-  await db.delete(vccTransactions).where(eq(vccTransactions.accountId, id));
+  // Wrap FK cleanup + delete in a transaction so a crash between steps cannot
+  // leave orphaned FKs or a half-deleted account (CWE-362). Delete the account
+  // FIRST with .returning(); rollback on not-found so we never side-effect
+  // other tables for a missing id.
+  let deleted: typeof accounts.$inferSelect | null = null;
+  try {
+    deleted = await db.transaction(async (tx) => {
+      const result = await tx.delete(accounts).where(eq(accounts.id, id)).returning();
+      if (result.length === 0) {
+        await tx.rollback();
+        return null;
+      }
+      await tx.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
+      await tx.update(vccCards).set({ usedByAccountId: null }).where(eq(vccCards.usedByAccountId, id));
+      await tx.delete(vccTransactions).where(eq(vccTransactions.accountId, id));
+      return result[0]!;
+    });
+  } catch (err: any) {
+    // rollback throws; surface not-found distinctly.
+    if (err && err.message === "rollback") return c.json({ error: "Account not found" }, 404);
+    throw err;
+  }
 
-  const result = await db
-    .delete(accounts)
-    .where(eq(accounts.id, id))
-    .returning();
-
-  if (result.length === 0) {
+  if (!deleted) {
     return c.json({ error: "Account not found" }, 404);
   }
 
-  const deleted = result[0]!;
   pool.invalidate(deleted.provider as ProviderName);
   broadcast({ type: "account_deleted", data: { id } });
 
@@ -2172,6 +2217,12 @@ accountsRouter.post("/:id/cancel-manual", async (c) => {
  * tokens that are not useful to the user in raw form.
  */
 accountsRouter.post("/:id/reveal", async (c) => {
+  // Secret disclosure: require local origin / CLI admin token on top of the
+  // API key. A leaked low-priv managed key must not be able to exfiltrate
+  // stored provider credentials (OWASP API1:2023 / CWE-862).
+  const guard = adminGuardFromPeer(peerIpFromHonoContext(c), c.req.raw.headers, new URL(c.req.url).searchParams);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
+
   const id = Number(c.req.param("id"));
   if (!Number.isFinite(id)) return c.json({ error: "Invalid account id" }, 400);
 

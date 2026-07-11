@@ -327,7 +327,12 @@ function truncateGrep(text: string, maxChars: number): string {
   const PER_FILE_KEEP = 5;
   // Sort files by match count desc so important files come first.
   const sorted = Array.from(byFile.entries()).sort((a, b) => b[1].length - a[1].length);
-  for (const [path, hits] of sorted) {
+  // Indexed loop so we know the current position (the old code used
+  // sorted.indexOf([path, hits]) which always returned -1 — a freshly-built
+  // array literal is never reference-equal to an existing entry per MDN's
+  // indexOf strict-equality semantics — producing a wrong "remaining" count).
+  for (let idx = 0; idx < sorted.length; idx++) {
+    const [path, hits] = sorted[idx]!;
     out.push(`[${path}] (${hits.length}):`);
     for (const h of hits.slice(0, PER_FILE_KEEP)) {
       out.push(`  ${h.line.padStart(4)}: ${h.raw.split(":").slice(2).join(":").trim()}`);
@@ -336,7 +341,7 @@ function truncateGrep(text: string, maxChars: number): string {
       out.push(`  ... +${hits.length - PER_FILE_KEEP} more`);
     }
     if (out.join("\n").length > maxChars) {
-      out.push(`…[truncated remaining ${sorted.length - sorted.indexOf([path, hits])} files]…`);
+      out.push(`…[truncated remaining ${sorted.length - idx - 1} files]…`);
       break;
     }
   }

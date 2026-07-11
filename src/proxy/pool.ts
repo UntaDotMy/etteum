@@ -597,25 +597,39 @@ class AccountPool {
    * it. A subsequent success resets the counter.
    */
   async markError(accountId: number, errorMessage: string): Promise<void> {
-    const [cur] = await db.select({ cae: accounts.consecutiveAuthErrors })
-      .from(accounts).where(eq(accounts.id, accountId)).limit(1);
-    const consecutive = (cur?.cae ?? 0) + 1;
-    const terminal = consecutive >= TERMINAL_ERROR_THRESHOLD;
-
+    // Atomic increment: SET consecutive_auth_errors = consecutive_auth_errors + 1
+    // in a single statement with RETURNING, so two concurrent failures can't
+    // both read the same baseline and lose an increment (read-modify-write race).
     const [account] = await db
       .update(accounts)
       .set({
-        ...(terminal
-          ? { status: "error" as const, cooldownUntil: null }
-          : { status: "active" as const, cooldownUntil: new Date(Date.now() + 30_000) }),
+        // Increment atomically; SQLite applies SET col = col + 1 under its row lock.
+        consecutiveAuthErrors: sql`${accounts.consecutiveAuthErrors} + 1`,
         errorMessage,
-        consecutiveAuthErrors: consecutive,
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
       .returning();
 
-    if (account) this.invalidate(account.provider as ProviderName);
+    if (!account) return;
+    const consecutive = account.consecutiveAuthErrors ?? 0;
+    const terminal = consecutive >= TERMINAL_ERROR_THRESHOLD;
+    if (terminal) {
+      // Flip to terminal error state in a second (still-atomic) update.
+      await db.update(accounts).set({
+        status: "error",
+        cooldownUntil: null,
+        updatedAt: new Date(),
+      }).where(eq(accounts.id, accountId));
+    } else {
+      await db.update(accounts).set({
+        status: "active",
+        cooldownUntil: new Date(Date.now() + 30_000),
+        updatedAt: new Date(),
+      }).where(eq(accounts.id, accountId));
+    }
+
+    this.invalidate(account.provider as ProviderName);
 
     broadcast({
       type: "account_status",
@@ -628,27 +642,31 @@ class AccountPool {
     // cooldown (2s, 4s, 8s, … capped at BACKOFF_MAX_MS). The account stays
     // `active` but is excluded from selection by cooldownUntil. Auto-reinstates
     // when the timestamp passes — no manual action, no permanent disable.
-    const [cur] = await db.select({ ctf: accounts.consecutiveTransientFailures, nb: accounts.nextBackoffMs })
-      .from(accounts).where(eq(accounts.id, accountId)).limit(1);
-    const failures = (cur?.ctf ?? 0) + 1;
-    const baseDelay = cur?.nb && cur.nb > 0 ? cur.nb : BACKOFF_INITIAL_MS;
-    const delay = Math.min(baseDelay * 2, BACKOFF_MAX_MS);
-    const cooldownUntil = new Date(Date.now() + delay);
-
+    //
+    // ATOMIC: increment the failure counter AND double the backoff in a single
+    // SQL statement with RETURNING, so concurrent transient failures can't both
+    // read the same baseline and lose an increment / under-compute the backoff.
+    // next_backoff_ms = min(coalesce(nullif(next_backoff_ms,0), <initial>)*2, <max>)
     const [account] = await db
       .update(accounts)
       .set({
         status: "active",
         errorMessage,
-        cooldownUntil,
-        consecutiveTransientFailures: failures,
-        nextBackoffMs: delay,
+        consecutiveTransientFailures: sql`${accounts.consecutiveTransientFailures} + 1`,
+        nextBackoffMs: sql`MIN(COALESCE(NULLIF(${accounts.nextBackoffMs}, 0), ${BACKOFF_INITIAL_MS}) * 2, ${BACKOFF_MAX_MS})`,
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
       .returning();
 
-    if (account) this.invalidate(account.provider as ProviderName);
+    if (!account) return;
+    const failures = account.consecutiveTransientFailures ?? 0;
+    const delay = account.nextBackoffMs ?? BACKOFF_INITIAL_MS;
+    const cooldownUntil = new Date(Date.now() + delay);
+    // Set the cooldown timestamp from the atomically-computed delay.
+    await db.update(accounts).set({ cooldownUntil, updatedAt: new Date() }).where(eq(accounts.id, accountId));
+
+    this.invalidate(account.provider as ProviderName);
 
     broadcast({
       type: "account_status",

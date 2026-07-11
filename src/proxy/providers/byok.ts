@@ -468,7 +468,10 @@ export class ByokProvider extends BaseProvider {
           return { kind: "banned", success: false, error: "BYOK key forbidden (HTTP 403 — key may be disabled, IP-restricted, or banned)" };
         }
         if (resp.status === 429) {
-          return { kind: "healthy", success: true };
+          // Rate limited — key is valid but should be backed off, not routed to
+          // (a 'healthy' 429 key keeps receiving requests that then fail). Per
+          // RFC 6585, 429 is a throttling signal for a valid client.
+          return { kind: "transient_error", success: false, retryable: true, error: "BYOK upstream rate limited (HTTP 429)" };
         }
         if (resp.status >= 500) {
           return { kind: "transient_error", success: false, retryable: true, error: `BYOK upstream HTTP ${resp.status}` };
@@ -502,8 +505,8 @@ export class ByokProvider extends BaseProvider {
         return { kind: "banned", success: false, error: "BYOK key forbidden (HTTP 403 — key may be disabled, IP-restricted, or banned)" };
       }
       if (resp.status === 429) {
-        // Rate limited but key is valid
-        return { kind: "healthy", success: true };
+        // Rate limited — back off rather than marking healthy (RFC 6585).
+        return { kind: "transient_error", success: false, retryable: true, error: "BYOK upstream rate limited (HTTP 429)" };
       }
       if (resp.status >= 500) {
         return { kind: "transient_error", success: false, retryable: true, error: `BYOK upstream HTTP ${resp.status}` };
@@ -706,11 +709,12 @@ export class ByokProvider extends BaseProvider {
     this.appendOptionalParams(body, request);
 
     try {
+      const upstreamAbort = new AbortController();
       const response = await this.fetchWithTimeout(url, {
         method: "POST",
         headers,
         body: JSON.stringify(body),
-      });
+      }, config.providerRequestTimeoutMs, upstreamAbort.signal);
 
       if (response.status === 401) {
         return { success: false, error: `expired: HTTP 401` };
@@ -732,10 +736,13 @@ export class ByokProvider extends BaseProvider {
       const model = request.model;
       const encoder = new TextEncoder();
       const upstream = response.body;
+      // Hoisted so cancel() can release the upstream reader on client disconnect.
+      let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           const reader = upstream.getReader();
+          upstreamReader = reader;
           const decoder = new TextDecoder();
           let buffer = "";
 
@@ -773,6 +780,12 @@ export class ByokProvider extends BaseProvider {
           } catch (err) {
             try { controller.error(err); } catch { /* already errored */ }
           }
+        },
+        async cancel(reason) {
+          try {
+            await upstreamReader?.cancel(reason).catch(() => {});
+            upstreamAbort.abort();
+          } catch { /* never throw from cancel */ }
         },
       });
 

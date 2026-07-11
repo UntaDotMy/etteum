@@ -736,12 +736,25 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
 
 /**
  * GET /v1/models - List available models
+ * ?active=1 — return ONLY models backed by an active+enabled account (so the
+ *   caller doesn't fetch the entire catalog including models no account can
+ *   serve). Useful for clients that want a lean, usable model list.
  */
 proxyRouter.get("/v1/models", async (c) => {
   // Ensure BYOK cache is fresh before listing models.
   // Without this, the sync getModels() returns stale/empty supportedModels.
   await refreshByokModels();
-  const models = getAllModels();
+  let models = getAllModels();
+  if (c.req.query("active") === "1") {
+    // Filter to models that have at least one active+enabled account that can
+    // serve them. This is per-model, parallelizable but bounded by model count.
+    const filtered: typeof models = [];
+    await Promise.all(models.map(async (m) => {
+      const acct = await pool.getAccountForModel(m.id).catch(() => null);
+      if (acct) filtered.push(m);
+    }));
+    models = filtered;
+  }
   return c.json({
     object: "list",
     data: models,

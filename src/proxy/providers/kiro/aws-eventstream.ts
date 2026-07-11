@@ -146,7 +146,7 @@ export function extractKiroText(events: Array<{ payload: any }>): string {
     for (const key of Object.keys(value)) visit(value[key]);
   };
   for (const event of events) visit(event.payload);
-  return [...new Set(parts)].join("");
+  return parts.join("");
 }
 
 export function extractKiroToolCalls(events: Array<{ headers: Record<string, string>; payload: any }>): any[] {

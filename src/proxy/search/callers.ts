@@ -72,10 +72,20 @@ function buildBraveRequest(config: SearchProviderConfig, p: SearchRequestParams)
 }
 
 function buildPerplexityRequest(config: SearchProviderConfig, p: SearchRequestParams): BuiltRequest {
-  const body: any = { query: p.query, max_results: p.maxResults };
-  if (p.country) body.country = p.country;
-  if (p.language) body.search_language_filter = [p.language];
-  if (p.domainFilter?.length) body.search_domain_filter = p.domainFilter;
+  // Perplexity's Sonar API is OpenAI-compatible: POST /chat/completions with a
+  // { model, messages } body — NOT { query, max_results } (that was rejected by
+  // the API, so dedicated Perplexity search always returned empty). The search
+  // is performed server-side by the sonar model; results + citations come back
+  // in the chat-completion response + the `citations` field.
+  // Ref: https://docs.perplexity.ai/api-reference/sonar-post
+  const body: any = {
+    model: "sonar",
+    messages: [
+      { role: "system", content: "Be precise and concise. Provide sources." },
+      { role: "user", content: p.query },
+    ],
+    max_tokens: Math.min(1024, p.maxResults * 256),
+  };
   return {
     url: resolveBaseUrl(config),
     init: { method: "POST", headers: applyAuth({ "Content-Type": "application/json" }, config.authHeader, p.token), body: JSON.stringify(body) },

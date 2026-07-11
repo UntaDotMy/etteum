@@ -15,7 +15,7 @@ import { isValidApiKey, resolveApiKey } from "./api/keys";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { autoRefreshScheduler } from "./auth/refresh-scheduler";
-import { db } from "./db/index";
+import { db, client as sqliteClient } from "./db/index";
 import { filterRules, apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { sql, inArray } from "drizzle-orm";
@@ -289,10 +289,26 @@ app.use("/v1/*", async (c, next) => {
 });
 
 // API Key authentication for management API
+// Paths that may be reached WITHOUT an API key. These either carry their own
+// auth (dashboard password / OIDC / key-test / brute-force lockout) or are
+// non-sensitive public reads. The dashboard login flow MUST be reachable
+// before the user has a key — otherwise login is impossible on a fresh
+// install (OWASP API2:2023 Broken Authentication).
+const AUTHLESS_API_PATHS = new Set([
+  "/api/health",
+  "/api/info",
+  "/api/keys/test",
+  "/api/dashboard-auth/status",
+  "/api/dashboard-auth/login",
+  "/api/dashboard-auth/logout",
+  "/api/dashboard-auth/oidc/start",
+  "/api/dashboard-auth/oidc/callback",
+  "/api/dashboard-auth/oidc/test",
+]);
 app.use("/api/*", async (c, next) => {
   // Allow health check, info, key validation, and SSE frame streams without header auth
   // (EventSource cannot send custom headers, so SSE uses ?token= query param)
-  if (c.req.path === "/api/health" || c.req.path === "/api/info" || c.req.path === "/api/keys/test") {
+  if (AUTHLESS_API_PATHS.has(c.req.path)) {
     await next();
     return;
   }
@@ -482,13 +498,21 @@ console.log(`
 `);
 
 // F10: on shutdown, stop the MITM server + strip DNS hijack entries so the
-// IDEs' hardcoded vendor hosts resolve normally again. Best-effort.
-function gracefulShutdown(signal: string): void {
-  console.log(`\n[shutdown] ${signal} received — cleaning up MITM…`);
+// IDEs' hardcoded vendor hosts resolve normally again. Best-effort. Also
+// drain the HTTP server (let in-flight requests finish) and checkpoint the
+// SQLite WAL so recent writes aren't left unflushed.
+async function gracefulShutdown(signal: string): Promise<void> {
+  console.log(`\n[shutdown] ${signal} received — cleaning up…`);
   try { disableMitm(); } catch { /* best effort */ }
+  // Stop accepting new connections; allow in-flight requests a moment to finish.
+  try { server.stop(true); } catch { /* best effort */ }
+  // Flush the WAL to the main DB file so committed writes survive the exit.
+  try { sqliteClient.run("PRAGMA wal_checkpoint(TRUNCATE)"); } catch { /* best effort */ }
+  try { sqliteClient.close(); } catch { /* best effort */ }
   process.exit(0);
 }
-process.on("SIGTERM", () => gracefulShutdown("SIGTERM"));
-process.on("SIGINT", () => gracefulShutdown("SIGINT"));
+let shuttingDown = false;
+process.on("SIGTERM", () => { if (!shuttingDown) { shuttingDown = true; void gracefulShutdown("SIGTERM"); } });
+process.on("SIGINT", () => { if (!shuttingDown) { shuttingDown = true; void gracefulShutdown("SIGINT"); } });
 
 export default server;
