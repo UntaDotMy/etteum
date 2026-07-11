@@ -310,6 +310,7 @@ export class GrokProvider extends BaseProvider {
     });
     if (!bearer) throw new Error("expired: OAuth access token could not be refreshed");
 
+
     // Resolve the CLI version dynamically (rot-proof against CLI updates).
     const cliVersion = await getGrokCliVersion();
 

@@ -39,7 +39,17 @@ const DB: Record<string, CapEntry[]> = {
   kiro: [["*", { thinking: true }]],
   "kiro-pro": [["*", { thinking: true }]],
   codebuddy: [["*", { thinking: true }]],
-  "codebuddy-china": [["*", { thinking: true }]],
+  "codebuddy-china": [
+    // Most codebuddy-china models support vision (glm-5.1/5.2/5v-turbo,
+    // kimi-k2.5/2.6/2.7, deepseek-v3-2-volc/v4-flash/v4-pro, minimax-m3).
+    // Only these text-only models must be excluded (declared vision:false in
+    // codebuddy-china.ts) — list them first, then fall back to vision:true.
+    ["cbc-haiku-4.5", { thinking: false }],
+    ["cbc-deepseek-r1", { thinking: true }],
+    ["cbc-deepseek-v3", { thinking: false }],
+    ["cbc-hy3-preview", { thinking: false }],
+    ["*", { vision: true, thinking: true }],
+  ],
   canva: [["*", { vision: true }]],
   codex: [["*", { thinking: true }]],
   qoder: [["*", { thinking: true }]],
