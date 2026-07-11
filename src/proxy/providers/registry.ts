@@ -84,9 +84,12 @@ export const providers = {
   alibaba,
   antigravity,
   cursor,
-  grok,
-  // F13: API-key catalog.
+  // F13: API-key catalog (ids must not collide with first-party keys below).
   ...Object.fromEntries(openaiCompatibleProviders.map((p) => [p.name, p])),
+  // First-party GrokProvider MUST win over any catalog id named "grok".
+  // Historically OPENAI_COMPATIBLE_CATALOG had id:"grok", which overwrote this
+  // entry and made OAuth/SSO accounts hit decrypt(password) as Bearer.
+  grok,
 } as const;
 
 export type ProviderName = keyof typeof providers;

@@ -224,11 +224,16 @@ export const OPENAI_COMPATIBLE_CATALOG: OpenAICompatibleSpec[] = [
     prefix: "fireworks",
     models: ["accounts/fireworks/models/llama-v3p3-70b-instruct", "accounts/fireworks/models/qwen2p5-72b-instruct"],
   },
+  // API-key relay for console.x.ai. MUST NOT use id/prefix "grok" — that name
+  // is owned by the first-party GrokProvider (OAuth/SSO + cli-chat-proxy). A
+  // colliding id silently overwrites providers.grok in the registry map and
+  // routes OAuth accounts through decrypt(password) → garbage Bearer headers
+  // (Bun: Header '14' has invalid value: 'Bearer ŜȶL]…').
   {
-    id: "grok",
-    displayName: "xAI Grok",
+    id: "xai",
+    displayName: "xAI (API key)",
     baseUrl: "https://api.x.ai/v1",
-    prefix: "grok",
+    prefix: "xai",
     models: ["grok-2", "grok-2-latest", "grok-beta"],
   },
 ];

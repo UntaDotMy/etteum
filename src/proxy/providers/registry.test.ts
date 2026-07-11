@@ -12,12 +12,24 @@
  * cache is injected via its test hook so routing is deterministic.
  */
 import { describe, test, expect, beforeEach } from "bun:test";
-import { getProviderForModel } from "./registry";
+import { getProviderForModel, providers } from "./registry";
+import { GrokProvider } from "./grok";
 import { resetCustomModelsRegistry, __setCustomModelsForTest } from "./custom-models";
 
 describe("getProviderForModel — strict per-provider routing (no kiro catch-all)", () => {
   beforeEach(() => {
     resetCustomModelsRegistry();
+  });
+
+  test("providers.grok is the first-party GrokProvider, not the xAI API-key catalog relay", () => {
+    // Regression: OPENAI_COMPATIBLE_CATALOG used id:"grok", which overwrote
+    // the real GrokProvider in the providers map. OAuth accounts then had
+    // password "oauth:no-password" XOR-decrypted into a binary Bearer and
+    // Bun threw: Header '14' has invalid value: 'Bearer ŜȶL]…'.
+    expect(providers.grok).toBeInstanceOf(GrokProvider);
+    expect(providers.grok.name).toBe("grok");
+    expect(getProviderForModel("grok-4.5")).toBe("grok");
+    expect(getProviderForModel("grok-4.5-reasoning")).toBe("grok");
   });
 
   test("a model kiro genuinely owns routes to kiro", () => {
