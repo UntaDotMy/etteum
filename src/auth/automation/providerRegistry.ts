@@ -10,6 +10,7 @@ import type { ProviderAdapter } from "./providerAdapter";
 import { KiroAdapter } from "./adapters/kiroAdapter";
 import { CodexAdapter } from "./adapters/codexAdapter";
 import { CodeBuddyAdapter } from "./adapters/codebuddyAdapter";
+import { GrokAdapter } from "./adapters/grokAdapter";
 
 const REGISTRY = new Map<string, () => ProviderAdapter>();
 
@@ -35,6 +36,7 @@ export function listAdapters(): string[] {
 registerAdapter("kiro", () => new KiroAdapter());
 registerAdapter("codex", () => new CodexAdapter());
 registerAdapter("codebuddy", () => new CodeBuddyAdapter());
+registerAdapter("grok", () => new GrokAdapter());
 
 // TODO (remaining adapters): canva, qoder — each implements the
 // ProviderAdapter contract.

@@ -122,6 +122,20 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
 
   // ── xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ──
   "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
+  // ── xAI Grok — grok.com web surface (reverse-engineered app-chat via GrokProvider) ──
+  "grok-4.20":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-4.20-fast":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-4.20-reasoning":    { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.20-super":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.20-heavy":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.3-beta":          { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-4.3-reasoning":     { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.3-heavy":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-auto":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-fast":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-reasoning":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-heavy":             { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+
   "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-build-0.1":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
 
