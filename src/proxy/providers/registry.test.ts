@@ -21,15 +21,22 @@ describe("getProviderForModel — strict per-provider routing (no kiro catch-all
     resetCustomModelsRegistry();
   });
 
-  test("providers.grok is the first-party GrokProvider, not the xAI API-key catalog relay", () => {
-    // Regression: OPENAI_COMPATIBLE_CATALOG used id:"grok", which overwrote
-    // the real GrokProvider in the providers map. OAuth accounts then had
-    // password "oauth:no-password" XOR-decrypted into a binary Bearer and
-    // Bun threw: Header '14' has invalid value: 'Bearer ŜȶL]…'.
+  test("providers.grok is the first-party GrokProvider; no parallel xai catalog", () => {
+    // Regression: OPENAI_COMPATIBLE_CATALOG used id:"grok" (later "xai"), which
+    // either overwrote GrokProvider or split the dashboard into two provider
+    // groups. Grok is first-party only.
     expect(providers.grok).toBeInstanceOf(GrokProvider);
     expect(providers.grok.name).toBe("grok");
+    expect((providers as Record<string, unknown>).xai).toBeUndefined();
     expect(getProviderForModel("grok-4.5")).toBe("grok");
     expect(getProviderForModel("grok-4.5-reasoning")).toBe("grok");
+    expect(getProviderForModel("grok-auto")).toBe("grok");
+    // Legacy console API ids are not claimed by any provider after xai removal.
+    expect(getProviderForModel("grok-2")).toBeNull();
+    // Catalog models are all owned_by "grok" (active-account list has one group).
+    for (const m of providers.grok.getModels()) {
+      expect(m.owned_by).toBe("grok");
+    }
   });
 
   test("a model kiro genuinely owns routes to kiro", () => {

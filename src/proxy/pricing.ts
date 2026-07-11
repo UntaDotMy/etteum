@@ -98,8 +98,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gemini-3.1-pro":               { input: 2.50,  output: 15.00, cached: 0.25,  reasoning: 22.50,  cacheCreation: 2.50  },
   "gemini-3.5-flash":             { input: 0.30,  output: 2.50,  cached: 0.03,  reasoning: 3.75,   cacheCreation: 0.30  },
 
-  // === xAI Grok — docs.x.ai (latest: grok-4.5, grok-4.3) ===
+  // === Grok (first-party GrokProvider) ===
   "grok-4.5":                     { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.00  },
+  "grok-4.5-reasoning":           { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.00  },
   // === xAI Grok — grok.com web surface (free web quota; cost = 0) ===
   "grok-4.20":                    { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
   "grok-4.20-fast":               { input: 0,     output: 0,     cached: 0,     reasoning: 0,     cacheCreation: 0 },
@@ -139,10 +140,6 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "llama-3.3-70b-versatile":      { input: 0.59,  output: 0.79,  cached: 0.059,  reasoning: 0.79,  cacheCreation: 0.59  },
   "llama-3.1-70b-versatile":      { input: 0.59,  output: 0.79,  cached: 0.059,  reasoning: 0.79,  cacheCreation: 0.59  },
   "mixtral-8x7b-32768":           { input: 0.24,  output: 0.24,  cached: 0.024,  reasoning: 0.24,  cacheCreation: 0.24  },
-  // xAI Grok — docs.x.ai (grok-2 legacy rates)
-  "grok-2":                       { input: 2.00,  output: 10.00, cached: 0.20,   reasoning: 10.00, cacheCreation: 2.00  },
-  "grok-2-latest":                { input: 2.00,  output: 10.00, cached: 0.20,   reasoning: 10.00, cacheCreation: 2.00  },
-  "grok-beta":                    { input: 5.00,  output: 15.00, cached: 0.50,   reasoning: 15.00, cacheCreation: 5.00  },
   // Cohere — docs.cohere.com
   "command-r-plus":               { input: 2.50,  output: 10.00, cached: 0.25,   reasoning: 10.00, cacheCreation: 2.50  },
   "command-r":                    { input: 0.50,  output: 1.50,  cached: 0.05,   reasoning: 1.50,  cacheCreation: 0.50  },
