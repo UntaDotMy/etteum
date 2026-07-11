@@ -52,8 +52,10 @@ interface TurnSession {
 
 const encoder = new TextEncoder();
 
-/** Parse one or more SSE-framed events out of a text buffer. Returns the events. */
-function parseSseEvents(text: string): { event: string; data: string }[] {
+/** Parse one or more SSE-framed events out of a text buffer. Returns the events.
+ *  Exported for direct unit testing (the handler is otherwise hard to test in
+ *  isolation — it drives a WebSocket pump). */
+export function parseSseEvents(text: string): { event: string; data: string }[] {
   const out: { event: string; data: string }[] = [];
   for (const block of text.split("\n\n")) {
     if (!block.trim()) continue;
@@ -61,7 +63,14 @@ function parseSseEvents(text: string): { event: string; data: string }[] {
     let data = "";
     for (const line of block.split("\n")) {
       if (line.startsWith("event:")) event = line.slice(6).trim();
-      else if (line.startsWith("data:")) data += line.slice(5).trim();
+      else if (line.startsWith("data:")) {
+        // WHATWG event-stream spec: join multiple data: field values with a
+        // single U+000A LINE FEED between them, and strip only ONE leading
+        // space (not all whitespace). The old code joined with no separator
+        // and .trim()'d — corrupting multi-line JSON payloads.
+        const value = line.slice(5).replace(/^ /, "");
+        data = data ? data + "\n" + value : value;
+      }
     }
     if (event) out.push({ event, data });
   }

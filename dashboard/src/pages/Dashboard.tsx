@@ -37,6 +37,7 @@ export default function Dashboard() {
     requests: totalRequests,
     successRate: totalRequests > 0 ? Number(((successRequests / totalRequests) * 100).toFixed(1)) : 0,
     totalTokens: Number(stats?.tokens?.total || 0),
+    cost: Number(stats?.cost?.total || 0),
   };
 
   const tokenStats = {

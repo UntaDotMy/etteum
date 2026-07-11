@@ -181,10 +181,11 @@ export const config = {
   gitlabDuoPreflightCacheMs: Number(process.env.POOLPROX_GITLAB_DUO_PREFLIGHT_CACHE_MS) || 30_000,
   gitlabDuoPreflightTimeoutMs: Number(process.env.POOLPROX_GITLAB_DUO_PREFLIGHT_TIMEOUT_MS) || 5_000,
   // Auto-approve PLAN_APPROVAL_REQUIRED + TOOL_CALL_APPROVAL_REQUIRED frames.
-  // Default ON — poolprox3 is a transparent proxy and clients (Claude Code,
-  // Cline, Roo Code) typically don't expose plan-approval UX. Set to "false"
-  // for strict orgs that want every approval surfaced as turn-end.
-  gitlabDuoAutoApprove: process.env.POOLPROX_GITLAB_DUO_AUTO_APPROVE !== "false",
+  // Default OFF (opt-in) — auto-approving upstream tool/plan actions, which
+  // can include arbitrary shell, is an OWASP LLM06:2025 Excessive Agency risk.
+  // Set POOLPROX_GITLAB_DUO_AUTO_APPROVE="true" for transparent-proxy clients
+  // (Claude Code, Cline, Roo Code) that don't surface plan-approval UX.
+  gitlabDuoAutoApprove: process.env.POOLPROX_GITLAB_DUO_AUTO_APPROVE === "true",
   // Whether to let Duo's agent pause workflows mid-task to ask clarifying
   // questions of the user via INPUT_REQUIRED checkpoints. The CLI sets this
   // to true because there's a human at a TTY; the proxy serves chat clients
@@ -204,7 +205,12 @@ export const config = {
   gitlabDuoDebugLog: process.env.POOLPROX_DUO_DEBUG_LOG === "1",
   // Kiro Pro upgrade settings
   kiroProUpgrade: process.env.KIRO_PRO_UPGRADE === "true",
-  billingAddress: JSON.parse(process.env.BILLING_ADDRESS || '{"name":"John Doe","country":"US","line1":"123 Main St","city":"New York","state":"NY","postal_code":"10001"}'),
+  billingAddress: (() => {
+    const DEFAULT_BILLING = { name: "John Doe", country: "US", line1: "123 Main St", city: "New York", state: "NY", postal_code: "10001" };
+    const raw = process.env.BILLING_ADDRESS;
+    if (!raw) return DEFAULT_BILLING;
+    try { return JSON.parse(raw); } catch { console.warn("[config] BILLING_ADDRESS is malformed JSON — using default."); return DEFAULT_BILLING; }
+  })(),
   browserEngine: process.env.BROWSER_ENGINE || "camoufox",
   captchaService: process.env.CAPTCHA_SERVICE || "none",
   captchaApiKey: process.env.CAPTCHA_API_KEY || "",

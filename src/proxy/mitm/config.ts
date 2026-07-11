@@ -43,11 +43,8 @@ export const MODEL_SYNONYMS: Record<string, string> = {
 /** Models that should NOT be remapped (passthrough as-is). */
 export const MODEL_NO_MAP = new Set<string>(["auto", "cursor-small"]);
 
-/**
- * Host rewrite for the upstream forward. The PROD cloudcode-pa endpoint is
- * rate-limited (429); the daily- (dev) endpoint accepts the same body+token.
- * Same trick as open-sse. Mirrors reference HOST_REWRITE.
- */
-export const HOST_REWRITE: Record<string, string> = {
-  "cloudcode-pa.googleapis.com": "daily-cloudcode-pa.googleapis.com",
-};
+// NOTE: a former HOST_REWRITE map (cloudcode-pa → daily-cloudcode-pa, a 429
+// dodge for direct upstream forwarding) was removed: it was never applied —
+// the MITM server forwards intercepted requests to the LOCAL router, not to
+// the upstream host, so rewriting the upstream host was dead code. Re-add +
+// wire it into handlers.ts if direct-upstream forwarding is ever introduced.

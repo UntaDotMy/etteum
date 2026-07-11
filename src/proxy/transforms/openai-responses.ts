@@ -583,9 +583,13 @@ export function chatStreamToResponsesStream(
   let seq = 0;
   const nextSeq = () => seq++;
 
+  // Hoisted so cancel() can release the UPSTREAM reader on client disconnect
+  // (the prior cancel() only stopped local emission, leaking chatStream).
+  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = chatStream.getReader();
+      upstreamReader = reader;
       const decoder = new TextDecoder();
       // Emit a canonical OpenAI Responses SSE event. The JSON `data` MUST
       // include `type` (the SDK parses data.type, not the SSE event: field)
@@ -833,6 +837,9 @@ export function chatStreamToResponsesStream(
     async cancel(reason) {
       void reason;
       closed = true;
+      try {
+        await upstreamReader?.cancel(reason).catch(() => {});
+      } catch { /* never throw from cancel */ }
     },
   });
 }

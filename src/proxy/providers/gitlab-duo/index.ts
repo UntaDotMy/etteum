@@ -1851,6 +1851,15 @@ export class GitlabDuoProvider extends BaseProvider {
     if (result.toolCall) {
       // Register the WS so the next turn (which will carry a tool_result) can
       // find it and resume via actionResponse.
+      //
+      // DRY NOTE: this session-registration + token/credit computation block is
+      // duplicated in toStreamResult's final-usage path (search for the other
+      // registerSession([tc.id], ...) call). The two intentionally diverge in
+      // how they SHAPE output (ChatCompletionResponse vs SSE StreamChunk) but
+      // share the registration + estimateMessagesTokens + creditsPerCall logic.
+      // A future refactor should extract a private registerTurnAndComputeCredits()
+      // helper so the credit formula has one authoritative home; until then,
+      // changes here must be mirrored in the streaming path.
       const tc = result.toolCall;
       const cb: SessionCallbacks = {
         // Continuation iterators will replace these — keep them as no-ops here

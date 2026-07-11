@@ -11,6 +11,7 @@ import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { applyModelSpecs } from "../model-specs";
+import { getUpstreamNameOverride } from "./custom-models";
 
 // ============================================================================
 // Qoder CLI port — auth + chat (PAT/COSY flow, no browser cookie)
@@ -634,7 +635,11 @@ function deriveSessionId(messages: ChatCompletionRequest["messages"]): string {
 function buildChatBody(request: ChatCompletionRequest, tokens: QoderTokens): any {
   const prompt = extractLatestUserPrompt(request);
   const images = extractLatestUserImages(request);
-  const cfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+  const baseCfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+  // Honor operator-set upstream-name override (catalog rename). Clone so we
+  // never mutate the shared MODEL_CONFIGS entry.
+  const upstreamOverride = getUpstreamNameOverride(request.model);
+  const cfg = upstreamOverride ? { ...baseCfg, upstream: upstreamOverride } : baseCfg;
   const reqId = crypto.randomUUID();
   const chatRecordId = crypto.randomUUID();
   const sessionId = deriveSessionId(request.messages);
@@ -902,11 +907,20 @@ export class QoderProvider extends BaseProvider {
     let finalUsage = { prompt_tokens: 0, completion_tokens: 0, total_tokens: 0 };
 
     try {
+      // Buffer raw bytes across reads: a single SSE `data:` line can be split
+      // across TCP segments, so splitting per-read would feed a partial JSON
+      // string to JSON.parse (silently dropped by the catch) and lose tokens.
+      let sseBuffer = "";
       while (true) {
         const { done, value } = await reader.read();
         if (done) break;
-        const text = decoder.decode(value, { stream: true });
-        for (const line of text.split("\n")) {
+        sseBuffer += decoder.decode(value, { stream: true });
+        // Process complete lines (terminated by \n). The trailing partial line
+        // stays in the buffer for the next read.
+        let nlIdx: number;
+        while ((nlIdx = sseBuffer.indexOf("\n")) >= 0) {
+          const line = sseBuffer.slice(0, nlIdx);
+          sseBuffer = sseBuffer.slice(nlIdx + 1);
           if (!line.startsWith("data: ")) continue;
           if (line === "data: [DONE]") continue;
           try {
@@ -996,13 +1010,16 @@ export class QoderProvider extends BaseProvider {
     let resp: Response;
     try {
       const cfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+      // Honor the override for the x-model-key header too.
+      const upstreamOverride = getUpstreamNameOverride(request.model);
+      const modelKey = upstreamOverride || cfg.upstream;
       const modelSource = body?.model_config?.source || "system";
       resp = await bearerFetch(tokens, {
         url: CHAT_URL,
         body,
         stream: true,
         extraHeaders: {
-          "x-model-key": cfg.upstream,
+          "x-model-key": modelKey,
           "x-model-source": modelSource,
         },
       });
@@ -1078,19 +1095,26 @@ export class QoderProvider extends BaseProvider {
               break;
             }
 
-            // Use Promise.race for timeout on read
+            // Use Promise.race for timeout on read. IMPORTANT: clear the timer
+            // when readPromise wins (the normal case) — otherwise each loop
+            // iteration leaks a dangling setTimeout that holds its reject fn
+            // alive for STREAM_TIMEOUT ms. On long streams this accumulated
+            // thousands of timers (memory leak → OOM).
             const readPromise = reader.read();
+            let timer: ReturnType<typeof setTimeout> | undefined;
             const timeoutPromise = new Promise<{ done: boolean; value?: Uint8Array }>((_, reject) => {
-              setTimeout(() => reject(new Error("Stream read timeout")), STREAM_TIMEOUT);
+              timer = setTimeout(() => reject(new Error("Stream read timeout")), STREAM_TIMEOUT);
             });
 
             let result;
             try {
               result = await Promise.race([readPromise, timeoutPromise]);
             } catch (e) {
+              if (timer) clearTimeout(timer);
               console.error(`[Qoder] Stream read error: ${e instanceof Error ? e.message : String(e)}`);
               break;
             }
+            if (timer) clearTimeout(timer);
 
             if (result.done) break;
             lastActivity = Date.now();

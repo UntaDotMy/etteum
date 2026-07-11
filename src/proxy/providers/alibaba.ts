@@ -771,34 +771,46 @@ export class AlibabaProvider extends BaseProvider {
   /**
    * Decrement per-model quota after a successful completion.
    * Updates the account's tokens in the DB with the new remaining.
+   *
+   * ATOMICITY: re-reads the CURRENT tokens inside a transaction and writes
+   * back, so two concurrent completions on the same account don't both
+   * decrement from the same stale baseline (losing one decrement). The
+   * passed-in `account` may be stale by the time this runs.
    */
   private async decrementModelQuota(
     account: Account,
     upstreamModel: string,
     creditsUsed: number,
   ): Promise<number> {
-    const tokens = this.parseQuotaTokens(account.tokens);
-    const entry = tokens[upstreamModel];
-    if (!entry) {
-      // Unknown model — nothing to decrement. The aggregate quotaRemaining
-      // is handled by pool.decrementQuota() already.
-      return -1;
-    }
+    return await db.transaction(async (tx) => {
+      // Re-read the live tokens row under the transaction.
+      const [row] = await tx.select({ tokens: accounts.tokens })
+        .from(accounts)
+        .where(eq(accounts.id, account.id))
+        .limit(1);
+      const tokens = this.parseQuotaTokens(row?.tokens);
+      const entry = tokens[upstreamModel];
+      if (!entry) {
+        // Unknown model — nothing to decrement. The aggregate quotaRemaining
+        // is handled by pool.decrementQuota() already.
+        return -1;
+      }
 
-    const remaining = Math.max(0, entry.remaining - creditsUsed);
-    entry.remaining = remaining;
-    tokens[upstreamModel] = entry;
+      const remaining = Math.max(0, entry.remaining - creditsUsed);
+      entry.remaining = remaining;
+      tokens[upstreamModel] = entry;
 
-    const quotaTokens: AlibabaQuotaTokens = {
-      modelQuotas: tokens,
-      updatedAt: new Date().toISOString(),
-    };
+      const quotaTokens: AlibabaQuotaTokens = {
+        modelQuotas: tokens,
+        updatedAt: new Date().toISOString(),
+      };
 
-    await db.update(accounts)
-      .set({ tokens: quotaTokens as unknown })
-      .where(eq(accounts.id, account.id));
+      await tx.update(accounts)
+        .set({ tokens: quotaTokens as unknown })
+        .where(eq(accounts.id, account.id));
 
-    return remaining;
+      return remaining;
+    });
   }
 
   /**

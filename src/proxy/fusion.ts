@@ -1,12 +1,19 @@
 /**
  * Fusion strategy for combo routing.
  *
- * Fires all models in a combo in parallel and returns the first successful
- * response. A future iteration can use a judge model to score and rank
- * responses rather than just returning the fastest to respond.
+ * Fans out to all models in a combo in parallel and returns the first
+ * successful (fulfilled) response. A future iteration can use a judge model
+ * to score and rank responses rather than just returning the first to succeed.
  *
- * Currently: "race" semantics — first to respond wins.
- * Future: judge-model scoring for quality-ranked selection.
+ * SEMANTICS NOTE: this uses Promise.allSettled — it waits for ALL models to
+ * settle, then returns the first fulfilled result. It is NOT a true race
+ * (which would cancel losing requests via AbortController once one succeeds).
+ * Consequence: every model's full response (incl. streaming) is consumed and
+ * billed even after one has succeeded, and latency = the slowest model, not
+ * the fastest. This is acceptable for non-streaming judge fusion where all
+ * candidates are needed; for streaming "fastest wins" a true race with
+ * AbortSignal should be implemented (threading a signal through routeRequest
+ * → provider fetches is the required change — see routeRequest signature).
  */
 
 import type { ChatCompletionRequest } from "./providers/base";
@@ -31,7 +38,7 @@ export interface FusionResult {
 export async function routeComboFusion(opts: FusionOptions): Promise<RouteResult> {
   const { request, comboName, models, judgeModel } = opts;
 
-  // Race all models — first successful response wins
+  // Fan out to all models (collect-all via allSettled); return first fulfilled.
   const errors: Array<{ model: string; error: string }> = [];
 
   const results = await Promise.allSettled(

@@ -39,6 +39,25 @@ export interface CustomModelEntry {
   provider: string;
   displayName?: string;
   spec?: CustomModelSpec;
+  /**
+   * When set, this entry RENAMES a hardcoded catalog model: the model whose id
+   * equals `renameFrom` is removed from the list and replaced by this entry
+   * (keyed by the new id). Used when an upstream renames a model and the
+   * operator wants to update the proxy's catalog id without code changes
+   * (e.g. cbc-hy3-preview → cbc-hy3). Routing still resolves via the provider's
+   * ownsModel()/resolveModel(), so the new id must match the provider's prefix
+   * pattern; the provider translates it to the upstream name.
+   */
+  renameFrom?: string;
+  /**
+   * The upstream API model name to send to the provider (overrides the
+   * provider's hardcoded resolveModel map). Used when an upstream renames a
+   * model and the operator updates the catalog: e.g. rename cbc-hy3-preview →
+   * cbc-hy3 with upstreamName 'hy3' → the proxy catalog shows cbc-hy3 and the
+   * provider sends 'hy3' upstream. Looked up by BOTH the new id and the old
+   * (renameFrom) id so already-deployed clients using either name still route.
+   */
+  upstreamName?: string;
 }
 
 /** A stored disabled-model entry (keyed by `${provider}:${model}`). */
@@ -121,13 +140,60 @@ class CustomModelsRegistry {
   /**
    * Merge custom models into a base list AND filter out disabled models.
    * Used by getAllModels() to produce the final /v1/models catalog.
-   * Custom models whose id already exists in the base list are NOT duplicated
-   * (the hardcoded entry wins on id; this avoids duplicate rows).
+   *
+   * - A custom entry WITHOUT `renameFrom` is added if its id isn't already in
+   *   the base list (avoids duplicates).
+   * - A custom entry WITH `renameFrom` REPLACES the base model whose id equals
+   *   `renameFrom` with this entry's id (catalog rename). The base entry is
+   *   removed so only the new id remains.
    */
   applyCustomModelsToList(base: ModelInfo[]): ModelInfo[] {
-    const existingIds = new Set(base.map((m) => m.id));
-    const extras = this.getCustomModels().filter((m) => !existingIds.has(m.id));
-    return [...base, ...extras].filter((m) => !this.isModelDisabled(m.id));
+    // Build the set of ids to remove (renamed-away ids).
+    const renamedAway = new Set<string>();
+    for (const entry of Object.values(this.custom)) {
+      if (entry.renameFrom) renamedAway.add(entry.renameFrom);
+    }
+    // Start from base, minus renamed-away entries.
+    let merged = base.filter((m) => !renamedAway.has(m.id));
+
+    // Add custom entries that are either new ids OR renames (their new id
+    // replaces the removed base entry). Skip pure-adds whose id already exists.
+    const existingIds = new Set(merged.map((m) => m.id));
+    const customModels = this.getCustomModels();
+    for (const cm of customModels) {
+      // Renames always go in (their new id replaced the old). Pure-adds only if
+      // the id isn't already present.
+      const isRename = !!this.findRenameEntry(cm.id);
+      if (isRename || !existingIds.has(cm.id)) {
+        merged.push(cm);
+        existingIds.add(cm.id);
+      }
+    }
+    return merged.filter((m) => !this.isModelDisabled(m.id));
+  }
+
+  /** Find the custom entry whose new id is `newId` AND has a renameFrom. */
+  private findRenameEntry(newId: string): CustomModelEntry | undefined {
+    const entry = this.custom[newId];
+    return entry?.renameFrom ? entry : undefined;
+  }
+
+  /**
+   * Look up a custom-model upstream-name override for `modelId`.
+   * Checks the entry keyed by `modelId` AND any entry whose `renameFrom`
+   * equals `modelId` (so a request for the OLD id still resolves to the new
+   * upstream name). Returns the override or null.
+   */
+  getUpstreamNameOverride(modelId: string): string | null {
+    if (!modelId) return null;
+    // Direct key match.
+    const direct = this.custom[modelId];
+    if (direct?.upstreamName) return direct.upstreamName;
+    // renameFrom match (request came in on the old id).
+    for (const entry of Object.values(this.custom)) {
+      if (entry.renameFrom === modelId && entry.upstreamName) return entry.upstreamName;
+    }
+    return null;
   }
 
   // --- Test-only injection hooks (the DB-backed refresh is exercised via the
@@ -173,6 +239,15 @@ export function isModelDisabled(model: string): boolean {
 }
 export function applyCustomModelsToList(base: ModelInfo[]): ModelInfo[] {
   return customModelsRegistry.applyCustomModelsToList(base);
+}
+
+/**
+ * Look up a custom-model upstream-name override for `modelId`.
+ * Providers call this in their resolveModel() to honor operator-set upstream
+ * names (from catalog renames). Returns null when no override is set.
+ */
+export function getUpstreamNameOverride(modelId: string): string | null {
+  return customModelsRegistry.getUpstreamNameOverride(modelId);
 }
 
 // --- Test-only exports (kept out of the public surface by the __ prefix) ---

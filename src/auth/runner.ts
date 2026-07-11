@@ -24,8 +24,13 @@ const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro", "codex", "codebuddy"]
 
 // Provider ids that the new TS+Camoufox automation layer supports. Logins for
 // these go through loginProvider() instead of the legacy Python subprocess.
+// NOTE: kiro/codex/codebuddy are intentionally ABSENT here — they are claimed
+// first by ENOWXAI_ADAPTER_PROVIDERS (above), which takes precedence in
+// loginAccount(). Including them here was dead code (the enowxai branch
+// returns before this path is reached). If an enowxai adapter is removed for
+// one of those providers, add its id back here to fall through to the native path.
 const NATIVE_AUTOMATION_PROVIDERS = new Set<string>([
-  "kiro", "antigravity", "codex", "gemini-cli", "codebuddy", "codebuddy-cn",
+  "antigravity", "gemini-cli", "codebuddy-cn",
   "qoder", "qwen", "github", "openai", "iflow", "cursor", "cline", "gitlab",
   "claude", "kimi-coding", "kilocode",
 ]);

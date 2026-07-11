@@ -17,6 +17,7 @@ import {
   getCustomModels,
   isModelDisabled,
   applyCustomModelsToList,
+  getUpstreamNameOverride,
 } from "./custom-models";
 import type { ModelInfo } from "./base";
 
@@ -95,6 +96,51 @@ describe("custom-models registry — listing", () => {
     const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
     const matches = result.filter((m) => m.id === "qd-existing");
     expect(matches).toHaveLength(1);
+  });
+
+  test("rename: a custom entry with renameFrom REPLACES the base model id", () => {
+    // Operator renames cbc-hy3-preview → cbc-hy3 (upstream dropped "-preview").
+    __setCustomModelsForTest({
+      "cbc-hy3": {
+        provider: "codebuddy-china",
+        renameFrom: "cbc-hy3-preview",
+        upstreamName: "hy3",
+      },
+    });
+    const result = applyCustomModelsToList([baseModel("cbc-hy3-preview", "codebuddy-china")]);
+    const ids = result.map((m) => m.id);
+    // The old id is gone; the new id is present.
+    expect(ids).not.toContain("cbc-hy3-preview");
+    expect(ids).toContain("cbc-hy3");
+  });
+});
+
+describe("custom-models registry — upstream-name override", () => {
+  beforeEach(() => {
+    resetCustomModelsRegistry();
+  });
+
+  test("returns the override when keyed directly by the new id", () => {
+    __setCustomModelsForTest({
+      "cbc-hy3": { provider: "codebuddy-china", renameFrom: "cbc-hy3-preview", upstreamName: "hy3" },
+    });
+    expect(getUpstreamNameOverride("cbc-hy3")).toBe("hy3");
+  });
+
+  test("returns the override when queried by the OLD id (renameFrom match)", () => {
+    // A client still sending the old id cbc-hy3-preview must resolve to hy3.
+    __setCustomModelsForTest({
+      "cbc-hy3": { provider: "codebuddy-china", renameFrom: "cbc-hy3-preview", upstreamName: "hy3" },
+    });
+    expect(getUpstreamNameOverride("cbc-hy3-preview")).toBe("hy3");
+  });
+
+  test("returns null when no override is set", () => {
+    __setCustomModelsForTest({
+      "cbc-hy3": { provider: "codebuddy-china", renameFrom: "cbc-hy3-preview" },
+    });
+    expect(getUpstreamNameOverride("cbc-hy3")).toBeNull();
+    expect(getUpstreamNameOverride("anything")).toBeNull();
   });
 });
 

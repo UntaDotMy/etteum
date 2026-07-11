@@ -84,6 +84,16 @@ export async function runMigrations() {
   } catch (err) {
     console.error("[DB] provider_nodes table creation skipped:", err);
   }
+
+  // 2026-07-11 — encrypt legacy plaintext VCC card rows at rest (AES-256-GCM).
+  // Skips rows already encrypted. PCI DSS Req 3.4. Safe & idempotent.
+  try {
+    const { migrateVccEncryption } = await import("../api/vcc");
+    const n = await migrateVccEncryption();
+    if (n > 0) console.log(`[DB] Re-encrypted ${n} VCC card(s) at rest.`);
+  } catch (err) {
+    console.error("[DB] VCC encryption migration skipped:", err);
+  }
 }
 
 // Run if called directly

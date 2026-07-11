@@ -7,6 +7,7 @@ import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, DollarS
 import { useEffect, useState, useCallback } from "react";
 import {
   fetchModels,
+  fetchActiveModels,
   fetchCustomModels,
   saveCustomModel,
   deleteCustomModel,
@@ -76,6 +77,7 @@ export default function Models() {
   const [loading, setLoading] = useState(true);
   const [filter, setFilter] = useState<string>("all");
   const [search, setSearch] = useState("");
+  const [activeOnly, setActiveOnly] = useState(false);
   const [showAdd, setShowAdd] = useState(false);
   const [editing, setEditing] = useState<string | null>(null);
   // Per-row test state: model id → { status, error? }
@@ -85,7 +87,7 @@ export default function Models() {
 
   const reload = useCallback(async () => {
     const [modelsRes, customRes, disabledRes, pricingRes] = await Promise.all([
-      fetchModels().catch(() => ({ data: [] })),
+      (activeOnly ? fetchActiveModels() : fetchModels()).catch(() => ({ data: [] })),
       fetchCustomModels().catch(() => ({ custom: {} })),
       fetchDisabledModels().catch(() => ({ disabled: {} })),
       fetchModelPricing().catch(() => ({ pricing: {} })),
@@ -94,7 +96,7 @@ export default function Models() {
     setCustomMap((customRes as { custom: CustomModelsMap }).custom || {});
     setDisabledMap((disabledRes as { disabled: DisabledModelsMap }).disabled || {});
     setPricingMap((pricingRes as { pricing: PricingMap }).pricing || {});
-  }, []);
+  }, [activeOnly]);
 
   useEffect(() => {
     reload()
@@ -110,7 +112,10 @@ export default function Models() {
     ]),
   ).sort();
 
-  const isCustom = (id: string) => !!customMap[id];
+  // A model is "custom" if there's an override keyed by its id OR its canonical
+  // name (edits are stored under the canonical form for cross-provider sharing,
+  // so cbc-hy3-preview's override lives under hy3-preview — both must match).
+  const isCustom = (id: string) => !!(customMap[id] || customMap[toCanonicalModelName(id)]);
   const isDisabled = (provider: string, id: string) => !!disabledMap[`${provider}:${id}`];
 
   const providers = ["all", ...knownProviders];
@@ -142,9 +147,12 @@ export default function Models() {
   }
 
   async function handleDeleteCustom(id: string) {
-    if (!confirm(`Delete custom model "${id}"? This removes it from the catalog and routing.`)) return;
+    // Delete by canonical key (the store keys overrides canonically, so
+    // cbc-hy3-preview's override lives under hy3-preview).
+    const key = customMap[id] ? id : toCanonicalModelName(id);
+    if (!confirm(`Delete custom model "${key}"? This removes it from the catalog and routing.`)) return;
     try {
-      await deleteCustomModel(id);
+      await deleteCustomModel(key);
       setStatusMsg("Custom model deleted");
       await reload();
     } catch (e: any) {
@@ -206,8 +214,8 @@ export default function Models() {
       {editing && (
         <EditModelDialog
           model={models.find((m) => m.id === editing)!}
-          custom={customMap[editing]}
-          pricing={pricingMap[editing]}
+          custom={customMap[editing] || customMap[toCanonicalModelName(editing)]}
+          pricing={pricingMap[editing] || pricingMap[toCanonicalModelName(editing)]}
           onDone={async () => {
             setEditing(null);
             await reload();
@@ -228,6 +236,23 @@ export default function Models() {
               onChange={(e) => setSearch(e.target.value)}
               className="w-full pl-10 pr-4 py-2 bg-[var(--background)] border border-[var(--border)] rounded-lg text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
             />
+          </div>
+          <div className="flex items-center justify-between mt-3">
+            <span className="text-xs text-[var(--muted-foreground)]">
+              {filtered.length} model{filtered.length !== 1 ? "s" : ""}
+              {activeOnly ? " · active accounts only" : ""}
+            </span>
+            <button
+              onClick={() => setActiveOnly((v) => !v)}
+              className={`px-3 py-1 rounded-md text-xs font-medium transition-colors border ${
+                activeOnly
+                  ? "bg-[var(--success)]/15 text-[var(--success)] border-[var(--success)]/30"
+                  : "bg-[var(--secondary)] text-[var(--muted-foreground)] border-[var(--border)] hover:text-[var(--foreground)]"
+              }`}
+              title="When on, fetch only models backed by an active+enabled account"
+            >
+              Active only
+            </button>
           </div>
         </CardContent>
       </Card>
@@ -457,13 +482,17 @@ function EditModelDialog({
   setStatus,
 }: {
   model: ModelData;
-  custom?: { provider: string; displayName?: string; spec?: CustomModelSpec };
+  custom?: { provider: string; displayName?: string; spec?: CustomModelSpec; renameFrom?: string; upstreamName?: string };
   pricing?: { inputPer1M: number; outputPer1M: number; cachedInputPer1M: number; reasoningPer1M?: number; cacheCreationPer1M?: number };
   onDone: () => void;
   setStatus: (s: string) => void;
 }) {
   const spec = custom?.spec;
   const [displayName, setDisplayName] = useState(custom?.displayName ?? model.display_name ?? "");
+  // Catalog rename: the new model id (defaults to the current id; editing it
+  // renames the catalog entry). renameFrom tracks the original hardcoded id.
+  const [modelId, setModelId] = useState(model.id);
+  const [upstreamName, setUpstreamName] = useState(custom?.upstreamName ?? "");
   const [contextWindow, setContextWindow] = useState(spec?.context_window?.toString() ?? model.context_window?.toString() ?? "");
   const [maxOutput, setMaxOutput] = useState(spec?.max_output?.toString() ?? model.max_output?.toString() ?? "");
   const [thinking, setThinking] = useState(spec?.thinking ?? model.thinking ?? false);
@@ -472,7 +501,7 @@ function EditModelDialog({
   const [outputPer1M, setOutputPer1M] = useState(pricing?.outputPer1M?.toString() ?? "");
   const [cachedPer1M, setCachedPer1M] = useState(pricing?.cachedInputPer1M?.toString() ?? "");
   const [saving, setSaving] = useState(false);
-  const [testState, setTestState] = useState<{ status: "idle" | "loading" | "ok" | "fail"; error?: string }>({ status: "idle" });
+  const [testState, setTestState] = useState<{ status: "idle" | "loading" | "ok" | "fail"; error?: string; account?: string }>({ status: "idle" });
 
   async function save() {
     setSaving(true);
@@ -482,19 +511,27 @@ function EditModelDialog({
       if (maxOutput.trim()) newSpec.max_output = Number(maxOutput);
       newSpec.thinking = thinking;
       newSpec.vision = vision;
-      // Persist name + spec override via the custom-model store (idempotent).
-      // Store the override under the CANONICAL model name (not the provider alias)
-      // so it applies across providers (cbc-glm-5.2 -> glm-5.2).
-      const canonicalId = toCanonicalModelName(model.id);
+
+      // Catalog rename: if the operator changed the model id, store the new
+      // entry with renameFrom = the original hardcoded id. The proxy catalog
+      // will then show the new id and route requests for either name to the
+      // upstreamName (if set) or the provider's default resolution.
+      const trimmedId = modelId.trim();
+      const isRename = trimmedId !== model.id;
+      // If no rename, keep storing under the canonical name (cross-provider).
+      // If rename, store under the new (possibly prefixed) id the operator chose.
+      const storeKey = isRename ? trimmedId : toCanonicalModelName(model.id);
       await saveCustomModel({
-        model: canonicalId,
+        model: storeKey,
         provider: custom?.provider || model.owned_by,
         displayName: displayName.trim() || undefined,
         spec: newSpec,
+        ...(isRename ? { renameFrom: model.id } : {}),
+        ...(upstreamName.trim() ? { upstreamName: upstreamName.trim() } : {}),
       });
-      // Persist pricing if any rate was entered.
+      // Persist pricing if any rate was entered (under the same key).
       if (inputPer1M.trim() || outputPer1M.trim() || cachedPer1M.trim()) {
-        await setModelPricing(canonicalId, {
+        await setModelPricing(storeKey, {
           inputPer1M: Number(inputPer1M || 0),
           outputPer1M: Number(outputPer1M || 0),
           cachedInputPer1M: Number(cachedPer1M || 0),
@@ -514,8 +551,12 @@ function EditModelDialog({
   async function runTest() {
     setTestState({ status: "loading" });
     try {
-      const res = await testModel(custom?.provider || model.owned_by, model.id);
-      setTestState(res.ok ? { status: "ok" } : { status: "fail", error: res.error || "Test failed" });
+      // Test the (possibly renamed) model id through the real proxy path.
+      const res = await testModel(custom?.provider || model.owned_by, modelId.trim() || model.id);
+      const acct = res.account ? `${res.account.email} (${res.account.provider})` : undefined;
+      setTestState(res.ok
+        ? { status: "ok", account: acct }
+        : { status: "fail", error: res.error || "Test failed", account: acct });
     } catch (e: any) {
       setTestState({ status: "fail", error: e?.message || "Test failed" });
     }
@@ -532,6 +573,24 @@ function EditModelDialog({
         </DialogHeader>
 
         <div className="space-y-4">
+          {/* Catalog rename + upstream name */}
+          <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+            <div>
+              <label className="text-xs text-[var(--muted-foreground)]">Model ID (catalog)</label>
+              <Input value={modelId} onChange={(e) => setModelId(e.target.value)} placeholder={model.id} />
+              <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+                Change to rename this model in the catalog (e.g. remove "-preview" after an upstream update).
+              </p>
+            </div>
+            <div>
+              <label className="text-xs text-[var(--muted-foreground)]">Upstream name (optional)</label>
+              <Input value={upstreamName} onChange={(e) => setUpstreamName(e.target.value)} placeholder="auto (provider default)" />
+              <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+                The model name sent to the upstream API. Set when the upstream renamed it (e.g. "hy3").
+              </p>
+            </div>
+          </div>
+
           {/* Name */}
           <div>
             <label className="text-xs text-[var(--muted-foreground)]">Display name</label>
@@ -588,9 +647,9 @@ function EditModelDialog({
               {testState.status === "loading" && <Loader2 className="w-4 h-4 animate-spin" />}
               {testState.status === "ok" && <CheckCircle2 className="w-4 h-4" />}
               {testState.status === "fail" && <AlertCircle className="w-4 h-4" />}
-              {testState.status === "ok" ? "Model reachable — connectivity OK"
+              {testState.status === "ok" ? `Model reachable — connectivity OK${testState.account ? ` via ${testState.account}` : ""}`
                 : testState.status === "loading" ? "Testing connectivity…"
-                : testState.error || "Test failed"}
+                : `${testState.error || "Test failed"}${testState.account ? ` (via ${testState.account})` : ""}`}
             </div>
           )}
         </div>

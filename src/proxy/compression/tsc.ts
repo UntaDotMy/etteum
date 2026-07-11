@@ -21,7 +21,12 @@
 import type { ChatCompletionRequest } from "../providers/base";
 import type { TSCConfig } from "./types";
 
-const META_KEYS_TO_DROP = new Set(["$schema", "$id", "$comment", "$ref"]);
+// NOTE: $ref is intentionally NOT dropped — it is a structural JSON-Schema
+// reference (e.g. {"$ref":"#/$defs/foo"}), not metadata. Dropping it corrupts
+// tool definitions by leaving a schema that resolves to nothing. (Found via
+// deep-dive gap analysis; TSC is ON by default, so this affected every
+// tool-bearing request.)
+const META_KEYS_TO_DROP = new Set(["$schema", "$id", "$comment"]);
 const WHITESPACE_RUN_RE = /[ \t]{2,}/g;
 const BLANK_LINE_RUN_RE = /\n[ \t]*\n[ \t\n]*/g;
 

@@ -447,11 +447,12 @@ export class AntigravityProvider extends BaseProvider {
       const upstreamModel = this.resolveModel(request.model);
       const body = openAIToGemini(request, upstreamModel);
 
+      const upstreamAbort = new AbortController();
       const resp = await this.fetchWithTimeout(AG_GENERATE_URL, {
         method: "POST",
         headers: this.apiHeaders(tokens),
         body: JSON.stringify({ ...body, project: tokens.project_id, stream: true }),
-      }, config.providerRequestTimeoutMs);
+      }, config.providerRequestTimeoutMs, upstreamAbort.signal);
 
       if (resp.status === 401) return { success: false, error: "expired: HTTP 401" };
       if (resp.status === 403) return { success: false, error: "Account restricted (HTTP 403)", banned: true };
@@ -465,12 +466,15 @@ export class AntigravityProvider extends BaseProvider {
       const model = request.model;
       const created = Math.floor(Date.now() / 1000);
       const encoder = new TextEncoder();
+      // Hoisted so cancel() can release the upstream reader on client disconnect.
+      let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
           // Emit role.
           controller.enqueue(encoder.encode(`data: ${JSON.stringify({ id, object: "chat.completion.chunk", created, model, choices: [{ index: 0, delta: { role: "assistant" }, finish_reason: null }] })}\n\n`));
           const reader = resp.body!.getReader();
+          upstreamReader = reader;
           const decoder = new TextDecoder();
           let buffer = "";
           try {
@@ -507,6 +511,12 @@ export class AntigravityProvider extends BaseProvider {
           } finally {
             controller.close();
           }
+        },
+        async cancel(reason) {
+          try {
+            await upstreamReader?.cancel(reason).catch(() => {});
+            upstreamAbort.abort();
+          } catch { /* never throw from cancel */ }
         },
       });
 

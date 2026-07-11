@@ -10,6 +10,7 @@ import type { Account } from "../../db/schema";
 import { decrypt } from "../../utils/crypto";
 import { normalizeMessagesToOpenAI } from "../transforms/anthropic";
 import { applyModelSpecs } from "../model-specs";
+import { getUpstreamNameOverride } from "./custom-models";
 import { safeJsonParse } from "../../utils/safe-json";
 
 // ============================================================================
@@ -186,7 +187,12 @@ export class YouMindProvider extends BaseProvider {
   // ── Helpers ────────────────────────────────────────────────────────
 
   private resolveModel(model: string): YouMindModelDef | null {
-    return MODEL_BY_ID[model.toLowerCase()] ?? null;
+    const def = MODEL_BY_ID[model.toLowerCase()] ?? null;
+    if (!def) return null;
+    // Honor operator-set upstream-name override (catalog rename). Clone so the
+    // shared MODEL_BY_ID entry is never mutated.
+    const override = getUpstreamNameOverride(model);
+    return override ? { ...def, upstream: override } : def;
   }
 
   /**

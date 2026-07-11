@@ -153,7 +153,15 @@ export const braveBackend: WebSearchBackend = {
     });
     if (!res.ok) return [];
     const html = await res.text();
-    return parseBraveHtml(html);
+    const results = parseBraveHtml(html);
+    // Distinguish markup drift from "genuinely no results": a non-empty HTML
+    // body that yielded zero organic anchors likely means Brave changed its
+    // markup (CWE-390 — don't fail open silently). Log so it's debuggable;
+    // the cascade still tries the next backend.
+    if (results.length === 0 && html.length > 2000) {
+      console.warn("[web-search] Brave returned HTML but parser found 0 results — markup drift suspected");
+    }
+    return results;
   },
 };
 
@@ -293,7 +301,11 @@ export const duckduckgoBackend: WebSearchBackend = {
     });
     if (!res.ok) return [];
     const html = await res.text();
-    return parseDuckDuckGoLite(html);
+    const results = parseDuckDuckGoLite(html);
+    if (results.length === 0 && html.length > 2000) {
+      console.warn("[web-search] DuckDuckGo Lite returned HTML but parser found 0 results — markup drift suspected");
+    }
+    return results;
   },
 };
 

@@ -7,10 +7,11 @@
  *
  * Combo strategies (stored per-combo in settings as comboStrategies JSON):
  *   fallback  — try first model; on error/rate-limit, fall through to next
- *   sticky    — round-robin within combo, but always use the same combo-level
- *                sticky session (account pinned to combo for the request's lifetime)
  *   fusion    — parallel inference across all models; a judge model picks the best
  *                response (advanced — see fusion.ts)
+ *
+ * NOTE: a "sticky" strategy value appears in the ComboStrategy type for
+ * back-compat, but it is NOT implemented — routeCombo throws if selected.
  *
  * Account exclusion is tracked per combo: if account-1 fails on model-1, it is
  * excluded when retrying model-2 within the same combo.
@@ -117,13 +118,15 @@ export async function resolveCombo(model: string): Promise<string[] | null> {
 
 // ─── Reorder combo models by capability fit ────────────────────────────────────
 
-function reorderByCapabilitiesLocal(models: string[]): string[] {
+function reorderByCapabilitiesLocal(models: string[], messages: { role: string; content: string | any[] | null }[]): string[] {
   if (models.length <= 1) return models;
 
   // Only import if capabilities module exists (it may not always be available)
   try {
     const { reorderByCapabilities, detectRequiredCapabilities } = require("./capabilities");
-    const messages = [] as any[];
+    // TODO: requires populated messages — when called before messages are
+    // attached this is a clean no-op (detectRequiredCapabilities returns an
+    // empty set and we return models unchanged), never a wrong reorder.
     const required = detectRequiredCapabilities(messages);
     if (!required.size) return models;
 
@@ -152,10 +155,20 @@ export async function routeCombo(options: ComboRoutingOptions): Promise<RouteRes
   const strategies = await getComboStrategies();
   const strategy = strategies[comboName]?.fallbackStrategy ?? "fallback";
 
-  // Capability-based reordering for fallback/sticky strategies
+  // "sticky" is documented but not implemented — fail loudly rather than
+  // silently degrading to "fallback", which would mislead operators who
+  // configured it expecting account-pinned semantics.
+  if (strategy === "sticky") {
+    throw new Error(
+      `Combo "${comboName}" uses the "sticky" strategy, which is not implemented. ` +
+      `Use "fallback" or "fusion" instead.`
+    );
+  }
+
+  // Capability-based reordering for fallback strategies
   const orderedModels = strategy === "fusion"
     ? models // fusion tries all in parallel, no reordering needed
-    : reorderByCapabilitiesLocal(models);
+    : reorderByCapabilitiesLocal(models, request.messages ?? []);
 
   if (strategy === "fusion") {
     const judgeModel = strategies[comboName]?.judgeModel;
@@ -179,12 +192,6 @@ interface ComboFallbackOptions {
 
 async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResult> {
   const { request, comboName, models, options } = opts;
-  const strategies = await getComboStrategies();
-  const stickyLimit = (strategies[comboName] as any)?._stickyLimit ?? 3;
-
-  // Per-combo sticky state: round-robin index + consecutive use count
-  const stateKey = `combo:${comboName}`;
-  const state = (globalThis as any)[stateKey] ?? { index: 0, consecutive: 0 };
 
   const excludedAccounts = new Set<number>();
   let lastError = "";
@@ -203,8 +210,25 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         continue;
       }
 
-      const { account } = await pool.getAccountForModel(modelSpec, { excludeAccountIds: excludedAccounts })
-        ?? { account: null };
+      // Mirror routeRequest's account selection: BYOK uses the generic
+      // getAccountForModel (prefix-based, also surfaces error/exhausted
+      // accounts for retry) with exclusion; other providers use the
+      // model-aware getNextAccountForModel so e.g. Alibaba accounts are
+      // filtered to those that can actually query this model.
+      // NOTE: getNextAccountForModel does not support excludeAccountIds, so
+      // excluded accounts may be re-selected; routeRequest has the same
+      // limitation for non-BYOK providers. Excluded set is still maintained
+      // for the BYOK path below.
+      let account;
+      if (providerName === "byok") {
+        account = (await pool.getAccountForModel(modelName, { excludeAccountIds: excludedAccounts }))?.account ?? null;
+      } else {
+        account = await pool.getNextAccountForModel(providerName, modelName);
+        if (account && excludedAccounts.has(account.id)) {
+          // Skip already-tried accounts; loop will fetch the next round.
+          account = null;
+        }
+      }
 
       if (!account) {
         lastError = `No active accounts for ${modelSpec}`;
@@ -215,7 +239,11 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
       excludedAccounts.add(account.id);
 
       try {
-        const result = await routeRequest({ ...request, model: modelSpec }, request.stream ?? false);
+        // Pass the SPLIT model name (after the slash) — not the full
+        // "provider/model" spec — so routeRequest's getProviderForModel
+        // matches the bare model id. Prefixed combo entries like
+        // "gitlab-duo/claude-sonnet-4" would otherwise fail routing.
+        const result = await routeRequest({ ...request, model: modelName }, request.stream ?? false);
         broadcast({
           type: "combo_success",
           data: { comboName, model: modelSpec, accountId: account.id },

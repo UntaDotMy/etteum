@@ -57,7 +57,11 @@ export function applyInjections(
   ponytail: PonytailInjectionConfig,
   providerName?: string,
 ): ApplyInjectionResult {
-  let current = request;
+  // Deep-clone so injectSystemPrompt (which mutates in place) cannot mutate the
+  // caller's original request. Previously `current = request` was a reference,
+  // so injection prompt text leaked into the shared request object seen by
+  // other pipeline stages, breaking the immutable-pipeline contract.
+  let current = structuredClone(request);
   let appended = 0;
 
   if (caveman.enabled && !shouldSkipCavemanInjection(current, providerName)) {

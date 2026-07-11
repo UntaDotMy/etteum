@@ -138,7 +138,13 @@ export class CursorProvider extends BaseProvider {
     const body = generateCursorBody(request.messages as any[], request.model, request.tools || [], request.reasoning_effort || null, forceAgentMode);
     const headers = buildCursorHeaders(tokens.access_token, tokens.machineId || null, tokens.ghostMode !== false);
 
-    const response = await fetch(CURSOR_ENDPOINT, { method: "POST", headers, body });
+    // AbortController so client disconnects (cancel()) can abort the upstream
+    // fetch, combined with a hard 120s timeout so the upstream can't hang forever
+    // (cursor's raw fetch had no timeout before this).
+    const upstreamAbort = new AbortController();
+    const timeoutSignal = AbortSignal.timeout(120_000);
+    const combinedSignal = AbortSignal.any([upstreamAbort.signal, timeoutSignal]);
+    const response = await fetch(CURSOR_ENDPOINT, { method: "POST", headers, body, signal: combinedSignal });
     if (response.status === 401) return { success: false, error: "expired: HTTP 401" };
     if (response.status === 403) return { success: false, error: "Account banned or restricted (HTTP 403)", banned: true };
     if (response.status === 429) return { success: false, error: "Rate limited", rateLimited: true };
@@ -151,10 +157,13 @@ export class CursorProvider extends BaseProvider {
     const model = request.model;
     const encoder = new TextEncoder();
     const upstream = response.body;
+    // Hoisted so cancel() can release the upstream reader on client disconnect.
+    let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {
         const reader = upstream.getReader();
+        upstreamReader = reader;
         let buffer = new Uint8Array(0);
         let started = false;
         let offset = 0;
@@ -218,6 +227,12 @@ export class CursorProvider extends BaseProvider {
         } finally {
           controller.close();
         }
+      },
+      async cancel(reason) {
+        try {
+          await upstreamReader?.cancel(reason).catch(() => {});
+          upstreamAbort.abort();
+        } catch { /* never throw from cancel */ }
       },
     });
 

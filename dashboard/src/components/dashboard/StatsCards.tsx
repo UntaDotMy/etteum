@@ -1,4 +1,4 @@
-import { Users, Activity, CheckCircle, Zap } from "lucide-react";
+import { Users, Activity, CheckCircle, Zap, DollarSign } from "lucide-react";
 import { Card, CardContent } from "@/components/ui/card";
 
 function formatTokens(n: number): string {
@@ -8,11 +8,18 @@ function formatTokens(n: number): string {
   return n.toString();
 }
 
+function formatCost(n: number): string {
+  if (n >= 1) return `$${n.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
+  if (n > 0) return `$${n.toFixed(4)}`;
+  return "$0.00";
+}
+
 interface StatsData {
   accounts: { active: number; total: number };
   requests: number;
   successRate: number;
   totalTokens: number;
+  cost?: number;
 }
 
 interface StatsCardsProps {
@@ -24,6 +31,7 @@ const defaultData: StatsData = {
   requests: 0,
   successRate: 0,
   totalTokens: 0,
+  cost: 0,
 };
 
 export default function StatsCards({ data = defaultData }: StatsCardsProps) {
@@ -60,10 +68,18 @@ export default function StatsCards({ data = defaultData }: StatsCardsProps) {
       color: "text-[var(--warning)]",
       bgColor: "bg-[var(--warning)]/10",
     },
+    {
+      label: "Total Cost",
+      value: formatCost(Number(data.cost || 0)),
+      subtitle: "USD · All time",
+      icon: DollarSign,
+      color: "text-[var(--primary)]",
+      bgColor: "bg-[var(--primary)]/10",
+    },
   ];
 
   return (
-    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-4">
+    <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-5 gap-4">
       {stats.map((stat) => (
         <Card
           key={stat.label}

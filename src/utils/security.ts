@@ -141,15 +141,102 @@ export class RateLimiter {
 /** Private loopback ranges — a request is "local" if its real origin is here. */
 const LOOPBACK_PREFIXES = ["127.", "::1", "::ffff:127."];
 
-/** Determine the real client IP, walking XFF only if TRUST_PROXY is set. */
+/**
+ * Determine the real client IP for security decisions.
+ *
+ * SECURITY: x-forwarded-for / x-real-ip / x-9r-real-ip are ALL client-
+ * controllable headers. They MUST NOT be trusted for loopback/admin
+ * decisions unless the deployment is explicitly behind a trusted reverse
+ * proxy (TRUST_PROXY=true). Reading them unconditionally enabled a trivial
+ * auth-bypass: a remote attacker sets `x-real-ip: 127.0.0.1` and is treated
+ * as local by adminGuard → RCE via /api/update/apply. (CWE-348; OWASP "IP
+ * Spoofing via HTTP Headers"; CVE-2025-13694 / CVE-2026-0033 class.)
+ *
+ * When TRUST_PROXY is not set, callers must rely on the actual TCP socket
+ * peer (preferred — see isLocalOriginFromPeer / adminGuardFromPeer) and
+ * treat header-derived IPs as untrusted, returning "unknown".
+ */
 export function realClientIp(headers: Headers): string {
-  const realIp = headers.get("x-9r-real-ip") || headers.get("x-real-ip");
-  if (realIp) return realIp.trim();
   if (process.env.TRUST_PROXY === "true") {
+    // Behind a trusted proxy that overwrites these headers — safe to read.
+    const realIp = headers.get("x-9r-real-ip") || headers.get("x-real-ip");
+    if (realIp) return realIp.trim();
     const xff = headers.get("x-forwarded-for");
     if (xff) return (xff.split(",")[0] || "").trim();
   }
   return "unknown";
+}
+
+/**
+ * Loopback check from a known-trusted TCP socket peer (Bun
+ * server.requestIP()). This is the preferred path for admin/loopback
+ * decisions because the peer address cannot be spoofed by the client.
+ */
+export function isLoopbackPeer(peerIp: string | null | undefined): boolean {
+  if (!peerIp) return false;
+  return isLoopbackIp(peerIp);
+}
+
+/**
+ * Decide local-origin for admin guarding using the TCP peer as the source of
+ * truth, falling back to header-derived IP only under TRUST_PROXY. Use this
+ * (or adminGuardFromPeer) instead of the header-only isLocalOrigin for any
+ * spawn-capable / secret-disclosure route.
+ */
+export function isLocalOriginFromPeer(
+  peerIp: string | null | undefined,
+  headers: Headers,
+): boolean {
+  if (process.env.ALLOW_REMOTE_ADMIN === "true") return true;
+  // 1. Trust the TCP socket peer first (non-spoofable).
+  if (peerIp) return isLoopbackIp(peerIp);
+  // 2. Fallback: header-derived IP, only if behind a trusted proxy.
+  if (process.env.TRUST_PROXY === "true") {
+    return isLoopbackIp(realClientIp(headers));
+  }
+  // 3. No peer info and no trusted proxy → cannot prove local → fail closed.
+  return false;
+}
+
+/**
+ * adminGuard variant that accepts a TCP peer IP. Prefer this over the
+ * header-only adminGuard() on routes that have access to the raw request
+ * (and thus server.requestIP()).
+ */
+export function adminGuardFromPeer(
+  peerIp: string | null | undefined,
+  headers: Headers,
+  query?: URLSearchParams | null,
+): { allowed: boolean; reason: string } {
+  if (isLocalOriginFromPeer(peerIp, headers)) return { allowed: true, reason: "local" };
+  const token = extractCliAdminToken(headers, query);
+  if (token && isValidCliAdminToken(token)) return { allowed: true, reason: "cli-token" };
+  return {
+    allowed: false,
+    reason: "admin actions require a local origin (TCP peer) or a valid x-9r-cli-token (CLI_ADMIN_TOKEN)",
+  };
+}
+
+/**
+ * Extract the TCP socket peer IP from a Hono context (Bun.serve).
+ * Bun populates `c.env.server` (the BunServer) on requests; its
+ * `server.requestIP(request)` returns the real socket peer, which a client
+ * cannot spoof — unlike x-forwarded-for / x-real-ip headers.
+ * Returns null when unavailable (non-Bun runtime, no server in env, or the
+ * socket is gone). Callers must treat null as "unknown origin" → fail closed.
+ */
+export function peerIpFromHonoContext(c: any): string | null {
+  try {
+    const server = c?.env?.server ?? c?.env?.runtime?.server;
+    if (server && typeof server.requestIP === "function") {
+      const addr = server.requestIP(c.req.raw);
+      if (addr) {
+        // Bun returns { address, family, port } (SocketAddress).
+        return typeof addr === "string" ? addr : (addr as any).address ?? null;
+      }
+    }
+  } catch { /* best effort */ }
+  return null;
 }
 
 /** True if the IP is a loopback address. */

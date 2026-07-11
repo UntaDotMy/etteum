@@ -788,10 +788,13 @@ export class KiroProvider extends BaseProvider {
     const id = this.generateId();
     const encoder = new TextEncoder();
     const contextWindow = this.getModelInfo(model)?.context_window ?? 200000;
+    // Hoisted so cancel() can release the upstream reader on client disconnect.
+    let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
         const reader = response.body?.getReader();
         if (!reader) { controller.close(); return; }
+        upstreamReader = reader;
         let buffer: Uint8Array<ArrayBufferLike> = new Uint8Array(0);
         const toolIndexes = new Map<string, number>();
         const toolBuffers = new Map<string, string>();
@@ -942,6 +945,11 @@ export class KiroProvider extends BaseProvider {
         } finally {
           controller.close();
         }
+      },
+      async cancel(reason) {
+        try {
+          await upstreamReader?.cancel(reason).catch(() => {});
+        } catch { /* never throw from cancel */ }
       },
     });
     return { success: true, stream, tokensUsed: 0 };

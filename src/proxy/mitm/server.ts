@@ -17,7 +17,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { generateLeafCert, loadRootCA } from "./cert";
 import { getToolForHost } from "./config";
 import { handleToolRequest, type MitmRequest } from "./handlers";
-import { MITM_DIR, MITM_PORT, ROOT_CA_CERT_PATH, ROOT_CA_KEY_PATH } from "./paths";
+import { MITM_DIR, MITM_PORT, ROOT_CA_CERT_PATH, ROOT_CA_KEY_PATH, TOOL_HOSTS } from "./paths";
 
 let server: tls.Server | null = null;
 const certCache = new Map<string, tls.SecureContext>();
@@ -66,6 +66,16 @@ function parseHttp(buf: Buffer): { method: string; url: string; headers: Record<
       headers[k] = v;
     }
   }
+  // Strip hop-by-hop headers (RFC 7230 §6.1) + any header named in Connection.
+  // A proxy MUST NOT forward these — forwarding Transfer-Encoding/Connection
+  // can desync the downstream parser (request smuggling surface).
+  const HOP_BY_HOP = new Set([
+    "connection", "keep-alive", "proxy-authenticate", "proxy-authorization",
+    "te", "trailers", "transfer-encoding", "upgrade",
+  ]);
+  const connVal = headers["connection"];
+  const connList = typeof connVal === "string" ? connVal.split(",").map((s) => s.trim().toLowerCase()) : [];
+  for (const h of [...HOP_BY_HOP, ...connList]) delete headers[h];
   return { method, url, headers, body };
 }
 
@@ -78,15 +88,25 @@ async function handleConnection(socket: tls.TLSSocket): Promise<void> {
     chunks.push(Buffer.from(chunk));
     totalLen += (chunk as Buffer).length;
     if (totalLen > MAX) { socket.end("HTTP/1.1 413 Request Too Large\r\n\r\n"); return; }
-    // Heuristic: once we have the full headers + Content-Length body, break.
+    // Heuristic: once we have the full headers + body, break. Supports BOTH
+    // Content-Length and chunked Transfer-Encoding (RFC 7230 §4.1). Previously
+    // only Content-Length was handled, so chunked bodies were truncated after
+    // the first TCP read (bodySoFar >= 0 was always true when cl=0).
     const joined = Buffer.concat(chunks);
     const headerEnd = joined.indexOf("\r\n\r\n");
     if (headerEnd >= 0) {
-      const headerStr = joined.subarray(0, headerEnd).toString("utf8");
-      const clMatch = headerStr.match(/content-length:\s*(\d+)/i);
-      const cl = clMatch && clMatch[1] ? parseInt(clMatch[1], 10) : 0;
-      const bodySoFar = joined.length - (headerEnd + 4);
-      if (bodySoFar >= cl) break;
+      const headerStr = joined.subarray(0, headerEnd).toString("utf8").toLowerCase();
+      const body = joined.subarray(headerEnd + 4);
+      const isChunked = /transfer-encoding:\s*chunked/i.test(headerStr);
+      if (isChunked) {
+        // Chunked: body is complete when the terminating `0\r\n\r\n` is present.
+        if (body.includes("\r\n0\r\n\r\n")) break;
+      } else {
+        const clMatch = headerStr.match(/content-length:\s*(\d+)/i);
+        const cl = clMatch && clMatch[1] ? parseInt(clMatch[1], 10) : 0;
+        const bodySoFar = body.length;
+        if (bodySoFar >= cl) break;
+      }
     }
   }
   const raw = Buffer.concat(chunks);
@@ -139,14 +159,35 @@ export function startMitmServer(): ServerStartResult {
   try {
     rootCAPem = readFileSync(ROOT_CA_CERT_PATH, "utf8");
     const rootKey = readFileSync(ROOT_CA_KEY_PATH);
+    // Pre-warm the leaf-cert cache for every known tool host at STARTUP, so the
+    // SNI callback on the hot path is a pure Map lookup (zero RSA keygen in
+    // the TLS handshake). node-forge's generateLeafCert is synchronous and can
+    // block 1–33s per domain; doing it at boot moves that cost off the hot path.
+    const rootCA = loadRootCA();
+    const allHosts = Object.values(TOOL_HOSTS).flat();
+    let prewarmed = 0;
+    for (const host of allHosts) {
+      if (certCache.has(host)) continue;
+      try {
+        const leaf = generateLeafCert(host, rootCA);
+        certCache.set(host, tls.createSecureContext({ key: leaf.key, cert: `${leaf.cert}\n${rootCAPem}` }));
+        prewarmed++;
+      } catch { /* skip individual host failures — will retry on-demand */ }
+    }
+    if (prewarmed > 0) console.log(`[MITM] Pre-warmed ${prewarmed} leaf cert(s).`);
+
     server = tls.createServer({ key: rootKey, cert: rootCAPem, SNICallback: sniCallback }, (socket) => {
       void handleConnection(socket).catch(() => { try { socket.destroy(); } catch { /* ignore */ } });
     });
     server.on("error", (err: any) => {
       console.error("[MITM] server error:", err?.message || err);
     });
-    server.listen(MITM_PORT, () => {
-      console.log(`[MITM] TLS intercepting server listening on :${MITM_PORT}`);
+    // Bind to loopback only — this is a LOCAL interception proxy (the DNS
+    // hijack points vendor hosts at 127.0.0.1). Binding 0.0.0.0:443 exposed
+    // the intercepting TLS server to the network with no auth.
+    const bindHost = process.env.MITM_BIND_HOST || "127.0.0.1";
+    server.listen(MITM_PORT, bindHost, () => {
+      console.log(`[MITM] TLS intercepting server listening on ${bindHost}:${MITM_PORT}`);
     });
     return { ok: true };
   } catch (e: any) {

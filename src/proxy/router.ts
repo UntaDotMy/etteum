@@ -214,6 +214,13 @@ export async function routeRequest(
     if (providerName === "byok") attemptedByokAccountIds.add(account.id);
 
     const startTime = Date.now();
+    // For a successful STREAMING result we hand the live stream back to the
+    // caller (index.ts), whose wrapStreamWithUsageFinalizer releases in-flight
+    // tracking when the stream ends. We must NOT release here in that case —
+    // doing so zeroed the count during streaming, making the load balancer
+    // pile concurrent streams onto one account. `handedStreamToCaller` marks
+    // that path so the finally skips the release.
+    let handedStreamToCaller = false;
 
     try {
       pool.trackRequestStart(account.id);
@@ -229,6 +236,8 @@ export async function routeRequest(
           await pool.updateTokens(account.id, result.tokens);
         }
         await pool.markUsed(account.id, providerName);
+        // Successful stream: the caller owns the in-flight tracking now.
+        if (stream && result.stream) handedStreamToCaller = true;
         return { result, account, provider: providerName, durationMs, compressionStats, compressedRequest };
       }
 
@@ -397,7 +406,9 @@ export async function routeRequest(
       }
       lastError = errMsg;
     } finally {
-      pool.trackRequestEnd(account.id);
+      // Only release here when we did NOT hand the stream to the caller.
+      // (Successful streams are released by the stream finalizer in index.ts.)
+      if (!handedStreamToCaller) pool.trackRequestEnd(account.id);
     }
   }
 

@@ -356,6 +356,9 @@ export function runWebSearchLoopStreaming(
     textBlockOpen = false;
   }
 
+  // Hoisted so cancel() can release whichever upstream reader is currently
+  // active (the loop creates a fresh reader per iteration).
+  let currentUpstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let heartbeat: ReturnType<typeof setInterval> | null = null;
@@ -390,6 +393,7 @@ export function runWebSearchLoopStreaming(
 
           // Consume this upstream stream; forward deltas, detect web_search calls.
           const reader = stream.getReader();
+          currentUpstreamReader = reader;
           let buffer = "";
           let finishReason: string | null = null;
           // Accumulate streaming tool_calls by index (OpenAI streams them in fragments).
@@ -571,6 +575,11 @@ export function runWebSearchLoopStreaming(
       } finally {
         if (heartbeat) clearInterval(heartbeat);
       }
+    },
+    async cancel(reason) {
+      try {
+        await currentUpstreamReader?.cancel(reason).catch(() => {});
+      } catch { /* never throw from cancel */ }
     },
   });
 }

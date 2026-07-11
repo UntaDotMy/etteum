@@ -30,6 +30,14 @@ const RETRY_CONFIG: Record<number, { attempts: number; delayMs: number }> = {
 };
 const DEFAULT_MAX_ATTEMPTS = 2;
 const DEFAULT_DELAY_MS = 2000;
+// The retry loop must be able to reach the largest configured `attempts`
+// value, otherwise a 502/503 (attempts:3) silently caps at 2 retries.
+// `attempt < retry.attempts` needs attempt to reach attempts-1, and the loop
+// bound `attempt <= MAX_RETRY_ATTEMPTS` must allow that.
+const MAX_RETRY_ATTEMPTS = Math.max(
+  DEFAULT_MAX_ATTEMPTS,
+  ...Object.values(RETRY_CONFIG).map((c) => c.attempts),
+);
 
 // Codex SSE-peek — mirrors reference codex.js:16-17.
 const CODEX_SSE_OVERLOADED_PATTERNS = ["server_is_overloaded", "service_unavailable_error"];
@@ -39,19 +47,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 /**
  * Peek the first ~4KB of a 200-OK stream for Codex overload patterns.
- * Returns the matched pattern (→ reclassify as retryable 503) or null.
- * Consumes a clone so the original stream is untouched on no-match.
+ *
+ * IMPORTANT (MDN WHATWG Streams spec): `tee()` LOCKS the original stream —
+ * the caller can no longer read `result.stream` directly. Both branches must
+ * be consumed. The previous implementation teed and discarded branch 2, then
+ * returned `result.stream` to the caller, whose `getReader()` threw
+ * "ReadableStream is locked" on EVERY successful non-overload Codex stream.
+ *
+ * Fix: this function receives ONE branch (the caller passes `branch1` and
+ * keeps `branch2`). It reads up to 4KB looking for an overload pattern.
+ * Returns the matched pattern, or null on no-match.
  *
  * Mirrors reference codex.js _peekSseOverloaded (195-263).
  */
 async function peekSseOverloaded(stream: ReadableStream<Uint8Array>): Promise<string | null> {
-  let reader: any = null;
+  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
   try {
-    // Tee so the caller still gets the full stream if we don't match (the
-    // peek branch is consumed + discarded; the original `result.stream` is
-    // untouched and usable by the caller on a no-match).
-    const [peek] = stream.tee();
-    reader = peek.getReader();
+    reader = stream.getReader();
     let acc = "";
     let bytesRead = 0;
     while (bytesRead < CODEX_SSE_PEEK_BYTES) {
@@ -97,7 +109,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
 
   let lastResult: ProviderResult = { success: false, error: "No attempt made" };
 
-  for (let attempt = 0; attempt <= DEFAULT_MAX_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
     if (attempt > 0) await sleep(DEFAULT_DELAY_MS);
     if (signal?.aborted) return { success: false, error: "aborted" };
 
@@ -179,14 +191,27 @@ function inferStatus(result: ProviderResult): number | undefined {
 /**
  * Check a Codex success result for a 200-OK overload error hiding in the body.
  * For streams: peek the first 4KB. For non-streams: inspect the response text.
+ *
+ * STREAM CORRECTNESS: tee() locks the source stream, so we must hand the
+ * caller a branch it can still read. On a no-match we replace result.stream
+ * with branch2 (the unconsumed twin, which still contains the full data).
+ * On a match (overload) we cancel both branches — the stream is abandoned
+ * because the result will be reclassified as a retryable 503.
  */
 async function checkCodexOverload(result: ProviderResult, stream: boolean): Promise<string | null> {
   if (stream && result.stream) {
-    // Tee + peek; if no match, the original stream is still usable (we peeked a clone).
     try {
-      const [peek] = result.stream.tee();
+      const [peek, original] = result.stream.tee();
       const hit = await peekSseOverloaded(peek);
-      return hit;
+      if (hit) {
+        // Overload: abandon the stream (reclassified as 503 below).
+        try { original.cancel(); } catch { /* ignore */ }
+        return hit;
+      }
+      // No overload: hand the caller the intact second branch. The original
+      // result.stream is now locked (tee locks it); branch2 is the readable copy.
+      result.stream = original as any;
+      return null;
     } catch {
       return null;
     }

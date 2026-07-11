@@ -20,8 +20,13 @@ async function migrateSummary() {
   // Aggregate all request_logs into usage_summary, grouped by hour + provider + model.
   // created_at is an integer epoch-ms timestamp (mode:"timestamp"), so divide by 1000 and
   // use SQLite 'unixepoch' to derive the UTC ISO-8601 hour bucket string.
+  // Aggregate request_logs → usage_summary. NOTE: the unique index on
+  // usage_summary is (bucket, provider, model) — it does NOT include api_key_id,
+  // so per-key granularity is not supported at the schema level for historical
+  // rows (a schema migration to add api_key_id to the index would be needed for
+  // per-key rollups). We DO aggregate total_cost now (previously dropped).
   const result = await db.run(sql`
-    INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms)
+    INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, total_cost)
     SELECT
       strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch') AS bucket,
       COALESCE(provider, 'unknown') AS provider,
@@ -33,7 +38,8 @@ async function migrateSummary() {
       COALESCE(SUM(completion_tokens), 0) AS completion_tokens,
       COALESCE(SUM(total_tokens), 0) AS total_tokens,
       COALESCE(SUM(credits_used), 0) AS credits_used,
-      COALESCE(SUM(duration_ms), 0) AS total_duration_ms
+      COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
+      COALESCE(SUM(cost), 0) AS total_cost
     FROM request_logs
     GROUP BY strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch'), COALESCE(provider, 'unknown'), COALESCE(model, 'unknown')
     ON CONFLICT (bucket, provider, model) DO UPDATE SET
@@ -44,7 +50,8 @@ async function migrateSummary() {
       completion_tokens = usage_summary.completion_tokens + excluded.completion_tokens,
       total_tokens = usage_summary.total_tokens + excluded.total_tokens,
       credits_used = usage_summary.credits_used + excluded.credits_used,
-      total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms
+      total_duration_ms = usage_summary.total_duration_ms + excluded.total_duration_ms,
+      total_cost = usage_summary.total_cost + excluded.total_cost
   `);
 
   // Verify

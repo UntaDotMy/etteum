@@ -14,13 +14,28 @@ import { Hono } from "hono";
 import { db } from "../db/index";
 import { kv } from "../db/schema";
 import { eq, and } from "drizzle-orm";
-import { getAllModels, providers } from "../proxy/router";
+import { getAllModels } from "../proxy/router";
 import { pool } from "../proxy/pool";
 import { adminGuard } from "../utils/security";
-import { invalidatePricingCache } from "../proxy/pricing";
+import { invalidatePricingCache, getPricingForModel } from "../proxy/pricing";
 import { refreshCustomModels } from "../proxy/providers/registry";
+import { routeRequest } from "../proxy/router";
+import type { ChatCompletionRequest } from "../proxy/providers/base";
 
 export const managementRouter = new Hono();
+
+/**
+ * Attach resolved pricing (from the catalog + user overrides) to each model.
+ * The `cbc-`/`qd-`/etc. prefixes are provider aliases; getPricingForModel
+ * resolves them to the canonical model name and looks up the rate, so the
+ * "all models" list shows cost even for aliased entries.
+ */
+async function attachPricing(models: any[]): Promise<any[]> {
+  return Promise.all(models.map(async (m) => {
+    const pricing = await getPricingForModel(m.id).catch(() => null);
+    return { ...m, pricing: pricing ?? null };
+  }));
+}
 
 // --- KV helpers (scope = customModels | disabledModels | pricing | mitmAlias) ---
 async function kvGet(scope: string): Promise<Record<string, any>> {
@@ -45,9 +60,24 @@ async function kvDelete(scope: string, key: string): Promise<void> {
 }
 
 // --- Models: list + availability ---
-managementRouter.get("/models/all", (c) => {
-  const models = getAllModels();
+managementRouter.get("/models/all", async (c) => {
+  const models = await attachPricing(getAllModels());
   return c.json({ models });
+});
+
+/**
+ * GET /api/models/active — only models backed by an active+enabled account.
+ * Lighter than /models/all (which returns the entire catalog incl. models no
+ * account can serve). The dashboard can call this to avoid fetching everything.
+ */
+managementRouter.get("/models/active", async (c) => {
+  const models = getAllModels();
+  const filtered: typeof models = [];
+  await Promise.all(models.map(async (m) => {
+    const acct = await pool.getAccountForModel(m.id).catch(() => null);
+    if (acct) filtered.push(m);
+  }));
+  return c.json({ models: await attachPricing(filtered) });
 });
 
 managementRouter.get("/models/availability", async (c) => {
@@ -92,12 +122,18 @@ managementRouter.post("/models/custom", async (c) => {
     provider: string;
     displayName?: string;
     spec?: { context_window?: number; max_output?: number; thinking?: boolean; vision?: boolean };
+    /** When renaming an existing catalog model: the old id being replaced. */
+    renameFrom?: string;
+    /** The upstream API model name to send to the provider (override). */
+    upstreamName?: string;
   }>();
   if (!body.model || !body.provider) return c.json({ error: "model and provider required" }, 400);
   await kvSet("customModels", body.model, {
     provider: body.provider,
     displayName: body.displayName || body.model,
     ...(body.spec ? { spec: body.spec } : {}),
+    ...(body.renameFrom ? { renameFrom: body.renameFrom } : {}),
+    ...(body.upstreamName ? { upstreamName: body.upstreamName } : {}),
   });
   await refreshCustomModels();
   return c.json({ success: true });
@@ -109,21 +145,36 @@ managementRouter.delete("/models/custom/:model", async (c) => {
 });
 
 // --- Per-model connectivity test ---
+// Routes through the REAL proxy path (routeRequest), so the test exercises the
+// exact same model resolution, account selection, sanitization, and compression
+// as a live client request — not a bypassed direct provider call. This means
+// an aliased id (cbc-hy3-preview) is resolved by the provider exactly as a real
+// request would, and account/token selection matches production behavior.
 managementRouter.post("/models/test", async (c) => {
-  const body = await c.req.json<{ provider: string; model: string }>();
-  if (!body.provider || !body.model) return c.json({ error: "provider and model required" }, 400);
-  const provider = (providers as any)[body.provider];
-  if (!provider) return c.json({ error: `Unknown provider: ${body.provider}` }, 400);
-  const acct = await pool.getAccountForModel(body.model).catch(() => null);
-  if (!acct) return c.json({ ok: false, error: "No available account for this model" });
+  const body = await c.req.json<{ provider: string; model: string; accountId?: number }>();
+  if (!body.model) return c.json({ error: "model required" }, 400);
+
   try {
-    // Minimal probe: a 1-token completion. Provider-specific but uses the standard interface.
-    const res = await provider.chatCompletion(acct, {
-      model: body.model, messages: [{ role: "user", content: "ping" }], stream: false, max_tokens: 1,
-    } as any);
-    return c.json({ ok: !!res.success, error: res.error });
+    // Build a minimal probe request and route it through the full pipeline.
+    // stream:false → routeRequest returns a fully-assembled (non-stream) result.
+    const probe: ChatCompletionRequest = {
+      model: body.model,
+      messages: [{ role: "user", content: "ping" }],
+      stream: false,
+      max_tokens: 1,
+    } as any;
+    const { result, account, provider, durationMs } = await routeRequest(probe, false);
+    return c.json({
+      ok: !!result.success,
+      error: result.error,
+      account: account ? { id: account.id, email: account.email, provider: account.provider } : undefined,
+      routedProvider: provider,
+      durationMs,
+    });
   } catch (err: any) {
-    return c.json({ ok: false, error: err.message });
+    // routeRequest throws when no account is available / all accounts fail.
+    const msg = err?.message || String(err);
+    return c.json({ ok: false, error: msg });
   }
 });
 

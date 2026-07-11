@@ -2,7 +2,7 @@ import { Hono } from "hono";
 import type { ContentfulStatusCode } from "hono/utils/http-status";
 import { db } from "../../db/index";
 import { accounts } from "../../db/schema";
-import { eq, and } from "drizzle-orm";
+import { eq, and, asc } from "drizzle-orm";
 import { decrypt } from "../../utils/crypto";
 import { broadcast } from "../../ws/index";
 import { shapeMediaRequest, normalizeMediaResponse, type MediaFormat } from "./shapers";
@@ -36,12 +36,15 @@ interface MediaAccountTokens {
   headers?: Record<string, string>;
 }
 
-/** Pick the first enabled media account supporting a modality. */
+/** Pick the least-recently-used enabled media account supporting a modality. */
 async function getMediaAccount(modality: string): Promise<{ account: typeof accounts.$inferSelect; tokens: MediaAccountTokens; apiKey: string } | null> {
+  // Order by lastUsedAt ascending (NULLs first = never-used) so requests
+  // round-robin across accounts instead of always hammering the first row.
   const rows = await db
     .select()
     .from(accounts)
-    .where(and(eq(accounts.provider, "media"), eq(accounts.enabled, true), eq(accounts.status, "active")));
+    .where(and(eq(accounts.provider, "media"), eq(accounts.enabled, true), eq(accounts.status, "active")))
+    .orderBy(asc(accounts.lastUsedAt));
   for (const account of rows) {
     let tokens: MediaAccountTokens;
     try {
@@ -178,7 +181,16 @@ mediaRouter.post("/v1/images/generations", async (c) => {
   }
   broadcast({ type: "media_request", data: { modality: "images", model, accountId: media.account.id } });
   // Shaped vendors need their response normalized to the OpenAI image shape.
-  const normalized = normalizeMediaResponse(format, "images", JSON.parse(text), { baseUrl: media.tokens.base_url, apiKey: media.apiKey, model, input: body });
+  // Guard JSON.parse: a 200-OK non-JSON body (e.g. an HTML error page) would
+  // otherwise throw an uncaught SyntaxError → 500. Surface a 502 instead.
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(text);
+  } catch {
+    return c.json({ error: { message: `Image generation upstream returned non-JSON: ${text.slice(0, 500)}`, type: "upstream_error" } }, 502);
+  }
+  const normalized = normalizeMediaResponse(format, "images", parsed, { baseUrl: media.tokens.base_url, apiKey: media.apiKey, model, input: body });
   if (normalized) return c.json(normalized);
+  // Only re-serve the raw body as JSON if it actually parsed (it did, above).
   return new Response(text, { status: 200, headers: { "content-type": "application/json" } });
 });

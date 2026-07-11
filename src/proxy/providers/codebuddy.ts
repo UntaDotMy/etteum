@@ -10,6 +10,7 @@ import {
 import type { Account } from "../../db/schema";
 import { config } from "../../config";
 import { applyModelSpecs, resolveModelSpec } from "../model-specs";
+import { getUpstreamNameOverride } from "./custom-models";
 
 
 /**
@@ -109,6 +110,8 @@ export class CodeBuddyProvider extends BaseProvider {
 
   /** Resolve cb- prefixed model IDs to actual CodeBuddy API model names. */
   private resolveModel(model: string): string {
+    const override = getUpstreamNameOverride(model);
+    if (override) return override;
     // Strip -thinking suffix first for lookup, re-apply after
     const isThinking = model.endsWith("-thinking");
     const base = isThinking ? model.replace(/-thinking$/, "") : model;
