@@ -568,7 +568,9 @@ export default function Settings() {
                   Compression
                 </CardTitle>
                 <CardDescription className="mt-1">
-                  Reduce token usage by compressing tool outputs, deduplicating context, and shortening prompts. Pipeline runs in order: DCP → RTK → Caveman → Image Dedupe → Cache Markers.
+                  Reduce token usage by compressing tool outputs, deduplicating context, and shortening prompts.
+                  Pipeline: Headroom (opt) → TSC → DCP → RTK → Ponytail → Caveman → Injections → Image Dedupe → Cache Markers.
+                  Over-aggressive RTK (tiny caps / few protected turns) makes CLI agents re-read files and look “dumb” — prefer Balanced or Conservative for Claude Code / Codex.
                 </CardDescription>
               </div>
               <a
@@ -596,9 +598,9 @@ export default function Settings() {
                 <div className="grid grid-cols-3 gap-2">
                   {(
                     [
-                      { name: "Conservative", chars: "8000", turns: "3", smart: "true", hint: "Bigger budget, more context kept. ~3% saving." },
-                      { name: "Balanced", chars: "500", turns: "2", smart: "true", hint: "Recommended default. Matches backend cap of 500 chars." },
-                      { name: "Aggressive", chars: "2000", turns: "1", smart: "true", hint: "Smaller cap, only last turn protected. ~12% saving — model may miss older details." },
+                      { name: "Conservative", chars: "8000", turns: "6", smart: "true", hint: "Max context for long CLI sessions. Lowest “dumb agent” risk." },
+                      { name: "Balanced", chars: "1500", turns: "4", smart: "true", hint: "Recommended default for Claude Code / Codex. Matches backend." },
+                      { name: "Aggressive", chars: "500", turns: "2", smart: "true", hint: "Max savings. Older tool output is heavily truncated — model may re-read files." },
                     ] as const
                   ).map((preset) => {
                     const selected =
@@ -643,7 +645,7 @@ export default function Settings() {
                         className="mt-1"
                       />
                       <p className="text-[10px] text-[var(--muted-foreground)] mt-1 leading-relaxed">
-                        ~4 chars = 1 token. Default: <code>500</code> (≈125 tokens).
+                        ~4 chars = 1 token. Default: <code>1500</code> (≈375 tokens) for older turns only.
                       </p>
                     </div>
                     <div>
@@ -657,7 +659,7 @@ export default function Settings() {
                         className="mt-1"
                       />
                       <p className="text-[10px] text-[var(--muted-foreground)] mt-1 leading-relaxed">
-                        Recent turns left untouched. Default: <code>2</code>.
+                        Recent turns left untouched. Default: <code>4</code> (CLI-safe).
                       </p>
                     </div>
                     <div>

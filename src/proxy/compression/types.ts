@@ -5,13 +5,16 @@
  * returns a smaller equivalent request plus a CompressionStats record that
  * is attached to request_logs.compression_stats for telemetry.
  *
- * Pipeline order is intentional:
- *   1. DCP          — lossless dedup (cheapest savings, must run first so
- *                     subsequent steps don't compress already-removable text)
+ * Pipeline order is intentional (see compressRequest):
+ *   0. TSC          — lossless tool-schema compaction
+ *   1. DCP          — lossless dedup
  *   2. RTK          — lossy tool-result truncation
- *   3. Caveman      — lossy system-prompt compaction (off by default)
- *   4. Image dedupe — lossless image block dedup
- *   5. Cache markers — final pass: insert cache_control on stable prefix
+ *   3. Ponytail     — lossy structural tool-result cleanup
+ *   4. Caveman      — lossy system-prompt compaction (off by default)
+ *   5. Injections   — optional terse/lazy output prompts
+ *   6. Image dedupe — lossless image block dedup
+ *   7. Cache markers — final pass: insert cache_control on stable prefix
+ * Headroom (async) runs before this pipeline when enabled in the router.
  */
 
 export type CavemanLevel = "lite" | "full" | "ultra";
@@ -142,29 +145,17 @@ export const DEFAULT_DCP_WHITELIST = ["Read", "Glob", "Grep", "LS", "WebFetch"];
 
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   rtk: {
-    // RTK on by default. Old tool results are the dominant cost in long
-    // agentic sessions (hundreds of tool_result messages replayed every turn).
-    // Truncating them is what keeps prompts small enough that reasoning models
-    // (GLM-5.2 etc.) actually have output budget left to think. The last
-    // `keepLastNTurnsFull` turns stay fully intact so active tool calls are
-    // never touched.
+    // RTK on by default for long agentic sessions, but tuned for CLI agents
+    // (Claude Code, Codex, etc.): truncating *too* hard made models re-read
+    // files and miss prior tool output ("dumb" agent loops). Keep more recent
+    // turns full and a larger per-block cap for older turns.
     enabled: true,
-    // 500-char cap for OLD tool results. In long agentic sessions there are
-    // hundreds of tool_result messages; the median is ~240 chars but the long
-    // tail (p75 ~1.5K, p90 ~4K, max ~34K) dominates. A 500-char cap keeps the
-    // gist (path, status, short result, error summary) while cutting the bulk.
-    //
-    // Note on the chars/token ratio: the proxy estimates tokens at chars/4, but
-    // GLM/DeepSeek tokenizers are denser (~2.5 chars/token for code/markdown).
-    // So a prompt the estimator calls "127K tokens" is really ~200K GLM tokens.
-    // The cap must be aggressive enough that the REAL (GLM-counted) prompt
-    // leaves room for reasoning. 500 + TSC gets a typical long session from
-    // ~200K GLM tokens down toward ~150K; shorter sessions land in the
-    // reasoning zone (~60-90K). The smart shape filters (diff hunks, grep
-    // groupings, etc.) still run first within the cap, and the last
-    // `keepLastNTurnsFull` turns stay fully intact.
-    maxToolChars: 500,
-    keepLastNTurnsFull: 2,
+    // Cap for OLD tool results only (last N turns stay intact).
+    // 1500 chars keeps meaningful Read/Grep snippets without replaying 30K
+    // dumps every turn.
+    maxToolChars: 1500,
+    // Protect the last 4 turns fully so the active tool loop stays sharp.
+    keepLastNTurnsFull: 4,
     smartTruncate: true,
   },
   dcp: {

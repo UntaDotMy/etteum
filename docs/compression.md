@@ -13,27 +13,35 @@ per-request savings to `request_logs.compression_stats` for telemetry.
 ## Pipeline order
 
 ```
-sanitizeRequest()          (existing — strips Claude Code identity etc.)
+sanitizeRequest()          (strip-only filters — telemetry / identity lines)
         │
         ▼
-┌─── compressRequest() ────────────────────────────┐
-│  1. DCP          (lossless)  dedup repeat tools   │
-│  2. RTK          (lossy)     truncate tool output │
-│  3. Caveman      (lossy)     compact system prompt│
-│  4. Image dedupe (lossless)  dedup repeat images  │
-│  5. Cache markers (struct)   tag cacheable prefix │
-└──────────────────────────────────────────────────┘
+┌─── routeRequest compression ──────────────────────────────┐
+│  0. Headroom     (opt, async)  external LLM pre-compress  │
+│  1. TSC          (lossless)    compact tools[] schemas    │
+│  2. DCP          (lossless)    dedup repeat tool results  │
+│  3. RTK          (lossy)       truncate older tool output │
+│  4. Ponytail     (lossy)       path/log scaffolding strip │
+│  5. Caveman      (lossy)       compact system prompt      │
+│  6. Injections   (opt)         terse / lazy output prompts│
+│  7. Image dedupe (lossless)    dedup repeat images        │
+│  8. Cache markers (struct)     tag cacheable prefix       │
+└───────────────────────────────────────────────────────────┘
         │
         ▼
-routeRequest()             (existing — picks account, retries, etc.)
+provider.execute()         (picks account, retries, etc.)
 ```
 
-Lossless techniques run first so lossy steps don't waste cycles compressing
-text that was about to be removed anyway. Cache markers run last because
-they tag whatever the final prefix shape is.
+Lossless techniques (TSC, DCP) run early so lossy steps don't waste cycles
+compressing text that was about to be removed. Cache markers run last because
+they tag whatever the final prefix shape is. Headroom (when enabled) runs
+before the sync pipeline so later stages compress a smaller conversation.
 
 If anything in the pipeline throws, the original sanitized request is
 forwarded as a fallback — compression failure never breaks a real request.
+
+**CLI note.** Pathological RTK values (`max_tool_chars` &lt; 500) are clamped at
+boot by `compression_policy_v1` to Balanced defaults (1500 / 4 turns).
 
 ---
 
@@ -50,8 +58,9 @@ only needed that text once — to make a decision in the next turn. After
 that, it's pure context overhead. RTK detects and trims those.
 
 **What's protected.** The last `keepLastNTurnsFull * 2` messages
-(N user/assistant pairs) are NEVER touched. Default 2, so the model always
-sees the most recent two pairs in full.
+(N user/assistant pairs) are NEVER touched. Default **4**, so the model always
+sees the most recent four pairs in full (CLI agents like Claude Code need this
+so they don't re-read files and look "dumb").
 
 **Smart truncation.** When `smartTruncate: true` (default), RTK recognises
 common command shapes and uses pattern-aware logic:
@@ -69,17 +78,17 @@ common command shapes and uses pattern-aware logic:
 | Key                                       | Default | Range          | Meaning                                                                          |
 | ----------------------------------------- | ------- | -------------- | -------------------------------------------------------------------------------- |
 | `compression_rtk_enabled`                 | `true`  | bool           | Master switch.                                                                   |
-| `compression_rtk_max_tool_chars`          | `4000`  | 500 – 50 000   | Cap per older `tool_result`. ~4 chars = 1 token, so 4000 ≈ 1000 tokens.          |
-| `compression_rtk_keep_last_n_turns_full`  | `2`     | 0 – 20         | Turns to leave fully untouched. Lower = more saving; higher = safer.             |
+| `compression_rtk_max_tool_chars`          | `1500`  | 500 – 50 000   | Cap per older `tool_result`. ~4 chars = 1 token, so 1500 ≈ 375 tokens.           |
+| `compression_rtk_keep_last_n_turns_full`  | `4`     | 0 – 20         | Turns to leave fully untouched. Lower = more saving; higher = safer for CLIs.    |
 | `compression_rtk_smart_truncate`          | `true`  | bool           | Pattern-aware truncation for git diff / tree. Off → generic head+tail only.      |
 
 **Quick presets** (in the dashboard)
 
 | Preset       | maxToolChars | keepN | When to use                                                       |
 | ------------ | ------------ | ----- | ----------------------------------------------------------------- |
-| Conservative | 8000         | 3     | Long-context agents, debugging sessions where history matters.    |
-| Balanced     | 4000         | 2     | **Default.** Sensible for Claude Code style coding agents.        |
-| Aggressive   | 2000         | 1     | High-volume, mostly-stateless calls. Saves more, may miss detail. |
+| Conservative | 8000         | 6     | Long-context agents, debugging sessions where history matters.    |
+| Balanced     | 1500         | 4     | **Default.** Tuned for Claude Code / Codex-style coding agents.   |
+| Aggressive   | 500          | 2     | High-volume, mostly-stateless calls. Saves more; may re-read.     |
 
 **Example.** A `git diff` of 18 000 chars in turn #3 of a 12-turn session,
 with default RTK on:
@@ -339,25 +348,17 @@ config cache to expire. The HTTP API does this invalidation for you.
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   rtk: {
     enabled: true,
-    maxToolChars: 4000,
-    keepLastNTurnsFull: 2,
+    maxToolChars: 1500,       // older tool results only
+    keepLastNTurnsFull: 4,    // CLI-safe protected window
     smartTruncate: true,
   },
-  dcp: {
-    enabled: false,
-    whitelist: ["Read", "Glob", "Grep", "LS", "WebFetch"],
-  },
-  caveman: {
-    enabled: false,
-    level: "lite",
-  },
-  cacheMarkers: {
-    enabled: true,
-    providerOverrides: { codex: false },
-  },
-  imageDedupe: {
-    enabled: true,
-  },
+  dcp: { enabled: false, whitelist: ["Read", "Glob", "Grep", "LS", "WebFetch"] },
+  caveman: { enabled: false, level: "lite" },
+  cacheMarkers: { enabled: false, providerOverrides: { codex: false } },
+  imageDedupe: { enabled: false },
+  tsc: { enabled: true, stripSchemaWhitespace: true, trimDescriptions: true, dropSchemaMeta: true },
+  ponytail: { enabled: false },
+  // cavemanInjection / ponytailInjection / headroom: all OFF by default
 };
 ```
 

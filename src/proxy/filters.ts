@@ -9,13 +9,12 @@
  *     <vendor>" identity, Cursor/Windsurf/[AI-LAB-A]-CLI agent identity).
  *
  * IMPORTANT: there is NO brand-neutralization tier and NO word-rewrite tier.
- * Brand names (Claude, [AI-LAB-B], [AI-LAB-A], [AI-CHAT], [AI-LAB-C], [AI-LAB-D],
- * [AI-MODEL], [AI-LAB-E], ...) pass through VERBATIM. Common technical words
- * (terminate, access, modify, tool, device, threat, ...) also pass through
- * verbatim. Both tiers were removed because they mangled tool calls, code, file
- * paths, and tool results. The deactivated rules stay in the DB (is_active=false)
- * so they can be re-enabled per-provider from the dashboard; they are NOT in
- * this fallback const. Nothing in user content is dropped or rewritten.
+ * Those tiers mangled tool-call arguments, paths, and tool results (especially
+ * Claude Code / CLI agent loops) and made models look "dumb". Inactive rules
+ * are purged from the DB (filter_policy_v3) — not kept for re-enable.
+ *
+ * Active rules only strip vendor telemetry + short identity boilerplate lines.
+ * Brand names and technical words pass through VERBATIM.
  */
 
 export interface FilterRule {
