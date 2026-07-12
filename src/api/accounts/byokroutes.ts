@@ -25,10 +25,17 @@ import {
   getByokPrefix,
   getByokKeyLabel,
   normalizeModels,
+  normalizeByokKeys,
+  buildByokEmail,
+  normalizeByokLbMethod,
+  setByokLbMethod,
+  getByokLbMethods,
+  refreshByokRuntime,
   BYOK_PREFIX_RE,
   BYOK_KEY_LABEL_RE,
+  type ByokKeyInput,
+  type ByokTokensShape,
 } from "./shared";
-import * as shared from "./shared";
 
 /** Register routes on the parent accounts router (order-sensitive). */
 export function registerByokRoutes(router: Hono): void {
