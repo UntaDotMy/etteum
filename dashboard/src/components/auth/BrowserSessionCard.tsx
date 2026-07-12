@@ -102,17 +102,24 @@ export function BrowserSessionCard({ session, challenge }: Props) {
   const showEnded = session.terminal;
 
   return (
-    <div className="relative rounded-xl border border-[var(--border)] bg-[var(--card)] flex flex-col overflow-hidden">
+    <div className="relative flex flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
       {/* Header */}
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-2">
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2.5">
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-            <span className="font-mono text-[var(--foreground)]" title={session.sessionId}>{session.sessionId.slice(0, 16)}</span>
-            <span className="font-mono text-[var(--muted-foreground)] truncate">{session.email}</span>
+            <span className="font-mono text-[var(--primary)]" title={session.sessionId}>
+              {session.sessionId.slice(0, 20)}
+            </span>
+            <span className="truncate font-mono text-[var(--foreground)]">{session.email}</span>
+            <Badge variant="outline" className="text-[10px] uppercase">
+              {session.provider}
+            </Badge>
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={phaseColor as any}>{session.phase || "unknown"}</Badge>
-            {session.lastMessage && <p className="truncate text-xs text-[var(--muted-foreground)]">{session.lastMessage}</p>}
+            {session.lastMessage && (
+              <p className="truncate text-xs text-[var(--muted-foreground)]">{session.lastMessage}</p>
+            )}
           </div>
         </div>
         {!session.terminal && (

@@ -15,6 +15,13 @@ import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
 import { runPythonFlow } from "./automation/pythonFlow";
 import type { AutomationEvent } from "./automation/automationEvents";
+import {
+  registerSession,
+  getSession,
+  updateFrame,
+  updatePhase,
+  appendStep,
+} from "./browserSession";
 
 // Providers that use the Python Camoufox adapter runner (browser login +
 // live frame stream). Codex uses OAuth via the native services path below.
@@ -714,19 +721,56 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     });
     broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
 
-    // Bridge the Python flow-runner emit() stream → dashboard WebSocket + auth log.
+    // Register a browser-session so Browser Logs can poll + stream frames
+    // the same way the batch automation path does (batch-${id}).
+    const sessionId = `camoufox-${account.id}`;
+    if (!getSession(sessionId)) {
+      registerSession({
+        sessionId,
+        accountId: account.id,
+        email: account.email,
+        provider,
+        phase: "starting",
+        lastMessage: `Starting ${provider} login…`,
+        lastFrame: "",
+        lastFrameFormat: "jpeg",
+        lastFrameTime: Date.now(),
+        steps: [],
+        challenge: null,
+        terminal: false,
+        proc: null,
+        stdinWriter: null,
+        cancelSignalFile: "",
+        startedAt: Date.now(),
+      });
+    }
+    appendStep(sessionId, "starting", `Starting ${provider} login…`, provider);
+    updatePhase(sessionId, "starting", `Starting ${provider} login…`);
+
+    // Bridge Python flow emit → WS + auth log + browser-session registry.
     const emit = (ev: AutomationEvent) => {
       if (ev.type === "progress") {
         addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
         broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: ev.step, message: ev.message } });
+        appendStep(sessionId, ev.step || "progress", ev.message || "", provider);
+        updatePhase(sessionId, ev.step || "running", ev.message || "");
       } else if (ev.type === "manual_challenge") {
         addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "manual_challenge", message: ev.message });
         broadcast({ type: "manual_challenge", data: { id: account.id, email: account.email, provider, challengeType: ev.challengeType, message: ev.message } });
+        appendStep(sessionId, "manual_challenge", ev.message || "", provider);
+        updatePhase(sessionId, "manual_input_waiting", ev.message || "Manual challenge");
       } else if (ev.type === "error") {
         addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "error", message: ev.error });
         broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: "error", message: ev.error } });
+        appendStep(sessionId, "error", ev.error || "", provider);
+        updatePhase(sessionId, "failed", ev.error || "error");
       } else if (ev.type === "frame") {
-        broadcast({ type: "browser_frame", data: { id: account.id, email: account.email, provider, png: ev.png } });
+        // Raw base64 JPEG (no data: prefix) — same contract as batch frames.
+        const png = ev.png || "";
+        if (png) {
+          updateFrame(sessionId, png, "jpeg");
+          broadcast({ type: "browser_frame", data: { id: account.id, email: account.email, provider, png, sessionId } });
+        }
       }
     };
 
@@ -739,6 +783,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           proxy: proxy?.url,
         });
         if (!result.success) {
+          updatePhase(sessionId, "failed", result.error || "login failed");
           await markAccountError(account.id, result.error || "login failed");
           const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: result.error || "login failed", message: result.error || "login failed" });
           broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error || "login failed" } });
@@ -762,11 +807,14 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           } : undefined,
         };
         await applyProviderResult(account, provider, password, providerResult);
+        updatePhase(sessionId, "complete", "login succeeded");
+        appendStep(sessionId, "success", "login succeeded", provider);
         const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (camoufox)` });
         broadcast({ type: "login_success", data: { logId: okLog.id, id: account.id, email: account.email, provider } });
         return { success: true };
       } catch (err: any) {
         const errorMsg = err?.message || String(err);
+        updatePhase(sessionId, "failed", errorMsg);
         await markAccountError(account.id, errorMsg);
         const failLog = addAuthLog({ type: "login_failed", accountId: account.id, email: account.email, provider, error: errorMsg, message: errorMsg });
         broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: errorMsg } });

@@ -2,7 +2,7 @@ import { useState } from "react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import { Minus, Plus, X } from "lucide-react";
+import { Minus, Plus, X, Zap } from "lucide-react";
 
 interface StartAutomationModalProps {
   provider: string;
@@ -54,20 +54,24 @@ export default function StartAutomationModal({
   }
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50">
-      <div className="relative w-full max-w-2xl max-h-[90vh] overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--background)] shadow-2xl">
+    <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/60 backdrop-blur-[2px]">
+      <div className="relative max-h-[90vh] w-full max-w-2xl overflow-y-auto rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
         {/* Header */}
         <div className="flex items-start justify-between border-b border-[var(--border)] p-6">
           <div className="flex items-start gap-3">
-            <div className="flex h-10 w-10 items-center justify-center rounded-lg bg-[var(--primary)]/20">
-              <span className="text-xl">⚡</span>
+            <div className="flex h-10 w-10 items-center justify-center rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))]">
+              <Zap className="h-5 w-5 text-[var(--primary)]" />
             </div>
             <div>
-              <h2 className="text-lg font-semibold">Start {providerLabel} Automation</h2>
+              <h2 className="text-lg font-semibold text-[var(--foreground)]">Start {providerLabel} Automation</h2>
               <p className="text-sm text-[var(--muted-foreground)]">{subtitle}</p>
             </div>
           </div>
-          <button onClick={onClose} className="text-[var(--muted-foreground)] hover:text-[var(--foreground)]">
+          <button
+            type="button"
+            onClick={onClose}
+            className="rounded-md p-1 text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)]"
+          >
             <X className="h-5 w-5" />
           </button>
         </div>
