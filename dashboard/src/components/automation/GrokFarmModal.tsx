@@ -46,7 +46,13 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
   const [loading, setLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
-  const [setup, setSetup] = useState<{ ok: boolean; errors: string[]; python: string | null } | null>(null);
+  const [setup, setSetup] = useState<{
+    ok: boolean;
+    errors: string[];
+    python: string | null;
+    hasCamoufox?: boolean;
+    authVenv?: string;
+  } | null>(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -138,13 +144,19 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
           {loading && <p className="text-sm text-[var(--muted-foreground)]">Loading config…</p>}
 
           {setup && !setup.ok && (
-            <div className="rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">
-              Setup issues: {setup.errors.join("; ")}
+            <div className="rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)] space-y-1">
+              <p className="font-medium">Setup issues</p>
+              {setup.errors.map((e, i) => (
+                <p key={i}>{e}</p>
+              ))}
+              <p className="text-[11px] opacity-90">
+                Farm reuses <code>scripts/auth/.venv</code> (same as other etteum bots) — no separate farm venv.
+              </p>
             </div>
           )}
           {setup?.ok && (
             <p className="text-xs text-[var(--muted-foreground)]">
-              Python ready{setup.python ? `: ${setup.python}` : ""}. Farm script vendored under scripts/auth/grok-farm.
+              Using etteum Python{setup.python ? `: ${setup.python}` : ""} · camoufox ready · farm at scripts/auth/grok-farm
             </p>
           )}
 
@@ -264,9 +276,10 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
 
           <p className="text-[11px] text-[var(--muted-foreground)]">
             Runs Camoufox <strong>headless</strong> (no OS popup). Screenshots stream to{" "}
-            <strong>Browser Logs</strong> like other automations (enowxai-style frame relay).
-            Install deps if needed:
-            <code className="ml-1 rounded bg-[var(--secondary)] px-1">scripts/auth/grok-farm</code>
+            <strong>Browser Logs</strong> (enowxai-style). Uses etteum’s existing Python env
+            (<code className="rounded bg-[var(--secondary)] px-1">scripts/auth/.venv</code> +{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">scripts/auth/requirements.txt</code>),
+            not a separate farm venv.
           </p>
         </div>
 

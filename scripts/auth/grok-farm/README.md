@@ -4,29 +4,34 @@ Port of the standalone `grok-farm` CLI. Etteum spawns `farm.py` from **Automatio
 
 On exit, etteum imports `results/batch_*/accounts.json` into the **Grok** provider (`auth_method: oauth` + absolute free Build credits when present).
 
-## Setup
+## Python / Camoufox — use etteum’s env (no separate farm venv)
+
+Farm reuses the same interpreter as other auth scripts:
+
+| Priority | Source |
+|----------|--------|
+| 1 | `config.pythonPath` → `scripts/auth/.venv` |
+| 2 | `PYTHON_PATH` / `ETTEUM_PYTHON` / `BATCHER_PYTHON` |
+| 3 | System Python that already has `camoufox` + `playwright` |
+
+Deps are listed in **`scripts/auth/requirements.txt`** (already includes `camoufox[geoip]` + `playwright`).
 
 ```bash
-cd scripts/auth/grok-farm
-python -m venv .venv
-# Windows: .venv\Scripts\activate
-source .venv/bin/activate
-pip install -r requirements.txt
-# Camoufox browser binary may need a first-run download
+# from repo root — one env for all Python auth (including farm)
+python -m venv scripts/auth/.venv
+# Windows:
+scripts\auth\.venv\Scripts\python.exe -m pip install -r scripts/auth/requirements.txt
+# Linux/macOS:
+scripts/auth/.venv/bin/python -m pip install -r scripts/auth/requirements.txt
 ```
 
-Point etteum at this Python if needed:
-
-```bash
-set ETTEUM_PYTHON=C:\path\to\python.exe
-```
+Do **not** create `scripts/auth/grok-farm/.venv` unless you want an optional override.
 
 Optional `proxies.txt` next to `farm.py` (see `proxies.txt.example`).
 
 ## Manual run (debug)
 
 ```bash
-python farm.py -m tempmail -n 2 -c 1 -y
-# or Gmail/IMAP (requires env vars from .env.example)
-python farm.py -m google -n 2 -c 1 -y
+# use the etteum auth venv
+scripts/auth/.venv/Scripts/python.exe farm.py -m tempmail -n 2 -c 1 -y
 ```
