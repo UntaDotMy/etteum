@@ -486,7 +486,7 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
       data: {
         provider: "grok",
         jobId: job.id,
-        email: `grok-farm@${job.id}`,
+        email: "Grok Farm",
         sessionId: job.id,
         message: job.lastMessage,
         error: job.status === "failed" ? job.lastMessage : undefined,
