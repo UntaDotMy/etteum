@@ -152,14 +152,21 @@ const app = new Hono();
 
 // Middleware
 // CORS — allowlist the dashboard origin(s) rather than a blanket "*".
-  // Configurable via POOLPROX_CORS_ORIGINS (comma-separated); defaults to the
-  // dashboard port on localhost. Set to "*" only for local dev if needed.
+  // Configurable via POOLPROX_CORS_ORIGINS (comma-separated). Defaults cover
+  // both localhost and 127.0.0.1 for the dashboard + API ports — browsers treat
+  // those as different origins, so only allowing "localhost" breaks dashboard
+  // calls when the user opens http://127.0.0.1:1931 (Failed to fetch / 401 UX).
   const corsOrigins = (process.env.POOLPROX_CORS_ORIGINS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
-  const dashboardOrigin = `http://localhost:${config.dashboardPort}`;
-  const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : [dashboardOrigin];
+  const defaultOrigins = [
+    `http://localhost:${config.dashboardPort}`,
+    `http://127.0.0.1:${config.dashboardPort}`,
+    `http://localhost:${config.port}`,
+    `http://127.0.0.1:${config.port}`,
+  ];
+  const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : defaultOrigins;
   app.use(
     "*",
     cors({

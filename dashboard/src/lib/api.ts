@@ -68,6 +68,32 @@ export function logout() {
 
 type FetchApiOptions = RequestInit & { timeoutMs?: number };
 
+/**
+ * Normalize API error payloads. Auth middleware returns
+ * `{ error: { message, type } }` while many routes return `{ error: "string" }`.
+ * Without unwrapping, `new Error(object)` becomes "[object Object]" in the UI.
+ */
+function formatApiErrorBody(body: unknown, status: number): string {
+  if (body == null) return `API error: ${status}`;
+  if (typeof body === "string") return body || `API error: ${status}`;
+  if (typeof body !== "object") return String(body);
+
+  const rec = body as Record<string, unknown>;
+  const err = rec.error ?? rec.message;
+  if (typeof err === "string" && err.trim()) return err;
+  if (err && typeof err === "object") {
+    const nested = err as Record<string, unknown>;
+    if (typeof nested.message === "string" && nested.message.trim()) return nested.message;
+    try {
+      return JSON.stringify(err);
+    } catch {
+      /* fall through */
+    }
+  }
+  if (typeof rec.message === "string" && rec.message.trim()) return rec.message;
+  return `API error: ${status}`;
+}
+
 export async function fetchApi<T = any>(path: string, options?: FetchApiOptions): Promise<T> {
   const { timeoutMs = 30_000, signal, ...fetchOptions } = options || {};
   const controller = new AbortController();
@@ -94,7 +120,7 @@ export async function fetchApi<T = any>(path: string, options?: FetchApiOptions)
       let message = `API error: ${res.status}`;
       try {
         const body = await res.json();
-        message = body.error || body.message || message;
+        message = formatApiErrorBody(body, res.status);
       } catch {
         const text = await res.text().catch(() => "");
         if (text) message = text;
