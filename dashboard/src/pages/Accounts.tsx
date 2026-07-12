@@ -1848,6 +1848,11 @@ export default function Accounts() {
             </div>
           </DialogHeader>
           <div className="space-y-4 pt-3">
+            {(message || error) && (
+              <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
+                {message || error}
+              </div>
+            )}
             {/* Connection Settings */}
             <div className="space-y-3 rounded-lg border border-[var(--border)] bg-[var(--secondary)]/[0.06] p-3.5">
               <p className="text-xs font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">Connection</p>
@@ -2105,6 +2110,12 @@ export default function Accounts() {
                 : `Add account for ${addDialogProvider ? labelProvider(addDialogProvider) : "this provider"}.`}
             </DialogDescription>
           </DialogHeader>
+
+          {(message || error) && (
+            <div className={`rounded-md p-3 text-sm ${message ? "bg-[var(--success)]/10 text-[var(--success)]" : "bg-[var(--error)]/10 text-[var(--error)]"}`}>
+              {message || error}
+            </div>
+          )}
 
           {/* Mode tabs */}
           {addDialogProvider === "kiro-pro" || addDialogProvider === "codex" ? (
