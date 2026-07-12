@@ -176,7 +176,7 @@ export default function BotLogs() {
             </Badge>
           </div>
           <p className="mt-1 text-sm text-[var(--muted-foreground)]">
-            Live Camoufox frames + step timeline from Automation logins.
+            Live headless Camoufox preview + step timeline (same idea as enowxai frame relay).
           </p>
         </div>
         <div className="flex flex-wrap gap-2">
@@ -211,8 +211,9 @@ export default function BotLogs() {
             </span>
           </div>
           <p className="text-[11px] text-[var(--muted-foreground)]">
-            Session ids: <code className="text-[var(--primary)]">camoufox-{"{id}"}</code> /{" "}
-            <code className="text-[var(--primary)]">batch-{"{id}"}</code>
+            Sessions: <code className="text-[var(--primary)]">camoufox-*</code> /{" "}
+            <code className="text-[var(--primary)]">batch-*</code> /{" "}
+            <code className="text-[var(--primary)]">grok-farm-*</code>
           </p>
         </CardContent>
       </Card>
@@ -334,7 +335,9 @@ export default function BotLogs() {
                         }`}
                       />
                       <span className="min-w-0 flex-1 truncate font-mono text-xs text-[var(--foreground)]">
-                        {s.email}
+                        {s.provider === "grok" && s.sessionId.startsWith("grok-farm-")
+                          ? "Grok Farm"
+                          : s.email}
                       </span>
                       <Badge
                         variant={

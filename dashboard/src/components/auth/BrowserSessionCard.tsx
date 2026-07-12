@@ -100,20 +100,23 @@ export function BrowserSessionCard({ session, challenge }: Props) {
   const phaseColor = session.phase === "complete" ? "success" : session.phase === "failed" || session.phase === "error" ? "error" : session.phase === "manual_input_waiting" ? "warning" : "secondary";
   const isGrokFarm = session.provider === "grok" && session.sessionId.startsWith("grok-farm-");
   const showEnded = session.terminal;
+  const displayName = isGrokFarm ? "Grok Farm" : session.email;
 
   return (
     <div className="relative flex flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
-      {/* Header */}
+      {/* Header — enowxai-style single session strip */}
       <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2.5">
         <div className="flex min-w-0 flex-1 flex-col gap-0.5">
           <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-            <span className="font-mono text-[var(--primary)]" title={session.sessionId}>
-              {session.sessionId.slice(0, 20)}
-            </span>
-            <span className="truncate font-mono text-[var(--foreground)]">{session.email}</span>
+            <span className="truncate font-medium text-[var(--foreground)]">{displayName}</span>
             <Badge variant="outline" className="text-[10px] uppercase">
               {session.provider}
             </Badge>
+            {isGrokFarm && (
+              <Badge variant="outline" className="text-[10px] text-[var(--muted-foreground)]">
+                headless preview
+              </Badge>
+            )}
           </div>
           <div className="flex items-center gap-2">
             <Badge variant={phaseColor as any}>{session.phase || "unknown"}</Badge>
@@ -129,17 +132,17 @@ export function BrowserSessionCard({ session, challenge }: Props) {
         )}
       </div>
 
-      {/* Browser surface */}
+      {/* Browser surface — frame primary (enowxai); steps only below, once */}
       <div
         ref={containerRef}
         role="application"
         tabIndex={0}
-        aria-label="nodriver browser input surface"
+        aria-label="browser preview surface"
         onKeyDown={handleKeyDown}
-        className="relative flex w-full items-center justify-center overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)] outline-none focus-visible:border-[var(--primary)]"
-        style={{ minHeight: "200px" }}
+        className="relative flex w-full items-center justify-center overflow-hidden bg-[var(--background)] outline-none focus-visible:border-[var(--primary)]"
+        style={{ minHeight: isGrokFarm ? "280px" : "200px" }}
       >
-        {frameSrc && !showEnded ? (
+        {frameSrc ? (
           <img
             ref={imgRef}
             src={frameSrc}
@@ -149,35 +152,30 @@ export function BrowserSessionCard({ session, challenge }: Props) {
             onPointerDown={(e) => handlePointer(e, "down")}
             onPointerMove={(e) => { if (e.buttons > 0) handlePointer(e, "move"); }}
             onPointerUp={(e) => handlePointer(e, "up")}
-            style={{ display: "block", width: "100%", height: "auto", maxHeight: "60vh", objectFit: "contain", cursor: "crosshair" }}
+            style={{
+              display: "block",
+              width: "100%",
+              height: "auto",
+              maxHeight: "60vh",
+              objectFit: "contain",
+              cursor: isGrokFarm ? "default" : "crosshair",
+              opacity: showEnded ? 0.85 : 1,
+            }}
           />
-        ) : isGrokFarm && !frameSrc ? (
-          <div className="flex w-full flex-col gap-2 px-4 py-6">
-            <div className="flex flex-col items-center gap-2 text-center">
-              {!showEnded && (
-                <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
-              )}
-              <p className="text-xs text-[var(--muted-foreground)]">
-                Headless Camoufox (no OS window) — waiting for screenshot stream…
-              </p>
-            </div>
-            <div className="max-h-36 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 font-mono text-[11px]">
-              {(session.steps || []).slice().reverse().slice(0, 30).map((st, i) => (
-                <div key={`${st.ts}-${i}`} className="border-b border-[var(--border)]/50 px-2 py-1 last:border-0">
-                  <span className="text-[var(--primary)]">{st.step}</span>{" "}
-                  <span className="text-[var(--foreground)]">{st.message}</span>
-                </div>
-              ))}
-            </div>
-          </div>
         ) : showEnded ? (
           <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
-            <p className="text-sm text-[var(--muted-foreground)]">Browser frame ended with the session.</p>
+            <p className="text-sm text-[var(--muted-foreground)]">
+              {isGrokFarm ? "Farm session ended." : "Browser frame ended with the session."}
+            </p>
           </div>
         ) : (
           <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
-            <p className="text-xs text-[var(--muted-foreground)]">Waiting for browser frame...</p>
+            <p className="text-xs text-[var(--muted-foreground)]">
+              {isGrokFarm
+                ? "Waiting for Grok signup browser screenshots…"
+                : "Waiting for browser frame..."}
+            </p>
           </div>
         )}
 

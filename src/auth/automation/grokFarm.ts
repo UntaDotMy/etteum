@@ -221,21 +221,26 @@ function pushLog(job: GrokFarmJobState, line: string) {
   appendStep(sid, isErr ? "error" : "farm", job.lastMessage, "grok");
   updatePhase(sid, isErr ? "error" : "farming", job.lastMessage);
 
-  broadcast({
-    type: "login_progress",
-    data: {
-      provider: "grok",
-      step: isErr ? "error" : "farm",
-      message: job.lastMessage,
-      jobId: job.id,
-      email: `grok-farm@${job.id}`,
-      sessionId: sid,
-    },
-  });
-  broadcast({
-    type: "browser_frame",
-    data: { sessionId: sid, provider: "grok", phase: "farming", message: job.lastMessage },
-  });
+  // Only push meaningful progress to the global activity stream (avoid flooding
+  // with every farm print line — steps already live on the session card).
+  const noteworthy =
+    isErr ||
+    /\[etteum\]|BATCH|Mail mode|Batch|Import|succeed|fail|ERROR|starting farm|closing|signup|OAuth|probe|token/i.test(
+      msg,
+    );
+  if (noteworthy) {
+    broadcast({
+      type: "login_progress",
+      data: {
+        provider: "grok",
+        step: isErr ? "error" : "farm",
+        message: job.lastMessage,
+        jobId: job.id,
+        email: "Grok Farm",
+        sessionId: sid,
+      },
+    });
+  }
 }
 
 function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
@@ -260,6 +265,9 @@ function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
     GROK_USED_EMAILS_FILE: path.join(resultsDir, "used_emails.txt"),
     GROK_SCREENSHOTS: "false",
     PYTHONUNBUFFERED: "1",
+    // Avoid Windows cp1252 UnicodeEncodeError on arrows/emoji in print().
+    PYTHONIOENCODING: "utf-8",
+    PYTHONUTF8: "1",
   };
 
   if (cfg.mailMode === "google") {
@@ -400,7 +408,8 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   registerSession({
     sessionId: id,
     accountId: 0,
-    email: `grok-farm@${id}`,
+    // Display label for Browser Logs (not a real mailbox).
+    email: "Grok Farm",
     provider: "grok",
     phase: "starting",
     lastMessage: "Starting Grok farm…",
