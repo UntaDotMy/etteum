@@ -19,6 +19,7 @@ import { db, client as sqliteClient } from "./db/index";
 import { apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { bootstrapFilterRules } from "./db/filter-bootstrap";
+import { bootstrapCompressionSettings } from "./db/compression-bootstrap";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
 import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
@@ -58,6 +59,13 @@ try {
   await bootstrapFilterRules();
 } catch (e) {
   console.error("[DB] Filter rules bootstrap skipped:", e instanceof Error ? e.message : e);
+}
+
+// Compression settings: clamp pathological RTK values (e.g. max_tool_chars=150).
+try {
+  await bootstrapCompressionSettings();
+} catch (e) {
+  console.error("[DB] Compression settings bootstrap skipped:", e instanceof Error ? e.message : e);
 }
 
 // Ensure model_mappings table exists (idempotent), seed Claude Code templates

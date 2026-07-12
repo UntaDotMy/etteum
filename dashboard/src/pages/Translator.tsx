@@ -8,7 +8,7 @@ import { fetchApi } from "@/lib/api";
 const PIPELINE_STAGES = [
   { id: "raw", label: "1. Raw Input", desc: "Client request as received" },
   { id: "normalized", label: "2. Normalized", desc: "Model alias resolved, fields canonicalized" },
-  { id: "filtered", label: "3. Filtered", desc: "Pudidil filters applied (telemetry/brand neutralization)" },
+  { id: "filtered", label: "3. Filtered", desc: "Strip-only sanitizer (telemetry / identity lines; no word-rewrite)" },
   { id: "compressed", label: "4. Compressed", desc: "RTK/TSC/cache-markers applied" },
   { id: "mapped", label: "5. Mapped", desc: "Model mapped to provider target" },
   { id: "transformed", label: "6. Transformed", desc: "Converted to provider-native format" },

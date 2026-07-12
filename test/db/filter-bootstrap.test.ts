@@ -4,9 +4,8 @@ import { settings, filterRules } from "../../src/db/schema";
 import { eq, sql } from "drizzle-orm";
 import { bootstrapFilterRules } from "../../src/db/filter-bootstrap";
 
-describe("bootstrapFilterRules", () => {
+describe("bootstrapFilterRules v3", () => {
   beforeAll(async () => {
-    // Ensure schema is usable; migrations may already have run in other tests.
     try {
       await db.select({ c: sql`1` }).from(settings).limit(1);
     } catch {
@@ -14,27 +13,33 @@ describe("bootstrapFilterRules", () => {
     }
   });
 
-  test("is idempotent — second call does not throw", async () => {
+  test("is idempotent and purges inactive rules", async () => {
     await bootstrapFilterRules();
     await bootstrapFilterRules();
-    const [row] = await db
+
+    const [policy] = await db
       .select()
       .from(settings)
-      .where(eq(settings.key, "filter_policy_v2"))
+      .where(eq(settings.key, "filter_policy_v3"))
       .limit(1);
-    expect(row?.value).toBe("applied");
-  });
+    expect(policy?.value).toBe("applied");
 
-  test("word-rewrite rules stay disabled after policy", async () => {
-    await bootstrapFilterRules();
-    const rows = await db
+    const inactive = await db
       .select()
       .from(filterRules)
-      .where(eq(filterRules.ruleId, "neutralize_kill"));
-    if (rows.length === 0) {
-      // Rule not present in this DB seed — skip assert.
-      return;
-    }
-    expect(rows[0]!.isActive).toBe(false);
+      .where(eq(filterRules.isActive, false));
+    expect(inactive.length).toBe(0);
+  });
+
+  test("active sanitization rules remain", async () => {
+    await bootstrapFilterRules();
+    const active = await db
+      .select()
+      .from(filterRules)
+      .where(eq(filterRules.isActive, true));
+    expect(active.length).toBeGreaterThan(0);
+    const ids = new Set(active.map((r) => r.ruleId));
+    // Telemetry strip must stay.
+    expect(ids.has("remove_billing_header_regex") || ids.has("remove_cc_entrypoint_any")).toBe(true);
   });
 });

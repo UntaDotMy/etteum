@@ -34,6 +34,20 @@ interface RuleFormState {
 
 const emptyForm: RuleFormState = { id: null, pattern: "", replacement: "", isRegex: true, isActive: true };
 
+/** Mirror of server filter-safety (strip-only + no bare short tokens). */
+function clientValidateRule(pattern: string, replacement: string): string | null {
+  const p = pattern.trim();
+  if (!p) return "Pattern is required";
+  if (replacement.trim().length > 0) {
+    return "Replacement must be empty (strip-only). Word-rewrite breaks CLI tool calls.";
+  }
+  const structured = /\s/.test(p) || /[=:/\\@#<>{}()[\],.|+]/.test(p);
+  if (!structured && p.length < 16) {
+    return "Pattern is too broad (bare short token). Use a multi-word phrase, key=value, or URL.";
+  }
+  return null;
+}
+
 export default function FilterRules() {
   const [form, setForm] = useState<RuleFormState | null>(null);
   const { message, setMessage } = useTimedMessage<string>(null, 3000);
@@ -74,8 +88,9 @@ export default function FilterRules() {
 
   const handleSave = async () => {
     if (!form) return;
-    if (!form.pattern.trim()) {
-      setMessage("Pattern is required");
+    const clientErr = clientValidateRule(form.pattern, form.replacement);
+    if (clientErr) {
+      setMessage(clientErr);
       return;
     }
     try {
@@ -84,7 +99,7 @@ export default function FilterRules() {
           method: "POST",
           body: JSON.stringify({
             pattern: form.pattern,
-            replacement: form.replacement,
+            replacement: "", // strip-only
             isRegex: form.isRegex,
             isActive: form.isActive,
           }),
@@ -95,7 +110,7 @@ export default function FilterRules() {
           method: "PATCH",
           body: JSON.stringify({
             pattern: form.pattern,
-            replacement: form.replacement,
+            replacement: "", // strip-only
             isRegex: form.isRegex,
             isActive: form.isActive,
           }),
@@ -117,7 +132,7 @@ export default function FilterRules() {
         <div>
           <h1 className="text-2xl font-bold text-[var(--foreground)]">Filter Rules</h1>
           <p className="text-sm text-[var(--muted-foreground)]">
-            Pre-request sanitizer rules to strip patterns that trigger upstream content moderation
+            Pre-request sanitizer — strip-only (empty replacement). Word-rewrite and brand tokens are blocked so CLI tool calls stay intact.
           </p>
         </div>
         <div className="flex flex-wrap items-center gap-2">
@@ -159,13 +174,19 @@ export default function FilterRules() {
               />
             </div>
             <div>
-              <label className="text-xs font-medium text-[var(--muted-foreground)] mb-1 block">Replacement</label>
+              <label className="text-xs font-medium text-[var(--muted-foreground)] mb-1 block">
+                Replacement <span className="opacity-70">(must stay empty — strip only)</span>
+              </label>
               <textarea
-                className="w-full h-[60px] px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-[var(--primary)]"
-                placeholder="(empty to remove the matched text)"
-                value={form.replacement}
-                onChange={(e) => setForm({ ...form, replacement: e.target.value })}
+                className="w-full h-[60px] px-3 py-2 rounded-md border border-[var(--border)] bg-[var(--background)] text-sm font-mono resize-none focus:outline-none focus:ring-2 focus:ring-[var(--primary)] opacity-70"
+                placeholder="leave empty — matched text is removed"
+                value=""
+                readOnly
+                disabled
               />
+              <p className="text-[10px] text-[var(--muted-foreground)] mt-1">
+                Non-empty replacements (word-rewrite / brand tokens) are rejected by the API. They used to mangle tool args in Claude Code.
+              </p>
             </div>
             <div className="flex items-center gap-4">
               <label className="flex items-center gap-2 text-sm cursor-pointer">

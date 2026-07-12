@@ -1,8 +1,11 @@
 /**
- * One-shot filter policy bootstrap.
+ * Filter policy bootstrap (v3).
  *
- * Runs at most once per DB (settings key). Avoids re-deleting/re-disabling
- * dozens of filter rows on every process start.
+ * Seeds sanitization-only rules on first boot, then permanently removes
+ * legacy inactive tiers (word-rewrite + brand neutralization) that mangled
+ * Claude Code / CLI tool calls if re-enabled from the dashboard.
+ *
+ * Policy key `filter_policy_v3` ensures the purge runs once per DB.
  */
 import { db } from "./index";
 import { filterRules, settings } from "./schema";
@@ -10,9 +13,10 @@ import { eq, inArray, sql } from "drizzle-orm";
 import { PUDIDIL_FILTERS } from "../proxy/filters";
 import { loadFilterCache } from "../proxy/filter-cache";
 
-const POLICY_KEY = "filter_policy_v2";
+const POLICY_KEY = "filter_policy_v3";
 const POLICY_VALUE = "applied";
 
+/** Hard-deleted: broken / over-broad regex rules. */
 const PURGE_RULE_IDS = [
   "remove_claude_code_identity_variations",
   "remove_cline_identity",
@@ -22,85 +26,26 @@ const PURGE_RULE_IDS = [
   "remove_claude_code_mention",
 ] as const;
 
-/** Word-rewrite tier — mangled tool args/paths; keep rows but disable. */
-const DISABLE_WORD_REWRITE = [
-  "neutralize_kill",
-  "neutralize_kill_upper",
-  "neutralize_kill_allcaps",
-  "neutralize_exploit",
-  "neutralize_exploit_upper",
-  "neutralize_attack",
-  "neutralize_attack_upper",
-  "neutralize_attacker",
-  "neutralize_attacker_upper",
-  "neutralize_hack",
-  "neutralize_hack_upper",
-  "neutralize_weapon",
-  "neutralize_weapon_upper",
-  "neutralize_bomb",
-  "neutralize_bomb_upper",
-  "neutralize_terror",
-  "neutralize_terror_upper",
-  "neutralize_suicide",
-  "neutralize_suicide_upper",
-  "neutralize_violence",
-  "neutralize_violence_upper",
-  "neutralize_political",
-  "neutralize_political_upper",
-  "neutralize_kill_regex",
-  "neutralize_exploit_regex",
-  "neutralize_attack_regex",
-  "neutralize_hack_regex",
-] as const;
-
-/** Brand neutralization — brand names must pass through verbatim. */
-const DISABLE_BRAND_REWRITE = [
-  "neutralize_anthropic",
-  "neutralize_anthropic_lower",
-  "neutralize_claude_code",
-  "neutralize_claude_code_lower",
-  "neutralize_openai",
-  "neutralize_openai_lower",
-  "neutralize_chatgpt",
-  "neutralize_chatgpt_lower",
-  "neutralize_gemini",
-  "neutralize_gemini_lower",
-  "neutralize_google_ai",
-  "neutralize_google_ai_lower",
-  "neutralize_llama",
-  "neutralize_llama_lower",
-  "neutralize_meta_ai",
-  "neutralize_meta_ai_lower",
-] as const;
-
-async function policyAlreadyApplied(): Promise<boolean> {
+async function getSetting(key: string): Promise<string | null> {
   try {
-    const [row] = await db
-      .select()
-      .from(settings)
-      .where(eq(settings.key, POLICY_KEY))
-      .limit(1);
-    return row?.value === POLICY_VALUE;
+    const [row] = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
+    return row?.value ?? null;
   } catch {
-    return false;
+    return null;
   }
 }
 
-async function markPolicyApplied(): Promise<void> {
-  const [existing] = await db
-    .select()
-    .from(settings)
-    .where(eq(settings.key, POLICY_KEY))
-    .limit(1);
+async function setSetting(key: string, value: string): Promise<void> {
+  const [existing] = await db.select().from(settings).where(eq(settings.key, key)).limit(1);
   if (existing) {
-    await db.update(settings).set({ value: POLICY_VALUE }).where(eq(settings.key, POLICY_KEY));
+    await db.update(settings).set({ value }).where(eq(settings.key, key));
   } else {
-    await db.insert(settings).values({ key: POLICY_KEY, value: POLICY_VALUE });
+    await db.insert(settings).values({ key, value });
   }
 }
 
 /**
- * Seed defaults if empty, apply one-shot policy, always reload in-memory cache.
+ * Seed defaults if empty, purge inactive/legacy rules once, reload cache.
  */
 export async function bootstrapFilterRules(): Promise<void> {
   const [row] = await db.select({ count: sql<number>`COUNT(*)` }).from(filterRules);
@@ -115,21 +60,38 @@ export async function bootstrapFilterRules(): Promise<void> {
         sortOrder: i,
       })),
     );
-    console.log(`[DB] Seeded ${PUDIDIL_FILTERS.length} filter rules`);
+    console.log(`[DB] Seeded ${PUDIDIL_FILTERS.length} filter rules (sanitization only)`);
   }
 
-  if (!(await policyAlreadyApplied())) {
-    await db.delete(filterRules).where(inArray(filterRules.ruleId, [...PURGE_RULE_IDS]));
+  const applied = await getSetting(POLICY_KEY);
+  if (applied !== POLICY_VALUE) {
+    // 1) Drop known-broken rule ids (if any leftover).
     await db
-      .update(filterRules)
-      .set({ isActive: false })
-      .where(inArray(filterRules.ruleId, [...DISABLE_WORD_REWRITE]));
-    await db
-      .update(filterRules)
-      .set({ isActive: false })
-      .where(inArray(filterRules.ruleId, [...DISABLE_BRAND_REWRITE]));
-    await markPolicyApplied();
-    console.log("[DB] Applied filter policy v2 (purge + disable rewrite tiers)");
+      .delete(filterRules)
+      .where(inArray(filterRules.ruleId, [...PURGE_RULE_IDS]));
+
+    // 2) Delete every inactive rule — user request: off rules are not needed
+    //    and were a trap (word-rewrite / brand tiers broke CLI tool calls).
+    const deleted = await db
+      .delete(filterRules)
+      .where(eq(filterRules.isActive, false))
+      .returning({ id: filterRules.id });
+
+    // Clear legacy v2 marker if present.
+    await db.delete(settings).where(eq(settings.key, "filter_policy_v2"));
+    await setSetting(POLICY_KEY, POLICY_VALUE);
+    console.log(
+      `[DB] Applied filter policy v3 — removed ${deleted.length} inactive rule(s)`,
+    );
+  } else {
+    // Always scrub inactive rows that were re-disabled later so they don't pile up.
+    const deleted = await db
+      .delete(filterRules)
+      .where(eq(filterRules.isActive, false))
+      .returning({ id: filterRules.id });
+    if (deleted.length > 0) {
+      console.log(`[DB] Purged ${deleted.length} inactive filter rule(s)`);
+    }
   }
 
   await loadFilterCache();
