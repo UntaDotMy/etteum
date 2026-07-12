@@ -138,7 +138,7 @@ export async function routeRequest(
   let compressionStats: CompressionStats | undefined;
   try {
     const cfg = await getCompressionConfig();
-    // F11: Headroom LLM whole-message compression (async, fail-open). Runs
+    // Headroom LLM whole-message compression (async, fail-open). Runs
     // BEFORE the synchronous pipeline so the sync stages compress an already-
     // smaller conversation. Never blocks — on any error the original request
     // passes through to compressRequest unchanged.
@@ -224,7 +224,7 @@ export async function routeRequest(
 
     try {
       pool.trackRequestStart(account.id);
-      // F12: dispatch through the shared executor (per-status retry + Codex
+      // dispatch through the shared executor (per-status retry + Codex
       // SSE-peek for 200-OK overload errors + uniform reclassification).
       const result = await execute({ provider, providerName, account, request: compressedRequest, stream });
 
@@ -300,7 +300,7 @@ export async function routeRequest(
       }
 
       // Handle token refresh for expired/401 errors.
-      // F8: route through the refresh coordinator (dedup + per-account lock +
+      // route through the refresh coordinator (dedup + per-account lock +
       // retry/backoff + unrecoverable-error classification) so concurrent 401s
       // on the same account coalesce instead of racing on token rotation.
       if (
@@ -335,7 +335,7 @@ export async function routeRequest(
           // might work on next request after propagation).
           await pool.markTransientFailure(account.id, result.error || "Auth failed");
         } else {
-          // F8: unrecoverable refresh errors (invalid_grant / reused refresh
+          // unrecoverable refresh errors (invalid_grant / reused refresh
           // token) mean the credential is permanently dead → disable account.
           if (refreshResult.unrecoverable) {
             await pool.markError(account.id, refreshResult.error || "Token unrecoverable — re-login required");
@@ -387,7 +387,7 @@ export async function routeRequest(
         throw error;
       }
       if (errMsg.includes("expired") || errMsg.includes("401")) {
-        // F8: route through the refresh coordinator (NOT direct
+        // route through the refresh coordinator (NOT direct
         // provider.refreshToken) so the per-account lock prevents concurrent
         // rotations, and the rotated token is persisted. Calling
         // provider.refreshToken directly here would (a) race the try-block's

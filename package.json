@@ -28,7 +28,7 @@
     "drizzle-orm": "^0.45.2",
     "hono": "^4.12.17",
     "node-forge": "^1.4.0",
-    "playwright": "^1.40.0"
+    "playwright": "^1.54.2"
   },
   "devDependencies": {
     "@types/bun": "latest",
@@ -38,7 +38,6 @@
     "typescript": "^7.0.0"
   },
   "optionalDependencies": {
-    "camoufox-js": "^0.11.0",
-    "playwright": "^1.54.2"
+    "camoufox-js": "^0.11.0"
   }
 }

@@ -172,7 +172,7 @@ export async function routeCombo(options: ComboRoutingOptions): Promise<RouteRes
 
   if (strategy === "fusion") {
     const judgeModel = strategies[comboName]?.judgeModel;
-    // F12: when a judge model is configured, use judge-fusion (collect all
+    // when a judge model is configured, use judge-fusion (collect all
     // responses, judge picks the best). Otherwise race semantics (first wins).
     if (judgeModel) {
       return routeComboFusionWithJudge({ request, comboName, models: orderedModels, judgeModel });

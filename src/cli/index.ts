@@ -14,7 +14,7 @@
  *   etteum media backends
  *   etteum status
  *
- * Closes the CLI-tools wave (Wave 8).
+ * Closes the CLI-tools wave .
  */
 import { readFileSync } from "node:fs";
 

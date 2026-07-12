@@ -462,7 +462,7 @@ export function runWebSearchLoopStreaming(
             if (typeof input === "string") {
               input = safeJsonParse(input, {}) ?? {};
             }
-            // F15: sanitize the accumulated args for Windows backslash repair
+            // sanitize the accumulated args for Windows backslash repair
             // before emitting as partial_json, so Claude Code doesn't see
             // corrupted JSON (C:\Users → C:\\Users).
             const rawJson = typeof call.args === "string" ? call.args : JSON.stringify(call.args);

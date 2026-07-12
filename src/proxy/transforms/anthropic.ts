@@ -777,7 +777,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   let accumulatedThinking = "";  // track thinking text for deterministic signature
   const toolBlocks = new Map<number, number>();
   const closedToolBlocks = new Set<number>();
-  // F15: accumulate raw tool-call argument fragments per call index. We CANNOT
+  // accumulate raw tool-call argument fragments per call index. We CANNOT
   // emit each fragment as an input_json_delta directly because:
   //  (a) upstream OpenAI providers (Kiro/CodeBuddy/…) sometimes emit Windows
   //      paths with UNESCAPED backslashes (C:\Users\test) — \t/\n/\b corrupt
@@ -1070,7 +1070,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   }));
                 }
                 const toolBlockIndex = toolBlocks.get(callIndex)!;
-                // F15: buffer the fragment — emit the full escaped args once at
+                // buffer the fragment — emit the full escaped args once at
                 // block close (see toolArgs comment above).
                 const partialJson = call.function?.arguments || "";
                 if (partialJson) {

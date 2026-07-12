@@ -61,7 +61,7 @@ export function buildBrowserProxyOption(proxyUrl?: string): { server: string; us
 // override per-account. Viewport + screen are randomized within a believable
 // range but kept internally consistent.
 const STEALTH_LOCALES = ["en-US", "en-US", "en-US", "en-GB"];
-const STEALTH_TIMEZES = ["America/New_York", "America/Chicago", "America/Los_Angeles", "America/Denver"];
+const STEALTH_TIMEZONES = ["America/New_York", "America/Chicago", "America/Los_Angeles", "America/Denver"];
 const STEALTH_VIEWPORTS = [
   { width: 1920, height: 1080 },
   { width: 1536, height: 864 },
@@ -83,7 +83,7 @@ export interface StealthProfile {
 /** Build a coherent stealth profile from a numeric seed (account id). */
 export function buildStealthProfile(seed: number): StealthProfile {
   const locale = pickDeterministic(STEALTH_LOCALES, seed);
-  const timezone = pickDeterministic(STEALTH_TIMEZES, seed);
+  const timezone = pickDeterministic(STEALTH_TIMEZONES, seed);
   const viewport = pickDeterministic(STEALTH_VIEWPORTS, seed);
   // Rough lat/long for the timezone's region — keeps geo consistent with TZ.
   const geoMap: Record<string, { latitude: number; longitude: number }> = {
@@ -158,27 +158,27 @@ async function launchCamoufox(opts: LaunchBrowserOptions) {
   }
   // Camoufox() generates the stealth Firefox fingerprint AND launches the
   // browser in one call (mirrors Python's `AsyncCamoufox(**kwargs)`). kwargs
-  // ported 1:1 from enowxai kiro/_adapter.py bootstrap_session.
+  // ported 1:1 from reference automation kiro/_adapter.py bootstrap_session.
   const proxy = buildBrowserProxyOption(proxyUrl);
   const camoufoxOpts: Record<string, any> = {
     headless,
-    // enowxai: block_webrtc=True (prevents the WebRTC IP leak that exposes the
+    // reference automation: block_webrtc=True (prevents the WebRTC IP leak that exposes the
     // real LAN/public IP — a classic bot tell).
     block_webrtc: true,
-    // enowxai: humanize=False (we do humanized typing in googleAutomation.ts;
+    // reference automation: humanize=False (we do humanized typing in googleAutomation.ts;
     // enabling Camoufox's own humanize double-throttles input).
     humanize: false,
-    // enowxai: randomizes the target OS fingerprint. Passing the full set lets
+    // reference automation: randomizes the target OS fingerprint. Passing the full set lets
     // Camoufox pick a coherent one per launch.
     os: ["windows", "macos", "linux"],
-    // enowxai: Screen(1920, 1080). Bounds the generated viewport/screen.
+    // reference automation: Screen(1920, 1080). Bounds the generated viewport/screen.
     screen: { maxWidth: 1920, maxHeight: 1080 },
   };
   if (args.length) camoufoxOpts.args = args;
   if (proxy) {
     camoufoxOpts.proxy = proxy;
     // geoip=True pairs the fingerprint locale/timezone with the proxy's exit
-    // IP (enowxai sets this whenever a proxy is configured).
+    // IP (reference automation sets this whenever a proxy is configured).
     camoufoxOpts.geoip = true;
   }
 

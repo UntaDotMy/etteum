@@ -16,9 +16,11 @@
     "noUnusedParameters": false,
     "noFallthroughCasesInSwitch": true,
     "forceConsistentCasingInFileNames": true,
+    "resolveJsonModule": true,
     "paths": {
-      "@/*": ["./src/*"]
+      "@/*": ["./src/*"],
+      "@shared/*": ["../shared/*"]
     }
   },
-  "include": ["src", "src/vite-env.d.ts"]
+  "include": ["src", "src/vite-env.d.ts", "../shared/**/*.json"]
 }

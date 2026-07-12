@@ -119,7 +119,7 @@ const codebuddyCnService: ProviderService = {
   provider: PROVIDERS.CODEBUDDY_CN,
   engine: "chromium",
   oauthLogin: async () => ({ ...(await runDeviceCodeFlow(cfg(PROVIDERS.CODEBUDDY_CN))) }),
-  // F5: phone-login flow — buys a 5sim number, enters it on codebuddy.cn, polls
+  // phone-login flow — buys a 5sim number, enters it on codebuddy.cn, polls
   // the OTP, mints an API key. The credential carries the 5sim token + optional
   // country/product under extra fields. Falls back to device-code if no token.
   login: async (credential, ctx) => {

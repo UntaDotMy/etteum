@@ -183,7 +183,7 @@ export abstract class BaseProvider {
 
     let quota = await this.fetchQuota(account, signal);
     let refreshedTokens: unknown | undefined;
-    // F15: auth-expired-retry on quota fetch. When fetchQuota fails with a
+    // auth-expired-retry on quota fetch. When fetchQuota fails with a
     // 401/expired/unauthorized error AND the provider supports refresh, force a
     // token refresh + retry the quota fetch once. Mirrors reference
     // usage/[connectionId]/route.js:173-183 (isAuthExpiredMessage → force refresh → re-fetch).

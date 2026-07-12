@@ -178,7 +178,7 @@ class WarmupQueue {
       inArray(accounts.status, statuses),
     ];
 
-    // F15: reset-window-aware selection. When onlyDueForReset is set, limit to
+    // reset-window-aware selection. When onlyDueForReset is set, limit to
     // accounts whose quotaResetAt is within the lead window (about to reset) —
     // so warmup runs right around the provider's reset boundary and an
     // exhausted account is reinstated + re-probed as soon as its window rolls

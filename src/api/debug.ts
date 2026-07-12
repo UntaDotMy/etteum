@@ -7,7 +7,7 @@
  *   GET  /api/console/stream    — SSE stream of server log lines (ring buffer).
  *
  * Closes the dashboard gaps that made the Translator + Live Console pages
- * non-functional (Wave 8 follow-up).
+ * non-functional .
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";

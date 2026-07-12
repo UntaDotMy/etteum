@@ -159,7 +159,7 @@ async function loadFromDb(): Promise<CompressionConfig> {
     ponytail: {
       enabled: parseBool(map.get("compression_ponytail_enabled"), dflt.ponytail.enabled),
     },
-    // F11: output-reducing prompt injections + Headroom LLM compression.
+    // output-reducing prompt injections + Headroom LLM compression.
     cavemanInjection: {
       enabled: parseBool(map.get("compression_caveman_injection_enabled"), dflt.cavemanInjection.enabled),
       level: parseCavemanInjectionLevel(map.get("compression_caveman_injection_level")),

@@ -8,7 +8,7 @@ import { getProviderForModel, type ProviderName } from "./providers/registry";
 
 export type { ProviderName };
 
-// --- Routing resilience constants (Wave 1) ---
+// --- Routing resilience constants  ---
 // Exponential backoff for transient failures: start at 2s, double each time,
 // cap at 5 min. A transient blip cools an account briefly; sustained flakiness
 // pushes it out longer. Auto-reinstates the moment cooldownUntil passes.
@@ -469,7 +469,7 @@ class AccountPool {
     const provider = this.getProviderForModel(model);
     if (!provider) return null;
 
-    // Sticky/preferred-connection pinning (Wave 9 LOW): if a preferred account
+    // Sticky/preferred-connection pinning : if a preferred account
     // id was passed (e.g. the account that served a previous_response_id),
     // return it first if it is eligible — preserves Codex session continuity.
     if (options.preferredAccountId) {

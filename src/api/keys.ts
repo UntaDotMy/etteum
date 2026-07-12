@@ -40,7 +40,7 @@ export async function getActiveApiKey(): Promise<string> {
 }
 
 /**
- * Validate an API key against ALL active sources (Wave 2 multi-key):
+ * Validate an API key against ALL active sources :
  *   1. The legacy single global key (settings.api_key / env) — preserved.
  *   2. Any active row in the api_keys table (named, machine-bound, revocable).
  * Returns the api_keys row id if matched (for per-key attribution), else null.
@@ -111,7 +111,7 @@ keysRouter.post("/test", async (c) => {
   return c.json({ valid });
 });
 
-// --- Wave 2/5: Multi-key API key management (named, machine-bound, revocable) ---
+// 
 
 /** List all managed API keys (never returns the key string — only a masked prefix). */
 keysRouter.get("/managed", async (c) => {

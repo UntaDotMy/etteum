@@ -14,24 +14,18 @@ import path from "node:path";
 import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
 import { runPythonFlow } from "./automation/pythonFlow";
-import type { AutomationEvent } from "./automation/enowxaiAdapter";
+import type { AutomationEvent } from "./automation/automationEvents";
 
-// Provider ids that use the enowxai adapter architecture (Camoufox + browser-
-// log streaming). These go through runProvider() first; others fall back to
-// the loginProvider() path. enowxai adapters are added incrementally per the
-// user directive ("follow enowxai 1:1").
-const ENOWXAI_ADAPTER_PROVIDERS = new Set<string>(["kiro", "codex", "codebuddy"]);
+// Providers that use the Python Camoufox adapter runner (browser login +
+// live frame stream). Codex uses OAuth via the native services path below.
+const CAMOUFOX_ADAPTER_PROVIDERS = new Set<string>([
+  "kiro", "kiro-pro", "codebuddy", "canva", "qoder",
+]);
 
-// Provider ids that the new TS+Camoufox automation layer supports. Logins for
-// these go through loginProvider() instead of the legacy Python subprocess.
-// NOTE: kiro/codex/codebuddy are intentionally ABSENT here — they are claimed
-// first by ENOWXAI_ADAPTER_PROVIDERS (above), which takes precedence in
-// loginAccount(). Including them here was dead code (the enowxai branch
-// returns before this path is reached). If an enowxai adapter is removed for
-// one of those providers, add its id back here to fall through to the native path.
+// Native TS automation (OAuth / specialized services) — no Python Camoufox.
 const NATIVE_AUTOMATION_PROVIDERS = new Set<string>([
-  "antigravity", "gemini-cli", "codebuddy-cn",
-  "qoder", "qwen", "github", "openai", "iflow", "cursor", "cline", "gitlab",
+  "codex", "antigravity", "gemini-cli", "codebuddy-cn",
+  "qwen", "github", "openai", "iflow", "cursor", "cline", "gitlab",
   "claude", "kimi-coding", "kilocode",
 ]);
 
@@ -706,12 +700,8 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
     return { success: false, error: errorMsg };
   }
 
-  // --- Native TS+Camoufox automation path (Wave 3 migration) ---
-  // --- enowxai adapter architecture (1:1 Camoufox + browser-log stream) ---
-  // Providers with an enowxai adapter go through runProvider(), which drives
-  // the ProviderAdapter contract and emits browser-log events. Those events
-  // are bridged to the dashboard WebSocket (the "Browser Log" live viewer).
-  if (ENOWXAI_ADAPTER_PROVIDERS.has(provider)) {
+  // --- Python Camoufox adapter path (browser login + live frame stream) ---
+  if (CAMOUFOX_ADAPTER_PROVIDERS.has(provider)) {
     const password = decrypt(account.password);
     const proxy = await getNextProxy("auth");
     const startLog = addAuthLog({
@@ -720,7 +710,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       email: account.email,
       provider,
       step: "starting",
-      message: `Starting ${provider} login (enowxai + Camoufox) for ${account.email}...`,
+      message: `Starting ${provider} login (Camoufox) for ${account.email}...`,
     });
     broadcast({ type: "login_progress", data: { logId: startLog.id, id: account.id, email: account.email, provider, step: "starting" } });
 
@@ -729,31 +719,22 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       if (ev.type === "progress") {
         addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: ev.step, message: ev.message });
         broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: ev.step, message: ev.message } });
-        } else if (ev.type === "manual_challenge") {
-          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "manual_challenge", message: ev.message });
-          broadcast({ type: "manual_challenge", data: { id: account.id, email: account.email, provider, challengeType: ev.challengeType, message: ev.message } });
-        } else if (ev.type === "error") {
-          addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "error", message: ev.error });
-          broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: "error", message: ev.error } });
-        } else if ((ev as any).type === "frame") {
-          // Live browser-log preview (JPEG screenshot from the Python runner).
-          broadcast({ type: "browser_frame", data: { id: account.id, email: account.email, provider, png: (ev as any).png } });
-        }
-      };
+      } else if (ev.type === "manual_challenge") {
+        addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "manual_challenge", message: ev.message });
+        broadcast({ type: "manual_challenge", data: { id: account.id, email: account.email, provider, challengeType: ev.challengeType, message: ev.message } });
+      } else if (ev.type === "error") {
+        addAuthLog({ type: "login_progress", accountId: account.id, email: account.email, provider, step: "error", message: ev.error });
+        broadcast({ type: "login_progress", data: { id: account.id, email: account.email, provider, step: "error", message: ev.error } });
+      } else if (ev.type === "frame") {
+        broadcast({ type: "browser_frame", data: { id: account.id, email: account.email, provider, png: ev.png } });
+      }
+    };
 
-      try {
-        // Run the login via the Python Camoufox flow-runner (1:1 enowxai).
-        // camoufox-js hangs on this host; the Python camoufox package is what
-        // enowxai uses and launches reliably. The runner streams progress/frame/
-        // manual_challenge events back over stdio; we bridge them to the WS.
-        //
-        // Headless: enowxai runs headless by default (BATCHER_CAMOUFOX_HEADLESS
-        // env, default "true") and does NOT pop a visible window. We mirror that
-        // exactly — always headless unless the operator explicitly sets
-        // BATCHER_CAMOUFOX_HEADLESS=false in the server env. The dashboard
-        // toggle is ignored for this path (matches enowxai: no per-run popup).
+    try {
+        // Headless by default; set BATCHER_CAMOUFOX_HEADLESS=false for a visible window.
         const camoufoxHeadless = process.env.BATCHER_CAMOUFOX_HEADLESS?.toLowerCase() !== "false";
-        const result = await runPythonFlow(provider, { email: account.email, password }, emit, {
+        const flowProvider = provider === "kiro-pro" ? "kiro" : provider;
+        const result = await runPythonFlow(flowProvider, { email: account.email, password }, emit, {
           headless: camoufoxHeadless,
           proxy: proxy?.url,
         });
@@ -763,14 +744,15 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error || "login failed" } });
           return { success: false, error: result.error || "login failed" };
         }
+        const toks = result.tokens || result.credentials || {};
         const providerResult: ProviderResult = {
           success: true,
           provider,
           credentials: {
-            access_token: String(result.tokens?.access_token || ""),
-            refresh_token: String(result.tokens?.refresh_token || ""),
-            id_token: String(result.tokens?.id_token || ""),
-            profile_arn: String((result.tokens as any)?.profile_arn || ""),
+            access_token: String((toks as any).access_token || ""),
+            refresh_token: String((toks as any).refresh_token || ""),
+            id_token: String((toks as any).id_token || ""),
+            profile_arn: String((toks as any).profile_arn || ""),
           },
           quota: result.quota ? {
             remaining_credits: (result.quota as any).remaining_credits,
@@ -780,7 +762,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           } : undefined,
         };
         await applyProviderResult(account, provider, password, providerResult);
-        const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (enowxai)` });
+        const okLog = addAuthLog({ type: "login_success", accountId: account.id, email: account.email, provider, message: `${provider} login succeeded (camoufox)` });
         broadcast({ type: "login_success", data: { logId: okLog.id, id: account.id, email: account.email, provider } });
         return { success: true };
       } catch (err: any) {
@@ -792,7 +774,7 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
       }
   }
 
-  // --- Native TS+Camoufox automation path (Wave 3 migration) ---
+  // --- Native TS+Camoufox automation path  ---
   // Providers supported by the new automation layer bypass the legacy Python
   // subprocess entirely. The result is converted to the same ProviderResult
   // shape and applied via the existing applyProviderResult(), preserving the

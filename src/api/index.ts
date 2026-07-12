@@ -33,9 +33,9 @@ apiRouter.route("/proxy-pool", proxyPoolRouter);
 apiRouter.route("/image-studio", imageStudioRouter);
 apiRouter.route("/filters", filtersRouter);
 apiRouter.route("/combos", combosRouter);
-apiRouter.route("/dashboard-auth", dashboardAuthRouter); // Wave 5: session/SSO login
-apiRouter.route("/", managementRouter); // Wave 7: models/pricing/sync/tunnel/system
-apiRouter.route("/", debugRouter); // Wave 8: translator debug + live console stream
+apiRouter.route("/dashboard-auth", dashboardAuthRouter);
+apiRouter.route("/", managementRouter);
+apiRouter.route("/", debugRouter);
 apiRouter.route("/bin", binApi);
 apiRouter.route("/integration", integrationRouter);
 apiRouter.route("/oauth", oauthRouter);

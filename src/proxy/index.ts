@@ -130,7 +130,7 @@ export async function recordRequest(entry: NewRequestLog) {
       cost: entry.cost || 0,
       durationMs: entry.durationMs || 0,
     });
-    if (++requestCounter % 10 === 0) void pruneRequestLogs();
+    // Log pruning is background-only (setInterval below) to avoid SQLite write contention.
     broadcast({
       type: "request_log",
       data: { ...entry, email: entry.accountEmail, createdAt: new Date().toISOString() },
@@ -353,7 +353,7 @@ function wrapStreamWithUsageFinalizer(
   let completionTokens = 0;
   let totalTokens = 0;
   let upstreamCredits = 0;
-  // F6: token-breakdown accumulation for USD cost (cached/reasoning/cache-creation).
+  // token-breakdown accumulation for USD cost (cached/reasoning/cache-creation).
   let cachedTokens = 0;
   let cacheCreationTokens = 0;
   let reasoningTokens = 0;
@@ -470,7 +470,7 @@ function wrapStreamWithUsageFinalizer(
           quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
         }
 
-        // F6: USD cost from per-model pricing + the accumulated token breakdown.
+        // USD cost from per-model pricing + the accumulated token breakdown.
         // Never throws (calculateCost catches internally); 0 when unpriced/unknown.
         const breakdown: TokenBreakdown = {
           promptTokens: finalPromptTokens,
@@ -580,7 +580,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
   const isStream = body.stream === true;
-  // F12: if the client wants non-stream but the provider is streaming-only,
+  // if the client wants non-stream but the provider is streaming-only,
   // fetch the stream upstream and assemble it into a single JSON response.
   // Resolve the provider name from the model to check forceStream before the
   // routeRequest call (which is where `provider` is normally assigned).
@@ -591,7 +591,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   let shouldReleaseTracking = true;
 
   try {
-    // F12: forced SSE→JSON — assemble the stream into a single response object
+    // forced SSE→JSON — assemble the stream into a single response object
     // for a non-streaming client that hit a streaming-only provider.
     if (!isStream && providerForceStream && result.success && result.stream) {
       try {
@@ -620,7 +620,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     result.creditsUsed,
     result.creditSource
   );
-  // F6: USD cost from per-model pricing. Never throws; 0 when unpriced/unknown.
+  // USD cost from per-model pricing. Never throws; 0 when unpriced/unknown.
   const cost = await calculateCost(body.model, breakdown).catch(() => 0);
 
     // Qoder: server IS the source of truth, but we now also decrement the
@@ -864,7 +864,7 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
 
-    // F15: no provider owns this model (strict routing, no kiro catch-all).
+    // no provider owns this model (strict routing, no kiro catch-all).
     // Surface a clean 404 model_not_found so the client sees the
     // misconfiguration instead of a 503 proxy_error.
     if (errorMessage.startsWith("No provider found for model:")) {
@@ -1066,7 +1066,7 @@ proxyRouter.post("/v1/messages", async (c) => {
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
 
-    // F15: no provider owns this model → 404 model_not_found (strict routing).
+    // no provider owns this model → 404 model_not_found (strict routing).
     if (errorMessage.startsWith("No provider found for model:")) {
       return c.json({
         type: "error",
@@ -1168,7 +1168,7 @@ proxyRouter.post("/v1/responses", async (c) => {
     const invalidModel = isInvalidModelError(errorMessage);
     const badUpstreamRequest = isBadUpstreamRequest(errorMessage);
 
-    // F15: no provider owns this model → 404 model_not_found (strict routing).
+    // no provider owns this model → 404 model_not_found (strict routing).
     if (errorMessage.startsWith("No provider found for model:")) {
       return c.json({
         type: "error",
