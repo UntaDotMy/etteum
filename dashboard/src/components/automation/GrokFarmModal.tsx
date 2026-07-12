@@ -263,8 +263,9 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
           </label>
 
           <p className="text-[11px] text-[var(--muted-foreground)]">
-            Progress appears on <strong>Browser Logs</strong> as a Grok farm session (step timeline).
-            Headless only — no live frames. Install farm Python deps if start fails:
+            Runs Camoufox <strong>headless</strong> (no OS popup). Screenshots stream to{" "}
+            <strong>Browser Logs</strong> like other automations (enowxai-style frame relay).
+            Install deps if needed:
             <code className="ml-1 rounded bg-[var(--secondary)] px-1">scripts/auth/grok-farm</code>
           </p>
         </div>

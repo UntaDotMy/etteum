@@ -151,23 +151,23 @@ export function BrowserSessionCard({ session, challenge }: Props) {
             onPointerUp={(e) => handlePointer(e, "up")}
             style={{ display: "block", width: "100%", height: "auto", maxHeight: "60vh", objectFit: "contain", cursor: "crosshair" }}
           />
-        ) : isGrokFarm ? (
+        ) : isGrokFarm && !frameSrc ? (
           <div className="flex w-full flex-col gap-2 px-4 py-6">
-            <p className="text-center text-xs text-[var(--muted-foreground)]">
-              Grok farm runs <strong>headless</strong> — no live frames. Watch the step log below.
-            </p>
-            <div className="max-h-48 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 font-mono text-[11px]">
-              {(session.steps || []).slice().reverse().slice(0, 40).map((st, i) => (
+            <div className="flex flex-col items-center gap-2 text-center">
+              {!showEnded && (
+                <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
+              )}
+              <p className="text-xs text-[var(--muted-foreground)]">
+                Headless Camoufox (no OS window) — waiting for screenshot stream…
+              </p>
+            </div>
+            <div className="max-h-36 overflow-y-auto rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 font-mono text-[11px]">
+              {(session.steps || []).slice().reverse().slice(0, 30).map((st, i) => (
                 <div key={`${st.ts}-${i}`} className="border-b border-[var(--border)]/50 px-2 py-1 last:border-0">
                   <span className="text-[var(--primary)]">{st.step}</span>{" "}
                   <span className="text-[var(--foreground)]">{st.message}</span>
                 </div>
               ))}
-              {(session.steps || []).length === 0 && (
-                <div className="px-2 py-3 text-center text-[var(--muted-foreground)]">
-                  {showEnded ? "No steps recorded." : "Starting farm…"}
-                </div>
-              )}
             </div>
           </div>
         ) : showEnded ? (

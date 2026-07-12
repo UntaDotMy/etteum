@@ -14,6 +14,7 @@ import {
   registerSession,
   appendStep,
   updatePhase,
+  updateFrame,
   getSession,
 } from "../browserSession";
 
@@ -109,13 +110,40 @@ export function listGrokFarmJobs(): GrokFarmJobState[] {
 }
 
 function pushLog(job: GrokFarmJobState, line: string) {
-  const msg = line.replace(/\r/g, "").trimEnd();
-  if (!msg) return;
+  const raw = line.replace(/\r/g, "").trimEnd();
+  if (!raw) return;
+
+  // Frame relay from farm.py (ETTEUM_JSON:{"type":"frame","base64":...,"format":"jpeg"})
+  // Same contract as enowxai: headless browser + screenshot loop → Browser Logs.
+  if (raw.startsWith("ETTEUM_JSON:")) {
+    try {
+      const payload = JSON.parse(raw.slice("ETTEUM_JSON:".length)) as {
+        type?: string;
+        base64?: string;
+        format?: string;
+      };
+      if (payload.type === "frame" && payload.base64) {
+        updateFrame(job.id, payload.base64, payload.format || "jpeg");
+        broadcast({
+          type: "browser_frame",
+          data: {
+            sessionId: job.id,
+            provider: "grok",
+            format: payload.format || "jpeg",
+          },
+        });
+        return; // never put multi-KB base64 into logTail
+      }
+    } catch {
+      /* fall through as normal log */
+    }
+  }
+
+  const msg = raw;
   job.logTail.push(msg);
   if (job.logTail.length > 200) job.logTail.splice(0, job.logTail.length - 200);
   job.lastMessage = msg.slice(0, 300);
 
-  // Mirror into Browser Logs session (steps timeline — farm is headless so no frames).
   const sid = job.id;
   const isErr = /error|failed|traceback|exception/i.test(msg);
   appendStep(sid, isErr ? "error" : "farm", job.lastMessage, "grok");
@@ -132,7 +160,6 @@ function pushLog(job: GrokFarmJobState, line: string) {
       sessionId: sid,
     },
   });
-  // Nudge Browser Logs pollers that a session updated.
   broadcast({
     type: "browser_frame",
     data: { sessionId: sid, provider: "grok", phase: "farming", message: job.lastMessage },
@@ -152,8 +179,10 @@ function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
     GROK_PASSWORD: cfg.accountPassword,
     GROK_MAX_ACCOUNTS: String(cfg.maxAccounts),
     GROK_CONCURRENT: String(cfg.concurrent),
-    // Etteum always runs farm headless (no UI toggle).
+    // Headless OS window (no popup) — frames still stream via screenshot relay.
     GROK_HEADLESS: "true",
+    ETTEUM_FRAME_RELAY: "true",
+    ETTEUM_FRAME_INTERVAL: "1.5",
     GROK_ACTIVATE_WEB: cfg.activateWeb ? "true" : "false",
     GROK_RESULTS_DIR: resultsDir,
     GROK_USED_EMAILS_FILE: path.join(resultsDir, "used_emails.txt"),
