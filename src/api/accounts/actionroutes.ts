@@ -43,6 +43,42 @@ export function decodeJwtPayload(token: string): Record<string, any> {
   }
 }
 
+// Module-level Codex OAuth constants + upsert. Must live here (not nested inside
+// registerActionRoutes) so importCodexAccessToken / exchangeCodex* can call them.
+const CODEX_ISSUER = "https://auth.openai.com";
+const CODEX_TOKEN_URL = `${CODEX_ISSUER}/oauth/token`;
+const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
+const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+const CODEX_SCOPE = "openid profile email offline_access";
+
+async function upsertCodexAccount(email: string, tokens: Record<string, unknown>): Promise<number> {
+  const existing = await db.select().from(accounts)
+    .where(eq(accounts.email, email))
+    .then((rows) => rows.find((r) => r.provider === "codex"));
+
+  if (existing) {
+    await db.update(accounts).set({
+      status: "active",
+      tokens: tokens as unknown,
+      errorMessage: null,
+      lastLoginAt: new Date(),
+      updatedAt: new Date(),
+    }).where(eq(accounts.id, existing.id));
+    return existing.id;
+  }
+
+  const inserted = await db.insert(accounts).values({
+    provider: "codex",
+    email,
+    password: encrypt("instant-login"),
+    status: "active",
+    tokens: tokens as unknown,
+    lastLoginAt: new Date(),
+  }).returning();
+
+  return inserted[0]!.id;
+}
+
 export async function importCodexAccessToken(accessToken: string, name?: string) {
   const token = accessToken.trim();
   if (!token) {
@@ -315,6 +351,97 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
   return { success, failed, errors: errors.length > 0 ? errors : undefined };
 }
 
+/**
+ * Bulk-import Grok accounts via refresh tokens (preferred) or access tokens.
+ * Used by POST /api/accounts/instant-login (provider=grok).
+ *
+ * - Refresh tokens (durable): exchanged at auth.x.ai for a fresh access token.
+ * - Access tokens (JWT, "eyJ..."): stored as-is with no refresh capability.
+ */
+export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
+  success: number;
+  failed: number;
+  errors?: string[];
+}> {
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+
+  for (const token of tokens) {
+    const trimmed = token.trim();
+    if (!trimmed) { failed++; continue; }
+
+    try {
+      let oauthTokens;
+      let email = "";
+
+      if (trimmed.startsWith("eyJ")) {
+        oauthTokens = bundleFromAccessToken(trimmed);
+        email = oauthTokens.sub
+          ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth`
+          : `grok-${trimmed.slice(-8)}@token.local`;
+      } else {
+        oauthTokens = await exchangeRefreshToken(trimmed);
+        email = oauthTokens.sub
+          ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth`
+          : `grok-${trimmed.slice(-8)}@token.local`;
+      }
+
+      await upsertGrokOAuthAccount(email, oauthTokens);
+      success++;
+    } catch (err) {
+      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      failed++;
+    }
+  }
+
+  pool.invalidate("grok" as ProviderName);
+  if (success > 0) {
+    broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
+  }
+
+  return { success, failed, errors: errors.length > 0 ? errors : undefined };
+}
+
+async function upsertGrokOAuthAccount(
+  email: string,
+  oauthTokens: import("../../proxy/providers/grok/oauth").GrokOAuthTokens,
+) {
+  const existing = await db.select().from(accounts)
+    .where(and(eq(accounts.provider, "grok"), eq(accounts.email, email)))
+    .limit(1);
+
+  const tokensBlob = {
+    auth_method: "oauth" as const,
+    access_token: oauthTokens.access_token,
+    refresh_token: oauthTokens.refresh_token,
+    expires_at: oauthTokens.expires_at,
+    oidc_client_id: oauthTokens.oidc_client_id,
+    sub: oauthTokens.sub,
+  };
+
+  if (existing.length > 0) {
+    await db.update(accounts)
+      .set({
+        tokens: tokensBlob,
+        status: "active",
+        enabled: true,
+        lastLoginAt: new Date(),
+      })
+      .where(eq(accounts.id, existing[0]!.id));
+  } else {
+    await db.insert(accounts).values({
+      provider: "grok",
+      email,
+      password: encrypt("oauth:no-password"),
+      status: "active",
+      enabled: true,
+      tokens: tokensBlob,
+      metadata: { auth_method: "oauth", oidc_client_id: oauthTokens.oidc_client_id },
+    });
+  }
+}
+
 export function registerActionRoutes(router: Hono): void {
   router.post("/:id/login", async (c) => {
     const id = Number(c.req.param("id"));
@@ -453,140 +580,6 @@ export function registerActionRoutes(router: Hono): void {
     broadcast({ type: "codex_reset_consumed", data: { accountId: id, remainingCredits: result.remainingCredits } });
     return c.json({ success: true, remainingCredits: result.remainingCredits });
   });
-
-  const CODEX_ISSUER = "https://auth.openai.com";
-  const CODEX_TOKEN_URL = `${CODEX_ISSUER}/oauth/token`;
-  const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
-  const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
-  const CODEX_SCOPE = "openid profile email offline_access";
-
-
-  async function upsertCodexAccount(email: string, tokens: Record<string, unknown>) {
-    const existing = await db.select().from(accounts)
-      .where(eq(accounts.email, email))
-      .then((rows) => rows.find((r) => r.provider === "codex"));
-
-    if (existing) {
-      await db.update(accounts).set({
-        status: "active",
-        tokens: tokens as unknown,
-        errorMessage: null,
-        lastLoginAt: new Date(),
-        updatedAt: new Date(),
-      }).where(eq(accounts.id, existing.id));
-      return existing.id;
-    }
-
-    const inserted = await db.insert(accounts).values({
-      provider: "codex",
-      email,
-      password: encrypt("instant-login"),
-      status: "active",
-      tokens: tokens as unknown,
-      lastLoginAt: new Date(),
-    }).returning();
-
-    return inserted[0]!.id;
-  }
-
-
-
-
-  async function handleCodexInstantLogin(c: any, tokens: string[]) {
-    const result = await exchangeCodexRefreshTokens(tokens);
-    return c.json(result);
-  }
-
-  /**
-   * Bulk-import Grok accounts via refresh tokens (preferred) or access tokens.
-   * Mirrors exchangeCodexRefreshTokens: exchange → upsert → invalidate → broadcast.
-   *
-   * - Refresh tokens (durable): exchanged at auth.x.ai for a fresh access token.
-   *   Account stays alive; etteum auto-refreshes before the 6h expiry.
-   * - Access tokens (JWT, "eyJ..."): stored as-is with no refresh capability.
-   *   Will expire in ~6h — useful only for quick testing.
-   */
-  async function handleGrokInstantLogin(c: any, tokens: string[]) {
-    let success = 0;
-    let failed = 0;
-    const errors: string[] = [];
-
-    for (const token of tokens) {
-      const trimmed = token.trim();
-      if (!trimmed) { failed++; continue; }
-
-      try {
-        let oauthTokens;
-        let email = "";
-
-        if (trimmed.startsWith("eyJ")) {
-          // Looks like a JWT access token — bundle as-is (no refresh).
-          oauthTokens = bundleFromAccessToken(trimmed);
-          email = oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${trimmed.slice(-8)}@token.local`;
-        } else {
-          // Treat as a refresh token — exchange for a fresh access token.
-          oauthTokens = await exchangeRefreshToken(trimmed);
-          email = oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${trimmed.slice(-8)}@token.local`;
-        }
-
-        await upsertGrokOAuthAccount(email, oauthTokens);
-        success++;
-      } catch (err) {
-        errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
-        failed++;
-      }
-    }
-
-    pool.invalidate("grok" as ProviderName);
-    if (success > 0) {
-      broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
-    }
-
-    return c.json({ success, failed, errors: errors.length > 0 ? errors : undefined });
-  }
-
-  /**
-   * Upsert a Grok OAuth account. Dedupes by (provider, email); preserves existing id.
-   * Tokens stored in the existing `accounts.tokens` JSON column (no migration).
-   */
-  async function upsertGrokOAuthAccount(email: string, oauthTokens: import("../../proxy/providers/grok/oauth").GrokOAuthTokens) {
-    const existing = await db.select().from(accounts)
-      .where(and(eq(accounts.provider, "grok"), eq(accounts.email, email)))
-      .limit(1);
-
-    const tokensBlob = {
-      auth_method: "oauth" as const,
-      access_token: oauthTokens.access_token,
-      refresh_token: oauthTokens.refresh_token,
-      expires_at: oauthTokens.expires_at,
-      oidc_client_id: oauthTokens.oidc_client_id,
-      sub: oauthTokens.sub,
-    };
-
-    if (existing.length > 0) {
-      await db.update(accounts)
-        .set({
-          tokens: tokensBlob,
-          status: "active",
-          enabled: true,
-          lastLoginAt: new Date(),
-        })
-        .where(eq(accounts.id, existing[0]!.id));
-    } else {
-      await db.insert(accounts).values({
-        provider: "grok",
-        email,
-        // password is NOT NULL but unused for OAuth — store an encrypted sentinel
-        // (never plaintext: legacy decrypt() of "oauth:no-password" yields binary
-        // garbage that Bun rejects as an Authorization header value).
-        password: encrypt("oauth:no-password"),
-        status: "active",
-        enabled: true,
-        tokens: tokensBlob,
-        metadata: { auth_method: "oauth", oidc_client_id: oauthTokens.oidc_client_id },
-      });
-    }
-  }
 
   /**
    * POST /api/accounts/:id/open-panel - Open web panel in browser with auto-login

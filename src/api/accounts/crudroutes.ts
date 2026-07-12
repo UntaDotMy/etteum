@@ -29,6 +29,7 @@ import {
   BYOK_KEY_LABEL_RE,
 } from "./shared";
 import * as shared from "./shared";
+import { exchangeCodexRefreshTokens, exchangeGrokInstantTokens } from "./actionroutes";
 
 /** Register routes on the parent accounts router (order-sensitive). */
 export function registerCrudRoutes(router: Hono): void {
@@ -412,11 +413,26 @@ export function registerCrudRoutes(router: Hono): void {
     }
 
     if (provider === "codex") {
-      return await handleCodexInstantLogin(c, body.tokens);
+      // Handlers live in actionroutes (exported after modular split). Calling
+      // undefined locals here threw ReferenceError → HTTP 500 for every Codex
+      // / Grok Instant Login from the dashboard.
+      try {
+        const result = await exchangeCodexRefreshTokens(body.tokens);
+        return c.json(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ error: `Codex instant-login failed: ${msg}` }, 500);
+      }
     }
 
     if (provider === "grok") {
-      return await handleGrokInstantLogin(c, body.tokens);
+      try {
+        const result = await exchangeGrokInstantTokens(body.tokens);
+        return c.json(result);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        return c.json({ error: `Grok instant-login failed: ${msg}` }, 500);
+      }
     }
 
     const REFRESH_URL = "https://prod.us-east-1.auth.desktop.kiro.dev/refreshToken";
