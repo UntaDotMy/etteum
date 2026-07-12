@@ -1118,12 +1118,39 @@ def install_quiet_print() -> None:
         # force_console=True escapes mute (interrupt messages, fatal errors)
         force = bool(kwargs.pop("force_console", False))
         sep = kwargs.get("sep", " ")
-        msg = sep.join(str(a) for a in args)
+        # Windows cp1252 consoles crash on arrows/emoji (→ etc). Always
+        # ASCII-safe when writing to stdout/stderr pipes (etteum capture).
+        safe_args = []
+        for a in args:
+            s = str(a)
+            try:
+                enc = getattr(sys.stdout, "encoding", None) or "utf-8"
+                s.encode(enc)
+            except Exception:
+                s = s.encode("ascii", errors="replace").decode("ascii")
+            safe_args.append(s)
+        msg = sep.join(safe_args)
         if force or not HUD.enabled or not HUD._active or VERBOSE:
             if _ORIG_PRINT is not None:
                 # I/O lock only — never take state lock (that froze HUD paint)
                 with HUD._io_lock:
-                    _ORIG_PRINT(*args, **{k: v for k, v in kwargs.items() if k != "force_console"})
+                    try:
+                        _ORIG_PRINT(
+                            *safe_args,
+                            **{k: v for k, v in kwargs.items() if k != "force_console"},
+                        )
+                    except UnicodeEncodeError:
+                        # Last resort for pipes / cp1252
+                        text = sep.join(safe_args)
+                        try:
+                            sys.stdout.buffer.write(
+                                (text + ("\n" if kwargs.get("end", "\n") == "\n" else "")).encode(
+                                    "utf-8", errors="replace"
+                                )
+                            )
+                            sys.stdout.buffer.flush()
+                        except Exception:
+                            pass
             return
         HUD.log_line(msg)
 
@@ -2559,8 +2586,13 @@ def _ensure_frame_relay() -> None:
         _frame_relay_task = loop.create_task(_etteum_frame_relay_loop())
 
 
-def _register_frame_page(manager: Any, page: Any) -> None:
-    if not ETTEUM_FRAME_RELAY or manager is None or page is None:
+def _register_frame_page(manager: Any, page: Any, *, preview: bool = True) -> None:
+    """Register page for etteum Browser Logs screenshots.
+
+    preview=False for the temp-mail browser — only the Grok signup/OAuth
+    page should stream frames (enowxai-style single preview).
+    """
+    if not ETTEUM_FRAME_RELAY or not preview or manager is None or page is None:
         return
     _FRAME_PAGES[id(manager)] = page
     _ensure_frame_relay()
@@ -2572,7 +2604,12 @@ def _unregister_frame_page(manager: Any) -> None:
     _FRAME_PAGES.pop(id(manager), None)
 
 
-async def launch_browser(proxy_url: str | None, headless: bool | None = None):
+async def launch_browser(
+    proxy_url: str | None,
+    headless: bool | None = None,
+    *,
+    preview: bool = True,
+):
     """Launch a stealth Camoufox browser (unique fingerprint per instance).
 
     headless=None (default) → use the global HEADLESS flag (existing behavior).
@@ -2615,8 +2652,8 @@ async def launch_browser(proxy_url: str | None, headless: bool | None = None):
 
     page = await browser.new_page()
     page.set_default_timeout(60000)
-    # Register for etteum Browser Logs frame stream (headless screenshots).
-    _register_frame_page(manager, page)
+    # Only Grok signup/OAuth pages stream to Browser Logs (not temp-mail).
+    _register_frame_page(manager, page, preview=preview)
     # Log fingerprint axis once per launch (helps debug CF/geo mismatches)
     try:
         _os = kwargs.get("os", "?")
@@ -2691,7 +2728,7 @@ async def close_browser(manager) -> None:
         _cleanup_self_profiles()
         if my_driver and _pid_alive(my_driver):
             print(
-                f"[cleanup] self driver still alive → kill self tree pid={my_driver}",
+                f"[cleanup] self driver still alive -> kill self tree pid={my_driver}",
                 flush=True,
             )
             _kill_pid_tree(my_driver, allow_untracked=True)
@@ -5922,8 +5959,9 @@ async def _do_register(attempt_num: int) -> dict | None:
                 "",
             )
             try:
+                # preview=False: temp-mail browser is internal; do not stream frames
                 _mmgr, _mbrowser, mail_page = await launch_browser(
-                    None, headless=TEMPMAIL_HEADLESS
+                    None, headless=TEMPMAIL_HEADLESS, preview=False
                 )
                 _tempmail_sessions[attempt_num] = (mail_page, _mbrowser, _mmgr)
                 email_addr = await tempmail_gen_email(mail_page, attempt_num)
