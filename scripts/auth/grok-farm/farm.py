@@ -6844,60 +6844,10 @@ async def main():
     except Exception as e:
         print(f"[cleanup] startup sweep failed: {e}", flush=True)
     _install_sigint_handler()
-    if MAIL_MODE == "google":
-        if not IMAP_USER or not IMAP_PASS:
-            print("ERROR: set GROK_IMAP_USER and GROK_IMAP_PASS in .env (or use temp mail)", flush=True)
-            sys.exit(1)
-    if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
-        print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
-        sys.exit(1)
-    if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
-        print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
-        sys.exit(1)
 
-    _load_used_emails()
-    known = len(_used_emails)
-
-    print("=" * 60, flush=True)
-    print("  Grok / xAI Standalone Farmer", flush=True)
-    print("=" * 60, flush=True)
-    print(f"  Mail mode  : {MAIL_MODE}", flush=True)
-    if MAIL_MODE == "tempmail":
-        print(f"  Temp mail  : generator.email (headless={TEMPMAIL_HEADLESS})", flush=True)
-        print(f"  OTP source : temp-mail inbox page (no IMAP)", flush=True)
-    else:
-        print(f"  Email mode : {EMAIL_MODE}", flush=True)
-        if EMAIL_MODE == "domain":
-            print(f"  Domain     : @{EMAIL_DOMAIN}", flush=True)
-        else:
-            print(f"  Gmail base : {GMAIL_BASE or IMAP_USER}", flush=True)
-        print(f"  IMAP       : {IMAP_USER} @ {IMAP_HOST}:{IMAP_PORT}", flush=True)
-    print(f"  Password   : {'*' * max(0, len(ACCOUNT_PASSWORD) - 2)}{ACCOUNT_PASSWORD[-2:]}", flush=True)
-    print(f"  Headless   : {HEADLESS}", flush=True)
-    print(f"  Activate   : {ACTIVATE_WEB}", flush=True)
-    print(
-        f"  Isolation  : {WORKER_ISOLATION} "
-        f"(own browser/Turnstile; spawn_delay={SPAWN_DELAY}s; "
-        f"ts_parallel={TURNSTILE_PARALLEL})",
-        flush=True,
-    )
-    print(
-        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES}",
-        flush=True,
-    )
-    print(
-        f"  Proxies    : {len(PROXY_POOL)} ({PROXY_SOURCE})"
-        if PROXY_POOL
-        else f"  Proxies    : direct ({PROXY_SOURCE})",
-        flush=True,
-    )
-    print(f"  Email len  : {EMAIL_LOCAL_LEN} (crypto secrets)", flush=True)
-    print(f"  Known mail : {known} (all batches + used_emails.txt)", flush=True)
-    print(f"  Results    : {RESULTS_ROOT}/batch_<id>/  (per run)", flush=True)
-    print("-" * 60, flush=True)
-    print("  Setting run (Enter = pakai default dari .env)", flush=True)
-
-    # CLI args override: python farm.py -m tempmail --count 10 --concurrent 2 --yes
+    # CLI args FIRST — must run before domain/IMAP validation so
+    # `python farm.py -m tempmail -y` does not require GROK_EMAIL_DOMAIN.
+    # (Etteum always passes -m / -n / -c / -y.)
     arg_count: int | None = None
     arg_conc: int | None = None
     arg_mail: str | None = None
@@ -6973,6 +6923,60 @@ async def main():
                 break  # keep GROK_MAIL_MODE default (farm)
             print("  Masukkan 1, 2, atau 3.")
         print()
+
+    # Validate config only after MAIL_MODE is final.
+    # tempmail never needs GROK_EMAIL_DOMAIN / IMAP.
+    if MAIL_MODE == "google":
+        if not IMAP_USER or not IMAP_PASS:
+            print("ERROR: google mode needs GROK_IMAP_USER and GROK_IMAP_PASS (or use -m tempmail)", flush=True)
+            sys.exit(1)
+        if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
+            print("ERROR: set GROK_EMAIL_DOMAIN for google domain mode", flush=True)
+            sys.exit(1)
+        if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
+            print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
+            sys.exit(1)
+
+    _load_used_emails()
+    known = len(_used_emails)
+
+    print("=" * 60, flush=True)
+    print("  Grok / xAI Standalone Farmer", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Mail mode  : {MAIL_MODE}", flush=True)
+    if MAIL_MODE == "tempmail":
+        print(f"  Temp mail  : generator.email (headless={TEMPMAIL_HEADLESS})", flush=True)
+        print(f"  OTP source : temp-mail inbox page (no IMAP)", flush=True)
+    else:
+        print(f"  Email mode : {EMAIL_MODE}", flush=True)
+        if EMAIL_MODE == "domain":
+            print(f"  Domain     : @{EMAIL_DOMAIN}", flush=True)
+        else:
+            print(f"  Gmail base : {GMAIL_BASE or IMAP_USER}", flush=True)
+        print(f"  IMAP       : {IMAP_USER} @ {IMAP_HOST}:{IMAP_PORT}", flush=True)
+    print(f"  Password   : {'*' * max(0, len(ACCOUNT_PASSWORD) - 2)}{ACCOUNT_PASSWORD[-2:]}", flush=True)
+    print(f"  Headless   : {HEADLESS}", flush=True)
+    print(f"  Activate   : {ACTIVATE_WEB}", flush=True)
+    print(
+        f"  Isolation  : {WORKER_ISOLATION} "
+        f"(own browser/Turnstile; spawn_delay={SPAWN_DELAY}s; "
+        f"ts_parallel={TURNSTILE_PARALLEL})",
+        flush=True,
+    )
+    print(
+        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES}",
+        flush=True,
+    )
+    print(
+        f"  Proxies    : {len(PROXY_POOL)} ({PROXY_SOURCE})"
+        if PROXY_POOL
+        else f"  Proxies    : direct ({PROXY_SOURCE})",
+        flush=True,
+    )
+    print(f"  Email len  : {EMAIL_LOCAL_LEN} (crypto secrets)", flush=True)
+    print(f"  Known mail : {known} (all batches + used_emails.txt)", flush=True)
+    print(f"  Results    : {RESULTS_ROOT}/batch_<id>/  (per run)", flush=True)
+    print("-" * 60, flush=True)
 
     # Re-validate config now that MAIL_MODE is final.
     if MAIL_MODE == "google" and (not IMAP_USER or not IMAP_PASS):
