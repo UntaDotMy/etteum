@@ -265,6 +265,11 @@ scripts/auth/run_gitlab_duo_only.py
 # Debug screenshots:
 scripts/auth/ag_*.png
 scripts/auth/screenshots/
+scripts/auth/grok-farm/results/
+scripts/auth/grok-farm/screenshots/
+scripts/auth/grok-farm/.venv/
+scripts/auth/grok-farm/proxies.txt
+scripts/auth/grok-farm/.env
 # Captured OAuth tokens — SECRET, never commit:
 scripts/auth/ag_tokens.json
 

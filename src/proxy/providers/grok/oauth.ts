@@ -149,6 +149,70 @@ export interface GrokOAuthTokens {
   oidc_client_id: string;
   /** Subject (user id) from the JWT, for identification. */
   sub?: string;
+  /** Optional email from farm / id_token claims. */
+  email?: string;
+  /** Free Build absolute token credits (from x-ratelimit-*-tokens headers). */
+  credits_remaining?: number;
+  credits_limit?: number;
+}
+
+/**
+ * Normalize expires_at from number (unix s/ms) or ISO string.
+ * Farm batches store ISO strings; if left as strings, `expires_at - now` is NaN
+ * and ensureFreshAccessToken always treats the token as expired.
+ */
+export function normalizeExpiresAt(value: unknown, accessToken?: string): number {
+  if (typeof value === "number" && Number.isFinite(value)) {
+    return value > 1e12 ? Math.floor(value / 1000) : Math.floor(value);
+  }
+  if (typeof value === "string" && value.trim()) {
+    const asNum = Number(value);
+    if (Number.isFinite(asNum) && asNum > 1_000_000_000) {
+      return asNum > 1e12 ? Math.floor(asNum / 1000) : Math.floor(asNum);
+    }
+    const ms = Date.parse(value);
+    if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+  }
+  if (accessToken) {
+    const claims = peekJwtClaims(accessToken);
+    if (claims.exp) return claims.exp;
+  }
+  return 0;
+}
+
+/**
+ * Normalize farm / paste / legacy token blobs into the canonical OAuth shape.
+ * Accepts grok-farm accounts.json tokens (`auth_mode: "oidc"`, ISO expires_at).
+ */
+export function normalizeGrokOAuthTokens(raw: unknown): GrokOAuthTokens | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, unknown>;
+  const access = typeof t.access_token === "string" ? t.access_token.trim() : "";
+  if (!access) return null;
+  // SSO-only blobs are not OAuth.
+  if (typeof t.sso === "string" && t.sso && !t.access_token) return null;
+
+  const refresh = typeof t.refresh_token === "string" ? t.refresh_token.trim() : "";
+  const claims = peekJwtClaims(access);
+  const clientId =
+    (typeof t.oidc_client_id === "string" && t.oidc_client_id) ||
+    (typeof t.client_id === "string" && t.client_id) ||
+    GROK_OAUTH.clientId;
+
+  const creditsRem = Number(t.credits_remaining);
+  const creditsLim = Number(t.credits_limit);
+
+  return {
+    auth_method: "oauth",
+    access_token: access,
+    refresh_token: refresh,
+    expires_at: normalizeExpiresAt(t.expires_at, access),
+    oidc_client_id: clientId,
+    sub: (typeof t.sub === "string" && t.sub) || claims.sub,
+    email: typeof t.email === "string" ? t.email : undefined,
+    credits_remaining: Number.isFinite(creditsRem) ? creditsRem : undefined,
+    credits_limit: Number.isFinite(creditsLim) ? creditsLim : undefined,
+  };
 }
 
 /** Response from auth.x.ai/oauth2/token on a refresh exchange. */
@@ -279,16 +343,14 @@ export function bundleFromAccessToken(
 // Account helpers
 // ---------------------------------------------------------------------------
 
-/** Type guard: does an account's token blob use the OAuth method? */
+/** Type guard: does an account's token blob use the OAuth / CLI method? */
 export function isOAuthAccount(account: Account): boolean {
-  const tokens = account.tokens as Record<string, unknown> | null;
-  return tokens?.auth_method === "oauth" && typeof tokens.access_token === "string";
+  return normalizeGrokOAuthTokens(account.tokens) != null;
 }
 
-/** Extract the OAuth token bundle from an account, or null. */
+/** Extract a normalized OAuth token bundle from an account, or null. */
 export function getOAuthTokens(account: Account): GrokOAuthTokens | null {
-  if (!isOAuthAccount(account)) return null;
-  return account.tokens as unknown as GrokOAuthTokens;
+  return normalizeGrokOAuthTokens(account.tokens);
 }
 
 /**
@@ -659,6 +721,78 @@ export async function fetchOAuthBillingQuota(
     }
   } catch (err: any) {
     if (err?.name === "AbortError") throw err;
+  }
+
+  // 3) Farm-compatible absolute free Build credits via rate-limit headers on a
+  //    tiny Responses probe (x-ratelimit-remaining-tokens / limit-tokens).
+  try {
+    const headerQuota = await probeOAuthChatCredits(bearer, signal);
+    if (headerQuota) return headerQuota;
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw err;
+  }
+
+  return null;
+}
+
+/**
+ * Farm-compatible free Build credit probe: POST /v1/responses with max_output_tokens=16
+ * and read absolute token quota from x-ratelimit-*-tokens response headers.
+ */
+export async function probeOAuthChatCredits(
+  bearer: string,
+  signal?: AbortSignal,
+): Promise<GrokOAuthQuota | null> {
+  const cliVersion = await getGrokCliVersion();
+  const response = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${bearer}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+      "x-grok-client-version": cliVersion,
+      "x-grok-client-identifier": "grok-build",
+      "x-grok-client-surface": "grok-build",
+    },
+    body: JSON.stringify({
+      model: "grok-4.5",
+      input: "Reply with exactly: OK",
+      stream: false,
+      max_output_tokens: 16,
+    }),
+    signal,
+  });
+
+  const rem = Number(response.headers.get("x-ratelimit-remaining-tokens"));
+  const lim = Number(response.headers.get("x-ratelimit-limit-tokens"));
+  if (Number.isFinite(rem) && Number.isFinite(lim) && lim > 0) {
+    return {
+      limit: lim,
+      remaining: Math.max(0, rem),
+      used: Math.max(0, lim - rem),
+      resetAt: null,
+      source: "cli-chat-proxy/ratelimit-headers",
+      percentScale: false,
+      raw: {
+        status: response.status,
+        ok: response.ok,
+        rem,
+        lim,
+      },
+    };
+  }
+
+  // No rate-limit headers — still useful as a liveness signal when 200.
+  if (response.ok) {
+    return {
+      limit: 0,
+      remaining: 0,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/responses-probe",
+      percentScale: false,
+      raw: { status: response.status, headersMissing: true },
+    };
   }
 
   return null;

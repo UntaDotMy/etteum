@@ -387,6 +387,18 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
           : `grok-${trimmed.slice(-8)}@token.local`;
       }
 
+      // Probe free Build absolute credits (farm-compatible rate-limit headers).
+      try {
+        const { probeOAuthChatCredits } = await import("../../proxy/providers/grok/oauth");
+        const q = await probeOAuthChatCredits(oauthTokens.access_token);
+        if (q && q.limit > 0) {
+          oauthTokens.credits_limit = q.limit;
+          oauthTokens.credits_remaining = q.remaining;
+        }
+      } catch {
+        /* non-fatal */
+      }
+
       await upsertGrokOAuthAccount(email, oauthTokens);
       success++;
     } catch (err) {
@@ -403,10 +415,69 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
   return { success, failed, errors: errors.length > 0 ? errors : undefined };
 }
 
+/**
+ * Import grok-farm batch accounts (accounts.json records) into the Grok provider.
+ * Normalizes farm token shape and writes absolute credits when present.
+ */
+export async function importGrokFarmAccounts(
+  records: Array<Record<string, unknown>>,
+): Promise<{ success: number; failed: number; errors?: string[]; ids: number[] }> {
+  const { normalizeGrokOAuthTokens } = await import("../../proxy/providers/grok/oauth");
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  const ids: number[] = [];
+
+  for (const rec of records) {
+    try {
+      const emailRaw = typeof rec.email === "string" ? rec.email.trim() : "";
+      const tokensRaw = rec.tokens ?? rec;
+      const oauthTokens = normalizeGrokOAuthTokens(tokensRaw);
+      if (!oauthTokens) {
+        failed++;
+        errors.push(`${emailRaw || "record"}: missing access_token`);
+        continue;
+      }
+      // Prefer farm absolute credits when present.
+      const vRem = Number(rec.verify_credits_remaining ?? (tokensRaw as any)?.credits_remaining);
+      const vLim = Number(rec.verify_credits_limit ?? (tokensRaw as any)?.credits_limit);
+      if (Number.isFinite(vRem)) oauthTokens.credits_remaining = vRem;
+      if (Number.isFinite(vLim)) oauthTokens.credits_limit = vLim;
+
+      const email =
+        emailRaw ||
+        oauthTokens.email ||
+        (oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${Date.now()}@farm`);
+
+      const id = await upsertGrokOAuthAccount(email, oauthTokens, {
+        password: typeof rec.password === "string" ? rec.password : undefined,
+        farmMeta: {
+          source: "grok-farm",
+          verified: rec.verified === true,
+          web_activated: rec.web_activated === true,
+          proxy: rec.proxy,
+        },
+      });
+      ids.push(id);
+      success++;
+    } catch (err) {
+      failed++;
+      errors.push(`${String((rec as any).email || "?")}: ${err instanceof Error ? err.message : String(err)}`);
+    }
+  }
+
+  pool.invalidate("grok" as ProviderName);
+  if (success > 0) {
+    broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
+  }
+  return { success, failed, errors: errors.length > 0 ? errors : undefined, ids };
+}
+
 async function upsertGrokOAuthAccount(
   email: string,
   oauthTokens: import("../../proxy/providers/grok/oauth").GrokOAuthTokens,
-) {
+  opts?: { password?: string; farmMeta?: Record<string, unknown> },
+): Promise<number> {
   const existing = await db.select().from(accounts)
     .where(and(eq(accounts.provider, "grok"), eq(accounts.email, email)))
     .limit(1);
@@ -418,7 +489,18 @@ async function upsertGrokOAuthAccount(
     expires_at: oauthTokens.expires_at,
     oidc_client_id: oauthTokens.oidc_client_id,
     sub: oauthTokens.sub,
+    email: oauthTokens.email || email,
+    ...(oauthTokens.credits_remaining != null ? { credits_remaining: oauthTokens.credits_remaining } : {}),
+    ...(oauthTokens.credits_limit != null ? { credits_limit: oauthTokens.credits_limit } : {}),
   };
+
+  const quotaPatch: Record<string, unknown> = {};
+  if (oauthTokens.credits_limit != null && oauthTokens.credits_limit > 0) {
+    quotaPatch.quotaLimit = Math.floor(oauthTokens.credits_limit);
+    quotaPatch.quotaRemaining = Math.floor(
+      oauthTokens.credits_remaining ?? oauthTokens.credits_limit,
+    );
+  }
 
   if (existing.length > 0) {
     await db.update(accounts)
@@ -427,19 +509,36 @@ async function upsertGrokOAuthAccount(
         status: "active",
         enabled: true,
         lastLoginAt: new Date(),
+        errorMessage: null,
+        ...quotaPatch,
+        ...(opts?.password ? { password: encrypt(opts.password) } : {}),
+        metadata: {
+          ...((existing[0]!.metadata as object) || {}),
+          auth_method: "oauth",
+          oidc_client_id: oauthTokens.oidc_client_id,
+          ...(opts?.farmMeta || {}),
+        },
       })
       .where(eq(accounts.id, existing[0]!.id));
-  } else {
-    await db.insert(accounts).values({
-      provider: "grok",
-      email,
-      password: encrypt("oauth:no-password"),
-      status: "active",
-      enabled: true,
-      tokens: tokensBlob,
-      metadata: { auth_method: "oauth", oidc_client_id: oauthTokens.oidc_client_id },
-    });
+    return existing[0]!.id;
   }
+
+  const inserted = await db.insert(accounts).values({
+    provider: "grok",
+    email,
+    password: encrypt(opts?.password || "oauth:no-password"),
+    status: "active",
+    enabled: true,
+    tokens: tokensBlob,
+    ...(quotaPatch as { quotaLimit?: number; quotaRemaining?: number }),
+    lastLoginAt: new Date(),
+    metadata: {
+      auth_method: "oauth",
+      oidc_client_id: oauthTokens.oidc_client_id,
+      ...(opts?.farmMeta || {}),
+    },
+  }).returning();
+  return inserted[0]!.id;
 }
 
 export function registerActionRoutes(router: Hono): void {

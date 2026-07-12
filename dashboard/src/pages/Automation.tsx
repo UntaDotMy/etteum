@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import StartAutomationModal from "@/components/automation/StartAutomationModal";
+import GrokFarmModal from "@/components/automation/GrokFarmModal";
 import { importAccounts } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
 import {
@@ -18,6 +19,7 @@ import {
   Radio,
   CheckCircle2,
   CircleDashed,
+  Sparkles,
 } from "lucide-react";
 import type { LucideIcon } from "lucide-react";
 
@@ -28,7 +30,9 @@ interface ProviderConfig {
   description: string;
   icon: LucideIcon;
   comingSoon?: boolean;
-  engine: "camoufox" | "native" | "api";
+  engine: "camoufox" | "native" | "api" | "farm";
+  /** Dedicated modal (e.g. Grok farm config) instead of empas bulk import. */
+  farmModal?: boolean;
 }
 
 const PROVIDERS: ProviderConfig[] = [
@@ -73,6 +77,15 @@ const PROVIDERS: ProviderConfig[] = [
     engine: "native",
   },
   {
+    value: "grok",
+    label: "Grok",
+    subtitle: "Farm free CLI accounts → Grok provider",
+    description: "Temp-mail or Gmail/IMAP signup + OIDC. Accounts import straight into the Grok pool with credits.",
+    icon: Sparkles,
+    engine: "farm",
+    farmModal: true,
+  },
+  {
     value: "codebuddy-cn",
     label: "CodeBuddy CN",
     subtitle: "OTP + HTTP API (no browser)",
@@ -95,6 +108,7 @@ export default function Automation() {
   const navigate = useNavigate();
   const wsStatus = useWsStatus();
   const [modalProvider, setModalProvider] = useState<ProviderConfig | null>(null);
+  const [grokFarmOpen, setGrokFarmOpen] = useState(false);
   const [live, setLive] = useState<LiveEvent[]>([]);
 
   useWsEvent("login_progress", (msg) => {
@@ -278,7 +292,13 @@ export default function Automation() {
                       Coming soon
                     </Button>
                   ) : (
-                    <Button size="sm" onClick={() => setModalProvider(p)}>
+                    <Button
+                      size="sm"
+                      onClick={() => {
+                        if (p.farmModal) setGrokFarmOpen(true);
+                        else setModalProvider(p);
+                      }}
+                    >
                       Start
                       <ArrowRight className="ml-1.5 h-3.5 w-3.5" />
                     </Button>
@@ -346,6 +366,16 @@ export default function Automation() {
           subtitle={`Run ${modalProvider.label} login. Progress and frames open on Browser Logs automatically.`}
           onClose={() => setModalProvider(null)}
           onStart={handleStart}
+        />
+      )}
+
+      {grokFarmOpen && (
+        <GrokFarmModal
+          onClose={() => setGrokFarmOpen(false)}
+          onStarted={() => {
+            setGrokFarmOpen(false);
+            // Farm progress streams on the same login_progress WS channel.
+          }}
         />
       )}
     </div>

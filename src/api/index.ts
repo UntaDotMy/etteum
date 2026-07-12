@@ -18,6 +18,7 @@ import { dashboardAuthRouter } from "./dashboardAuth";
 import { managementRouter } from "./management";
 import { debugRouter } from "./debug";
 import { automationRouter } from "./automation";
+import { grokFarmRouter } from "./grok-farm";
 import { mitmRouter } from "./mitm";
 import { playgroundRouter } from "./playground";
 import { providerNodesRouter } from "./provider-nodes";
@@ -40,6 +41,7 @@ apiRouter.route("/bin", binApi);
 apiRouter.route("/integration", integrationRouter);
 apiRouter.route("/oauth", oauthRouter);
 apiRouter.route("/automation", automationRouter); // F5: bulk-import job framework
+apiRouter.route("/grok-farm", grokFarmRouter); // Grok account farmer → provider feed
 apiRouter.route("/mitm", mitmRouter); // F10: MITM intercepting server control
 apiRouter.route("/playground", playgroundRouter); // F14: basic-chat + skills + translator-live
 apiRouter.route("/provider-nodes", providerNodesRouter); // F13: dynamic compatible-node providers
