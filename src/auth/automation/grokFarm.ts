@@ -10,6 +10,12 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { broadcast } from "../../ws/index";
+import {
+  registerSession,
+  appendStep,
+  updatePhase,
+  getSession,
+} from "../browserSession";
 
 export type GrokMailMode = "tempmail" | "google";
 
@@ -54,6 +60,13 @@ let activeProc: ChildProcessWithoutNullStreams | null = null;
 let activeJobId: string | null = null;
 
 function resolvePython(): string | null {
+  // Prefer farm-local venv (has camoufox) over random PATH pythons (e.g. hermes).
+  const farmVenv =
+    process.platform === "win32"
+      ? path.join(farmRoot(), ".venv", "Scripts", "python.exe")
+      : path.join(farmRoot(), ".venv", "bin", "python");
+  if (existsSync(farmVenv)) return farmVenv;
+
   if (process.env.ETTEUM_PYTHON && existsSync(process.env.ETTEUM_PYTHON)) return process.env.ETTEUM_PYTHON;
   if (process.env.BATCHER_PYTHON && existsSync(process.env.BATCHER_PYTHON)) return process.env.BATCHER_PYTHON;
   const whichCmds =
@@ -101,14 +114,28 @@ function pushLog(job: GrokFarmJobState, line: string) {
   job.logTail.push(msg);
   if (job.logTail.length > 200) job.logTail.splice(0, job.logTail.length - 200);
   job.lastMessage = msg.slice(0, 300);
+
+  // Mirror into Browser Logs session (steps timeline — farm is headless so no frames).
+  const sid = job.id;
+  const isErr = /error|failed|traceback|exception/i.test(msg);
+  appendStep(sid, isErr ? "error" : "farm", job.lastMessage, "grok");
+  updatePhase(sid, isErr ? "error" : "farming", job.lastMessage);
+
   broadcast({
     type: "login_progress",
     data: {
       provider: "grok",
-      step: "farm",
+      step: isErr ? "error" : "farm",
       message: job.lastMessage,
       jobId: job.id,
+      email: `grok-farm@${job.id}`,
+      sessionId: sid,
     },
+  });
+  // Nudge Browser Logs pollers that a session updated.
+  broadcast({
+    type: "browser_frame",
+    data: { sessionId: sid, provider: "grok", phase: "farming", message: job.lastMessage },
   });
 }
 
@@ -125,7 +152,8 @@ function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
     GROK_PASSWORD: cfg.accountPassword,
     GROK_MAX_ACCOUNTS: String(cfg.maxAccounts),
     GROK_CONCURRENT: String(cfg.concurrent),
-    GROK_HEADLESS: cfg.headless ? "true" : "false",
+    // Etteum always runs farm headless (no UI toggle).
+    GROK_HEADLESS: "true",
     GROK_ACTIVATE_WEB: cfg.activateWeb ? "true" : "false",
     GROK_RESULTS_DIR: resultsDir,
     GROK_USED_EMAILS_FILE: path.join(resultsDir, "used_emails.txt"),
@@ -258,16 +286,40 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     "-y",
   ];
 
-  pushLog(job, `[etteum] starting farm: ${python} ${args.join(" ")}`);
+  // Register in Browser Logs so the dashboard has a live session card + step timeline.
+  registerSession({
+    sessionId: id,
+    accountId: 0,
+    email: `grok-farm@${id}`,
+    provider: "grok",
+    phase: "starting",
+    lastMessage: "Starting Grok farm…",
+    lastFrame: "",
+    lastFrameFormat: "jpeg",
+    lastFrameTime: 0,
+    steps: [],
+    challenge: null,
+    terminal: false,
+    proc: null,
+    stdinWriter: null,
+    cancelSignalFile: "",
+    startedAt: Date.now(),
+  });
+
+  pushLog(job, `[etteum] starting farm (always headless): ${python}`);
+  pushLog(job, `[etteum] args: ${args.slice(1).join(" ")}`);
   const proc = spawn(python, args, {
     cwd: farmRoot(),
     env,
     stdio: ["ignore", "pipe", "pipe"],
-    windowsHide: false,
+    windowsHide: true,
   }) as ChildProcessWithoutNullStreams;
 
   activeProc = proc;
   job.pid = proc.pid;
+  // Attach proc for cancel from Browser Logs.
+  const sess = getSession(id);
+  if (sess) sess.proc = proc;
 
   const onChunk = (buf: Buffer) => {
     for (const line of buf.toString("utf8").split(/\r?\n/)) {
@@ -279,6 +331,7 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
 
   proc.on("error", (err) => {
     pushLog(job, `[etteum] spawn error: ${err.message}`);
+    updatePhase(id, "failed", err.message);
   });
 
   proc.on("close", async (code) => {
@@ -294,23 +347,44 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
       } catch (e) {
         job.errors.push(e instanceof Error ? e.message : String(e));
       }
+    } else if (code !== 0) {
+      const hint =
+        job.logTail.some((l) => /camoufox not installed/i.test(l))
+          ? " Install deps: cd scripts/auth/grok-farm && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt"
+          : "";
+      job.errors.push(`No new farm batch folder found after run (exit ${code}).${hint}`);
+      pushLog(job, `[etteum] farm failed (exit ${code}).${hint}`);
     } else {
       job.errors.push("No new farm batch folder found after run");
     }
     job.status = code === 0 || job.imported > 0 ? "completed" : "failed";
     if (code !== 0 && job.imported === 0) {
-      job.lastMessage = `Farm exited with code ${code}`;
+      job.lastMessage = job.errors[job.errors.length - 1] || `Farm exited with code ${code}`;
     }
+    updatePhase(id, job.status === "completed" ? "complete" : "failed", job.lastMessage || job.status);
     broadcast({
       type: job.status === "completed" ? "login_success" : "login_failed",
       data: {
         provider: "grok",
         jobId: job.id,
+        email: `grok-farm@${job.id}`,
+        sessionId: job.id,
         message: job.lastMessage,
+        error: job.status === "failed" ? job.lastMessage : undefined,
         imported: job.imported,
         failed: job.failed,
       },
     });
+    broadcast({
+      type: "browser_frame",
+      data: { sessionId: job.id, terminal: true, phase: job.status },
+    });
+    // Keep session visible in Bot Logs for a while (don't delete immediately).
+  });
+
+  broadcast({
+    type: "browser_frame",
+    data: { sessionId: id, provider: "grok", phase: "starting" },
   });
 
   return job;
@@ -319,6 +393,7 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
 export function cancelGrokFarm(): boolean {
   if (!activeProc || !activeJobId) return false;
   const job = jobs.get(activeJobId);
+  const sid = activeJobId;
   try {
     activeProc.kill();
   } catch { /* */ }
@@ -326,6 +401,7 @@ export function cancelGrokFarm(): boolean {
     job.status = "cancelled";
     job.finishedAt = new Date().toISOString();
     pushLog(job, "[etteum] cancelled by user");
+    updatePhase(sid, "cancelled", "cancelled by user");
   }
   activeProc = null;
   activeJobId = null;

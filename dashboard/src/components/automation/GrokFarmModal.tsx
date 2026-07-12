@@ -18,7 +18,6 @@ export interface GrokFarmForm {
   accountPassword: string;
   maxAccounts: number;
   concurrent: number;
-  headless: boolean;
   activateWeb: boolean;
 }
 
@@ -34,13 +33,12 @@ const empty: GrokFarmForm = {
   accountPassword: "",
   maxAccounts: 5,
   concurrent: 1,
-  headless: false,
   activateWeb: true,
 };
 
 interface Props {
   onClose: () => void;
-  onStarted: () => void;
+  onStarted: (jobId?: string) => void;
 }
 
 export default function GrokFarmModal({ onClose, onStarted }: Props) {
@@ -92,16 +90,28 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
     }
     setStarting(true);
     try {
-      await fetchApi("/api/grok-farm/start", {
+      const res = await fetchApi<{ job: { id: string } }>("/api/grok-farm/start", {
         method: "POST",
-        body: JSON.stringify({ ...form, saveConfig: true }),
+        body: JSON.stringify({
+          ...form,
+          headless: true, // always headless in etteum
+          saveConfig: true,
+        }),
       });
-      onStarted();
+      // Hand off to parent: navigate to Browser Logs so the farm session card is visible.
+      onStarted(res.job?.id);
     } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
+      const msg =
+        e instanceof Error
+          ? e.message
+          : typeof e === "object" && e && "message" in e
+            ? String((e as any).message)
+            : String(e);
+      setError(msg || "Start failed");
       setStarting(false);
+      return;
     }
+    setStarting(false);
   }
 
   return (
@@ -242,22 +252,21 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
             </div>
           </div>
 
-          <div className="grid grid-cols-2 gap-3">
-            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--border)] p-3">
-              <input type="checkbox" className="mt-0.5" checked={form.headless} onChange={(e) => set("headless", e.target.checked)} />
-              <div>
-                <div className="text-sm font-medium">Headless</div>
-                <div className="text-xs text-[var(--muted-foreground)]">Prefer off for Turnstile reliability</div>
+          <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--border)] p-3">
+            <input type="checkbox" className="mt-0.5" checked={form.activateWeb} onChange={(e) => set("activateWeb", e.target.checked)} />
+            <div>
+              <div className="text-sm font-medium">Activate web</div>
+              <div className="text-xs text-[var(--muted-foreground)]">
+                After OAuth, open grok.com to attach free Build chat (avoids 403). Browser always runs headless in etteum.
               </div>
-            </label>
-            <label className="flex cursor-pointer items-start gap-3 rounded-lg border border-[var(--border)] p-3">
-              <input type="checkbox" className="mt-0.5" checked={form.activateWeb} onChange={(e) => set("activateWeb", e.target.checked)} />
-              <div>
-                <div className="text-sm font-medium">Activate web</div>
-                <div className="text-xs text-[var(--muted-foreground)]">Open grok.com after OAuth (avoids 403)</div>
-              </div>
-            </label>
-          </div>
+            </div>
+          </label>
+
+          <p className="text-[11px] text-[var(--muted-foreground)]">
+            Progress appears on <strong>Browser Logs</strong> as a Grok farm session (step timeline).
+            Headless only — no live frames. Install farm Python deps if start fails:
+            <code className="ml-1 rounded bg-[var(--secondary)] px-1">scripts/auth/grok-farm</code>
+          </p>
         </div>
 
         <div className="flex justify-end gap-2 border-t border-[var(--border)] p-4">

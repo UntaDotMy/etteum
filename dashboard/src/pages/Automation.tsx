@@ -372,9 +372,10 @@ export default function Automation() {
       {grokFarmOpen && (
         <GrokFarmModal
           onClose={() => setGrokFarmOpen(false)}
-          onStarted={() => {
+          onStarted={(jobId) => {
             setGrokFarmOpen(false);
-            // Farm progress streams on the same login_progress WS channel.
+            // Farm registers a browser-session card + steps on Browser Logs.
+            navigate(jobId ? `/bot-logs?farm=${encodeURIComponent(jobId)}` : "/bot-logs");
           }}
         />
       )}

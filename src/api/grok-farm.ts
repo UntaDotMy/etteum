@@ -27,7 +27,7 @@ const DEFAULT_CONFIG: GrokFarmConfig = {
   accountPassword: "",
   maxAccounts: 5,
   concurrent: 1,
-  headless: false,
+  headless: true, // always headless in etteum
   activateWeb: true,
 };
 
@@ -88,7 +88,7 @@ grokFarmRouter.put("/config", async (c) => {
         : current.captchaApiKey,
     maxAccounts: Math.max(1, Math.min(100, Number(body.maxAccounts ?? current.maxAccounts) || 5)),
     concurrent: Math.max(1, Math.min(8, Number(body.concurrent ?? current.concurrent) || 1)),
-    headless: body.headless ?? current.headless,
+    headless: true,
     activateWeb: body.activateWeb ?? current.activateWeb,
     accountPassword: (body.accountPassword ?? current.accountPassword) || "",
   };
@@ -120,6 +120,7 @@ grokFarmRouter.post("/start", async (c) => {
         : saved.captchaApiKey,
     maxAccounts: Math.max(1, Math.min(100, Number(body.maxAccounts ?? saved.maxAccounts) || 5)),
     concurrent: Math.max(1, Math.min(8, Number(body.concurrent ?? saved.concurrent) || 1)),
+    headless: true,
     accountPassword: (body.accountPassword ?? saved.accountPassword) || "",
   };
 
