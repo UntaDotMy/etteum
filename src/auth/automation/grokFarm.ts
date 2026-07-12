@@ -10,6 +10,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import path from "node:path";
 import { execFileSync } from "node:child_process";
 import { broadcast } from "../../ws/index";
+import { config } from "../../config";
 import {
   registerSession,
   appendStep,
@@ -60,16 +61,64 @@ const jobs = new Map<string, GrokFarmJobState>();
 let activeProc: ChildProcessWithoutNullStreams | null = null;
 let activeJobId: string | null = null;
 
-function resolvePython(): string | null {
-  // Prefer farm-local venv (has camoufox) over random PATH pythons (e.g. hermes).
-  const farmVenv =
-    process.platform === "win32"
-      ? path.join(farmRoot(), ".venv", "Scripts", "python.exe")
-      : path.join(farmRoot(), ".venv", "bin", "python");
-  if (existsSync(farmVenv)) return farmVenv;
+/** True if this interpreter can import camoufox (farm requirement). */
+function pythonHasCamoufox(pythonExe: string): boolean {
+  try {
+    execFileSync(
+      pythonExe,
+      ["-c", "import camoufox; import playwright"],
+      { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] },
+    );
+    return true;
+  } catch {
+    return false;
+  }
+}
 
-  if (process.env.ETTEUM_PYTHON && existsSync(process.env.ETTEUM_PYTHON)) return process.env.ETTEUM_PYTHON;
-  if (process.env.BATCHER_PYTHON && existsSync(process.env.BATCHER_PYTHON)) return process.env.BATCHER_PYTHON;
+/**
+ * Use etteum's existing Python surface — same as Camoufox auth / canva worker:
+ *   1. config.pythonPath  (scripts/auth/.venv or PYTHON_PATH)
+ *   2. ETTEUM_PYTHON / BATCHER_PYTHON
+ *   3. Any PATH/system python that already has camoufox
+ *   4. Optional farm-local .venv only as last resort (not required)
+ */
+function resolvePython(): string | null {
+  const candidates: string[] = [];
+
+  const push = (p: string | null | undefined) => {
+    if (!p) return;
+    const abs = path.isAbsolute(p) ? p : path.resolve(process.cwd(), p);
+    // bare name like "python.exe" — keep as-is for PATH lookup later
+    if (path.basename(p) === p || existsSync(abs) || existsSync(p)) {
+      if (!candidates.includes(p) && !candidates.includes(abs)) {
+        candidates.push(existsSync(abs) ? abs : p);
+      }
+    }
+  };
+
+  // Official etteum interpreter first (scripts/auth/.venv via config.pythonPath).
+  push(config.pythonPath);
+  push(process.env.PYTHON_PATH);
+  push(process.env.ETTEUM_PYTHON);
+  push(process.env.BATCHER_PYTHON);
+
+  const authVenv =
+    process.platform === "win32"
+      ? path.join(config.authScriptCwd, ".venv", "Scripts", "python.exe")
+      : path.join(config.authScriptCwd, ".venv", "bin", "python");
+  push(authVenv);
+
+  // System installs that commonly have camoufox when install.ps1 ran pip global.
+  if (process.platform === "win32") {
+    const home = process.env.USERPROFILE || "";
+    if (home) {
+      for (const ver of ["Python312", "Python311", "Python310"]) {
+        push(path.join(home, "AppData", "Local", "Programs", "Python", ver, "python.exe"));
+      }
+    }
+  }
+
+  // PATH lookup last among "shared" interpreters.
   const whichCmds =
     process.platform === "win32"
       ? [["where", "python"], ["where", "python3"], ["where", "py"]]
@@ -77,16 +126,39 @@ function resolvePython(): string | null {
   for (const [cmd, arg] of whichCmds) {
     try {
       const out = execFileSync(cmd, [arg], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
-      if (out && existsSync(out) && !out.toLowerCase().includes("windowsapps\\python")) return out;
+      if (out && !out.toLowerCase().includes("windowsapps\\python")) push(out);
     } catch { /* next */ }
   }
   if (process.platform === "win32") {
     try {
-      const out = execFileSync("py", ["-3", "-c", "import sys; print(sys.executable)"], { encoding: "utf8" }).trim();
-      if (out && existsSync(out)) return out;
+      const out = execFileSync("py", ["-3", "-c", "import sys; print(sys.executable)"], {
+        encoding: "utf8",
+      }).trim();
+      push(out);
     } catch { /* */ }
   }
-  return null;
+
+  // Prefer any candidate that already has camoufox+playwright.
+  for (const c of candidates) {
+    if (path.basename(c) === c) {
+      // bare name — still try import
+      if (pythonHasCamoufox(c)) return c;
+      continue;
+    }
+    if (existsSync(c) && pythonHasCamoufox(c)) return c;
+  }
+
+  // Farm-local venv only if someone created it (optional, not required).
+  const farmVenv =
+    process.platform === "win32"
+      ? path.join(farmRoot(), ".venv", "Scripts", "python.exe")
+      : path.join(farmRoot(), ".venv", "bin", "python");
+  if (existsSync(farmVenv) && pythonHasCamoufox(farmVenv)) return farmVenv;
+
+  // Fall back to etteum pythonPath even without camoufox so the error message
+  // from farm.py / our validate is clear and points at scripts/auth deps.
+  if (config.pythonPath) return config.pythonPath;
+  return candidates[0] ?? null;
 }
 
 function farmRoot(): string {
@@ -276,7 +348,16 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   }
   const python = resolvePython();
   if (!python) {
-    throw new Error("Python interpreter not found (set ETTEUM_PYTHON)");
+    throw new Error(
+      "Python not found. Use etteum's auth env: scripts/auth/.venv " +
+        "(install: python -m venv scripts/auth/.venv && scripts/auth/.venv/Scripts/pip install -r scripts/auth/requirements.txt)",
+    );
+  }
+  if (!pythonHasCamoufox(python)) {
+    throw new Error(
+      `Selected Python lacks camoufox: ${python}. ` +
+        `Install etteum auth deps: "${python}" -m pip install -r scripts/auth/requirements.txt`,
+    );
   }
   if (!cfg.accountPassword?.trim()) {
     throw new Error("Account password is required");
@@ -442,18 +523,36 @@ export function validateGrokFarmSetup(): {
   python: string | null;
   farmScript: string;
   farmScriptExists: boolean;
+  hasCamoufox: boolean;
+  authVenv: string;
   errors: string[];
 } {
   const python = resolvePython();
   const script = farmScript();
+  const authVenv =
+    process.platform === "win32"
+      ? path.join(config.authScriptCwd, ".venv", "Scripts", "python.exe")
+      : path.join(config.authScriptCwd, ".venv", "bin", "python");
   const errors: string[] = [];
-  if (!python) errors.push("Python not found — install Python 3.11+ or set ETTEUM_PYTHON");
+  if (!python) {
+    errors.push("Python not found — use etteum scripts/auth/.venv (same as auth bots)");
+  }
   if (!existsSync(script)) errors.push(`Missing farm script at ${script}`);
+  const hasCamoufox = python ? pythonHasCamoufox(python) : false;
+  if (python && !hasCamoufox) {
+    errors.push(
+      `Python at ${python} is missing camoufox/playwright. ` +
+        `Install into etteum auth env: ` +
+        `"${python}" -m pip install -r scripts/auth/requirements.txt`,
+    );
+  }
   return {
     ok: errors.length === 0,
     python,
     farmScript: script,
     farmScriptExists: existsSync(script),
+    hasCamoufox,
+    authVenv,
     errors,
   };
 }
