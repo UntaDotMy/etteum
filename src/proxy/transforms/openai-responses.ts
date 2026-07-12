@@ -781,7 +781,7 @@ export function chatStreamToResponsesStream(
           const outputIndex = (reasoningItemEmitted ? 1 : 0) + (messageItemEmitted ? 1 : 0) + tc.index;
           const callId = tc.id ?? `call_${responseId.slice(5)}_${tc.index}`;
           const itemId = `fc_${callId}`;
-          // F15: sanitize accumulated tool arguments for Windows backslash
+          // sanitize accumulated tool arguments for Windows backslash
           // repair before emitting the final completed arguments string.
           const safeArgs = (() => {
             if (!tc.arguments) return "";

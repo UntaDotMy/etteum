@@ -51,7 +51,7 @@ const antigravity = new AntigravityProvider();
 const cursor = new CursorProvider();
 const grok = new GrokProvider();
 
-// F13: API-key LLM catalog (openai, deepseek, groq, openrouter, …). Each is a
+// API-key LLM catalog (openai, deepseek, groq, openrouter, …). Each is a
 // generic OpenAI-compatible relay instantiated from OPENAI_COMPATIBLE_CATALOG.
 const openaiCompatibleProviders = createOpenAICompatibleProviders();
 
@@ -84,7 +84,7 @@ export const providers = {
   alibaba,
   antigravity,
   cursor,
-  // F13: API-key catalog (ids must not collide with first-party keys below).
+  // API-key catalog (ids must not collide with first-party keys below).
   ...Object.fromEntries(openaiCompatibleProviders.map((p) => [p.name, p])),
   // First-party GrokProvider MUST win over any catalog id named "grok".
   // Historically OPENAI_COMPATIBLE_CATALOG had id:"grok", which overwrote this
@@ -99,20 +99,20 @@ export function getProviderForModel(model: string): ProviderName | null {
   for (const provider of PROVIDER_ORDER) {
     if (provider.ownsModel(model)) return provider.name as ProviderName;
   }
-  // F13: dynamic compatible-node providers (user-defined, prefix-routed). These
+  // dynamic compatible-node providers (user-defined, prefix-routed). These
   // are checked AFTER the static providers but BEFORE the kiro fallback, so a
   // user-defined node prefix wins over the catch-all but not over a built-in.
   try {
     const nodeProvider = compatibleNodeRegistry.getProviderForModel(model);
     if (nodeProvider) return nodeProvider.name as ProviderName;
   } catch { /* registry not loaded yet — fall through */ }
-  // F15: dashboard-added custom models. Checked after built-ins + compatible
+  // dashboard-added custom models. Checked after built-ins + compatible
   // nodes so a manually-added model routes to its assigned provider.
   try {
     const customProvider = getCustomModelProvider(model);
     if (customProvider) return customProvider as ProviderName;
   } catch { /* registry not loaded yet — fall through */ }
-  // F15: NO implicit kiro catch-all. If no provider genuinely owns the model
+  // NO implicit kiro catch-all. If no provider genuinely owns the model
   // (not via ownsModel, not a compatible-node, not a custom entry), return null
   // so the edge surfaces a clean 404 model_not_found instead of silently routing
   // to kiro and failing upstream. Explicit cross-provider fallback is opt-in via
@@ -123,7 +123,7 @@ export function getProviderForModel(model: string): ProviderName | null {
 
 /** All models across every registered provider. */
 export function getAllModels(): ModelInfo[] {
-  // F15: merge dashboard-added custom models + apply disabled-model filter.
+  // merge dashboard-added custom models + apply disabled-model filter.
   // Custom entries are layered on top of the hardcoded provider lists; disabled
   // models are removed so they don't appear in /v1/models or route.
   const base = PROVIDER_ORDER.flatMap((provider) => provider.getModels());

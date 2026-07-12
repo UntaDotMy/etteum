@@ -16,11 +16,9 @@ import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { autoRefreshScheduler } from "./auth/refresh-scheduler";
 import { db, client as sqliteClient } from "./db/index";
-import { filterRules, apiKeys } from "./db/schema";
+import { apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
-import { sql, inArray } from "drizzle-orm";
-import { PUDIDIL_FILTERS } from "./proxy/filters";
-import { loadFilterCache } from "./proxy/filter-cache";
+import { bootstrapFilterRules } from "./db/filter-bootstrap";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
 import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
@@ -51,106 +49,15 @@ setupLogRotation();
 // Run database migrations on startup
 await runMigrations();
 
-// F5: recover bulk-import jobs left running by a crash/restart (mark
+// recover bulk-import jobs left running by a crash/restart (mark
 // interrupted items as error + move the job to a terminal status).
 recoverJobsOnBoot();
 
-// Seed filter rules from PUDIDIL_FILTERS if table is empty (first boot only)
+// Filter rules: seed once + apply policy once (not every boot).
 try {
-  const [row] = await db.select({ count: sql<number>`COUNT(*)` }).from(filterRules);
-  if (Number(row?.count || 0) === 0) {
-    await db.insert(filterRules).values(
-      PUDIDIL_FILTERS.map((r, i) => ({
-        ruleId: r.id,
-        pattern: r.pattern,
-        replacement: r.replacement,
-        isActive: r.is_active,
-        isRegex: r.is_regex,
-        sortOrder: i,
-      }))
-    );
-    console.log(`[DB] Seeded ${PUDIDIL_FILTERS.length} filter rules`);
-  }
-
-  // Purge deprecated filter rules with broken or over-broad regex patterns.
-  await db.delete(filterRules).where(inArray(filterRules.ruleId, [
-    "remove_claude_code_identity_variations",
-    "remove_cline_identity",
-    "remove_ai_coding_agent_pattern",
-    "remove_mcp_server_ref",
-    "remove_powered_by_anthropic",
-    "remove_claude_code_mention",
-  ]));
-
-
-  // Disable the word-rewrite tier (the rules that rewrote common technical
-  // words like {terminate, access, modify, tool, device, threat, ...} to
-  // moderation-neutral synonyms). That tier mangled tool-call arguments,
-  // tool results, commands, and file paths, which broke Codex tool
-  // execution ("dumb" tool calls). Rules stay in the DB (is_active=false)
-  // so they can be re-enabled per-provider from the dashboard; nothing is
-  // deleted. The rule_ids below are the true upstream ids.
-  await db.update(filterRules).set({ isActive: false }).where(
-    inArray(filterRules.ruleId, [
-    "neutralize_kill",
-    "neutralize_kill_upper",
-    "neutralize_kill_allcaps",
-    "neutralize_exploit",
-    "neutralize_exploit_upper",
-    "neutralize_attack",
-    "neutralize_attack_upper",
-    "neutralize_attacker",
-    "neutralize_attacker_upper",
-    "neutralize_hack",
-    "neutralize_hack_upper",
-    "neutralize_weapon",
-    "neutralize_weapon_upper",
-    "neutralize_bomb",
-    "neutralize_bomb_upper",
-    "neutralize_terror",
-    "neutralize_terror_upper",
-    "neutralize_suicide",
-    "neutralize_suicide_upper",
-    "neutralize_violence",
-    "neutralize_violence_upper",
-    "neutralize_political",
-    "neutralize_political_upper",
-    "neutralize_kill_regex",
-    "neutralize_exploit_regex",
-    "neutralize_attack_regex",
-    "neutralize_hack_regex",
-    ])
-  );
-
-
-  // Disable the brand-neutralization tier (Claude->[AI-ASSISTANT],
-  // [AI-LAB-B]->[AI-LAB-B], [AI-LAB-A]->[AI-LAB-A], ...). Per user request:
-  // brand names must pass through verbatim, no rewriting at all. Only
-  // telemetry stripping + identity-line neutralization remain active.
-  // Rules stay in the DB (is_active=false); re-enable via dashboard.
-  await db.update(filterRules).set({ isActive: false }).where(
-    inArray(filterRules.ruleId, [
-    "neutralize_anthropic",
-    "neutralize_anthropic_lower",
-    "neutralize_claude_code",
-    "neutralize_claude_code_lower",
-    "neutralize_openai",
-    "neutralize_openai_lower",
-    "neutralize_chatgpt",
-    "neutralize_chatgpt_lower",
-    "neutralize_gemini",
-    "neutralize_gemini_lower",
-    "neutralize_google_ai",
-    "neutralize_google_ai_lower",
-    "neutralize_llama",
-    "neutralize_llama_lower",
-    "neutralize_meta_ai",
-    "neutralize_meta_ai_lower",
-    ])
-  );
-  await loadFilterCache();
+  await bootstrapFilterRules();
 } catch (e) {
-  console.error("[DB] Filter rules seed/load skipped:", e instanceof Error ? e.message : e);
+  console.error("[DB] Filter rules bootstrap skipped:", e instanceof Error ? e.message : e);
 }
 
 // Ensure model_mappings table exists (idempotent), seed Claude Code templates
@@ -172,14 +79,14 @@ try {
   console.error("[BYOK] Cache warm-up skipped:", e instanceof Error ? e.message : e);
 }
 
-// F13: load dynamic compatible-node providers so their prefixes route from boot.
+// load dynamic compatible-node providers so their prefixes route from boot.
 try {
   await refreshCompatibleNodes();
 } catch (e) {
   console.error("[CompatibleNodes] load skipped:", e instanceof Error ? e.message : e);
 }
 
-// F15: load dashboard-added custom + disabled models so they route + list from boot.
+// load dashboard-added custom + disabled models so they route + list from boot.
 try {
   await refreshCustomModels();
 } catch (e) {
@@ -210,7 +117,7 @@ try {
 // Start auto-warmup scheduler (reads settings from DB)
 await autoWarmupScheduler.start();
 
-// F7: start proactive token-refresh scheduler (refreshes tokens before they
+// start proactive token-refresh scheduler (refreshes tokens before they
 // expire; uses the F8 coordinator for dedup/lock/retry). .unref()'d internally
 // so it never keeps the process alive.
 await autoRefreshScheduler.start();
@@ -327,9 +234,9 @@ app.use("/api/*", async (c, next) => {
 
 // Mount routes
 app.route("/", proxyRouter); // /v1/chat/completions, /v1/models
-app.route("/", mediaRouter); // /v1/audio/*, /v1/images/*, /v1/embeddings (Wave 4 media)
-app.route("/", mcpRouter); // /v1/mcp/* — MCP stdio↔SSE bridge (Wave 6)
-app.route("/", searchRouter); // /v1/search — web search (Wave 9)
+app.route("/", mediaRouter); // /v1/audio/*, /v1/images/*, /v1/embeddings 
+app.route("/", mcpRouter); // /v1/mcp/* — MCP stdio↔SSE bridge 
+app.route("/", searchRouter); // /v1/search — web search 
 app.route("/api", apiRouter); // /api/accounts, /api/settings, /api/stats
 app.route("/api/auth", authRouter); // /api/auth/login, /api/auth/queue
 
@@ -497,7 +404,7 @@ console.log(`
 ╚══════════════════════════════════════════════════╝
 `);
 
-// F10: on shutdown, stop the MITM server + strip DNS hijack entries so the
+// on shutdown, stop the MITM server + strip DNS hijack entries so the
 // IDEs' hardcoded vendor hosts resolve normally again. Best-effort. Also
 // drain the HTTP server (let in-flight requests finish) and checkpoint the
 // SQLite WAL so recent writes aren't left unflushed.

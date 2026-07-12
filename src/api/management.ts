@@ -1,14 +1,14 @@
 /**
  * Management API — TS port of 9router's model/pricing/sync/tunnel/system routes.
  *
- * Closes the remaining API-surface gaps (Wave 7):
+ * Closes the remaining API-surface gaps :
  *   - /api/models/{disabled,custom,availability,test} — model management
  *   - /api/pricing                              — per-model USD pricing CRUD
  *   - /api/sync/merge-to-target                 — config sync/migration
  *   - /api/tunnel/{enable,disable,status}       — Cloudflare/Tailscale tunnel
  *   - /api/system/specs                         — host system specs
  *
- * Backed by the `kv` table (Wave 2) for customModels / disabledModels / pricing.
+ * Backed by the `kv` table  for customModels / disabledModels / pricing.
  */
 import { Hono } from "hono";
 import { db } from "../db/index";

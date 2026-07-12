@@ -6,7 +6,7 @@
  * raw-api-key-in-localStorage model). Supports password login + optional OIDC
  * SSO. Progressive brute-force lockout protects the password endpoint.
  *
- * Closes the security/multi-tenancy HIGH gaps (Wave 5).
+ * Closes the security/multi-tenancy HIGH gaps .
  */
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";

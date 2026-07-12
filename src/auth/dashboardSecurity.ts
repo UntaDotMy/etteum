@@ -9,7 +9,7 @@
  *   - OIDC: discovery fetch, PKCE, JWKS ID-token verification, code exchange
  *   - loginLimiter: progressive brute-force lockout per IP
  *
- * Closes the security/multi-tenancy HIGH gaps (Wave 5).
+ * Closes the security/multi-tenancy HIGH gaps .
  */
 import crypto from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";

@@ -60,7 +60,7 @@ class AutoWarmupScheduler {
     if (this.running) return;
     this.running = true;
     await this.reload();
-    // F15: reset-window tick every 60s — queue only accounts due for reset.
+    // reset-window tick every 60s — queue only accounts due for reset.
     this.resetTickTimer = setInterval(() => { void this.resetTick().catch(() => {}); }, 60_000);
     if (this.resetTickTimer.unref) this.resetTickTimer.unref();
   }

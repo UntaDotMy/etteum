@@ -99,7 +99,7 @@ export async function forcedSseToJson(
       type: tc.type || "function",
       function: {
         name: tc.function?.name || "",
-        // F15: run the concatenated arguments through safeJsonParse to repair
+        // run the concatenated arguments through safeJsonParse to repair
         // Windows backslashes (C:\Users -> C:\\Users). Re-stringify so the
         // output is valid JSON, falling back to the raw string on parse failure
         // so tool calls are never silently dropped.

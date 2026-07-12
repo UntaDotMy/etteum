@@ -3,7 +3,7 @@
 Camoufox bridge — a JSON-RPC-over-stdio server that owns the Camoufox browser
 session and exposes page-interaction commands to the TS automation layer.
 
-This is how enowxai runs Camoufox: via the Python `camoufox[geoip]` package's
+This is how reference runs Camoufox: via the Python `camoufox[geoip]` package's
 AsyncCamoufox, which launches the patched-Fingerprint Firefox reliably on this
 host (the JS camoufox-js binding hangs here; the Python one does not).
 

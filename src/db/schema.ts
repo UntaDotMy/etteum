@@ -21,7 +21,7 @@ export const accounts = sqliteTable("accounts", {
   lastLoginAt: integer("last_login_at", { mode: "timestamp" }),
   errorMessage: text("error_message"),
   metadata: text("metadata", { mode: "json" }), // extra provider-specific data
-  // --- Routing resilience (Wave 1) ---
+  // --- Routing resilience  ---
   // Transient-error exponential backoff: an account here is temporarily
   // excluded from selection until the timestamp passes, then auto-reinstated.
   // NULL = not cooling down.
@@ -35,7 +35,7 @@ export const accounts = sqliteTable("accounts", {
   // pool). Reset to 0 on success. Prevents a single transient 401 from
   // permanently killing an account.
   consecutiveAuthErrors: integer("consecutive_auth_errors").notNull().default(0),
-  // --- Wave 2: Provider-priority routing (mirrors the reference proxy priority) ---
+  // 
   // Lower number = tried first. Enables "paid first, free fallback" ordering
   // of credentials within a provider. Default 0 preserves existing LB order.
   priority: integer("priority").notNull().default(0),
@@ -84,7 +84,7 @@ export const requestLogs = sqliteTable("request_logs", {
    * null when compression is disabled.
    */
   savingsByTechnique: text("savings_by_technique", { mode: "json" }),
-  // --- Wave 2: Per-API-key attribution + USD cost (mirrors the reference proxy) ---
+  // 
   // Which client API key made this request (null = legacy single-key or
   // internal). Enables "which client key spent the most" analytics that the
   // old schema could not answer.
@@ -129,7 +129,7 @@ export const usageSummary = sqliteTable("usage_summary", {
   totalTokens: integer("total_tokens", { mode: "number" }).default(0),
   creditsUsed: real("credits_used").default(0),
   totalDurationMs: integer("total_duration_ms", { mode: "number" }).default(0),
-  // --- Wave 2: per-key + cost rollup (mirrors the reference proxy) ---
+  // 
   apiKeyId: integer("api_key_id"),
   totalCost: real("total_cost").default(0),
 }, (table) => [
@@ -270,7 +270,7 @@ export const combos = sqliteTable("combos", {
   index("combos_name_idx").on(table.name),
 ]);
 
-// --- Wave 2: Multi-key API key system (mirrors the reference proxy `apiKeys` table) ---
+// 
 // Replaces the single-global-key model with named, machine-bound, individually
 // revocable keys. The legacy single key (settings.api_key) is preserved as a
 // fallback during the transition — nothing is dropped.
@@ -289,7 +289,7 @@ export const apiKeys = sqliteTable("api_keys", {
   index("api_keys_active_idx").on(table.isActive),
 ]);
 
-// --- Wave 2: Generic KV store (mirrors the reference proxy `kv` table) ---
+// 
 // Used by: customModels, disabledModels, pricing, mitmAlias scopes.
 // A single table avoids one-off tables for each small config namespace.
 export const kv = sqliteTable("kv", {
@@ -349,7 +349,7 @@ export type FilterRule = typeof filterRules.$inferSelect;
 export type NewFilterRule = typeof filterRules.$inferInsert;
 export type ModelMapping = typeof modelMappings.$inferSelect;
 export type NewModelMapping = typeof modelMappings.$inferInsert;
-// --- Wave 2 type exports ---
+// 
 export type ApiKey = typeof apiKeys.$inferSelect;
 export type NewApiKey = typeof apiKeys.$inferInsert;
 export type KvEntry = typeof kv.$inferSelect;

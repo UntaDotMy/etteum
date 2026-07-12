@@ -6,7 +6,7 @@
  *   POST /v1/mcp/:plugin/message  — send a JSON-RPC message to the plugin child.
  *   GET  /v1/mcp/plugins          — list available preset plugins + run state.
  *
- * Closes the MCP server-hosting HIGH gap (Wave 6).
+ * Closes the MCP server-hosting HIGH gap .
  */
 import { Hono } from "hono";
 import { streamSSE } from "hono/streaming";

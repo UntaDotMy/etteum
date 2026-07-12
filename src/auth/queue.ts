@@ -348,7 +348,7 @@ class LoginQueue {
           log(`worker ${idx + 1}/${total} start email=${item.email}`);
 
           // Fire-and-forget per account; resolve slot on completion.
-          // Wave 3 migration: loginAccount() now routes antigravity through the
+          // migration: loginAccount() now routes antigravity through the
           // TS+Camoufox stealth engine (googleAutomation.ts), replacing the
           // nodriver-based antigravity_manual_login.py subprocess. Manual/CAPTCHA
           // challenges surface as a `manual` result and round-trip via the
@@ -390,7 +390,7 @@ class LoginQueue {
 
   /**
    * Run a batch of logins through the native TS+Camoufox automation layer
-   * (Wave 3 migration — replaces the batch_login.py subprocess). Fans out up to
+   * . Fans out up to
    * `concurrency` loginAccount() calls in parallel, mapping each result to
    * applyProviderResult / markLoginFailed, exactly as the old Python event
    * stream did. Retry/backoff is handled inside loginAccount's provider path.

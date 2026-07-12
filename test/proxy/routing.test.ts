@@ -50,7 +50,10 @@ describe("getProviderForModel", () => {
     // New F13 catalog providers (prefix-routed):
     ["openai-gpt-4o", "openai"],
     ["groq-llama-3.3-70b-versatile", "groq"],
-    ["grok-2-latest", "grok"],
+    // Grok owns grok-4* / named aliases; legacy "grok-2*" is intentionally unclaimed.
+    ["grok-2-latest", null],
+    ["grok-4", "grok"],
+    ["grok-auto", "grok"],
     ["glm-5", "kiro"],
     ["glm-5-thinking", "kiro"],
     ["minimax-m2.1", "kiro"],

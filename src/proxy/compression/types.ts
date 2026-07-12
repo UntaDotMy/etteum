@@ -202,7 +202,7 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // only the verbose scaffolding around it). Enable per-provider via settings.
     enabled: false,
   },
-  // F11: output-reducing prompt injections. OFF by default — they change model
+  // output-reducing prompt injections. OFF by default — they change model
   // behavior (terser output / less code), which is a user opt-in. When enabled,
   // they APPEND to the system prompt (cache-aware) so the model emits fewer
   // OUTPUT tokens. Distinct from the input-side caveman/ponytail above.
@@ -214,7 +214,7 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     enabled: false,
     level: "full",
   },
-  // F11: Headroom LLM whole-message compression. OFF by default — requires an
+  // Headroom LLM whole-message compression. OFF by default — requires an
   // external headroom-ai proxy running at `url`. When enabled + reachable, it
   // compresses the conversation via Claude→OpenAI→compress→Claude round-trip.
   headroom: {

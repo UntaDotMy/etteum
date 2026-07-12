@@ -1,34 +1,34 @@
 {
-  "version": "7",
   "dialect": "sqlite",
   "entries": [
     {
+      "breakpoints": true,
       "idx": 0,
       "version": "6",
-      "when": 1782696993508,
       "tag": "0000_furry_ben_grimm",
-      "breakpoints": true
+      "when": 1782696993508
     },
     {
+      "breakpoints": true,
       "idx": 1,
       "version": "6",
-      "when": 1783309791907,
       "tag": "0001_bouncy_jimmy_woo",
-      "breakpoints": true
+      "when": 1783309791907
     },
     {
+      "breakpoints": true,
       "idx": 2,
       "version": "6",
-      "when": 1783345425968,
       "tag": "0002_sparkling_dark_phoenix",
-      "breakpoints": true
+      "when": 1783345425968
     },
     {
+      "breakpoints": true,
       "idx": 3,
       "version": "6",
-      "when": 1783428000000,
       "tag": "0003_response_id_pinning",
-      "breakpoints": true
+      "when": 1783428000000
     }
-  ]
+  ],
+  "version": "7"
 }

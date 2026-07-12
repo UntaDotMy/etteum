@@ -761,8 +761,22 @@ export class GrokProvider extends BaseProvider {
   /** Classify an error into a ProviderResult failure. */
   private classifyError(err: any): ProviderResult {
     const msg = err?.message ?? String(err);
-    if (/expired|unauthorized|401|403/i.test(msg)) {
+    // xAI "permission-denied" on chat is NOT an expired token — the access JWT
+    // is valid (models/billing often still 200) but this principal/team has no
+    // chat entitlement. Do not prefix with "expired:" or the router will
+    // uselessly burn the refresh token trying to "fix" it.
+    if (/permission-denied|chat endpoint is denied/i.test(msg)) {
+      return {
+        success: false,
+        error: `forbidden: ${msg}`,
+        banned: true,
+      };
+    }
+    if (/expired|unauthorized|\b401\b/i.test(msg)) {
       return { success: false, error: `expired: ${msg}` };
+    }
+    if (/\b403\b/i.test(msg)) {
+      return { success: false, error: `forbidden: ${msg}`, banned: true };
     }
     if (/rate_limit|429|too many/i.test(msg)) {
       return { success: false, error: `rate_limited: ${msg}`, rateLimited: true };

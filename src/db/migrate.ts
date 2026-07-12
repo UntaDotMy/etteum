@@ -5,12 +5,15 @@ import { sql } from "drizzle-orm";
 
 /**
  * Idempotent column-add migrations.
- * The drizzle/ folder is gitignored in this repo — fresh deploys would never
- * see file-based migrations for new columns. Each entry below adds a column
- * if it doesn't already exist; safe to run on every boot.
  *
- * Order: from oldest schema additions to newest. Add to the END of the list
- * when you add a new column to schema.ts.
+ * Dual strategy (intentional):
+ * 1. Journaled SQL under drizzle/ — applied once via drizzle-orm migrator.
+ * 2. This list — ADD COLUMN if missing, safe on every boot for deploys that
+ *    already had the column via (1) or an older path.
+ *
+ * Do not remove journal entries. Append-only here. Prefer a journaled SQL file
+ * for new columns when possible, and keep a matching idempotent entry for
+ * partial deploys.
  */
 const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> = [
   // 2026-06-13 — compression_stats (token-saver telemetry, see src/proxy/compression/)
@@ -69,7 +72,7 @@ export async function runMigrations() {
   // Always run idempotent column-add migrations (works on fresh deploys without drizzle/).
   await runIdempotentColumns();
 
-  // F13: ensure the provider_nodes table exists (dynamic compatible-node providers).
+  // ensure the provider_nodes table exists (dynamic compatible-node providers).
   try {
     await db.run(sql.raw(`
       CREATE TABLE IF NOT EXISTS provider_nodes (
