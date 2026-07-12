@@ -2502,6 +2502,76 @@ def _build_stealth_launch_kwargs(
     return kwargs
 
 
+# ── Etteum Browser Logs frame relay (headless screenshots → stdout JSON) ────
+# When ETTEUM_FRAME_RELAY=true (set by etteum grokFarm.ts), emit periodic JPEG
+# frames as single-line JSON on stdout. Same idea as enowxai/camoufox_flow:
+# browser stays headless (no OS window) but screenshots stream to Browser Logs.
+_FRAME_PAGES: dict[int, Any] = {}  # id(manager) -> page
+_frame_relay_task: asyncio.Task | None = None
+ETTEUM_FRAME_RELAY = _env_bool("ETTEUM_FRAME_RELAY", False)
+ETTEUM_FRAME_INTERVAL = max(0.8, float(_env("ETTEUM_FRAME_INTERVAL", "1.5") or "1.5"))
+
+
+def _emit_etteum_json(payload: dict[str, Any]) -> None:
+    try:
+        print("ETTEUM_JSON:" + json.dumps(payload, separators=(",", ":")), flush=True)
+    except Exception:
+        pass
+
+
+async def _etteum_frame_relay_loop() -> None:
+    """Screenshot any live farm page and emit ETTEUM_JSON frame lines."""
+    while True:
+        try:
+            for mid, page in list(_FRAME_PAGES.items()):
+                try:
+                    if page is None:
+                        continue
+                    closed = getattr(page, "is_closed", None)
+                    if callable(closed) and closed():
+                        _FRAME_PAGES.pop(mid, None)
+                        continue
+                    buf = await page.screenshot(type="jpeg", quality=50)
+                    _emit_etteum_json(
+                        {
+                            "type": "frame",
+                            "format": "jpeg",
+                            "base64": base64.b64encode(buf).decode("ascii"),
+                        }
+                    )
+                    break  # one frame per tick (bandwidth)
+                except Exception:
+                    continue
+        except Exception:
+            pass
+        await asyncio.sleep(ETTEUM_FRAME_INTERVAL)
+
+
+def _ensure_frame_relay() -> None:
+    global _frame_relay_task
+    if not ETTEUM_FRAME_RELAY:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    if _frame_relay_task is None or _frame_relay_task.done():
+        _frame_relay_task = loop.create_task(_etteum_frame_relay_loop())
+
+
+def _register_frame_page(manager: Any, page: Any) -> None:
+    if not ETTEUM_FRAME_RELAY or manager is None or page is None:
+        return
+    _FRAME_PAGES[id(manager)] = page
+    _ensure_frame_relay()
+
+
+def _unregister_frame_page(manager: Any) -> None:
+    if manager is None:
+        return
+    _FRAME_PAGES.pop(id(manager), None)
+
+
 async def launch_browser(proxy_url: str | None, headless: bool | None = None):
     """Launch a stealth Camoufox browser (unique fingerprint per instance).
 
@@ -2545,6 +2615,8 @@ async def launch_browser(proxy_url: str | None, headless: bool | None = None):
 
     page = await browser.new_page()
     page.set_default_timeout(60000)
+    # Register for etteum Browser Logs frame stream (headless screenshots).
+    _register_frame_page(manager, page)
     # Log fingerprint axis once per launch (helps debug CF/geo mismatches)
     try:
         _os = kwargs.get("os", "?")
@@ -2571,6 +2643,7 @@ async def close_browser(manager) -> None:
     Never kills other workers' PIDs. Never deletes profiles still owned by
     another live tracked browser.
     """
+    _unregister_frame_page(manager)
     entry = _untrack_browser(manager)
     # Prefer tracked identity; fall back to manager probe only for this object
     driver = None
