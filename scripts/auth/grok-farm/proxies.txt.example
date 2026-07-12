@@ -1,0 +1,23 @@
+# Grok farmer proxy list — copy to proxies.txt and fill in:
+#   cp proxies.txt.example proxies.txt
+#
+# One proxy per line. Blank lines and # comments ignored.
+# Supported formats:
+#   http://user:pass@host:port
+#   socks5://user:pass@host:port
+#   host:port
+#   host:port:user:pass
+#   user:pass@host:port
+#   http://user:pass@host:port#optional_id
+#
+# Round-robin: each new account takes the next proxy.
+# Optional .env:
+#   GROK_PROXY_FILE=./proxies.txt   # path (default: ./proxies.txt if file exists)
+#   GROK_PROXY_SHUFFLE=true         # shuffle order at start
+#   GROK_PROXY_POOL=http://...      # extra comma-separated (merged with file)
+
+# Examples (replace with real proxies):
+# http://user:pass@1.2.3.4:8080
+# socks5://user:pass@5.6.7.8:1080
+# 9.9.9.9:8000:user:pass
+# 10.0.0.1:3128

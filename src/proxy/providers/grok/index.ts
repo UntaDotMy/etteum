@@ -933,10 +933,29 @@ export class GrokProvider extends BaseProvider {
       if (!alive) {
         return { kind: "missing_tokens", success: false, error: "OAuth access token invalid or refresh failed" };
       }
-      // Fetch quota (credits) via the OAuth path if available.
+      // Prefer absolute free Build credits already stored by farm/import.
+      const oauth = getOAuthTokens(account);
+      if (
+        oauth?.credits_limit != null &&
+        oauth.credits_limit > 0 &&
+        oauth.credits_remaining != null
+      ) {
+        return {
+          kind: "healthy",
+          success: true,
+          quota: {
+            limit: Math.floor(oauth.credits_limit),
+            remaining: Math.floor(oauth.credits_remaining),
+            used: Math.max(0, Math.floor(oauth.credits_limit - oauth.credits_remaining)),
+            resetAt: null,
+            source: "stored-farm-credits",
+          },
+        };
+      }
+      // Live quota: billing / GetGrokCreditsConfig / rate-limit headers (farm-compatible).
       const quota = await this.fetchQuota(account, signal);
       return {
-        kind: quota.success ? "healthy" : "unsupported",
+        kind: "healthy",
         success: true,
         quota: quota.success ? quota.quota : undefined,
       };
