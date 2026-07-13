@@ -106,10 +106,10 @@ const GROK_CREATED = 1_718_000_000;
  * - grok-4.5           → chat (+ vision understand)
  * - grok-4.5-reasoning → chat alias
  * - composer-2.5       → Grok Build coding
- * - grok-imagine-*     → Imagine API (images/videos) — NOT chat
+ * - grok-imagine-*     → image/video via same cli-chat-proxy as chat (not api.x.ai)
  *
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
- * Image gen uses dedicated Imagine models, not grok-4.5.
+ * Image gen uses dedicated Imagine models on cli-chat-proxy, not grok-4.5 chat.
  */
 const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
@@ -157,7 +157,7 @@ export class GrokProvider extends BaseProvider {
     return false;
   }
 
-  /** Image/video generation via api.x.ai Imagine — returned as markdown URLs. */
+  /** Image/video generation via cli-chat-proxy Imagine paths — markdown URLs. */
   private async imagineCompletion(
     account: Account,
     request: ChatCompletionRequest,
@@ -262,7 +262,7 @@ export class GrokProvider extends BaseProvider {
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
     try {
-      // Imagine models are not chat — route to api.x.ai images/videos APIs.
+      // Imagine models are not chat — route to cli-chat-proxy images/videos.
       if (isGrokImagineModel(request.model || "")) {
         return this.imagineCompletion(account, request);
       }
