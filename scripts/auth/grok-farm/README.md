@@ -25,7 +25,16 @@ scripts\auth\.venv\Scripts\python.exe -m pip install -r scripts/auth/requirement
 scripts/auth/.venv/bin/python -m pip install -r scripts/auth/requirements.txt
 ```
 
-Do **not** create `scripts/auth/grok-farm/.venv` unless you want an optional override.
+Do **not** create `scripts/auth/grok-farm/.venv`. Prefer `bun scripts/doctor.ts --fix` to heal the shared env.
+
+### Headless multi-worker frames (Bot Logs)
+
+When run from etteum, env sets `GROK_HEADLESS=true` and `ETTEUM_FRAME_RELAY=true`. Each worker emits:
+
+- `ETTEUM_JSON:{"type":"frame","workerId":N,"email":"...","base64":"..."}`
+- `ETTEUM_JSON:{"type":"progress","workerId":N,"step":"...","message":"..."}`
+
+Etteum registers `grok-farm-*-wN` sessions so concurrency 3 → 3 live previews.
 
 Optional `proxies.txt` next to `farm.py` (see `proxies.txt.example`).
 

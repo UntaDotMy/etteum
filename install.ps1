@@ -16,7 +16,7 @@
 #   $env:ETTEUM_YES = "1"     Skip confirmation (CI / unattended)
 #   $env:ETTEUM_BRANCH        Branch to clone (default: main)
 #   $env:ETTEUM_NO_CLI = "1"  Skip the etteum CLI in ~\.local\bin
-#   $env:ETTEUM_SKIP_BROWSERS = "1"  Skip nodriver Chrome download
+#   $env:ETTEUM_SKIP_BROWSERS = "1"  Skip Camoufox browser binary download
 
 #Requires -Version 5.1
 
@@ -120,7 +120,7 @@ function Show-Summary {
     $items += "  • Node.js dependencies         ~200 MB"; $totalSize += 200
     $items += "  • Python packages (venv)       ~150 MB"; $totalSize += 150
     if ($env:ETTEUM_SKIP_BROWSERS -ne "1") {
-        $items += "  • nodriver Chrome              ~200 MB"; $totalSize += 200
+        $items += "  • Camoufox browser (shared)    ~250 MB"; $totalSize += 250
     }
     $items += "  • Dashboard build              ~50 MB";  $totalSize += 50
 
@@ -490,69 +490,47 @@ function Setup-PythonVenv {
     }
     Ok "Python deps installed"
 
+    # Shared browser runtime for provider login + farms (one Camoufox, not per-farm).
+    # Remove legacy nodriver if a previous install left it in the venv.
+    try {
+        & $venvPy -c "import nodriver" 2>$null
+        if ($LASTEXITCODE -eq 0) {
+            Info "Removing legacy nodriver package..."
+            if ($usePipModule) { & $venvPy -m pip uninstall -y --no-input nodriver 2>&1 | Out-Null }
+            else { & $venvPip uninstall -y --no-input nodriver 2>&1 | Out-Null }
+        }
+    } catch {}
+
     if ($env:ETTEUM_SKIP_BROWSERS -eq "1") {
-        Warn "ETTEUM_SKIP_BROWSERS=1 — skipping nodriver Chrome download."
-        Warn "  Auth bot will fail until you run: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+        Warn "ETTEUM_SKIP_BROWSERS=1 — skipping Camoufox browser fetch."
+        Warn "  Auth/farm will fail until you run: $venvPy -m camoufox fetch"
         return
     }
 
-    Step "Installing nodriver Chrome (this can take a few minutes)"
-    Info "nodriver will download a compatible Chrome/Chromium on first launch..."
-    # Bounded timeout: nodriver.start() launches a real Chrome and can stall on
-    # a slow download or a hung launch. Never let it block the installer forever
-    # — if it doesn't complete in ~120s, move on (Chrome auto-downloads later).
-    # PowerShell has no builtin `timeout`; run it as a job with a watchdog.
-    $nodriverJob = Start-Job -ScriptBlock {
+    Step "Fetching Camoufox browser binary (shared for auth + farms)"
+    Info "python -m camoufox fetch — downloads the stealth Firefox build once..."
+    # Bounded timeout: first fetch can be large. Fail open with a manual hint.
+    $cfJob = Start-Job -ScriptBlock {
         param($py)
-        & $py -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>$null
+        & $py -m camoufox fetch 2>&1
     } -ArgumentList $venvPy
-    if (Wait-Job -Job $nodriverJob -Timeout 120) {
-        Receive-Job -Job $nodriverJob 2>&1 | Out-Null
-        if ($nodriverJob.State -eq "Completed") {
-            Ok "nodriver Chrome installed"
+    if (Wait-Job -Job $cfJob -Timeout 300) {
+        Receive-Job -Job $cfJob 2>&1 | Out-Null
+        if ($cfJob.State -eq "Completed") {
+            # Verify import still works after fetch
+            & $venvPy -c "import camoufox; import playwright" 2>$null
+            if ($LASTEXITCODE -eq 0) {
+                Ok "Camoufox browser ready (scripts/auth/.venv)"
+            } else {
+                Warn "Camoufox fetch finished but import check failed — re-run: $venvPy -m pip install -r scripts\auth\requirements.txt && $venvPy -m camoufox fetch"
+            }
         } else {
-            Warn "nodriver Chrome pre-download failed — it will auto-download on first use"
-            Info "  Manual: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+            Warn "Camoufox fetch failed — re-run: $venvPy -m camoufox fetch"
         }
     } else {
-        Warn "nodriver Chrome pre-download timed out (>120s) — it will auto-download on first use"
-        Info "  Manual: $venvPy -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+        Warn "Camoufox fetch timed out (>300s) — re-run: $venvPy -m camoufox fetch"
     }
-    Remove-Job -Job $nodriverJob -Force 2>$null
-
-    # ── Cleanup: remove old camoufox/playwright if present ──
-    Step "Cleaning up old browser engines (camoufox/playwright)..."
-    # Use 'python -m pip' when pip.exe is missing (usePipModule=true) — calling
-    # $venvPip directly would fail silently on venvs that only have python -m pip.
-    try {
-        & $venvPy -c "import camoufox" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Info "Removing camoufox package..."
-            if ($usePipModule) { & $venvPy -m pip uninstall -y --no-input camoufox 2>&1 | Out-Null }
-            else { & $venvPip uninstall -y --no-input camoufox 2>&1 | Out-Null }
-        }
-    } catch {}
-    try {
-        & $venvPy -c "import playwright" 2>$null
-        if ($LASTEXITCODE -eq 0) {
-            Info "Removing playwright package..."
-            if ($usePipModule) { & $venvPy -m pip uninstall -y --no-input playwright 2>&1 | Out-Null }
-            else { & $venvPip uninstall -y --no-input playwright 2>&1 | Out-Null }
-        }
-    } catch {}
-    # Remove cached playwright browsers
-    $pwCache = Join-Path $env:LOCALAPPDATA "ms-playwright"
-    if (Test-Path $pwCache) {
-        Info "Removing Playwright browser cache ($pwCache)..."
-        Remove-Item -Recurse -Force $pwCache
-    }
-    # Remove cached camoufox browsers
-    $cfCache = Join-Path $env:LOCALAPPDATA "camoufox"
-    if (Test-Path $cfCache) {
-        Info "Removing Camoufox browser cache ($cfCache)..."
-        Remove-Item -Recurse -Force $cfCache
-    }
-    Ok "Old browser engines cleaned up"
+    Remove-Job -Job $cfJob -Force 2>$null
 }
 
 function Build-Dashboard {

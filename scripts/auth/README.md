@@ -3,12 +3,25 @@
 Python Camoufox adapters for providers that require a real browser login
 (Google OAuth / SSO). The TypeScript server spawns `camoufox_flow.py` over stdio.
 
-## Setup
+## Setup (shared env for provider login **and** farms)
+
+One Python venv only: `scripts/auth/.venv`. Do **not** create per-farm venvs.
 
 ```bash
-python -m pip install -r scripts/auth/requirements.txt
-python -m camoufox fetch   # download browser binary once
+# preferred self-heal
+bun scripts/doctor.ts --fix
+
+# or manually
+python -m venv scripts/auth/.venv
+# Windows:
+scripts\auth\.venv\Scripts\python.exe -m pip install -r scripts/auth/requirements.txt
+scripts\auth\.venv\Scripts\python.exe -m camoufox fetch
+# Linux/macOS:
+scripts/auth/.venv/bin/python -m pip install -r scripts/auth/requirements.txt
+scripts/auth/.venv/bin/python -m camoufox fetch
 ```
+
+Installers keep `camoufox[geoip]` + Playwright and remove legacy `nodriver`.
 
 Optional env:
 

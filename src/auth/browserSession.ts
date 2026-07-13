@@ -94,7 +94,7 @@ export function updatePhase(sessionId: string, phase: string, message: string): 
   if (!s) return;
   s.phase = phase;
   s.lastMessage = message || s.lastMessage;
-  if (phase === "complete" || phase === "failed") s.terminal = true;
+  if (phase === "complete" || phase === "failed" || phase === "cancelled") s.terminal = true;
 }
 
 export function updateChallenge(sessionId: string, challenge: BrowserSession["challenge"]): void {

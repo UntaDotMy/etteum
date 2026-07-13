@@ -100,15 +100,9 @@ function checkDotenv() {
       pushFail(`.env: ${k}`, "missing or empty", "Copy from .env.example and re-run installer");
     }
   }
-  // Warn on stale Python-centric keys from the pre-camoufox era
-  for (const stale of ["AUTH_SCRIPT_PATH", "AUTH_SCRIPT_CWD", "PYTHON_PATH"]) {
-    if (stale in env && env[stale]) {
-      pushWarn(
-        `.env: ${stale}`,
-        `Obsolete key (${env[stale]}) — auth is now TS+Camoufox, not Python scripts`,
-        "Remove this line from .env — it is unused",
-      );
-    }
+  // Optional overrides are fine; bare defaults still use scripts/auth/.venv.
+  if (env.PYTHON_PATH) {
+    pushOk(".env: PYTHON_PATH", `override set (${env.PYTHON_PATH})`);
   }
   if (env.ENCRYPTION_KEY === "a1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6") {
     pushFail(
@@ -149,20 +143,73 @@ function checkNodeModules() {
   }
 }
 
-function checkCamoufox() {
-  const engine = parseEnv(join(ROOT, ".env")).BROWSER_ENGINE || "camoufox";
-  if (engine === "chromium") {
-    pushOk("Camoufox", "skipped (BROWSER_ENGINE=chromium)");
+/** Shared Python auth/farm interpreter under scripts/auth/.venv (not per-farm). */
+function authVenvPython(): string | null {
+  const venvRoot = join(ROOT, "scripts", "auth", ".venv");
+  const candidates = IS_WIN
+    ? [join(venvRoot, "Scripts", "python.exe"), join(venvRoot, "bin", "python")]
+    : [join(venvRoot, "bin", "python"), join(venvRoot, "bin", "python3"), join(venvRoot, "Scripts", "python.exe")];
+  for (const c of candidates) {
+    if (existsSync(c)) return c;
+  }
+  return null;
+}
+
+function checkAuthPythonEnv() {
+  const py = authVenvPython();
+  if (!py) {
+    pushFail(
+      "Auth Python venv",
+      "scripts/auth/.venv missing — shared env for provider login + farms",
+      "Run: bun scripts/doctor.ts --fix   (or re-run install)",
+    );
     return;
   }
-  const r = run("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"]);
-  if (r.ok) {
-    pushOk("Camoufox", "camoufox-js importable");
+  pushOk("Auth Python venv", py);
+
+  const nodriver = run(py, ["-c", "import nodriver"]);
+  if (nodriver.ok) {
+    pushWarn(
+      "Legacy nodriver",
+      "nodriver is installed in auth venv but is not used — remove it",
+      "Run: bun scripts/doctor.ts --fix",
+    );
   } else {
+    pushOk("Legacy nodriver", "not installed (good)");
+  }
+}
+
+function checkCamoufox() {
+  // Primary runtime: Python camoufox in scripts/auth/.venv (login adapters + farms).
+  const py = authVenvPython();
+  if (!py) {
     pushFail(
-      "Camoufox",
-      "camoufox-js not found (optional dependency for stealth browser auth)",
-      "Run: bun install — camoufox-js is in optionalDependencies",
+      "Camoufox (Python)",
+      "auth venv missing — cannot import camoufox",
+      "Run: bun scripts/doctor.ts --fix",
+    );
+  } else {
+    const imp = run(py, ["-c", "import camoufox; import playwright"]);
+    if (imp.ok) {
+      pushOk("Camoufox (Python)", `importable via ${py}`);
+    } else {
+      pushFail(
+        "Camoufox (Python)",
+        "camoufox/playwright missing in scripts/auth/.venv",
+        `Run: bun scripts/doctor.ts --fix   or: "${py}" -m pip install -r scripts/auth/requirements.txt && "${py}" -m camoufox fetch`,
+      );
+    }
+  }
+
+  // Optional TS bulk-import path (camoufox-js) — warn only, not the farm source of truth.
+  const js = run("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"]);
+  if (js.ok) {
+    pushOk("Camoufox (JS optional)", "camoufox-js importable");
+  } else {
+    pushWarn(
+      "Camoufox (JS optional)",
+      "camoufox-js not found — TS bulk-import stealth may fall back to chromium",
+      "Run: bun install (optionalDependencies)",
     );
   }
 }
@@ -317,7 +364,6 @@ function autoFix() {
   console.log(`\n\x1b[1m🔧 Auto-fix mode\x1b[0m\n`);
 
   // 1. node_modules
-  const depsFixed: string[] = [];
   for (const dir of ["node_modules", "dashboard/node_modules"]) {
     if (!existsSync(join(ROOT, dir))) {
       process.stdout.write(`  \x1b[33m! ${dir} missing — installing...\x1b[0m\n`);
@@ -326,7 +372,6 @@ function autoFix() {
       } else {
         runFix("bun", ["install"], "bun install (root)", 300);
       }
-      depsFixed.push(dir);
     }
   }
 
@@ -336,7 +381,45 @@ function autoFix() {
     runFix("bun", ["run", "build"], "bun run build (dashboard)", 300, join(ROOT, "dashboard"));
   }
 
-  // 3. Canva worker: install curl_cffi if Python is available
+  // 3. Shared auth/farm Python venv + Camoufox (source of truth for browser automation)
+  const venvRoot = join(ROOT, "scripts", "auth", ".venv");
+  const reqFile = join(ROOT, "scripts", "auth", "requirements.txt");
+  let venvPy = authVenvPython();
+  if (!venvPy) {
+    process.stdout.write("  \x1b[33m! Creating scripts/auth/.venv...\x1b[0m\n");
+    const hostPy = findSystemPython();
+    if (!hostPy) {
+      process.stdout.write("  \x1b[31m✗ No system Python found — install Python 3.10+\x1b[0m\n");
+    } else {
+      const isPyLauncher = hostPy === "py" || /(?:^|[\\/])py(?:\.exe)?$/i.test(hostPy);
+      const ok = isPyLauncher
+        ? runFix(hostPy, ["-3", "-m", "venv", venvRoot], "create auth venv", 120)
+        : runFix(hostPy, ["-m", "venv", venvRoot], "create auth venv", 120);
+      if (ok) venvPy = authVenvPython();
+    }
+  }
+
+  if (venvPy && existsSync(reqFile)) {
+    process.stdout.write("  \x1b[33m! Installing scripts/auth requirements (camoufox[geoip] + playwright)...\x1b[0m\n");
+    runFix(venvPy, ["-m", "pip", "install", "--no-input", "--upgrade", "pip", "wheel"], "pip upgrade", 120);
+    runFix(venvPy, ["-m", "pip", "install", "--no-input", "-r", reqFile], "pip install auth requirements", 300);
+
+    // Remove legacy nodriver — never uninstall camoufox.
+    const hasNodriver = run(venvPy, ["-c", "import nodriver"]);
+    if (hasNodriver.ok) {
+      process.stdout.write("  \x1b[33m! Removing legacy nodriver from auth venv...\x1b[0m\n");
+      runFix(venvPy, ["-m", "pip", "uninstall", "-y", "--no-input", "nodriver"], "uninstall nodriver", 60);
+    }
+
+    if (process.env.ETTEUM_SKIP_BROWSERS !== "1") {
+      process.stdout.write("  \x1b[33m! Fetching Camoufox browser binary...\x1b[0m\n");
+      runFix(venvPy, ["-m", "camoufox", "fetch"], "camoufox fetch", 300);
+    } else {
+      process.stdout.write("  \x1b[2m→ ETTEUM_SKIP_BROWSERS=1 — skipped camoufox fetch\x1b[0m\n");
+    }
+  }
+
+  // 4. Canva worker: install curl_cffi if Python is available
   const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
   if (existsSync(workerPath)) {
     const sysPy = findSystemPython();
@@ -349,22 +432,10 @@ function autoFix() {
     }
   }
 
-  // 4. .env: strip stale keys (AUTH_SCRIPT_PATH, AUTH_SCRIPT_CWD, PYTHON_PATH)
+  // 5. .env: BROWSER_ENGINE nodriver → camoufox (do not strip PYTHON_PATH)
   const envPath = join(ROOT, ".env");
   if (existsSync(envPath)) {
     const env = parseEnv(envPath);
-    const staleKeys = ["AUTH_SCRIPT_PATH", "AUTH_SCRIPT_CWD", "PYTHON_PATH"];
-    const hasStale = staleKeys.some((k) => k in env && env[k]);
-    if (hasStale) {
-      process.stdout.write("  \x1b[33m! Stripping stale AUTH_SCRIPT/PYTHON keys from .env...\x1b[0m\n");
-      let content = readFileSync(envPath, "utf8");
-      for (const k of staleKeys) {
-        content = content.replace(new RegExp(`^${k}=.*$`, "gm"), `# ${k}= (removed — auth is now TS+Camoufox)`);
-      }
-      Bun.write(envPath, content);
-      process.stdout.write("  \x1b[2m→ Stripped stale keys\x1b[0m \x1b[32mOK\x1b[0m\n");
-    }
-    // Fix nodriver → camoufox
     if (env.BROWSER_ENGINE === "nodriver") {
       process.stdout.write("  \x1b[33m! Fixing BROWSER_ENGINE=nodriver → camoufox...\x1b[0m\n");
       let content = readFileSync(envPath, "utf8");
@@ -374,7 +445,7 @@ function autoFix() {
     }
   }
 
-  // 5. Database migrations
+  // 6. Database migrations
   process.stdout.write("  \x1b[33m! Running database migrations...\x1b[0m\n");
   runFix("bun", ["src/db/migrate.ts"], "db migrate", 60);
 
@@ -396,6 +467,7 @@ if (wantFix) {
 checkBun();
 checkDotenv();
 checkNodeModules();
+checkAuthPythonEnv();
 checkCamoufox();
 checkDashboardBuild();
 checkDatabase();

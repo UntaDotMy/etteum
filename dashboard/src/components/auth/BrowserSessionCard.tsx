@@ -2,8 +2,9 @@ import { useEffect, useRef, useState, useCallback } from "react";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
+import { cn } from "@/lib/utils";
 import { connectFrameStream, sendBrowserInput, sendCaptchaAnswer, cancelBrowserSession } from "@/lib/browserApi";
-import { Loader2, X, Send, Globe } from "lucide-react";
+import { Loader2, X, Send } from "lucide-react";
 
 interface SessionStep {
   ts: number;
@@ -37,17 +38,35 @@ interface Props {
   challenge: Challenge | null;
 }
 
+function stepTone(step: string, message: string): string {
+  if (step === "error" || step === "quota_skip" || step === "failed") {
+    return "text-[var(--error)] bg-[var(--error)]/10";
+  }
+  if (step === "success" || step === "authenticated" || step === "tokens") {
+    return "text-[var(--success)] bg-[var(--success)]/10";
+  }
+  if (step === "result") {
+    return message.includes("succeed")
+      ? "text-[var(--success)] bg-[var(--success)]/10"
+      : "text-[var(--error)] bg-[var(--error)]/10";
+  }
+  if (step === "manual_challenge" || step === "manual_input_waiting") {
+    return "text-[var(--warning)] bg-[var(--warning)]/10";
+  }
+  return "text-[var(--muted-foreground)] bg-[var(--secondary)]";
+}
+
+/**
+ * Theme-aligned worker card (enowxai layout, etteum tokens).
+ * Two content sections: frame + per-worker log.
+ */
 export function BrowserSessionCard({ session, challenge }: Props) {
   const [frameSrc, setFrameSrc] = useState<string>("");
   const [captchaText, setCaptchaText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
-  const containerRef = useRef<HTMLDivElement>(null);
+  const logEndRef = useRef<HTMLDivElement>(null);
 
-  // Connect to the SSE frame stream. Renders frames as a base64 data-URI —
-  // this matches the ennowxai frame contract byte-for-byte: the server sends
-  // {base64, format} with RAW base64 (no data: prefix), and the client builds
-  // `data:image/${format};base64,${base64}`.
   useEffect(() => {
     if (session.terminal) return;
     const cleanup = connectFrameStream(session.sessionId, (base64, format) => {
@@ -56,23 +75,26 @@ export function BrowserSessionCard({ session, challenge }: Props) {
     return cleanup;
   }, [session.sessionId, session.terminal]);
 
-  // Pointer event forwarding: compute relative coords scaled to the browser viewport.
+  useEffect(() => {
+    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+  }, [session.steps?.length]);
+
   const handlePointer = useCallback((e: React.PointerEvent, action: "down" | "move" | "up") => {
     if (!imgRef.current || session.terminal) return;
     const img = imgRef.current;
     const rect = img.getBoundingClientRect();
-    // The image uses objectFit: contain, so scale from displayed size to natural size.
     const scaleX = img.naturalWidth / rect.width;
     const scaleY = img.naturalHeight / rect.height;
-    const x = (e.clientX - rect.left) * scaleX;
-    const y = (e.clientY - rect.top) * scaleY;
-    void sendBrowserInput(session.sessionId, { type: "pointer", x: Math.round(x), y: Math.round(y), action });
+    void sendBrowserInput(session.sessionId, {
+      type: "pointer",
+      x: Math.round((e.clientX - rect.left) * scaleX),
+      y: Math.round((e.clientY - rect.top) * scaleY),
+      action,
+    });
   }, [session.sessionId, session.terminal]);
 
-  // Keyboard forwarding.
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (session.terminal || challenge) return;
-    // Don't forward if focus is in the captcha input.
     if (e.target instanceof HTMLInputElement) return;
     void sendBrowserInput(session.sessionId, {
       type: "key",
@@ -97,50 +119,81 @@ export function BrowserSessionCard({ session, challenge }: Props) {
     await cancelBrowserSession(session.sessionId);
   }
 
-  const phaseColor = session.phase === "complete" ? "success" : session.phase === "failed" || session.phase === "error" ? "error" : session.phase === "manual_input_waiting" ? "warning" : "secondary";
-  const isGrokFarm = session.provider === "grok" && session.sessionId.startsWith("grok-farm-");
+  const phaseColor =
+    session.phase === "complete"
+      ? "success"
+      : session.phase === "failed" || session.phase === "error" || session.phase === "cancelled"
+        ? "error"
+        : session.phase === "manual_input_waiting"
+          ? "warning"
+          : "secondary";
+
+  const isGrokWorker =
+    session.provider === "grok" &&
+    session.sessionId.startsWith("grok-farm-") &&
+    /-w\d+$/.test(session.sessionId);
   const showEnded = session.terminal;
-  const displayName = isGrokFarm ? "Grok Farm" : session.email;
+  const live = !session.terminal;
+  const steps = session.steps || [];
 
   return (
-    <div className="relative flex flex-col overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
-      {/* Header — enowxai-style single session strip */}
-      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2.5">
-        <div className="flex min-w-0 flex-1 flex-col gap-0.5">
-          <div className="flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
-            <span className="truncate font-medium text-[var(--foreground)]">{displayName}</span>
-            <Badge variant="outline" className="text-[10px] uppercase">
-              {session.provider}
+    <div
+      className={cn(
+        "group relative flex flex-col overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)] text-[var(--card-foreground)] shadow-[var(--shadow-card)] transition-shadow",
+        live && "hover:shadow-[var(--glow)]",
+      )}
+    >
+      {live && (
+        <div className="pointer-events-none absolute inset-x-0 top-0 h-px bg-gradient-to-r from-transparent via-[var(--primary)]/50 to-transparent" />
+      )}
+
+      {/* Identity chrome */}
+      <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] bg-[var(--secondary)]/40 px-3 py-2.5">
+        <div className="flex min-w-0 flex-1 flex-wrap items-center gap-2">
+          <span
+            className={cn(
+              "h-2 w-2 shrink-0 rounded-full",
+              live
+                ? "animate-pulse bg-[var(--primary)]"
+                : session.phase === "complete"
+                  ? "bg-[var(--success)]"
+                  : "bg-[var(--error)]",
+            )}
+          />
+          <span className="truncate text-sm font-medium text-[var(--foreground)]">
+            {session.email}
+          </span>
+          <Badge variant="outline" className="shrink-0 text-[10px] font-normal uppercase tracking-wide">
+            {session.provider}
+          </Badge>
+          {isGrokWorker && (
+            <Badge variant="outline" className="shrink-0 text-[10px] font-normal text-[var(--muted-foreground)]">
+              headless
             </Badge>
-            {isGrokFarm && (
-              <Badge variant="outline" className="text-[10px] text-[var(--muted-foreground)]">
-                headless preview
-              </Badge>
-            )}
-          </div>
-          <div className="flex items-center gap-2">
-            <Badge variant={phaseColor as any}>{session.phase || "unknown"}</Badge>
-            {session.lastMessage && (
-              <p className="truncate text-xs text-[var(--muted-foreground)]">{session.lastMessage}</p>
-            )}
-          </div>
+          )}
+          <Badge variant={phaseColor as "success" | "error" | "warning" | "secondary"} className="shrink-0">
+            {session.phase || "unknown"}
+          </Badge>
         </div>
         {!session.terminal && (
-          <Button variant="outline" size="sm" onClick={handleCancel} className="shrink-0 text-[var(--error)]">
-            <X className="h-3 w-3" />
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => void handleCancel()}
+            className="h-8 shrink-0 border-[var(--error)]/40 text-[var(--error)] hover:bg-[var(--error)]/10"
+          >
+            <X className="h-3.5 w-3.5" />
           </Button>
         )}
       </div>
 
-      {/* Browser surface — frame primary (enowxai); steps only below, once */}
+      {/* Section 1 — Frame */}
       <div
-        ref={containerRef}
         role="application"
         tabIndex={0}
-        aria-label="browser preview surface"
+        aria-label="browser preview"
         onKeyDown={handleKeyDown}
-        className="relative flex w-full items-center justify-center overflow-hidden bg-[var(--background)] outline-none focus-visible:border-[var(--primary)]"
-        style={{ minHeight: isGrokFarm ? "280px" : "200px" }}
+        className="relative flex min-h-[220px] w-full items-center justify-center overflow-hidden bg-[var(--background)] outline-none focus-visible:ring-2 focus-visible:ring-[var(--ring)] focus-visible:ring-offset-2 focus-visible:ring-offset-[var(--card)]"
       >
         {frameSrc ? (
           <img
@@ -150,48 +203,41 @@ export function BrowserSessionCard({ session, challenge }: Props) {
             decoding="async"
             draggable={false}
             onPointerDown={(e) => handlePointer(e, "down")}
-            onPointerMove={(e) => { if (e.buttons > 0) handlePointer(e, "move"); }}
-            onPointerUp={(e) => handlePointer(e, "up")}
-            style={{
-              display: "block",
-              width: "100%",
-              height: "auto",
-              maxHeight: "60vh",
-              objectFit: "contain",
-              cursor: isGrokFarm ? "default" : "crosshair",
-              opacity: showEnded ? 0.85 : 1,
+            onPointerMove={(e) => {
+              if (e.buttons > 0) handlePointer(e, "move");
             }}
+            onPointerUp={(e) => handlePointer(e, "up")}
+            className={cn(
+              "block h-auto max-h-[48vh] w-full object-contain",
+              isGrokWorker ? "cursor-default" : "cursor-crosshair",
+              showEnded && "opacity-85",
+            )}
           />
         ) : showEnded ? (
-          <div className="flex flex-col items-center gap-3 px-6 py-10 text-center">
-            <p className="text-sm text-[var(--muted-foreground)]">
-              {isGrokFarm ? "Farm session ended." : "Browser frame ended with the session."}
-            </p>
-          </div>
+          <p className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">Session ended.</p>
         ) : (
-          <div className="flex flex-col items-center gap-2 px-4 py-8 text-center">
+          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
             <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
-            <p className="text-xs text-[var(--muted-foreground)]">
-              {isGrokFarm
-                ? "Waiting for Grok signup browser screenshots…"
-                : "Waiting for browser frame..."}
-            </p>
+            <p className="text-xs text-[var(--muted-foreground)]">Waiting for frame…</p>
           </div>
         )}
 
-        {/* Captcha overlay */}
         {challenge && !session.terminal && (
-          <div className="absolute inset-0 z-10 flex flex-col justify-end bg-black/70 p-3">
-            <div className="rounded-xl border border-[var(--border)] bg-[var(--card)]/95 p-3 backdrop-blur-sm">
+          <div className="absolute inset-0 z-10 flex flex-col justify-end bg-[color-mix(in_srgb,var(--background)_72%,transparent)] p-3 backdrop-blur-[2px]">
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-3 shadow-[var(--shadow-card)]">
               <div className="mb-2">
-                <p className="text-[10px] font-mono text-[var(--muted-foreground)]">Captcha input</p>
-                <p className="text-xs text-[var(--foreground)]">{challenge.prompt || "Type the characters you see"}</p>
+                <p className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+                  Captcha
+                </p>
+                <p className="text-xs text-[var(--foreground)]">
+                  {challenge.prompt || "Type the characters you see"}
+                </p>
               </div>
               {challenge.image_base64 && (
-                <div className="mb-2 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--background)]/80 p-2">
+                <div className="mb-2 overflow-hidden rounded-md border border-[var(--border)] bg-[var(--secondary)] p-2">
                   <img
                     src={`data:image/${challenge.image_format || "jpeg"};base64,${challenge.image_base64}`}
-                    alt="captcha preview"
+                    alt="captcha"
                     className="mx-auto max-h-24 w-auto object-contain"
                     decoding="async"
                     draggable={false}
@@ -202,17 +248,24 @@ export function BrowserSessionCard({ session, challenge }: Props) {
                 autoFocus
                 value={captchaText}
                 onChange={(e) => setCaptchaText(e.target.value)}
-                onKeyDown={(e) => { if (e.key === "Enter") handleCaptchaSubmit(); }}
+                onKeyDown={(e) => {
+                  if (e.key === "Enter") void handleCaptchaSubmit();
+                }}
                 placeholder="Enter captcha text"
                 disabled={submitting}
                 className="w-full"
               />
-              <p className="mt-2 text-[11px] text-[var(--muted-foreground)]">Text will be submitted to this browser only.</p>
               <div className="mt-3 flex items-center justify-end gap-2">
-                <Button variant="outline" size="sm" onClick={handleCancel} disabled={submitting}>Close</Button>
-                <Button size="sm" onClick={handleCaptchaSubmit} disabled={!captchaText.trim() || submitting}>
+                <Button variant="outline" size="sm" onClick={() => void handleCancel()} disabled={submitting}>
+                  Close
+                </Button>
+                <Button
+                  size="sm"
+                  onClick={() => void handleCaptchaSubmit()}
+                  disabled={!captchaText.trim() || submitting}
+                >
                   {submitting ? <Loader2 className="h-3 w-3 animate-spin" /> : <Send className="h-3 w-3" />}
-                  Send captcha
+                  Send
                 </Button>
               </div>
             </div>
@@ -220,36 +273,46 @@ export function BrowserSessionCard({ session, challenge }: Props) {
         )}
       </div>
 
-      {/* Step timeline — the structured automation log (per-step progress/error/result) */}
-      {session.steps && session.steps.length > 0 && (
-        <div className="max-h-32 overflow-y-auto border-t border-[var(--border)] px-3 py-2">
-          <div className="mb-1 text-[10px] font-mono uppercase tracking-wide text-[var(--muted-foreground)]">
-            Automation log
-          </div>
-          <ol className="flex flex-col gap-1">
-            {session.steps.map((s, i) => (
-              <li key={i} className="flex items-start gap-2 text-[11px] font-mono">
-                <span className="shrink-0 text-[var(--muted-foreground)]">
-                  {new Date(s.ts).toLocaleTimeString([], { hour12: false })}
-                </span>
-                <span
-                  className="shrink-0 rounded px-1 py-0.5 text-[10px] font-semibold uppercase"
-                  style={{
-                    color:
-                      s.step === "error" || s.step === "quota_skip" ? "var(--error)" :
-                      s.step === "result" ? (s.message.includes("succeed") ? "var(--success)" : "var(--error)") :
-                      s.step === "authenticated" || s.step === "tokens" ? "var(--success)" :
-                      "var(--muted-foreground)",
-                  }}
-                >
-                  {s.step}
-                </span>
-                <span className="min-w-0 flex-1 break-words text-[var(--foreground)]">{s.message}</span>
-              </li>
-            ))}
-          </ol>
+      {/* Section 2 — Worker log */}
+      <div className="flex max-h-44 min-h-[7.5rem] flex-col border-t border-[var(--border)] bg-[var(--secondary)]/25">
+        <div className="flex items-center justify-between gap-2 border-b border-[var(--border)] px-3 py-1.5">
+          <span className="text-[10px] font-medium uppercase tracking-wide text-[var(--muted-foreground)]">
+            Worker log
+          </span>
+          {session.lastMessage && (
+            <span className="max-w-[65%] truncate text-[10px] text-[var(--muted-foreground)]">
+              {session.lastMessage}
+            </span>
+          )}
         </div>
-      )}
+        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+          {steps.length === 0 ? (
+            <p className="text-[11px] text-[var(--muted-foreground)]">
+              {showEnded ? "No steps recorded." : "Waiting for progress…"}
+            </p>
+          ) : (
+            <ol className="flex flex-col gap-1.5">
+              {steps.map((s, i) => (
+                <li key={`${s.ts}-${i}`} className="flex items-start gap-2 text-[11px]">
+                  <span className="shrink-0 font-mono tabular-nums text-[var(--muted-foreground)]">
+                    {new Date(s.ts).toLocaleTimeString([], { hour12: false })}
+                  </span>
+                  <span
+                    className={cn(
+                      "shrink-0 rounded px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wide",
+                      stepTone(s.step, s.message),
+                    )}
+                  >
+                    {s.step}
+                  </span>
+                  <span className="min-w-0 flex-1 break-words text-[var(--foreground)]">{s.message}</span>
+                </li>
+              ))}
+              <div ref={logEndRef} />
+            </ol>
+          )}
+        </div>
+      </div>
     </div>
   );
 }

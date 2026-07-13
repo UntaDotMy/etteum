@@ -17,7 +17,7 @@
 #   ETTEUM_YES=1      Skip confirmation prompts (for CI / unattended installs)
 #   ETTEUM_BRANCH     Branch to clone (default: main)
 #   ETTEUM_NO_CLI=1   Skip the ~/.local/bin/etteum symlink
-#   ETTEUM_SKIP_BROWSERS=1  Skip nodriver Chrome download (needed for auth bot)
+#   ETTEUM_SKIP_BROWSERS=1  Skip Camoufox browser binary download
 
 set -euo pipefail
 
@@ -115,8 +115,8 @@ show_summary() {
   items+=("  • Python packages (venv)       ~150 MB")
   ((total_size += 150))
   if [[ "${ETTEUM_SKIP_BROWSERS:-0}" != "1" ]]; then
-    items+=("  • nodriver Chrome              ~200 MB")
-    ((total_size += 200))
+    items+=("  • Camoufox browser (shared)    ~250 MB")
+    ((total_size += 250))
   fi
   items+=("  • Dashboard build              ~50 MB")
   ((total_size += 50))
@@ -499,57 +499,34 @@ setup_python_venv() {
   fi
   ok "Python deps installed"
 
+  # Shared browser runtime for provider login + farms (one Camoufox, not per-farm).
+  # Remove legacy nodriver if a previous install left it in the venv.
+  if "$venv_python" -c "import nodriver" 2>/dev/null; then
+    info "Removing legacy nodriver package..."
+    "$pip" uninstall -y nodriver >/dev/null 2>&1 || true
+  fi
+
   if [[ "${ETTEUM_SKIP_BROWSERS:-0}" == "1" ]]; then
-    warn "ETTEUM_SKIP_BROWSERS=1 — skipping nodriver Chrome download."
-    warn "  Auth bot will fail until you run: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+    warn "ETTEUM_SKIP_BROWSERS=1 — skipping Camoufox browser fetch."
+    warn "  Auth/farm will fail until you run: $venv_python -m camoufox fetch"
     return
   fi
 
-  step "Installing nodriver Chrome (this can take a few minutes)"
-  info "nodriver will download a compatible Chrome/Chromium on first launch..."
-  # Bounded timeout: nodriver.start() launches a real Chrome and can stall on a
-  # slow download or a hung launch. Never let it block the installer forever —
-  # if it doesn't complete in ~120s, move on (Chrome auto-downloads on first use).
+  step "Fetching Camoufox browser binary (shared for auth + farms)"
+  info "python -m camoufox fetch — downloads the stealth Firefox build once..."
   if command -v timeout >/dev/null 2>&1; then
-    if retry timeout 120 "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
-      ok "nodriver Chrome installed"
+    if retry timeout 300 "$venv_python" -m camoufox fetch; then
+      ok "Camoufox browser ready (scripts/auth/.venv)"
     else
-      warn "nodriver Chrome pre-download failed or timed out — it will auto-download on first use"
-      info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+      warn "Camoufox fetch failed or timed out — re-run: $venv_python -m camoufox fetch"
     fi
   else
-    # No `timeout` (rare on some macOS/BusyBox) — run unbounded but still non-fatal.
-    if retry "$venv_python" -c "import nodriver; nodriver.loop().run_until_complete(nodriver.start(headless=True).stop())" 2>/dev/null; then
-      ok "nodriver Chrome installed"
+    if retry "$venv_python" -m camoufox fetch; then
+      ok "Camoufox browser ready (scripts/auth/.venv)"
     else
-      warn "nodriver Chrome pre-download failed — it will auto-download on first use"
-      info "  Manual: $venv_python -c 'import nodriver; nodriver.loop().run_until_complete(nodriver.start())'"
+      warn "Camoufox fetch failed — re-run: $venv_python -m camoufox fetch"
     fi
   fi
-
-  # ── Cleanup: remove old camoufox/playwright/chromium if present ──
-  step "Cleaning up old browser engines (camoufox/playwright)..."
-  if "$venv_python" -c "import camoufox" 2>/dev/null; then
-    info "Removing camoufox package..."
-    "$pip" uninstall -y camoufox >/dev/null 2>&1 || true
-  fi
-  if "$venv_python" -c "import playwright" 2>/dev/null; then
-    info "Removing playwright package..."
-    "$pip" uninstall -y playwright >/dev/null 2>&1 || true
-  fi
-  # Remove cached playwright browsers
-  local pw_cache="${HOME}/.cache/ms-playwright"
-  if [[ -d "$pw_cache" ]]; then
-    info "Removing Playwright browser cache (~$pw_cache)..."
-    rm -rf "$pw_cache"
-  fi
-  # Remove cached camoufox browsers
-  local cf_cache="${HOME}/.local/share/camoufox"
-  if [[ -d "$cf_cache" ]]; then
-    info "Removing Camoufox browser cache (~$cf_cache)..."
-    rm -rf "$cf_cache"
-  fi
-  ok "Old browser engines cleaned up"
 }
 
 build_dashboard() {

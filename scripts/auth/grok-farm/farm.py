@@ -1173,14 +1173,45 @@ def restore_quiet_print() -> None:
 def emit_progress(attempt: int, step: str, message: str, email_addr: str = "", **kwargs):
     email = email_addr or kwargs.get("email") or ""
     HUD.set_progress(attempt, step, message, email)
+    if ETTEUM_FRAME_RELAY:
+        _emit_etteum_json(
+            {
+                "type": "progress",
+                "workerId": int(attempt),
+                "step": step,
+                "message": message,
+                "email": email or f"worker #{attempt}",
+            }
+        )
 
 
 def emit_success(attempt: int, email_addr: str, message: str):
     HUD.mark_ok(attempt, email_addr, message)
+    if ETTEUM_FRAME_RELAY:
+        _emit_etteum_json(
+            {
+                "type": "worker_done",
+                "workerId": int(attempt),
+                "ok": True,
+                "email": email_addr or f"worker #{attempt}",
+                "message": message,
+            }
+        )
 
 
 def emit_failed(attempt: int, message: str, error: str = ""):
     HUD.mark_fail(attempt, message, error)
+    if ETTEUM_FRAME_RELAY:
+        _emit_etteum_json(
+            {
+                "type": "worker_done",
+                "workerId": int(attempt),
+                "ok": False,
+                "email": f"worker #{attempt}",
+                "message": message,
+                "error": error or message,
+            }
+        )
 
 
 def vlog(msg: str, attempt: int | None = None) -> None:
@@ -2533,7 +2564,10 @@ def _build_stealth_launch_kwargs(
 # When ETTEUM_FRAME_RELAY=true (set by etteum grokFarm.ts), emit periodic JPEG
 # frames as single-line JSON on stdout. Same idea as enowxai/camoufox_flow:
 # browser stays headless (no OS window) but screenshots stream to Browser Logs.
-_FRAME_PAGES: dict[int, Any] = {}  # id(manager) -> page
+#
+# Multi-worker: each entry is tagged with workerId so concurrency N → N cards.
+# Shape: ETTEUM_JSON:{"type":"frame","workerId":1,"email":"...","base64":"..."}
+_FRAME_PAGES: dict[int, dict[str, Any]] = {}  # id(manager) -> {page, workerId, email}
 _frame_relay_task: asyncio.Task | None = None
 ETTEUM_FRAME_RELAY = _env_bool("ETTEUM_FRAME_RELAY", False)
 ETTEUM_FRAME_INTERVAL = max(0.8, float(_env("ETTEUM_FRAME_INTERVAL", "1.5") or "1.5"))
@@ -2547,11 +2581,12 @@ def _emit_etteum_json(payload: dict[str, Any]) -> None:
 
 
 async def _etteum_frame_relay_loop() -> None:
-    """Screenshot any live farm page and emit ETTEUM_JSON frame lines."""
+    """Screenshot every live worker page and emit one ETTEUM_JSON frame each."""
     while True:
         try:
-            for mid, page in list(_FRAME_PAGES.items()):
+            for mid, entry in list(_FRAME_PAGES.items()):
                 try:
+                    page = entry.get("page") if isinstance(entry, dict) else entry
                     if page is None:
                         continue
                     closed = getattr(page, "is_closed", None)
@@ -2559,14 +2594,18 @@ async def _etteum_frame_relay_loop() -> None:
                         _FRAME_PAGES.pop(mid, None)
                         continue
                     buf = await page.screenshot(type="jpeg", quality=50)
-                    _emit_etteum_json(
-                        {
-                            "type": "frame",
-                            "format": "jpeg",
-                            "base64": base64.b64encode(buf).decode("ascii"),
-                        }
-                    )
-                    break  # one frame per tick (bandwidth)
+                    worker_id = entry.get("workerId") if isinstance(entry, dict) else None
+                    email = entry.get("email") if isinstance(entry, dict) else ""
+                    payload: dict[str, Any] = {
+                        "type": "frame",
+                        "format": "jpeg",
+                        "base64": base64.b64encode(buf).decode("ascii"),
+                    }
+                    if worker_id is not None:
+                        payload["workerId"] = int(worker_id)
+                    if email:
+                        payload["email"] = str(email)
+                    _emit_etteum_json(payload)
                 except Exception:
                     continue
         except Exception:
@@ -2586,22 +2625,53 @@ def _ensure_frame_relay() -> None:
         _frame_relay_task = loop.create_task(_etteum_frame_relay_loop())
 
 
-def _register_frame_page(manager: Any, page: Any, *, preview: bool = True) -> None:
+def _register_frame_page(
+    manager: Any,
+    page: Any,
+    *,
+    preview: bool = True,
+    worker_id: int | None = None,
+    email: str = "",
+) -> None:
     """Register page for etteum Browser Logs screenshots.
 
     preview=False for the temp-mail browser — only the Grok signup/OAuth
-    page should stream frames (enowxai-style single preview).
+    page should stream frames. worker_id isolates concurrent farm workers.
     """
     if not ETTEUM_FRAME_RELAY or not preview or manager is None or page is None:
         return
-    _FRAME_PAGES[id(manager)] = page
+    _FRAME_PAGES[id(manager)] = {
+        "page": page,
+        "workerId": worker_id,
+        "email": email or "",
+    }
     _ensure_frame_relay()
+    if worker_id is not None:
+        _emit_etteum_json(
+            {
+                "type": "worker_start",
+                "workerId": int(worker_id),
+                "email": email or f"worker #{worker_id}",
+            }
+        )
 
 
 def _unregister_frame_page(manager: Any) -> None:
     if manager is None:
         return
-    _FRAME_PAGES.pop(id(manager), None)
+    entry = _FRAME_PAGES.pop(id(manager), None)
+    if entry and isinstance(entry, dict) and entry.get("workerId") is not None:
+        # Do not force terminal here — TS marks done/fail from progress/import.
+        pass
+
+
+def _frame_set_email(manager: Any, email: str) -> None:
+    """Update the email label for a registered preview page (after OTP assigns mailbox)."""
+    if manager is None:
+        return
+    entry = _FRAME_PAGES.get(id(manager))
+    if isinstance(entry, dict):
+        entry["email"] = email or entry.get("email") or ""
 
 
 async def launch_browser(
@@ -2609,6 +2679,8 @@ async def launch_browser(
     headless: bool | None = None,
     *,
     preview: bool = True,
+    worker_id: int | None = None,
+    email: str = "",
 ):
     """Launch a stealth Camoufox browser (unique fingerprint per instance).
 
@@ -2653,7 +2725,9 @@ async def launch_browser(
     page = await browser.new_page()
     page.set_default_timeout(60000)
     # Only Grok signup/OAuth pages stream to Browser Logs (not temp-mail).
-    _register_frame_page(manager, page, preview=preview)
+    _register_frame_page(
+        manager, page, preview=preview, worker_id=worker_id, email=email
+    )
     # Log fingerprint axis once per launch (helps debug CF/geo mismatches)
     try:
         _os = kwargs.get("os", "?")
@@ -3887,7 +3961,7 @@ async def fill_xai_otp_boxes(page, otp_chars: str, attempt: int) -> bool:
 
 
 # ── temp mail (generator.email via Camoufox/Playwright) ─────────────────────
-# Ported from refer/alibaba/farm.py (nodriver) → Camoufox (Playwright API).
+# Ported from refer/alibaba/farm.py → Camoufox (Playwright API).
 # The mail browser runs headless by default (TEMPMAIL_HEADLESS=True). Set
 # GROK_TEMPMAIL_HEADLESS=false to make it visible for debugging. One persistent
 # mail page per worker:
@@ -5737,7 +5811,10 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
     emit_progress(attempt_num, "browser", "Launching Camoufox", email_addr)
     manager = None
     try:
-        manager, browser, page = await launch_browser(proxy_url)
+        manager, browser, page = await launch_browser(
+            proxy_url, worker_id=attempt_num, email=email_addr
+        )
+        _frame_set_email(manager, email_addr)
         _plog = "direct"
         if proxy_url:
             try:
@@ -6465,7 +6542,9 @@ async def _refresh_one_account(
             if SPAWN_DELAY > 0 and try_n == 1:
                 await asyncio.sleep(SPAWN_DELAY * ((idx - 1) % max(1, concurrent)))
             proxy_url, proxy_id = await next_proxy()
-            manager, browser, page = await launch_browser(proxy_url)
+            manager, browser, page = await launch_browser(
+                proxy_url, worker_id=idx, email=email
+            )
             _plog = "direct"
             if proxy_url:
                 try:

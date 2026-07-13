@@ -55,11 +55,62 @@ export interface GrokFarmJobState {
   batchDir?: string;
   pid?: number;
   lastMessage?: string;
+  /** Per-worker Bot Logs session ids: jobId-w{N} */
+  workerSessionIds: string[];
 }
 
 const jobs = new Map<string, GrokFarmJobState>();
 let activeProc: ChildProcessWithoutNullStreams | null = null;
 let activeJobId: string | null = null;
+
+function workerSessionId(jobId: string, workerId: number): string {
+  return `${jobId}-w${workerId}`;
+}
+
+function ensureWorkerSession(
+  job: GrokFarmJobState,
+  workerId: number,
+  email?: string,
+): string {
+  const sid = workerSessionId(job.id, workerId);
+  const label = (email && email.trim()) || `Grok worker #${workerId}`;
+  const existing = getSession(sid);
+  if (!existing) {
+    registerSession({
+      sessionId: sid,
+      accountId: workerId,
+      email: label,
+      provider: "grok",
+      phase: "starting",
+      lastMessage: "Worker starting…",
+      lastFrame: "",
+      lastFrameFormat: "jpeg",
+      lastFrameTime: 0,
+      steps: [],
+      challenge: null,
+      terminal: false,
+      proc: activeProc,
+      stdinWriter: null,
+      cancelSignalFile: "",
+      startedAt: Date.now(),
+    });
+    if (!job.workerSessionIds.includes(sid)) job.workerSessionIds.push(sid);
+    // Parent job process is the cancel target for every worker card.
+    const parent = getSession(job.id);
+    if (parent?.proc) {
+      const w = getSession(sid);
+      if (w) w.proc = parent.proc;
+    }
+  } else if (email && email.trim() && existing.email.startsWith("Grok worker")) {
+    existing.email = email.trim();
+  }
+  return sid;
+}
+
+function forEachWorkerSession(job: GrokFarmJobState, fn: (sid: string) => void) {
+  const ids = new Set<string>([job.id, ...job.workerSessionIds]);
+  for (const sid of ids) fn(sid);
+}
 
 /** True if this interpreter can import camoufox (farm requirement). */
 function pythonHasCamoufox(pythonExe: string): boolean {
@@ -185,26 +236,92 @@ function pushLog(job: GrokFarmJobState, line: string) {
   const raw = line.replace(/\r/g, "").trimEnd();
   if (!raw) return;
 
-  // Frame relay from farm.py (ETTEUM_JSON:{"type":"frame","base64":...,"format":"jpeg"})
-  // Same contract as enowxai: headless browser + screenshot loop → Browser Logs.
+  // Farm → host event bus (ETTEUM_JSON:…). Frames + per-worker progress.
+  // Concurrency N → N Bot Logs sessions (jobId-w{N}); job.id is the overview card.
   if (raw.startsWith("ETTEUM_JSON:")) {
     try {
       const payload = JSON.parse(raw.slice("ETTEUM_JSON:".length)) as {
         type?: string;
         base64?: string;
         format?: string;
+        workerId?: number;
+        email?: string;
+        step?: string;
+        message?: string;
+        ok?: boolean;
+        error?: string;
       };
+      const wid =
+        typeof payload.workerId === "number" && Number.isFinite(payload.workerId)
+          ? Math.floor(payload.workerId)
+          : null;
+
       if (payload.type === "frame" && payload.base64) {
-        updateFrame(job.id, payload.base64, payload.format || "jpeg");
+        const sid = wid != null ? ensureWorkerSession(job, wid, payload.email) : job.id;
+        updateFrame(sid, payload.base64, payload.format || "jpeg");
         broadcast({
           type: "browser_frame",
           data: {
-            sessionId: job.id,
+            sessionId: sid,
             provider: "grok",
             format: payload.format || "jpeg",
+            workerId: wid ?? undefined,
           },
         });
         return; // never put multi-KB base64 into logTail
+      }
+
+      if (payload.type === "worker_start" && wid != null) {
+        const sid = ensureWorkerSession(job, wid, payload.email);
+        updatePhase(sid, "starting", payload.message || "Worker browser launching…");
+        appendStep(sid, "start", payload.message || "worker start", "grok");
+        return;
+      }
+
+      if (payload.type === "progress" && wid != null) {
+        const sid = ensureWorkerSession(job, wid, payload.email);
+        const step = payload.step || "progress";
+        const msg = payload.message || step;
+        appendStep(sid, step, msg, "grok");
+        updatePhase(sid, step, msg);
+        job.lastMessage = `[#${wid}] ${msg}`.slice(0, 300);
+        // Mirror short progress on the job overview card (no frame).
+        appendStep(job.id, step, `[#${wid}] ${msg}`, "grok");
+        updatePhase(job.id, "farming", job.lastMessage);
+        broadcast({
+          type: "login_progress",
+          data: {
+            provider: "grok",
+            step,
+            message: msg,
+            jobId: job.id,
+            email: payload.email || `Grok worker #${wid}`,
+            sessionId: sid,
+            workerId: wid,
+          },
+        });
+        return;
+      }
+
+      if (payload.type === "worker_done" && wid != null) {
+        const sid = ensureWorkerSession(job, wid, payload.email);
+        const ok = payload.ok !== false;
+        const msg = payload.message || payload.error || (ok ? "done" : "failed");
+        updatePhase(sid, ok ? "complete" : "failed", msg);
+        appendStep(sid, ok ? "success" : "error", msg, "grok");
+        broadcast({
+          type: ok ? "login_success" : "login_failed",
+          data: {
+            provider: "grok",
+            jobId: job.id,
+            email: payload.email || `Grok worker #${wid}`,
+            sessionId: sid,
+            workerId: wid,
+            message: msg,
+            error: ok ? undefined : msg,
+          },
+        });
+        return;
       }
     } catch {
       /* fall through as normal log */
@@ -364,7 +481,8 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   if (!pythonHasCamoufox(python)) {
     throw new Error(
       `Selected Python lacks camoufox: ${python}. ` +
-        `Install etteum auth deps: "${python}" -m pip install -r scripts/auth/requirements.txt`,
+        `Heal shared env: bun scripts/doctor.ts --fix ` +
+        `(or: "${python}" -m pip install -r scripts/auth/requirements.txt && "${python}" -m camoufox fetch)`,
     );
   }
   if (!cfg.accountPassword?.trim()) {
@@ -389,6 +507,7 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     imported: 0,
     failed: 0,
     errors: [],
+    workerSessionIds: [],
   };
   jobs.set(id, job);
   activeJobId = id;
@@ -396,23 +515,23 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   const startedMs = Date.now();
   const env = buildEnv(cfg);
   const mailFlag = cfg.mailMode === "tempmail" ? "tempmail" : "google";
+  const concurrent = Math.max(1, Math.min(8, cfg.concurrent));
   const args = [
     script,
     "-m", mailFlag,
     "-n", String(Math.max(1, Math.min(100, cfg.maxAccounts))),
-    "-c", String(Math.max(1, Math.min(8, cfg.concurrent))),
+    "-c", String(concurrent),
     "-y",
   ];
 
-  // Register in Browser Logs so the dashboard has a live session card + step timeline.
+  // Overview session (job-level logs). Per-worker cards appear as workers start.
   registerSession({
     sessionId: id,
     accountId: 0,
-    // Display label for Browser Logs (not a real mailbox).
     email: "Grok Farm",
     provider: "grok",
     phase: "starting",
-    lastMessage: "Starting Grok farm…",
+    lastMessage: `Starting Grok farm (headless, concurrent=${concurrent})…`,
     lastFrame: "",
     lastFrameFormat: "jpeg",
     lastFrameTime: 0,
@@ -425,7 +544,7 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     startedAt: Date.now(),
   });
 
-  pushLog(job, `[etteum] starting farm (always headless): ${python}`);
+  pushLog(job, `[etteum] starting farm (always headless, shared Camoufox): ${python}`);
   pushLog(job, `[etteum] args: ${args.slice(1).join(" ")}`);
   const proc = spawn(python, args, {
     cwd: farmRoot(),
@@ -436,53 +555,95 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
 
   activeProc = proc;
   job.pid = proc.pid;
-  // Attach proc for cancel from Browser Logs.
+  // Attach proc for cancel from Browser Logs (overview + any workers).
   const sess = getSession(id);
   if (sess) sess.proc = proc;
 
-  const onChunk = (buf: Buffer) => {
-    for (const line of buf.toString("utf8").split(/\r?\n/)) {
+  // Line-buffer stdout/stderr — ETTEUM_JSON frames are multi-KB; Node chunks
+  // mid-line. Same pattern as pythonFlow.ts / runner.ts.
+  let stdoutBuf = "";
+  let stderrBuf = "";
+  const drainLines = (chunk: Buffer, which: "out" | "err") => {
+    const prev = which === "out" ? stdoutBuf : stderrBuf;
+    const merged = prev + chunk.toString("utf8");
+    const parts = merged.split(/\r?\n/);
+    const rest = parts.pop() ?? "";
+    if (which === "out") stdoutBuf = rest;
+    else stderrBuf = rest;
+    for (const line of parts) {
       if (line.trim()) pushLog(job, line);
     }
   };
-  proc.stdout.on("data", onChunk);
-  proc.stderr.on("data", onChunk);
+  proc.stdout.on("data", (buf: Buffer) => drainLines(buf, "out"));
+  proc.stderr.on("data", (buf: Buffer) => drainLines(buf, "err"));
 
   proc.on("error", (err) => {
     pushLog(job, `[etteum] spawn error: ${err.message}`);
-    updatePhase(id, "failed", err.message);
+    forEachWorkerSession(job, (sid) => updatePhase(sid, "failed", err.message));
   });
 
   proc.on("close", async (code) => {
+    // Flush any trailing partial line (rare for frames, useful for last log).
+    if (stdoutBuf.trim()) pushLog(job, stdoutBuf);
+    if (stderrBuf.trim()) pushLog(job, stderrBuf);
+    stdoutBuf = "";
+    stderrBuf = "";
+
     activeProc = null;
     activeJobId = null;
-    job.finishedAt = new Date().toISOString();
-    const batch = findNewestBatch(path.join(farmRoot(), "results"), startedMs);
-    if (batch) {
-      job.batchDir = batch;
-      pushLog(job, `[etteum] importing batch ${path.basename(batch)}`);
-      try {
-        await importBatch(job, batch);
-      } catch (e) {
-        job.errors.push(e instanceof Error ? e.message : String(e));
+    if (!job.finishedAt) job.finishedAt = new Date().toISOString();
+
+    // Preserve user cancel — do not overwrite cancelled with failed/completed.
+    const wasCancelled = job.status === "cancelled";
+
+    if (!wasCancelled) {
+      const batch = findNewestBatch(path.join(farmRoot(), "results"), startedMs);
+      if (batch) {
+        job.batchDir = batch;
+        pushLog(job, `[etteum] importing batch ${path.basename(batch)}`);
+        try {
+          await importBatch(job, batch);
+        } catch (e) {
+          job.errors.push(e instanceof Error ? e.message : String(e));
+        }
+      } else if (code !== 0) {
+        const hint =
+          job.logTail.some((l) => /camoufox not installed/i.test(l))
+            ? " Heal shared env: bun scripts/doctor.ts --fix"
+            : "";
+        job.errors.push(`No new farm batch folder found after run (exit ${code}).${hint}`);
+        pushLog(job, `[etteum] farm failed (exit ${code}).${hint}`);
+      } else {
+        job.errors.push("No new farm batch folder found after run");
       }
-    } else if (code !== 0) {
-      const hint =
-        job.logTail.some((l) => /camoufox not installed/i.test(l))
-          ? " Install deps: cd scripts/auth/grok-farm && python -m venv .venv && .venv\\Scripts\\pip install -r requirements.txt"
-          : "";
-      job.errors.push(`No new farm batch folder found after run (exit ${code}).${hint}`);
-      pushLog(job, `[etteum] farm failed (exit ${code}).${hint}`);
-    } else {
-      job.errors.push("No new farm batch folder found after run");
+      job.status = code === 0 || job.imported > 0 ? "completed" : "failed";
+      if (code !== 0 && job.imported === 0) {
+        job.lastMessage = job.errors[job.errors.length - 1] || `Farm exited with code ${code}`;
+      }
     }
-    job.status = code === 0 || job.imported > 0 ? "completed" : "failed";
-    if (code !== 0 && job.imported === 0) {
-      job.lastMessage = job.errors[job.errors.length - 1] || `Farm exited with code ${code}`;
-    }
-    updatePhase(id, job.status === "completed" ? "complete" : "failed", job.lastMessage || job.status);
+
+    const phase =
+      job.status === "cancelled"
+        ? "cancelled"
+        : job.status === "completed"
+          ? "complete"
+          : "failed";
+    forEachWorkerSession(job, (sid) => {
+      const s = getSession(sid);
+      // Don't overwrite workers already marked complete/failed mid-run.
+      if (s && !s.terminal) {
+        updatePhase(sid, phase, job.lastMessage || job.status);
+      } else if (sid === job.id && s) {
+        updatePhase(sid, phase, job.lastMessage || job.status);
+      }
+    });
     broadcast({
-      type: job.status === "completed" ? "login_success" : "login_failed",
+      type:
+        job.status === "completed"
+          ? "login_success"
+          : job.status === "cancelled"
+            ? "login_progress"
+            : "login_failed",
       data: {
         provider: "grok",
         jobId: job.id,
@@ -492,13 +653,15 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
         error: job.status === "failed" ? job.lastMessage : undefined,
         imported: job.imported,
         failed: job.failed,
+        step: job.status === "cancelled" ? "cancelled" : undefined,
       },
     });
-    broadcast({
-      type: "browser_frame",
-      data: { sessionId: job.id, terminal: true, phase: job.status },
+    forEachWorkerSession(job, (sid) => {
+      broadcast({
+        type: "browser_frame",
+        data: { sessionId: sid, terminal: true, phase: job.status },
+      });
     });
-    // Keep session visible in Bot Logs for a while (don't delete immediately).
   });
 
   broadcast({
@@ -512,7 +675,6 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
 export function cancelGrokFarm(): boolean {
   if (!activeProc || !activeJobId) return false;
   const job = jobs.get(activeJobId);
-  const sid = activeJobId;
   try {
     activeProc.kill();
   } catch { /* */ }
@@ -520,7 +682,7 @@ export function cancelGrokFarm(): boolean {
     job.status = "cancelled";
     job.finishedAt = new Date().toISOString();
     pushLog(job, "[etteum] cancelled by user");
-    updatePhase(sid, "cancelled", "cancelled by user");
+    forEachWorkerSession(job, (sid) => updatePhase(sid, "cancelled", "cancelled by user"));
   }
   activeProc = null;
   activeJobId = null;
@@ -551,8 +713,8 @@ export function validateGrokFarmSetup(): {
   if (python && !hasCamoufox) {
     errors.push(
       `Python at ${python} is missing camoufox/playwright. ` +
-        `Install into etteum auth env: ` +
-        `"${python}" -m pip install -r scripts/auth/requirements.txt`,
+        `Heal shared env: bun scripts/doctor.ts --fix ` +
+        `(or: "${python}" -m pip install -r scripts/auth/requirements.txt && "${python}" -m camoufox fetch)`,
     );
   }
   return {
