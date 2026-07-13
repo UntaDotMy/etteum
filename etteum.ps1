@@ -373,6 +373,39 @@ function Invoke-Dev {
   try { bun scripts/start.ts } finally { Pop-Location }
 }
 
+function Invoke-Export([string]$outPath) {
+  Push-Location $ProjectDir
+  try {
+    # Arg2 can be --full (from: etteum export --full)
+    $extra = @()
+    if ($Arg1 -eq "--full" -or $Arg2 -eq "--full") { $extra += "--full" }
+    $dest = if ($outPath -and $outPath -ne "--full") { $outPath } else { $null }
+    if ($dest) { bun scripts/backup.ts export $dest @extra }
+    else { bun scripts/backup.ts export @extra }
+  } finally { Pop-Location }
+}
+
+function Invoke-Import([string]$inPath) {
+  if (-not $inPath) {
+    Write-Host "Usage: etteum import <backup-folder-or.zip>" -ForegroundColor Red
+    return
+  }
+  Push-Location $ProjectDir
+  try {
+    Write-Host "Stopping server so the database is not locked..."
+    Invoke-Stop
+    Start-Sleep -Seconds 1
+    bun scripts/backup.ts import $inPath --yes
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Import failed (exit $LASTEXITCODE)." -ForegroundColor Red
+      return
+    }
+    Write-Host "Starting server..."
+    Start-Sleep -Seconds 1
+    Invoke-Start
+  } finally { Pop-Location }
+}
+
 switch ($Command.ToLower()) {
   "start"     { Invoke-Start }
   "stop"      { Invoke-Stop }
@@ -386,6 +419,8 @@ switch ($Command.ToLower()) {
   "preflight" { Invoke-Preflight }
   "migrate"   { Invoke-Migrate }
   "dev"       { Invoke-Dev }
+  "export"    { Invoke-Export $Arg1 }
+  "import"    { Invoke-Import $Arg1 }
   default {
     Write-Host "etteum - Etteum Pool Management CLI (Windows)`n"
     Write-Host "Usage: .\etteum.ps1 <command> [args]`n"
@@ -406,10 +441,13 @@ switch ($Command.ToLower()) {
     Write-Host "Configuration:" -ForegroundColor White -BackgroundColor DarkBlue
     Write-Host "  port <api> <dash> Change ports"
     Write-Host "  update            Pull, install, build, restart"
+    Write-Host "  export [path]     Backup DB + .env for another PC"
+    Write-Host "  import <path>     Restore backup (stops/starts server)"
     Write-Host ""
     Write-Host "Common workflows:"
     Write-Host "  First time:       irm bun.sh/install.ps1 | iex; .\install.ps1; etteum start"
     Write-Host "  After update:     etteum update"
+    Write-Host "  Migrate PC:       etteum export; copy file; other PC: etteum import file"
     Write-Host "  Something broke:  etteum doctor; etteum logs 50"
   }
 }

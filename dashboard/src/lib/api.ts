@@ -846,6 +846,95 @@ export async function applyUpdate(): Promise<{ data: ApplyResult }> {
   });
 }
 
+// ── Backup export / import (migrate install to another PC) ──────────────────
+
+export type BackupStatusCounts = {
+  accounts: number;
+  settings: number;
+  apiKeys: number;
+  proxyPool: number;
+  requestLogs: number;
+  filterRules: number;
+  combos: number;
+  modelMappings: number;
+  vccCards: number;
+};
+
+export type BackupExportResult = {
+  dir: string;
+  zipPath: string | null;
+  downloadUrl: string | null;
+  mode: "essential" | "full";
+  createdAt: string;
+  counts: Record<string, number>;
+  databaseBytes: number;
+  envBytes: number;
+  hasJwtSecret: boolean;
+  hint: string;
+};
+
+export async function fetchBackupStatus(): Promise<{ data: BackupStatusCounts }> {
+  return fetchApi("/api/backup/status");
+}
+
+/** Create backup pack on server; download zip when available. */
+export async function createAndDownloadBackup(
+  mode: "essential" | "full" = "essential",
+): Promise<BackupExportResult> {
+  const res = await fetchApi<{ data: BackupExportResult }>("/api/backup/export", {
+    method: "POST",
+    body: JSON.stringify({ mode }),
+    timeoutMs: 300_000,
+  });
+  const data = res.data;
+  if (data.downloadUrl) {
+    const key = getApiKey();
+    const fileRes = await fetch(`${API_BASE}${data.downloadUrl}`, {
+      headers: { Authorization: `Bearer ${key}` },
+    });
+    if (!fileRes.ok) {
+      throw new Error(`Download failed (${fileRes.status}). Pack is on disk: ${data.dir}`);
+    }
+    const blob = await fileRes.blob();
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement("a");
+    a.href = url;
+    a.download =
+      (data.zipPath && data.zipPath.split(/[/\\]/).pop()) ||
+      `etteum-backup-${mode}.zip`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+  return data;
+}
+
+/** Upload a .zip backup (multipart). */
+export async function importBackupZip(file: File): Promise<{
+  data: {
+    ok: true;
+    preImportBackupDir: string;
+    counts: Record<string, number>;
+    needsRestart: boolean;
+    message: string;
+  };
+}> {
+  const key = getApiKey();
+  const form = new FormData();
+  form.append("file", file);
+  const res = await fetch(`${API_BASE}/api/backup/import?confirm=1`, {
+    method: "POST",
+    headers: { Authorization: `Bearer ${key}` },
+    body: form,
+  });
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(text || `Import failed (${res.status})`);
+  }
+  return res.json();
+}
+
 export async function clearProxyPool() {
   return fetchApi("/api/proxy-pool/pool", { method: "DELETE" });
 }

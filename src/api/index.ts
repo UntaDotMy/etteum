@@ -22,11 +22,13 @@ import { grokFarmRouter } from "./grok-farm";
 import { mitmRouter } from "./mitm";
 import { playgroundRouter } from "./playground";
 import { providerNodesRouter } from "./provider-nodes";
+import { backupRouter } from "./backup";
 
 export const apiRouter = new Hono();
 
 apiRouter.route("/accounts", accountsRouter);
 apiRouter.route("/settings", proxySettingsRouter);
+apiRouter.route("/backup", backupRouter);
 apiRouter.route("/stats", statsRouter);
 apiRouter.route("/keys", keysRouter);
 apiRouter.route("/vcc", vccRouter);
