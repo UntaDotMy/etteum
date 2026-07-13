@@ -392,16 +392,43 @@ export async function deleteCustomModel(model: string): Promise<{ success: boole
  */
 export function toCanonicalModelName(model: string | undefined | null): string {
   if (!model) return "";
-  let m = model.trim();
-  if (m.startsWith("kp-") || m.startsWith("kp_")) m = "claude-" + m.slice(3);
+  // Must stay in parity with backend src/proxy/pricing.ts toCanonicalModelName.
+  let m = model.trim().toLowerCase();
+  if (m.includes("/")) m = m.slice(m.lastIndexOf("/") + 1);
+  if (m.startsWith("kp-") || m.startsWith("kp_")) {
+    const rest = m.slice(3);
+    m = /^(opus|sonnet|haiku|fable|mythos)[-_]/.test(rest) ? "claude-" + rest : rest;
+  }
   if (m.startsWith("cbc-") || m.startsWith("cbc_")) m = m.slice(4);
   else if (m.startsWith("cb-") || m.startsWith("cb_")) m = m.slice(3);
   else if (m.startsWith("qd-") || m.startsWith("qd_")) m = m.slice(3);
   else if (m.startsWith("ym-") || m.startsWith("ym_")) m = m.slice(3);
+  else if (m.startsWith("ali-") || m.startsWith("ali_")) m = m.slice(4);
+  else if (m.startsWith("ag-") || m.startsWith("ag_")) m = m.slice(3);
+  else if (m.startsWith("codex-") || m.startsWith("codex_")) m = m.slice(6);
   else if (m.startsWith("gitlab-duo:")) m = m.slice(11);
   m = m.replace(/[-_]thinking$/i, "");
+  m = m.replace(/-1m$/i, "");
   // Lookup only: gpt_5.2 → gpt-5.2 for pricing/spec. Do not rewrite list ids.
   m = m.replace(/_/g, "-");
+  if (/^(opus|sonnet|haiku|fable|mythos)-/.test(m) && !m.startsWith("claude-")) {
+    m = "claude-" + m;
+  }
+  if (m === "kimi-k2.7") m = "kimi-k2.7-code";
+  if (m === "deepseek-v3-2" || m === "deepseek-v3-2-volc") m = "deepseek-v3.2";
+  if (m === "deepseek-r1") m = "deepseek-reasoner";
+  if (m === "deepseek-v3") m = "deepseek-chat";
+  m = m.replace(/^gemini-3\.0-/, "gemini-3-");
+  if (m === "claude-3.5-sonnet") m = "claude-3-5-sonnet-20241022";
+  if (m === "auto" || m === "auto-review") m = "gpt-5.5";
+  if (m === "ultimate") m = "claude-opus-4.8";
+  else if (m === "performance") m = "claude-sonnet-4.6";
+  else if (m === "efficient") m = "claude-haiku-4.5";
+  else if (m === "lite") m = "gpt-4o-mini";
+  if (/^llama-3\.3-70b/.test(m) || m === "llama-v3p3-70b-instruct") m = "llama-3.3-70b-versatile";
+  if (/^llama-3\.1-70b/.test(m) || /405b/.test(m)) m = "llama-3.1-70b-versatile";
+  if (m === "qwen2p5-72b-instruct") m = "qwen-plus";
+  if (m === "default") m = "gpt-5.5";
   return m;
 }
 

@@ -61,6 +61,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "claude-sonnet-4":              { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cacheCreation: 3.75  },
   "claude-sonnet-4-20250514":     { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cacheCreation: 3.75  },
   "claude-3-5-sonnet-20241022":   { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cacheCreation: 3.75  },
+  "claude-3.5-sonnet":            { input: 3.00,  output: 15.00, cached: 0.30,  reasoning: 15.00,  cacheCreation: 3.75  },
   "claude-haiku-4.5":             { input: 1.00,  output: 5.00,  cached: 0.10,  reasoning: 5.00,   cacheCreation: 1.25  },
   "claude-haiku-4-5":             { input: 1.00,  output: 5.00,  cached: 0.10,  reasoning: 5.00,   cacheCreation: 1.25  },
   "claude-haiku-4-5-20251001":    { input: 1.00,  output: 5.00,  cached: 0.10,  reasoning: 5.00,   cacheCreation: 1.25  },
@@ -111,6 +112,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "gemini-2.5-pro":               { input: 1.25,  output: 10.00, cached: 0.125, reasoning: 10.00,  cacheCreation: 1.5625 },
   "gemini-2.5-flash":             { input: 0.30,  output: 2.50,  cached: 0.03,  reasoning: 2.50,   cacheCreation: 0.375 },
   "gemini-2.5-flash-lite":        { input: 0.10,  output: 0.40,  cached: 0.01,  reasoning: 0.40,   cacheCreation: 0.125 },
+  // CodeBuddy gemini-3.0-flash → gemini-3-flash (alias also applied in toCanonical).
+  "gemini-3.0-flash":             { input: 0.50,  output: 3.00,  cached: 0.05,  reasoning: 3.00,   cacheCreation: 0.625 },
+  "gemini-3.1-flash-lite":        { input: 0.10,  output: 0.40,  cached: 0.01,  reasoning: 0.40,   cacheCreation: 0.125 },
 
   // ── xAI Grok — docs.x.ai (2026-07) ──
   "grok-4.5":                     { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.50  },
@@ -131,6 +135,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "deepseek-chat":                { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
   "deepseek-reasoner":            { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
   "deepseek-coder":               { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
+  // CBC / legacy aliases (also rewritten in toCanonical).
+  "deepseek-r1":                  { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
+  "deepseek-v3":                  { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
   "deepseek-v3.2":                { input: 0.28,  output: 0.42,  cached: 0.028,  reasoning: 0.42,  cacheCreation: 0.35  },
   "deepseek-3.2":                 { input: 0.28,  output: 0.42,  cached: 0.028,  reasoning: 0.42,  cacheCreation: 0.35  },
 
@@ -171,13 +178,20 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "qwq-plus":                     { input: 0.80,  output: 2.40,  cached: 0.08,   reasoning: 2.40,  cacheCreation: 1.00  },
   "qvq-max":                      { input: 1.20,  output: 4.80,  cached: 0.12,   reasoning: 4.80,  cacheCreation: 1.50  },
   "qwen-coder-plus":              { input: 1.00,  output: 5.00,  cached: 0.10,   reasoning: 5.00,  cacheCreation: 1.25  },
+  // Image models — DashScope bills per image; token rates are indicative for UI.
+  "qwen-image-max":               { input: 8.00,  output: 8.00,  cached: 8.00,   reasoning: 8.00,  cacheCreation: 8.00  },
+  "qwen-image-plus":              { input: 4.00,  output: 4.00,  cached: 4.00,   reasoning: 4.00,  cacheCreation: 4.00  },
 
   // ── MiniMax / Kimi / GLM ──
   "minimax-m3":                   { input: 0.58,  output: 2.33,  cached: 0.058,  reasoning: 2.33,  cacheCreation: 0.725 },
   "minimax-m2.7":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
   "minimax-m2.5":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
   "minimax-m2.1":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
+  // Kimi: platform.moonshot.cn / openrouter (k2.5–k2.7 share ~$0.95/$4 family rates)
+  "kimi-k2.5":                    { input: 0.60,  output: 2.50,  cached: 0.15,   reasoning: 2.50,  cacheCreation: 0.75  },
   "kimi-k2.6":                    { input: 0.95,  output: 4.00,  cached: 0.16,   reasoning: 4.00,  cacheCreation: 1.1875 },
+  // cbc-kimi-k2.7 / bare kimi-k2.7 ≈ kimi-k2.7-code SKU
+  "kimi-k2.7":                    { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
   "kimi-k2.7-code":               { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
   "moonshot-v1-8k":               { input: 0.20,  output: 2.00,  cached: 0.02,   reasoning: 2.00,  cacheCreation: 0.25  },
   "moonshot-v1-32k":              { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.25  },
@@ -185,7 +199,18 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "glm-5.2":                      { input: 0.69,  output: 2.08,  cached: 0.069,  reasoning: 2.08,  cacheCreation: 0.8625 },
   "glm-5.1":                      { input: 0.55,  output: 1.66,  cached: 0.055,  reasoning: 1.66,  cacheCreation: 0.6875 },
   "glm-5":                        { input: 0.42,  output: 1.25,  cached: 0.042,  reasoning: 1.25,  cacheCreation: 0.525 },
+  // Z.AI docs.z.ai: GLM-5V-Turbo $1.20 / $4.00, cache read $0.24 (2026-07)
+  "glm-5v-turbo":                 { input: 1.20,  output: 4.00,  cached: 0.24,   reasoning: 4.00,  cacheCreation: 1.50  },
+  "glm-5-turbo":                  { input: 1.20,  output: 4.00,  cached: 0.24,   reasoning: 4.00,  cacheCreation: 1.50  },
   "glm-4-flash":                  { input: 0.00,  output: 0.00,  cached: 0.00,   reasoning: 0.00,  cacheCreation: 0.00  },
+  // CBC Hunyuan / specialty
+  "hy3-preview":                  { input: 0.80,  output: 2.00,  cached: 0.08,   reasoning: 2.00,  cacheCreation: 1.00  },
+
+  // ── Proprietary / non-token surfaces (indicative for cost UI) ──
+  "canva-image":                  { input: 5.00,  output: 5.00,  cached: 5.00,   reasoning: 5.00,  cacheCreation: 5.00  },
+  "canva-video":                  { input: 20.00, output: 20.00, cached: 20.00,  reasoning: 20.00, cacheCreation: 20.00 },
+  "cursor-fast":                  { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.25  },
+  "cursor-small":                 { input: 0.30,  output: 1.00,  cached: 0.03,   reasoning: 1.00,  cacheCreation: 0.375 },
 };
 
 /** Token breakdown captured from the upstream `usage` object. */
@@ -244,24 +269,73 @@ async function getUserPricing(): Promise<Record<string, any>> {
 export function toCanonicalModelName(model: string | undefined | null): string {
   if (!model) return "";
   let m = model.trim();
-  // Kiro Pro: kp-<anthropic> -> claude-<anthropic> (kp-opus-4.8 -> claude-opus-4.8).
-  // Also accept underscore form from some upstreams (kp_opus_4.8).
+
+  // Catalog keys are lowercase; qd-Qwen3.7-Max / Llama-3.3-… must fold for lookup.
+  // Live list ids are never rewritten — only this resolution path lowercases.
+  m = m.toLowerCase();
+
+  // Vendor/org path form (OpenRouter, LiteLLM, Fireworks, …):
+  // openai/gpt-4o → gpt-4o; accounts/fireworks/models/foo → foo.
+  if (m.includes("/")) {
+    m = m.slice(m.lastIndexOf("/") + 1);
+  }
+
+  // Kiro Pro: only Anthropic short names get claude- (kp-opus-4.8 → claude-opus-4.8).
+  // kp-auto stays "auto" (not claude-auto).
   if (m.startsWith("kp-") || m.startsWith("kp_")) {
-    m = "claude-" + m.slice(3);
+    const rest = m.slice(3);
+    m = /^(opus|sonnet|haiku|fable|mythos)[-_]/.test(rest) ? "claude-" + rest : rest;
   }
   // Provider routing prefixes (strip, do not swap):
   if (m.startsWith("cbc-") || m.startsWith("cbc_")) m = m.slice(4);
   else if (m.startsWith("cb-") || m.startsWith("cb_")) m = m.slice(3);
   else if (m.startsWith("qd-") || m.startsWith("qd_")) m = m.slice(3);
   else if (m.startsWith("ym-") || m.startsWith("ym_")) m = m.slice(3);
+  else if (m.startsWith("ali-") || m.startsWith("ali_")) m = m.slice(4);
+  else if (m.startsWith("ag-") || m.startsWith("ag_")) m = m.slice(3);
+  else if (m.startsWith("codex-") || m.startsWith("codex_")) m = m.slice(6);
   else if (m.startsWith("gitlab-duo:")) m = m.slice(11);
-  // -thinking / _thinking variant shares the base model pricing/spec.
+  // -thinking / _thinking and -1m context variants share base model rates.
   m = m.replace(/[-_]thinking$/i, "");
+  m = m.replace(/-1m$/i, "");
   // Lookup only: providers may report gpt_5.2 / claude_opus_4.8 while our
   // catalog keys use hyphens (gpt-5.2). Do NOT rewrite the live model id in
   // lists — only normalize for pricing/spec resolution.
   m = m.replace(/_/g, "-");
+
+  // Claude short names after prefix strip (mirrors codebuddy/kiro-pro maps):
+  // cb-opus-4.8 / cbc-haiku-4.5 → claude-opus-4.8 / claude-haiku-4.5.
+  if (/^(opus|sonnet|haiku|fable|mythos)-/.test(m) && !m.startsWith("claude-")) {
+    m = "claude-" + m;
+  }
+
+  // ── SKU / display-name aliases (lookup only — live id unchanged) ──
+  // cbc-kimi-k2.7 / kimi-k2.7 → same rates as kimi-k2.7-code.
+  if (m === "kimi-k2.7") m = "kimi-k2.7-code";
+  // CodeBuddy / CBC DeepSeek slugs.
+  if (m === "deepseek-v3-2" || m === "deepseek-v3-2-volc") m = "deepseek-v3.2";
+  if (m === "deepseek-r1") m = "deepseek-reasoner";
+  if (m === "deepseek-v3") m = "deepseek-chat";
+  // Gemini version punctuation: 3.0 → 3 (gemini-3.0-flash → gemini-3-flash).
+  m = m.replace(/^gemini-3\.0-/, "gemini-3-");
+  // Cursor / OpenRouter dotted Claude id → catalog hyphen form.
+  if (m === "claude-3.5-sonnet") m = "claude-3-5-sonnet-20241022";
+  // Codex / Kiro / OpenRouter "auto" routers → mid-tier reference rates.
+  if (m === "auto" || m === "auto-review") m = "gpt-5.5";
+  // Qoder product tiers (not raw model SKUs) — map to closest public rates.
+  if (m === "ultimate") m = "claude-opus-4.8";
+  else if (m === "performance") m = "claude-sonnet-4.6";
+  else if (m === "efficient") m = "claude-haiku-4.5";
+  else if (m === "lite") m = "gpt-4o-mini";
+  // Hosted open-model path slugs (Together / Fireworks).
+  if (/^llama-3\.3-70b/.test(m) || m === "llama-v3p3-70b-instruct") m = "llama-3.3-70b-versatile";
+  if (/^llama-3\.1-70b/.test(m) || /405b/.test(m)) m = "llama-3.1-70b-versatile";
+  if (m === "qwen2p5-72b-instruct") m = "qwen-plus";
+  // CodeBuddy generic default router.
+  if (m === "default") m = "gpt-5.5";
+
   // NOTE: date suffixes are NOT stripped here (some keys ARE dated).
+  // getPricingForModel / catalogLookupKeys peels YYYY-MM-DD / YYYYMMDD.
 
   return m;
 }
@@ -300,7 +374,7 @@ function catalogLookupKeys(model: string): string[] {
   const variants = [canonical, stripEffortSuffix(canonical)].filter(Boolean);
   for (const base of variants) {
     push(base);
-    // Date-stripped form (claude-sonnet-4-5-20250929 → inherit base when present).
+    // Date-stripped form (claude-sonnet-4-5-20250929 / qwen-plus-2025-07-14 → base).
     const dateless = base.replace(/-\d{4}-\d{2}-\d{2}.*$/, "").replace(/-\d{8}$/, "");
     push(dateless);
     push(stripEffortSuffix(dateless));
@@ -310,8 +384,20 @@ function catalogLookupKeys(model: string): string[] {
       rest = rest.slice(rest.indexOf("-") + 1);
       push(rest);
       push(stripEffortSuffix(rest));
+      // Claude short names may appear mid-peel (…-opus-4.8) or as rest after strip.
+      if (/^(opus|sonnet|haiku|fable|mythos)-/i.test(rest)) {
+        push("claude-" + rest);
+      }
+      // kimi-k2.7 → also try kimi-k2.7-code when peel lands on bare k2.7 slug.
+      if (/^kimi-k2\.7$/i.test(rest)) push("kimi-k2.7-code");
     }
   }
+  // Claude short-name form of the full canonical (if still bare).
+  if (/^(opus|sonnet|haiku|fable|mythos)-/i.test(canonical)) {
+    push("claude-" + canonical);
+  }
+  if (/^kimi-k2\.7$/i.test(canonical)) push("kimi-k2.7-code");
+
   return [...new Set(keys.filter(Boolean))];
 }
 

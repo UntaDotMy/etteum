@@ -154,9 +154,39 @@ describe("toCanonicalModelName — strip provider aliases", () => {
   test("strips YouMind (ym-) prefix", () => {
     expect(toCanonicalModelName("ym-gpt-5")).toBe("gpt-5");
   });
-  test("maps Kiro Pro (kp-) → claude- prefix", () => {
+  test("strips Alibaba (ali-) prefix", () => {
+    expect(toCanonicalModelName("ali-qwen-plus")).toBe("qwen-plus");
+    expect(toCanonicalModelName("ali-qwen-plus-2025-07-14")).toBe("qwen-plus-2025-07-14");
+  });
+  test("strips vendor/ path (openai/, google/, …)", () => {
+    expect(toCanonicalModelName("openai/gpt-4o")).toBe("gpt-4o");
+    expect(toCanonicalModelName("google/gemini-2.5-pro")).toBe("gemini-2.5-pro");
+    expect(toCanonicalModelName("anthropic/claude-haiku-4.5")).toBe("claude-haiku-4.5");
+  });
+  test("maps Claude short names after cb-/cbc- strip", () => {
+    expect(toCanonicalModelName("cb-opus-4.8")).toBe("claude-opus-4.8");
+    expect(toCanonicalModelName("cbc-haiku-4.5")).toBe("claude-haiku-4.5");
+    expect(toCanonicalModelName("cb-sonnet-4.6")).toBe("claude-sonnet-4.6");
+  });
+  test("maps kimi-k2.7 → kimi-k2.7-code SKU", () => {
+    expect(toCanonicalModelName("cbc-kimi-k2.7")).toBe("kimi-k2.7-code");
+    expect(toCanonicalModelName("kimi-k2.7")).toBe("kimi-k2.7-code");
+  });
+  test("maps Kiro Pro (kp-) → claude- prefix for Anthropic short names only", () => {
     expect(toCanonicalModelName("kp-opus-4.8")).toBe("claude-opus-4.8");
     expect(toCanonicalModelName("kp-sonnet-4.6")).toBe("claude-sonnet-4.6");
+    // kp-auto is a router, not claude-auto
+    expect(toCanonicalModelName("kp-auto")).toBe("gpt-5.5");
+  });
+  test("lowercases and maps Qoder display names", () => {
+    expect(toCanonicalModelName("qd-Qwen3.7-Max")).toBe("qwen3.7-max");
+    expect(toCanonicalModelName("qd-DeepSeek-V4-Pro")).toBe("deepseek-v4-pro");
+    expect(toCanonicalModelName("qd-Ultimate")).toBe("claude-opus-4.8");
+  });
+  test("strips -1m context variants and codex-/ag- prefixes", () => {
+    expect(toCanonicalModelName("cb-opus-4.8-1m")).toBe("claude-opus-4.8");
+    expect(toCanonicalModelName("codex-gpt-5.5")).toBe("gpt-5.5");
+    expect(toCanonicalModelName("ag-gemini-3-flash")).toBe("gemini-3-flash");
   });
   test("strips -thinking variant", () => {
     expect(toCanonicalModelName("claude-opus-4.8-thinking")).toBe("claude-opus-4.8");
@@ -231,5 +261,56 @@ describe("getPricingForModel — resolves via canonical name", () => {
     expect(xhigh!.input).toBe(base!.input);
     expect(xhigh!.output).toBe(base!.output);
     expect(base!.input).toBe(1.75);
+  });
+  test("vendor/ path ids resolve bare catalog prices", async () => {
+    const gpt = await getPricingForModel("openai/gpt-4o");
+    const gem = await getPricingForModel("google/gemini-2.5-pro");
+    expect(gpt).not.toBeNull();
+    expect(gpt!.input).toBe(MODEL_PRICING["gpt-4o"]!.input);
+    expect(gem).not.toBeNull();
+    expect(gem!.input).toBe(MODEL_PRICING["gemini-2.5-pro"]!.input);
+  });
+  test("ali- dated qwen-plus resolves to qwen-plus rates", async () => {
+    const pricing = await getPricingForModel("ali-qwen-plus-2025-07-14");
+    expect(pricing).not.toBeNull();
+    expect(pricing!.input).toBe(MODEL_PRICING["qwen-plus"]!.input);
+    expect(pricing!.output).toBe(MODEL_PRICING["qwen-plus"]!.output);
+  });
+  test("cb-/cbc- Claude short names resolve catalog rates", async () => {
+    const opus = await getPricingForModel("cb-opus-4.8");
+    const haiku = await getPricingForModel("cbc-haiku-4.5");
+    expect(opus).not.toBeNull();
+    expect(opus!.input).toBe(MODEL_PRICING["claude-opus-4.8"]!.input);
+    expect(haiku).not.toBeNull();
+    expect(haiku!.input).toBe(MODEL_PRICING["claude-haiku-4.5"]!.input);
+  });
+  test("cbc kimi / glm-5v-turbo resolve catalog rates", async () => {
+    const k25 = await getPricingForModel("cbc-kimi-k2.5");
+    const k27 = await getPricingForModel("cbc-kimi-k2.7");
+    const glm = await getPricingForModel("cbc-glm-5v-turbo");
+    expect(k25).not.toBeNull();
+    expect(k25!.input).toBe(MODEL_PRICING["kimi-k2.5"]!.input);
+    expect(k27).not.toBeNull();
+    expect(k27!.input).toBe(MODEL_PRICING["kimi-k2.7-code"]!.input);
+    expect(glm).not.toBeNull();
+    expect(glm!.input).toBe(1.20);
+    expect(glm!.output).toBe(4.00);
+  });
+  test("previously unmapped provider ids all resolve non-null pricing", async () => {
+    const ids = [
+      "qd-Auto", "qd-Ultimate", "qd-Qwen3.7-Max", "qd-Kimi-K2.6",
+      "cb-opus-4.8-1m", "cb-gemini-3.0-flash", "cb-gemini-3.1-flash-lite", "cb-default",
+      "cbc-deepseek-r1", "cbc-deepseek-v3", "cbc-deepseek-v3-2-volc", "cbc-hy3-preview",
+      "codex-auto", "codex-gpt-5.5", "auto", "kp-auto",
+      "ali-qwen-image-max", "canva-image", "cursor-fast", "claude-3.5-sonnet",
+      "openrouter/auto", "meta-llama/Llama-3.3-70B-Instruct-Turbo",
+      "accounts/fireworks/models/llama-v3p3-70b-instruct",
+      "ag-gemini-3-pro",
+    ];
+    for (const id of ids) {
+      const p = await getPricingForModel(id);
+      expect(p, `expected pricing for ${id}`).not.toBeNull();
+      expect(p!.input + p!.output, `expected positive rate for ${id}`).toBeGreaterThan(0);
+    }
   });
 });
