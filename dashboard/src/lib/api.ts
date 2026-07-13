@@ -1007,6 +1007,8 @@ export async function assistPrompt(payload: {
 export async function generateImage(payload: {
   prompt: string;
   type?: "image" | "video";
+  /** Model id to route (canva-image, grok-imagine-image-quality, …). */
+  model?: string;
   aspectRatio?: string;
   n?: number;
   chatId?: number | null;

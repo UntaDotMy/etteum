@@ -671,8 +671,10 @@ export default function Chat() {
         const res = await generateImage({
           prompt: userText,
           type: gen,
+          // Pass selected model so routing uses Grok Imagine / Canva / etc. — not always Canva.
+          model,
           aspectRatio: "1:1",
-          n: gen === "video" ? 1 : 1,
+          n: 1,
         });
         const urls = res.urls || [];
         const media: MessageMedia[] = urls.map((url) => ({
