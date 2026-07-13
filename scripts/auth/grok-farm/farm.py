@@ -64,7 +64,6 @@ try:
     from dotenv import load_dotenv
     # When Etteum hosts the farm (ETTEUM_FRAME_RELAY / ETTEUM_FARM_HOST), process
     # env already has the full config from the UI — do NOT let local .env clobber it.
-    # Standalone: empty env → .env fills everything (override=False still loads missing keys).
     _hosted = bool(
         os.environ.get("ETTEUM_FRAME_RELAY") or os.environ.get("ETTEUM_FARM_HOST")
     )
@@ -78,7 +77,6 @@ except ImportError:
                 continue
             k, _, v = line.partition("=")
             k, v = k.strip(), v.strip().strip('"').strip("'")
-            # Match dotenv override=False: never replace keys already set by host
             os.environ.setdefault(k, v)
 
 try:
@@ -440,6 +438,9 @@ def _parse_proxy(url: str) -> dict:
 
 # ── Logging / HUD ────────────────────────────────────────────────────────────
 _attempt_proxy: dict[int, str] = {}
+# Per-worker browser handles so fail/activate paths can hard-EXIT the slot
+# and spawn a completely new browser stack (never soft-reuse a dead session).
+_worker_runtime: dict[int, dict[str, Any]] = {}
 
 # hud = progress panel (default on TTY); log = classic line spam
 _UI_ENV = _env("GROK_UI", "").lower()
@@ -815,6 +816,17 @@ class FarmHUD:
                 self.credits_sum_limit += rem_f
                 self.credits_accounts += 1
             self._dirty = True
+
+    def drop_worker(self, attempt: int) -> None:
+        """Remove a finished worker from the active HUD (no ok/fail counter).
+
+        Used after slot teardown so cleanup/EXIT lines do not re-park a dead
+        worker on the panel forever (looks like stuck 30s+ cleanup).
+        """
+        with self._slock:
+            if attempt in self._workers:
+                self._workers.pop(attempt, None)
+                self._dirty = True
 
     def mark_ok(self, attempt: int, email: str, message: str = "ok") -> None:
         with self._slock:
@@ -1664,10 +1676,15 @@ def _get_launch_sem() -> asyncio.Semaphore:
 
 
 def effective_spawn_delay(concurrent: int) -> float:
-    """Stagger worker *starts* under load so page-loads don't all hit the wire at once.
+    """Seconds between worker boots (SPAWN_DELAY or AUTO stagger).
+
+    Used for:
+      - first-wave stagger (worker #N waits N×delay)
+      - refill after a finished slot (always full delay)
+      - EXIT → NEW spawn self-heal (via post_exit_spawn_delay)
 
     - If GROK_SPAWN_DELAY > 0 → use it.
-    - Else if AUTO_STAGGER and concurrent >= 3 → GROK_AUTO_SPAWN_DELAY (default 2s).
+    - Else if AUTO_STAGGER and concurrent >= 3 → GROK_AUTO_SPAWN_DELAY.
     - Else 0.
     """
     if SPAWN_DELAY > 0:
@@ -1675,6 +1692,22 @@ def effective_spawn_delay(concurrent: int) -> float:
     if AUTO_STAGGER and concurrent >= 3 and AUTO_SPAWN_DELAY_S > 0:
         return AUTO_SPAWN_DELAY_S
     return 0.0
+
+
+def post_exit_spawn_delay(base_s: float = 0.0, *, concurrent: int | None = None) -> float:
+    """Cool-down after EXIT browsers before a NEW stack boots.
+
+    Never shorter than SPAWN_DELAY / AUTO_STAGGER — the short UI retry backoff
+    alone was letting self-heal re-launch immediately while SPAWN_DELAY was
+    only applied to the first wave of attempt numbers.
+    """
+    c = int(concurrent if concurrent is not None else CONCURRENT)
+    spawn = effective_spawn_delay(max(1, c))
+    try:
+        base = float(base_s or 0.0)
+    except (TypeError, ValueError):
+        base = 0.0
+    return max(0.0, base, spawn)
 
 
 def _driver_pid(manager) -> int | None:
@@ -2594,6 +2627,7 @@ def _build_stealth_launch_kwargs(
 # frames as single-line JSON on stdout. Multi-worker entries use workerId so
 # concurrency N → N Browser Logs cards.
 # Shape: ETTEUM_JSON:{"type":"frame","workerId":1,"email":"...","base64":"..."}
+# Also: worker_start / worker_exit / worker_done for spawn/exit lifecycle.
 _FRAME_PAGES: dict[int, dict[str, Any]] = {}  # id(manager) -> {page, workerId, email}
 _frame_relay_task: asyncio.Task | None = None
 ETTEUM_FRAME_RELAY = _env_bool("ETTEUM_FRAME_RELAY", False)
@@ -2679,6 +2713,7 @@ def _register_frame_page(
                 "type": "worker_start",
                 "workerId": int(worker_id),
                 "email": email or f"worker #{worker_id}",
+                "message": f"SPAWN worker #{worker_id}",
             }
         )
 
@@ -2724,7 +2759,7 @@ async def launch_browser(
         never deletes a sibling worker's temp profile).
 
     preview/worker_id/email: etteum Browser Logs frame relay (preview=False
-    skips temp-mail browser streaming).
+    skips temp-mail browser streaming). SPAWN worker path for new browsers.
     """
     global _launch_lock
     if headless is None:
@@ -8396,7 +8431,7 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
       - Post-signup: login → oauth → activate grok.com → dual CLI probe
     Signup/OTP stay patient — only the login→token tail is speed-matched to refresh.
     """
-    emit_progress(attempt_num, "browser", "Launching Camoufox", email_addr)
+    emit_progress(attempt_num, "browser", "Launching Camoufox (NEW worker)", email_addr)
     manager = None
     try:
         manager, browser, page = await launch_browser(
@@ -8406,6 +8441,12 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             email=email_addr,
         )
         _frame_set_email(manager, email_addr)
+        # Track for hard EXIT if activate/probe fails mid-flight
+        _worker_runtime[attempt_num] = {
+            "signup_manager": manager,
+            "email": email_addr,
+            "started": time.monotonic(),
+        }
         _plog = "direct"
         if proxy_url:
             try:
@@ -8416,7 +8457,7 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             except Exception:
                 _plog = (proxy_url[:32] + "…") if len(proxy_url) > 32 else proxy_url
         print(
-            f"[{attempt_num}] Browser up: {email_addr} proxy={_plog} id={proxy_id or '-'}",
+            f"[{attempt_num}] Browser up (NEW): {email_addr} proxy={_plog} id={proxy_id or '-'}",
             flush=True,
         )
         await do_signup(page, email_addr, password, attempt_num, mail_page)
@@ -8462,16 +8503,19 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 activated = False
             tokens["web_activated"] = bool(activated)
             if not activated:
+                # EXIT this browser stack entirely — outer loop spawns NEW worker
+                # browsers + NEW email (never soft-retry activate on same session).
                 raise RecoverableFarmError(
-                    "activate_grok_com failed (CF/login/UI) — will retry fresh browser",
-                    delay_s=2.5,
+                    "activate_grok_com failed (CF/login/UI) — EXIT worker, spawn NEW",
+                    delay_s=2.0,
                     tag="ActivateFail",
                 )
         else:
             tokens["web_activated"] = None  # skipped by config
 
-        # Gate: grok-4.5 Responses. Soft-retry probe (and re-activate once) on 403
-        # before giving up — concurrent farms often hit brief entitlement lag.
+        # Gate: grok-4.5 Responses. Soft-retry probe only (NO same-session re-activate).
+        # Re-activate on dead session was slow and looked "stuck"; full NEW spawn
+        # after probe fail is handled by DomainRejected / RecoverableFarmError.
         ok, status, detail, credits = False, 0, "", {}
         for probe_i in range(1, PROBE_RETRIES + 1):
             ok, status, detail, credits = await run_chat_probe_with_hud(
@@ -8486,7 +8530,7 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 break
             print(
                 f"[{attempt_num}] chat 403 soft-retry {probe_i}/{PROBE_RETRIES} "
-                f"(wait entitlement; re-activate only once) "
+                f"(wait entitlement only — no same-session re-activate) "
                 f"after {PROBE_RETRY_BACKOFF_S * probe_i:.1f}s",
                 flush=True,
             )
@@ -8497,17 +8541,6 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 email_addr,
             )
             await asyncio.sleep(PROBE_RETRY_BACKOFF_S * probe_i)
-            # Full re-activate is slow under concurrent load — only once
-            if ACTIVATE_WEB and probe_i == 1:
-                try:
-                    emit_progress(
-                        attempt_num, "activate",
-                        "403 re-activate once…",
-                        email_addr,
-                    )
-                    await activate_grok_com(page, email_addr, password, attempt_num)
-                except Exception as _ae:
-                    print(f"[{attempt_num}] re-activate warn: {_ae}", flush=True)
 
         if not ok:
             domain = email_domain(email_addr)
@@ -8576,32 +8609,50 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             "web_activated": tokens.get("web_activated"),
         }
     finally:
-        # ALWAYS kill this attempt's browsers — success or 403 re-roll.
-        # Re-roll must not inherit cookies/profile from a denied account.
-        # Windows tree-kill can take tens of seconds — not a hang on probe.
-        if manager is not None or mail_page is not None:
-            try:
-                emit_progress(
-                    attempt_num,
-                    "cleanup",
-                    "closing browsers (Windows cleanup can take a while)…",
-                    email_addr or "",
-                )
-            except Exception:
-                pass
+        # ALWAYS kill this attempt's browsers — success or fail.
+        # Next try must spawn a completely NEW Camoufox (no session reuse).
+        try:
+            emit_progress(
+                attempt_num,
+                "cleanup",
+                "closing browsers — next try = NEW worker stack…",
+                email_addr or "",
+            )
+        except Exception:
+            pass
         if manager is not None:
             print(
-                f"[{attempt_num}] closing signup browser (fresh spawn on next try)",
+                f"[{attempt_num}] closing signup browser (END session → NEW spawn next)",
                 flush=True,
             )
-            await close_browser(manager)
+            try:
+                await asyncio.wait_for(close_browser(manager), timeout=15.0)
+            except asyncio.TimeoutError:
+                print(
+                    f"[{attempt_num}] signup close timed out (15s) — continue",
+                    flush=True,
+                )
+            except Exception as e:
+                print(f"[{attempt_num}] signup close warn: {e}", flush=True)
             manager = None
-        if mail_page is not None:
+        # Drop runtime so force_worker_exit is a true no-op (no double-kill)
+        _worker_runtime.pop(attempt_num, None)
+        if mail_page is not None or attempt_num in _tempmail_sessions:
             print(
-                f"[{attempt_num}] closing temp-mail browser (fresh spawn on next try)",
+                f"[{attempt_num}] closing temp-mail browser (END session → NEW spawn next)",
                 flush=True,
             )
-            await tempmail_close(attempt_num)
+            try:
+                await asyncio.wait_for(tempmail_close(attempt_num), timeout=15.0)
+            except asyncio.TimeoutError:
+                print(
+                    f"[{attempt_num}] tempmail close timed out (15s) — continue",
+                    flush=True,
+                )
+                _tempmail_sessions.pop(attempt_num, None)
+            except Exception as e:
+                print(f"[{attempt_num}] tempmail close warn: {e}", flush=True)
+                _tempmail_sessions.pop(attempt_num, None)
             mail_page = None
 
 
@@ -8676,7 +8727,9 @@ async def _do_register(attempt_num: int) -> dict | None:
                 mail_page = None
                 if _is_recoverable_error(e) and domain_attempt < MAX_DOMAIN_RETRIES:
                     last_err_msg = str(e)
-                    await asyncio.sleep(UI_RETRY_BACKOFF_S * domain_attempt)
+                    await asyncio.sleep(
+                        post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
+                    )
                     continue
                 raise
         else:
@@ -8717,21 +8770,22 @@ async def _do_register(attempt_num: int) -> dict | None:
             # TEMPMAIL ONLY path for blacklist + re-roll.
             # Google mode must never raise this for chat 403 (see _do_register_body);
             # if signup still raises it, fail without blacklisting the fixed domain.
+            last_err_msg = str(dre)
+            await _force_worker_exit(
+                attempt_num, f"DomainRejected @{getattr(dre, 'domain', '?')}"
+            )
+            mail_page = None
             if MAIL_MODE != "tempmail":
-                # Treat as recoverable on google (new local-part) rather than
-                # permanent fail — domain is never blacklisted.
-                last_err_msg = str(dre)
-                if mail_page is not None:
-                    await tempmail_close(attempt_num)
-                mail_page = None
                 if domain_attempt < MAX_DOMAIN_RETRIES:
+                    cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                     emit_progress(
                         attempt_num,
                         "ui_retry",
-                        f"google domain issue — retry {domain_attempt}/{MAX_DOMAIN_RETRIES}",
+                        f"google domain issue — wait {cool:.0f}s → NEW spawn "
+                        f"{domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
                         email_addr,
                     )
-                    await asyncio.sleep(UI_RETRY_BACKOFF_S * domain_attempt)
+                    await asyncio.sleep(cool)
                     continue
                 msg = (
                     f"domain/chat issue on google mode @{dre.domain} "
@@ -8745,19 +8799,9 @@ async def _do_register(attempt_num: int) -> dict | None:
                     pass
                 return None
 
-            # tempmail: blacklist + re-roll
+            # tempmail: blacklist + re-roll with NEW worker browsers
             if dre.domain and dre.domain != "unknown":
                 blacklist_add(dre.domain)
-            emit_progress(
-                attempt_num,
-                "domain_rejected",
-                f"closing browsers after deny @{dre.domain}…",
-                email_addr,
-            )
-            if mail_page is not None:
-                await tempmail_close(attempt_num)
-            mail_page = None  # must not reuse closed page
-            last_err_msg = str(dre)
             if domain_attempt >= MAX_DOMAIN_RETRIES:
                 msg = (
                     f"domain rejected/chat-denied {MAX_DOMAIN_RETRIES}x "
@@ -8768,36 +8812,40 @@ async def _do_register(attempt_num: int) -> dict | None:
                 await save_failed_to_file(attempt_num, email_addr, msg)
                 return None
             print(
-                f"[{attempt_num}] tempmail domain {dre.domain!r} rejected/chat-denied "
-                f"-> blacklisted; EXIT browsers, spawn NEW on next try "
-                f"({domain_attempt}/{MAX_DOMAIN_RETRIES}) ({dre})",
+                f"[{attempt_num}] tempmail domain {dre.domain!r} rejected — "
+                f"EXIT worker, SPAWN NEW ({domain_attempt}/{MAX_DOMAIN_RETRIES})",
                 flush=True,
             )
             emit_progress(
                 attempt_num,
                 "domain_rejected",
-                f"@{dre.domain} denied — next try = NEW browsers",
+                f"@{dre.domain} EXIT → NEW worker spawn",
                 email_addr,
             )
-            continue  # loop: NEW proxy + NEW temp-mail + NEW signup browser
+            cool = post_exit_spawn_delay(
+                UI_RETRY_BACKOFF_S * max(1, domain_attempt) * 0.5
+            )
+            await asyncio.sleep(cool)
+            continue  # NEW proxy + NEW temp-mail + NEW signup browser
         except asyncio.TimeoutError:
             last_err_msg = f"account timeout after {ACCOUNT_TIMEOUT_S}s"
-            if mail_page is not None:
-                await tempmail_close(attempt_num)
+            await _force_worker_exit(attempt_num, last_err_msg)
             mail_page = None
             if domain_attempt < MAX_DOMAIN_RETRIES:
+                cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                 print(
-                    f"[{attempt_num}] TIMEOUT — self-heal retry "
-                    f"{domain_attempt}/{MAX_DOMAIN_RETRIES} (fresh browser)",
+                    f"[{attempt_num}] TIMEOUT — EXIT worker, SPAWN NEW "
+                    f"({domain_attempt}/{MAX_DOMAIN_RETRIES}) after {cool:.1f}s",
                     flush=True,
                 )
                 emit_progress(
                     attempt_num,
                     "ui_retry",
-                    f"timeout → retry {domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
+                    f"timeout → wait {cool:.0f}s → NEW spawn "
+                    f"{domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
                     email_addr,
                 )
-                await asyncio.sleep(UI_RETRY_BACKOFF_S * domain_attempt)
+                await asyncio.sleep(cool)
                 continue
             print(f"[{attempt_num}] FAILED: {last_err_msg}", flush=True)
             emit_failed(attempt_num, last_err_msg, "AccountTimeout")
@@ -8810,23 +8858,25 @@ async def _do_register(attempt_num: int) -> dict | None:
             last_err_msg = str(re_err)
             tag = getattr(re_err, "tag", "Recoverable") or "Recoverable"
             delay = float(getattr(re_err, "delay_s", UI_RETRY_BACKOFF_S) or UI_RETRY_BACKOFF_S)
-            if mail_page is not None:
-                await tempmail_close(attempt_num)
+            # Always hard-EXIT browsers (activate fail, token 400, probe fail, …)
+            await _force_worker_exit(attempt_num, f"[{tag}] {last_err_msg}")
             mail_page = None
             if domain_attempt < MAX_DOMAIN_RETRIES:
+                cool = post_exit_spawn_delay(delay * domain_attempt)
                 print(
                     f"[{attempt_num}] self-heal [{tag}] try {domain_attempt}/"
                     f"{MAX_DOMAIN_RETRIES}: {last_err_msg[:140]} "
-                    f"→ cool-down {delay * domain_attempt:.1f}s + NEW browser",
+                    f"→ cool-down {cool:.1f}s + SPAWN NEW worker",
                     flush=True,
                 )
                 emit_progress(
                     attempt_num,
                     "ui_retry",
-                    f"[{tag}] retry {domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
+                    f"[{tag}] EXIT → wait {cool:.0f}s → NEW spawn "
+                    f"{domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
                     email_addr,
                 )
-                await asyncio.sleep(delay * domain_attempt)
+                await asyncio.sleep(cool)
                 continue
             print(
                 f"[{attempt_num}] FAILED after {MAX_DOMAIN_RETRIES} self-heal tries "
@@ -8841,23 +8891,24 @@ async def _do_register(attempt_num: int) -> dict | None:
             return None
         except Exception as e:
             last_err_msg = str(e)
-            if mail_page is not None:
-                await tempmail_close(attempt_num)
+            await _force_worker_exit(attempt_num, f"{type(e).__name__}: {last_err_msg}")
             mail_page = None
             if _is_recoverable_error(e) and domain_attempt < MAX_DOMAIN_RETRIES:
+                cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                 print(
                     f"[{attempt_num}] self-heal [{type(e).__name__}] try "
                     f"{domain_attempt}/{MAX_DOMAIN_RETRIES}: {last_err_msg[:140]} "
-                    f"→ NEW browser",
+                    f"→ cool-down {cool:.1f}s + SPAWN NEW worker",
                     flush=True,
                 )
                 emit_progress(
                     attempt_num,
                     "ui_retry",
-                    f"[{type(e).__name__}] retry {domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
+                    f"[{type(e).__name__}] EXIT → wait {cool:.0f}s → NEW spawn "
+                    f"{domain_attempt + 1}/{MAX_DOMAIN_RETRIES}",
                     email_addr,
                 )
-                await asyncio.sleep(UI_RETRY_BACKOFF_S * domain_attempt)
+                await asyncio.sleep(cool)
                 continue
             print(f"[{attempt_num}] FAILED: {e}", flush=True)
             emit_failed(attempt_num, str(e)[:200], type(e).__name__)
@@ -8870,9 +8921,128 @@ async def _do_register(attempt_num: int) -> dict | None:
     return None
 
 
+async def _force_worker_exit(
+    attempt_num: int,
+    reason: str = "",
+    *,
+    quiet: bool = False,
+) -> None:
+    """Hard-close every browser for this slot before a NEW spawn.
+
+    User requirement: on activate fail / recoverable fail, do not keep using
+    the same Camoufox session — EXIT worker browsers, then outer loop launches
+    a fresh stack (new email + new proxy + new browsers).
+
+    Idempotent: if body finally already closed browsers (runtime empty + no
+    tempmail session), this is a no-op — no HUD re-park, no Windows settle
+    sleep. quiet=True skips HUD entirely (slot finally after ok/fail).
+    """
+    reason_s = (reason or "fail")[:120]
+    rt = _worker_runtime.pop(attempt_num, None) or {}
+    mgr = rt.get("signup_manager")
+    has_mail = attempt_num in _tempmail_sessions
+    already_clean = mgr is None and not has_mail
+
+    if already_clean:
+        _tempmail_sessions.pop(attempt_num, None)
+        _attempt_proxy.pop(attempt_num, None)
+        # Do NOT emit_progress — that re-adds a finished worker to the HUD
+        # and leaves it stuck on "cleanup" forever (36s+ "slot finished").
+        if not quiet:
+            print(
+                f"[{attempt_num}] EXIT worker: already clean "
+                f"({reason_s}) — skip kill/sleep",
+                flush=True,
+            )
+        return
+
+    if not quiet:
+        print(
+            f"[{attempt_num}] EXIT worker: {reason_s} "
+            f"— kill browsers, next try = NEW spawn (not same session)",
+            flush=True,
+        )
+        try:
+            emit_progress(
+                attempt_num,
+                "cleanup",
+                f"EXIT worker → NEW spawn ({reason_s[:40]})",
+                "",
+            )
+        except Exception:
+            pass
+        # Explicit lifecycle event for Etteum Browser Logs (spawn/exit cards)
+        if ETTEUM_FRAME_RELAY:
+            _emit_etteum_json(
+                {
+                    "type": "worker_exit",
+                    "workerId": int(attempt_num),
+                    "message": f"EXIT worker → NEW spawn ({reason_s[:80]})",
+                    "email": f"worker #{attempt_num}",
+                }
+            )
+    else:
+        print(
+            f"[{attempt_num}] EXIT leftovers: {reason_s} "
+            f"(signup={mgr is not None} mail={has_mail})",
+            flush=True,
+        )
+
+    closed_something = False
+    if mgr is not None:
+        closed_something = True
+        try:
+            await asyncio.wait_for(close_browser(mgr), timeout=12.0)
+        except asyncio.TimeoutError:
+            print(
+                f"[{attempt_num}] EXIT signup close timed out (12s) — continue",
+                flush=True,
+            )
+        except Exception as e:
+            print(f"[{attempt_num}] EXIT signup close warn: {e}", flush=True)
+
+    if has_mail:
+        closed_something = True
+        try:
+            await asyncio.wait_for(tempmail_close(attempt_num), timeout=12.0)
+        except asyncio.TimeoutError:
+            print(
+                f"[{attempt_num}] EXIT tempmail close timed out (12s) — continue",
+                flush=True,
+            )
+            _tempmail_sessions.pop(attempt_num, None)
+        except Exception as e:
+            print(f"[{attempt_num}] EXIT tempmail close warn: {e}", flush=True)
+            _tempmail_sessions.pop(attempt_num, None)
+
+    _tempmail_sessions.pop(attempt_num, None)
+    _attempt_proxy.pop(attempt_num, None)
+    # Settle only when we actually killed processes (Windows profile locks)
+    if closed_something:
+        await asyncio.sleep(0.35)
+
+
 async def register_one_account(attempt_num: int, semaphore: asyncio.Semaphore) -> dict | None:
+    """One account slot under the concurrency semaphore.
+
+    Safety net: kill leftover browsers when the slot finishes (ok or fail)
+    so the next account never inherits a half-dead Camoufox. Body finally
+    already closes on the happy path — force-exit is quiet/no-op then.
+    """
     async with semaphore:
-        return await _do_register(attempt_num)
+        try:
+            return await _do_register(attempt_num)
+        finally:
+            # Slot done — quiet leftovers only (no HUD re-park on "slot finished")
+            try:
+                await _force_worker_exit(attempt_num, "slot finished", quiet=True)
+            except Exception:
+                pass
+            # Drop any cleanup row that mid-fail EXIT re-added after ok/fail
+            try:
+                HUD.drop_worker(attempt_num)
+            except Exception:
+                pass
 
 
 # ── Non-blocking result writes (keep HUD smooth under concurrency) ──────────
@@ -9826,10 +9996,19 @@ async def main():
                     return
                 num = next_attempt
                 next_attempt += 1
-            # Stagger worker *starts* so page-loads don't all hit the uplink at once
+            # SPAWN_DELAY is wall-clock stagger between boots (not the short
+            # Windows settle after kill). Two cases:
+            #   - First wave (num <= concurrent): stagger by slot so all c
+            #     workers don't hit the uplink at t=0.
+            #   - Refill after a finished slot: always wait full SPAWN_DELAY
+            #     so "close → NEW spawn" respects the same delay (was broken:
+            #     (num-1)%c → 0 for every concurrent-th account).
             sd = effective_spawn_delay(concurrent)
             if sd > 0:
-                await asyncio.sleep(sd * ((num - 1) % max(1, concurrent)))
+                if num <= concurrent:
+                    await asyncio.sleep(sd * (num - 1))
+                else:
+                    await asyncio.sleep(sd)
             res = await register_one_account(num, semaphore)
             async with counter_lock:
                 if res:
