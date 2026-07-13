@@ -65,7 +65,9 @@ export function BrowserSessionCard({ session, challenge }: Props) {
   const [captchaText, setCaptchaText] = useState("");
   const [submitting, setSubmitting] = useState(false);
   const imgRef = useRef<HTMLImageElement>(null);
-  const logEndRef = useRef<HTMLDivElement>(null);
+  const logScrollRef = useRef<HTMLDivElement>(null);
+  /** Stick to bottom only while the user has not scrolled up in this card's log. */
+  const logStickBottomRef = useRef(true);
 
   useEffect(() => {
     if (session.terminal) return;
@@ -75,9 +77,13 @@ export function BrowserSessionCard({ session, challenge }: Props) {
     return cleanup;
   }, [session.sessionId, session.terminal]);
 
+  // Scroll only the worker log panel — never scrollIntoView (that jumps the
+  // whole Browser Logs page whenever any of N workers appends a step).
   useEffect(() => {
-    logEndRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
-  }, [session.steps?.length]);
+    const el = logScrollRef.current;
+    if (!el || !logStickBottomRef.current) return;
+    el.scrollTop = el.scrollHeight;
+  }, [session.steps?.length, session.lastMessage]);
 
   const handlePointer = useCallback((e: React.PointerEvent, action: "down" | "move" | "up") => {
     if (!imgRef.current || session.terminal) return;
@@ -308,7 +314,16 @@ export function BrowserSessionCard({ session, challenge }: Props) {
             </span>
           )}
         </div>
-        <div className="min-h-0 flex-1 overflow-y-auto px-3 py-2">
+        <div
+          ref={logScrollRef}
+          className="min-h-0 flex-1 overflow-y-auto px-3 py-2"
+          onScroll={() => {
+            const el = logScrollRef.current;
+            if (!el) return;
+            const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+            logStickBottomRef.current = dist < 48;
+          }}
+        >
           {steps.length === 0 ? (
             <p className="text-[11px] text-[var(--muted-foreground)]">
               {showEnded ? "No steps recorded." : "Waiting for progress…"}
@@ -331,7 +346,6 @@ export function BrowserSessionCard({ session, challenge }: Props) {
                   <span className="min-w-0 flex-1 break-words text-[var(--foreground)]">{s.message}</span>
                 </li>
               ))}
-              <div ref={logEndRef} />
             </ol>
           )}
         </div>
