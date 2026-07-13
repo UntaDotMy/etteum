@@ -374,18 +374,36 @@ function pushLog(job: GrokFarmJobState, line: string) {
   job.lastMessage = msg.slice(0, 300);
 
   const sid = job.id;
-  const isErr = /error|failed|traceback|exception/i.test(msg);
+  const isErr = /error|failed|traceback|exception|sys\.exit|ModuleNotFound|ImportError/i.test(msg);
   appendStep(sid, isErr ? "error" : "farm", job.lastMessage, "grok");
   updatePhase(sid, isErr ? "error" : "farming", job.lastMessage);
 
-  // Only push meaningful progress to the global activity stream (avoid flooding
-  // with every farm print line — steps already live on the session card).
+  // Bot Logs hides the job overview card (grok-farm-* without -wN). Mirror
+  // process lines onto live workers so the user sees real farm errors, not only
+  // "Waiting for farm worker…".
   const noteworthy =
     isErr ||
-    /\[etteum\]|BATCH|Mail mode|Batch|Import|succeed|fail|ERROR|starting farm|closing|signup|OAuth|probe|token/i.test(
+    /\[etteum\]|BATCH|Mail mode|Batch|Import|succeed|fail|ERROR|starting farm|closing|signup|OAuth|probe|token|camoufox|Traceback/i.test(
       msg,
     );
   if (noteworthy) {
+    for (const wsid of job.workerSessionIds) {
+      const w = getSession(wsid);
+      if (!w || w.terminal) continue;
+      appendStep(wsid, isErr ? "error" : "farm", job.lastMessage, "grok");
+      if (isErr) updatePhase(wsid, "farming", job.lastMessage);
+      broadcast({
+        type: "login_progress",
+        data: {
+          provider: "grok",
+          step: isErr ? "error" : "farm",
+          message: job.lastMessage,
+          jobId: job.id,
+          email: w.email,
+          sessionId: wsid,
+        },
+      });
+    }
     broadcast({
       type: "login_progress",
       data: {
@@ -398,6 +416,31 @@ function pushLog(job: GrokFarmJobState, line: string) {
       },
     });
   }
+}
+
+/** Prefer a concrete farm ERROR/traceback line over the generic batch-missing message. */
+function bestFarmErrorMessage(job: GrokFarmJobState, fallback: string): string {
+  const lines = job.logTail || [];
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i] || "";
+    if (/^ERROR:/i.test(l.trim()) || /camoufox not installed/i.test(l)) {
+      return l.trim().slice(0, 400);
+    }
+  }
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = lines[i] || "";
+    if (/traceback|modulenotfound|importerror|error:/i.test(l) && !/no new farm batch/i.test(l)) {
+      return l.trim().slice(0, 400);
+    }
+  }
+  // Last non-empty process line that isn't just our placeholder
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const l = (lines[i] || "").trim();
+    if (l && !/waiting for farm worker/i.test(l) && !/^\[etteum\] starting/i.test(l)) {
+      if (/\[etteum\]|error|fail|exit/i.test(l)) return l.slice(0, 400);
+    }
+  }
+  return fallback;
 }
 
 function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
@@ -671,17 +714,29 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
           job.errors.push(e instanceof Error ? e.message : String(e));
         }
       } else if (code !== 0) {
+        const detail = bestFarmErrorMessage(
+          job,
+          `Farm process exited with code ${code} and wrote no batch folder.`,
+        );
         const hint =
-          job.logTail.some((l) => /camoufox not installed/i.test(l))
+          /camoufox not installed/i.test(detail) || job.logTail.some((l) => /camoufox not installed/i.test(l))
             ? " Heal shared env: bun scripts/doctor.ts --fix"
-            : "";
-        job.errors.push(`No new farm batch folder found after run (exit ${code}).${hint}`);
-        pushLog(job, `[etteum] farm failed (exit ${code}).${hint}`);
+            : /IMAP|EMAIL_DOMAIN|GROK_IMAP|plus_trick/i.test(detail)
+              ? " Check Grok Farm mail settings (IMAP / domain / tempmail)."
+              : "";
+        const summary = `${detail}${hint}`;
+        job.errors.push(summary);
+        // Use pushLog so workers get the mirrored step too.
+        pushLog(job, `[etteum] farm failed (exit ${code}): ${summary}`);
+        job.lastMessage = summary.slice(0, 400);
       } else {
-        job.errors.push("No new farm batch folder found after run");
+        const detail = bestFarmErrorMessage(job, "No new farm batch folder found after run");
+        job.errors.push(detail);
+        job.lastMessage = detail.slice(0, 400);
+        pushLog(job, `[etteum] farm finished with no batch: ${detail}`);
       }
       job.status = code === 0 || job.imported > 0 ? "completed" : "failed";
-      if (code !== 0 && job.imported === 0) {
+      if (code !== 0 && job.imported === 0 && !job.lastMessage) {
         job.lastMessage = job.errors[job.errors.length - 1] || `Farm exited with code ${code}`;
       }
     }
@@ -692,13 +747,26 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
         : job.status === "completed"
           ? "complete"
           : "failed";
+    const endMsg = job.lastMessage || job.status;
     forEachWorkerSession(job, (sid) => {
       const s = getSession(sid);
       // Don't overwrite workers already marked complete/failed mid-run.
       if (s && !s.terminal) {
-        updatePhase(sid, phase, job.lastMessage || job.status);
+        appendStep(
+          sid,
+          phase === "complete" ? "success" : phase === "cancelled" ? "cancelled" : "error",
+          endMsg,
+          "grok",
+        );
+        updatePhase(sid, phase, endMsg);
       } else if (sid === job.id && s) {
-        updatePhase(sid, phase, job.lastMessage || job.status);
+        appendStep(
+          sid,
+          phase === "complete" ? "success" : phase === "cancelled" ? "cancelled" : "error",
+          endMsg,
+          "grok",
+        );
+        updatePhase(sid, phase, endMsg);
       }
     });
     broadcast({
@@ -720,7 +788,28 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
         step: job.status === "cancelled" ? "cancelled" : undefined,
       },
     });
+    // Refresh each worker card so steps + phase appear without waiting for poll.
     forEachWorkerSession(job, (sid) => {
+      if (sid === job.id) return; // overview is hidden; workers already updated above
+      const w = getSession(sid);
+      broadcast({
+        type:
+          job.status === "completed"
+            ? "login_success"
+            : job.status === "cancelled"
+              ? "login_progress"
+              : "login_failed",
+        data: {
+          sessionId: sid,
+          provider: "grok",
+          jobId: job.id,
+          email: w?.email || "Grok worker",
+          message: endMsg,
+          error: job.status === "failed" ? endMsg : undefined,
+          terminal: true,
+          phase: job.status,
+        },
+      });
       broadcast({
         type: "browser_frame",
         data: { sessionId: sid, terminal: true, phase: job.status },
