@@ -10,14 +10,87 @@
 
 set -euo pipefail
 
-# --- Resolve project dir from this script's real location (follow symlinks) ---
-SCRIPT_PATH="${BASH_SOURCE[0]}"
-while [ -L "$SCRIPT_PATH" ]; do
-  SCRIPT_DIR=$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)
-  SCRIPT_PATH=$(readlink "$SCRIPT_PATH")
-  [[ "$SCRIPT_PATH" != /* ]] && SCRIPT_PATH="$SCRIPT_DIR/$SCRIPT_PATH"
-done
-PROJECT_DIR=$(cd -P "$(dirname "$SCRIPT_PATH")" >/dev/null 2>&1 && pwd)
+# --- Resolve project dir ---
+# Order (first valid wins):
+#   1. $ETTEUM_HOME
+#   2. $POOLPROX_HOME (legacy)
+#   3. etteum.home pointer next to this script / ~/.local/bin / ~/.config/etteum
+#   4. Real path of this script (symlink-friendly install)
+#   5. Default ~/etteum-pool
+
+is_etteum_project() {
+  local dir="${1:-}"
+  [ -n "$dir" ] && [ -d "$dir" ] && [ -f "$dir/package.json" ] && [ -f "$dir/scripts/production.ts" ]
+}
+
+read_home_pointer() {
+  local file="${1:-}"
+  [ -f "$file" ] || return 1
+  # first non-empty line, strip CR and surrounding quotes
+  local line
+  line=$(head -n1 "$file" 2>/dev/null | tr -d '\r' | sed -e 's/^[[:space:]]*//' -e 's/[[:space:]]*$//' -e 's/^"//' -e 's/"$//' -e "s/^'//" -e "s/'$//")
+  [ -n "$line" ] || return 1
+  printf '%s\n' "$line"
+}
+
+resolve_project_dir() {
+  local script_path="${BASH_SOURCE[0]}"
+  while [ -L "$script_path" ]; do
+    local script_dir
+    script_dir=$(cd -P "$(dirname "$script_path")" >/dev/null 2>&1 && pwd)
+    script_path=$(readlink "$script_path")
+    [[ "$script_path" != /* ]] && script_path="$script_dir/$script_path"
+  done
+  local script_dir
+  script_dir=$(cd -P "$(dirname "$script_path")" >/dev/null 2>&1 && pwd)
+
+  local candidates=()
+  [ -n "${ETTEUM_HOME:-}" ] && candidates+=("$ETTEUM_HOME")
+  [ -n "${POOLPROX_HOME:-}" ] && candidates+=("$POOLPROX_HOME")
+
+  local pointer pointed
+  for pointer in \
+    "$script_dir/etteum.home" \
+    "$HOME/.local/bin/etteum.home" \
+    "$HOME/.config/etteum/home"
+  do
+    if pointed=$(read_home_pointer "$pointer"); then
+      candidates+=("$pointed")
+    fi
+  done
+
+  candidates+=("$script_dir")
+  candidates+=("$HOME/etteum-pool")
+
+  local c
+  for c in "${candidates[@]}"; do
+    if is_etteum_project "$c"; then
+      (cd -P "$c" >/dev/null 2>&1 && pwd)
+      return 0
+    fi
+  done
+
+  echo "Could not locate the Etteum install directory." >&2
+  echo "" >&2
+  echo "Tried:" >&2
+  local seen=""
+  for c in "${candidates[@]}"; do
+    [ -n "$c" ] || continue
+    case " $seen " in
+      *" $c "*) continue ;;
+    esac
+    seen="$seen $c"
+    echo "  - $c" >&2
+  done
+  echo "" >&2
+  echo "Fix one of:" >&2
+  echo "  1. export ETTEUM_HOME=/path/to/etteum  (and add to your shell rc)" >&2
+  echo "  2. Re-run install.sh from the project (rewrites the CLI home pointer)" >&2
+  echo "  3. Run from the project:  ./etteum <command>" >&2
+  exit 1
+}
+
+PROJECT_DIR=$(resolve_project_dir)
 
 PID_FILE="$PROJECT_DIR/.etteum.pid"
 LOG_FILE="$PROJECT_DIR/.etteum.log"
@@ -175,8 +248,26 @@ do_doctor() {
   exec bun scripts/doctor.ts "$@"
 }
 
+refresh_cli_home_pointer() {
+  # Keep PATH shim + home pointer aligned with this checkout.
+  local target="$HOME/.local/bin"
+  mkdir -p "$target"
+  if [ -f "$PROJECT_DIR/etteum" ]; then
+    ln -sf "$PROJECT_DIR/etteum" "$target/etteum"
+    chmod +x "$PROJECT_DIR/etteum" 2>/dev/null || true
+  fi
+  local install_root
+  install_root=$(cd -P "$PROJECT_DIR" >/dev/null 2>&1 && pwd)
+  printf '%s\n' "$install_root" > "$target/etteum.home"
+  mkdir -p "$HOME/.config/etteum"
+  printf '%s\n' "$install_root" > "$HOME/.config/etteum/home"
+  export ETTEUM_HOME="$install_root"
+  echo "CLI home pointer: $install_root"
+}
+
 do_update() {
   ensure_bun
+  echo "Updating Etteum at: $PROJECT_DIR"
   cd "$PROJECT_DIR"
 
   echo "🔄 Pulling latest..."
@@ -186,6 +277,9 @@ do_update() {
     echo "⚠️  Not a git checkout — re-run install.sh to upgrade."
     return 1
   fi
+
+  echo "🔗 Refreshing CLI shims..."
+  refresh_cli_home_pointer
 
   # Only reinstall if package.json changed
   if [ -f package.json ] && [ "$(stat -c%Y package.json 2>/dev/null || stat -f%m package.json 2>/dev/null)" -gt "$(stat -c%Y node_modules/.package-lock.json 2>/dev/null || stat -f%m node_modules/.package-lock.json 2>/dev/null || echo 0)" ]; then

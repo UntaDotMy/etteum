@@ -62,10 +62,10 @@ if (Test-Path $pidFile) {
     Info "No PID file found"
 }
 
-# 2. Remove CLI shims
+# 2. Remove CLI shims + home pointer files
 Step "Removing CLI shims..."
 $localBin = Join-Path $HOME ".local\bin"
-$shims = @("etteum.ps1", "etteum.cmd", "etteum")
+$shims = @("etteum.ps1", "etteum.cmd", "etteum", "etteum.home")
 $removed = 0
 foreach ($shim in $shims) {
     $shimPath = Join-Path $localBin $shim
@@ -74,7 +74,23 @@ foreach ($shim in $shims) {
         $removed++
     }
 }
-Ok "Removed $removed CLI shim(s) from $localBin"
+$configHome = Join-Path $HOME ".config\etteum\home"
+if (Test-Path $configHome) {
+    Remove-Item $configHome -Force -ErrorAction SilentlyContinue
+    $removed++
+}
+Ok "Removed $removed CLI shim/pointer file(s) from $localBin (and ~/.config/etteum)"
+
+# Clear user ETTEUM_HOME only if it still points at this install
+$userHome = [Environment]::GetEnvironmentVariable("ETTEUM_HOME", "User")
+if ($userHome -and ($userHome.TrimEnd('\') -ieq $ProjectDir.TrimEnd('\'))) {
+    try {
+        [Environment]::SetEnvironmentVariable("ETTEUM_HOME", $null, "User")
+        Ok "Cleared user ETTEUM_HOME"
+    } catch {
+        Warn "Could not clear user ETTEUM_HOME: $_"
+    }
+}
 
 # 3. Remove Python venv
 Step "Removing Python venv..."

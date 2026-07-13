@@ -1,5 +1,12 @@
 ﻿# etteum.ps1 - Etteum management CLI (Windows)
 # Usage: .\etteum.ps1 [start|stop|restart|status|logs|update|port|build]
+#
+# Project dir resolution (first valid wins):
+#   1. $env:ETTEUM_HOME
+#   2. $env:POOLPROX_HOME  (legacy alias)
+#   3. etteum.home pointer next to this script / under ~/.local/bin / ~/.config/etteum
+#   4. Directory containing this script (when run from the checkout)
+#   5. Default ~/etteum-pool
 
 param(
   [Parameter(Position = 0)][string]$Command = "help",
@@ -9,13 +16,75 @@ param(
 
 $ErrorActionPreference = "Stop"
 
-# Auto-detect project dir: env override > script dir
-if ($env:POOLPROX_HOME -and (Test-Path $env:POOLPROX_HOME)) {
-  $ProjectDir = $env:POOLPROX_HOME
-} else {
-  $ProjectDir = Split-Path -Parent $MyInvocation.MyCommand.Path
+function Test-EtteumProject([string]$dir) {
+  if (-not $dir) { return $false }
+  try { $dir = [System.IO.Path]::GetFullPath($dir) } catch { return $false }
+  if (-not (Test-Path -LiteralPath $dir -PathType Container)) { return $false }
+  $pkg = Join-Path $dir "package.json"
+  $prod = Join-Path $dir "scripts\production.ts"
+  if (-not (Test-Path -LiteralPath $pkg)) { return $false }
+  if (-not (Test-Path -LiteralPath $prod)) { return $false }
+  return $true
 }
 
+function Read-HomePointer([string]$file) {
+  if (-not (Test-Path -LiteralPath $file)) { return $null }
+  $line = (Get-Content -LiteralPath $file -TotalCount 1 -ErrorAction SilentlyContinue)
+  if (-not $line) { return $null }
+  return $line.Trim().Trim('"').Trim("'")
+}
+
+function Resolve-EtteumProjectDir {
+  # $PSScriptRoot is the directory of this .ps1 even when called from a function.
+  $scriptDir = $PSScriptRoot
+  if (-not $scriptDir -and $PSCommandPath) {
+    $scriptDir = Split-Path -Parent $PSCommandPath
+  }
+
+  $candidates = @()
+  if ($env:ETTEUM_HOME) { $candidates += $env:ETTEUM_HOME }
+  if ($env:POOLPROX_HOME) { $candidates += $env:POOLPROX_HOME }
+
+  $pointerFiles = @(
+    (Join-Path $scriptDir "etteum.home"),
+    (Join-Path $HOME ".local\bin\etteum.home"),
+    (Join-Path $HOME ".config\etteum\home")
+  )
+  foreach ($pf in $pointerFiles) {
+    $pointed = Read-HomePointer $pf
+    if ($pointed) { $candidates += $pointed }
+  }
+
+  if ($scriptDir) { $candidates += $scriptDir }
+  $candidates += (Join-Path $HOME "etteum-pool")
+
+  foreach ($c in $candidates) {
+    if (Test-EtteumProject $c) {
+      return [System.IO.Path]::GetFullPath($c)
+    }
+  }
+
+  Write-Host "Could not locate the Etteum install directory." -ForegroundColor Red
+  Write-Host ""
+  Write-Host "Tried:"
+  $seen = @{}
+  foreach ($c in $candidates) {
+    if (-not $c) { continue }
+    $key = $c.ToLowerInvariant()
+    if ($seen.ContainsKey($key)) { continue }
+    $seen[$key] = $true
+    Write-Host "  - $c"
+  }
+  Write-Host ""
+  Write-Host "Fix one of:"
+  Write-Host "  1. Set ETTEUM_HOME to your install folder, then reopen the terminal"
+  Write-Host "     setx ETTEUM_HOME `"C:\path\to\etteum`""
+  Write-Host "  2. Re-run install.ps1 from the project (rewrites the CLI home pointer)"
+  Write-Host "  3. Run from the project:  .\etteum.ps1 <command>"
+  exit 1
+}
+
+$ProjectDir = Resolve-EtteumProjectDir
 $PidFile = Join-Path $ProjectDir ".etteum.pid"
 $LogFile = Join-Path $ProjectDir ".etteum.log"
 $EnvFile = Join-Path $ProjectDir ".env"
@@ -152,20 +221,78 @@ function Invoke-Logs([string]$tailArg) {
   }
 }
 
+function Install-CliHomePointer {
+  # Keep global shims and home pointers aligned with this checkout so
+  # `etteum update` works from PATH for every user after install/update.
+  $target = Join-Path $HOME ".local\bin"
+  if (-not (Test-Path -LiteralPath $target)) {
+    New-Item -ItemType Directory -Path $target -Force | Out-Null
+  }
+  $srcPs1 = Join-Path $ProjectDir "etteum.ps1"
+  $srcCmd = Join-Path $ProjectDir "etteum.cmd"
+  if (Test-Path -LiteralPath $srcPs1) {
+    Copy-Item -LiteralPath $srcPs1 -Destination (Join-Path $target "etteum.ps1") -Force
+  }
+  if (Test-Path -LiteralPath $srcCmd) {
+    Copy-Item -LiteralPath $srcCmd -Destination (Join-Path $target "etteum.cmd") -Force
+  }
+  $installRoot = [System.IO.Path]::GetFullPath($ProjectDir)
+  Set-Content -LiteralPath (Join-Path $target "etteum.home") -Value $installRoot -Encoding ascii -NoNewline
+  $configDir = Join-Path $HOME ".config\etteum"
+  if (-not (Test-Path -LiteralPath $configDir)) {
+    New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+  }
+  Set-Content -LiteralPath (Join-Path $configDir "home") -Value $installRoot -Encoding ascii -NoNewline
+  $env:ETTEUM_HOME = $installRoot
+  try {
+    [Environment]::SetEnvironmentVariable("ETTEUM_HOME", $installRoot, "User")
+  } catch {}
+  Write-Host "CLI home pointer: $installRoot" -ForegroundColor DarkGray
+}
+
 function Invoke-Update {
-  Write-Host "Pulling latest..."
+  Write-Host "Updating Etteum at: $ProjectDir" -ForegroundColor Cyan
+  if (-not (Test-Path -LiteralPath (Join-Path $ProjectDir ".git"))) {
+    Write-Host "Not a git checkout — re-run install.ps1 to upgrade, or clone the repo first." -ForegroundColor Red
+    exit 1
+  }
   Push-Location $ProjectDir
   try {
-    git pull
+    Write-Host "Pulling latest..."
+    git pull --ff-only
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "git pull failed (exit $LASTEXITCODE). Resolve conflicts or run git pull manually." -ForegroundColor Red
+      exit 1
+    }
+    Write-Host "Refreshing CLI shims..."
+    Install-CliHomePointer
     Write-Host "Installing dependencies..."
     bun install
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "bun install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+      exit 1
+    }
+    $dashDir = Join-Path $ProjectDir "dashboard"
+    if (-not (Test-Path -LiteralPath $dashDir)) {
+      Write-Host "Dashboard folder missing at $dashDir" -ForegroundColor Red
+      exit 1
+    }
     Write-Host "Building dashboard..."
-    Push-Location (Join-Path $ProjectDir "dashboard")
-    try { bun run build } finally { Pop-Location }
+    Push-Location $dashDir
+    try {
+      bun run build
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "Dashboard build failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        exit 1
+      }
+    } finally { Pop-Location }
+    Write-Host "Running migrations..."
+    bun src/db/migrate.ts
     Write-Host "Restarting..."
     Invoke-Stop
     Start-Sleep -Seconds 1
     Invoke-Start
+    Write-Host "Update complete" -ForegroundColor Green
   } finally { Pop-Location }
 }
 

@@ -72,17 +72,21 @@ else
   info "No PID file found"
 fi
 
-# 2. Remove CLI shims
+# 2. Remove CLI shims + home pointer files
 step "Removing CLI shims..."
 LOCAL_BIN="$HOME/.local/bin"
 SHIMS_REMOVED=0
-for shim in etteum etteum.ps1 etteum.cmd; do
+for shim in etteum etteum.ps1 etteum.cmd etteum.home; do
   if [[ -L "$LOCAL_BIN/$shim" || -f "$LOCAL_BIN/$shim" ]]; then
     rm -f "$LOCAL_BIN/$shim"
     ((SHIMS_REMOVED++))
   fi
 done
-ok "Removed $SHIMS_REMOVED CLI shim(s) from $LOCAL_BIN"
+if [[ -f "$HOME/.config/etteum/home" ]]; then
+  rm -f "$HOME/.config/etteum/home"
+  ((SHIMS_REMOVED++))
+fi
+ok "Removed $SHIMS_REMOVED CLI shim/pointer file(s) from $LOCAL_BIN (and ~/.config/etteum)"
 
 # 3. Remove Python venv
 step "Removing Python venv..."
