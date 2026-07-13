@@ -26,6 +26,12 @@ import { setupLogRotation } from "./utils/log-rotation";
 import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
 import { disableMitm } from "./proxy/mitm/manager";
 import { installConsoleBridge } from "./api/debug";
+import {
+  dashboardAssetCacheHeaders,
+  dashboardAssetNotFoundResponse,
+  dashboardIndexHeaders,
+  isDashboardAssetPath,
+} from "./utils/dashboard-static";
 
 // Mirror console output into Live Console SSE ring buffer (dashboard /console).
 installConsoleBridge();
@@ -281,23 +287,9 @@ app.get("/api/info", (c) => {
   });
 });
 
-// Serve dashboard static files (SPA fallback)
+// Serve dashboard static files (SPA fallback for app routes only — never for /assets/*)
 const dashboardDist = new URL("../dashboard/dist", import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1");
 const dashboardIndex = `${dashboardDist}/index.html`;
-
-const staticMimeTypes: Record<string, string> = {
-  ".html": "text/html; charset=utf-8",
-  ".js": "application/javascript; charset=utf-8",
-  ".css": "text/css; charset=utf-8",
-  ".json": "application/json",
-  ".svg": "image/svg+xml",
-  ".png": "image/png",
-  ".jpg": "image/jpeg",
-  ".ico": "image/x-icon",
-  ".woff": "font/woff",
-  ".woff2": "font/woff2",
-  ".ttf": "font/ttf",
-};
 
 // Start server with WebSocket support
 const server = Bun.serve({
@@ -378,29 +370,22 @@ const server = Bun.serve({
     const filePath = `${dashboardDist}${pathname}`;
     const file = Bun.file(filePath);
     if (await file.exists()) {
-      const ext = pathname.slice(pathname.lastIndexOf("."));
-      // Hashed assets (e.g. Accounts-AbCd1234.js) can be cached forever.
-      // index.html must never be cached so the browser picks up new hashes.
-      const isHtml = ext === ".html";
-      const cacheControl = isHtml
-        ? "no-cache, no-store, must-revalidate"
-        : "public, max-age=31536000, immutable";
       return new Response(file, {
-        headers: {
-          "Content-Type": staticMimeTypes[ext] || "application/octet-stream",
-          "Cache-Control": cacheControl,
-        },
+        headers: dashboardAssetCacheHeaders(pathname),
       });
     }
 
-    // SPA fallback: serve index.html for non-file routes
+    // Missing hashed JS/CSS must NOT fall through to index.html — browsers
+    // then report "Expected a JavaScript module but got text/html".
+    if (isDashboardAssetPath(pathname)) {
+      return dashboardAssetNotFoundResponse();
+    }
+
+    // SPA fallback: app routes only (e.g. /accounts/kiro)
     const indexFile = Bun.file(dashboardIndex);
     if (await indexFile.exists()) {
       return new Response(indexFile, {
-        headers: {
-          "Content-Type": "text/html; charset=utf-8",
-          "Cache-Control": "no-cache, no-store, must-revalidate",
-        },
+        headers: dashboardIndexHeaders(),
       });
     }
 
