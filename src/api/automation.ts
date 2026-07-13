@@ -32,8 +32,20 @@ import { SERVICES, toBulkImportAdapter, type ProviderService } from "../auth/aut
 import type { ProviderId } from "../auth/automation/constants";
 import type { BrowserEngine } from "../auth/automation/engine";
 import type { ImportCredential } from "../auth/automation/bulkImport";
+import {
+  startCodebuddyCnFarm,
+  cancelCodebuddyCnFarm,
+  getCodebuddyCnFarmJob,
+  listCodebuddyCnFarmJobs,
+  type CodebuddyCnFarmConfig,
+} from "../auth/automation/codebuddyCnFarm";
+import { db } from "../db/index";
+import { settings } from "../db/schema";
+import { eq } from "drizzle-orm";
 
 export const automationRouter = new Hono();
+
+const CBC_SETTINGS_KEY = "codebuddy_cn_farm_config";
 
 interface StartJobBody {
   provider?: string;
@@ -137,5 +149,110 @@ automationRouter.post("/jobs/:jobId/manual/:itemId/resume", async (c) => {
   if (!body.answer) return c.json({ error: "answer required" }, 400);
   const result = await resumeManualSession(c.req.param("jobId"), c.req.param("itemId"), body.answer);
   if (!result.resolved) return c.json({ error: result.error || "Could not resume" }, 400);
+  return c.json({ success: true });
+});
+
+// ── CodeBuddy CN phone farm (5sim → ck_* → codebuddy-china pool) ───────────
+
+async function loadCbcConfig(): Promise<Partial<CodebuddyCnFarmConfig>> {
+  try {
+    const [row] = await db.select().from(settings).where(eq(settings.key, CBC_SETTINGS_KEY)).limit(1);
+    if (!row?.value) return {};
+    return JSON.parse(row.value) as Partial<CodebuddyCnFarmConfig>;
+  } catch {
+    return {};
+  }
+}
+
+async function saveCbcConfig(cfg: Partial<CodebuddyCnFarmConfig>): Promise<void> {
+  const value = JSON.stringify(cfg);
+  const [existing] = await db.select().from(settings).where(eq(settings.key, CBC_SETTINGS_KEY)).limit(1);
+  if (existing) {
+    await db.update(settings).set({ value, updatedAt: new Date() }).where(eq(settings.key, CBC_SETTINGS_KEY));
+  } else {
+    await db.insert(settings).values({ key: CBC_SETTINGS_KEY, value });
+  }
+}
+
+/** GET /api/automation/codebuddy-cn/config */
+automationRouter.get("/codebuddy-cn/config", async (c) => {
+  const cfg = await loadCbcConfig();
+  return c.json({
+    config: {
+      fiveSimToken: cfg.fiveSimToken ? "••••••••" : "",
+      count: cfg.count ?? 3,
+      concurrent: cfg.concurrent ?? 1,
+      country: cfg.country || "hongkong",
+      headless: cfg.headless !== false,
+      product: cfg.product || "codebuddy",
+    },
+  });
+});
+
+/** PUT /api/automation/codebuddy-cn/config */
+automationRouter.put("/codebuddy-cn/config", async (c) => {
+  const body = await c.req.json<Partial<CodebuddyCnFarmConfig>>().catch(() => ({}));
+  const cur = await loadCbcConfig();
+  const next = {
+    ...cur,
+    ...body,
+    fiveSimToken:
+      body.fiveSimToken && body.fiveSimToken !== "••••••••"
+        ? body.fiveSimToken
+        : cur.fiveSimToken,
+  };
+  await saveCbcConfig(next);
+  return c.json({
+    config: {
+      ...next,
+      fiveSimToken: next.fiveSimToken ? "••••••••" : "",
+    },
+  });
+});
+
+/** GET /api/automation/codebuddy-cn/jobs/latest */
+automationRouter.get("/codebuddy-cn/jobs/latest", (c) => {
+  return c.json({ job: getCodebuddyCnFarmJob() });
+});
+
+/** GET /api/automation/codebuddy-cn/jobs */
+automationRouter.get("/codebuddy-cn/jobs", (c) => {
+  return c.json({ jobs: listCodebuddyCnFarmJobs() });
+});
+
+/** POST /api/automation/codebuddy-cn/start */
+automationRouter.post("/codebuddy-cn/start", async (c) => {
+  const body = await c.req.json<Partial<CodebuddyCnFarmConfig> & { saveConfig?: boolean }>().catch(() => ({}));
+  const saved = await loadCbcConfig();
+  const fiveSimToken =
+    body.fiveSimToken && body.fiveSimToken !== "••••••••"
+      ? body.fiveSimToken
+      : saved.fiveSimToken || process.env.FIVE_SIM_TOKEN || "";
+  const cfg: CodebuddyCnFarmConfig = {
+    fiveSimToken,
+    count: Math.max(1, Math.min(50, Number(body.count ?? saved.count) || 3)),
+    concurrent: Math.max(1, Math.min(5, Number(body.concurrent ?? saved.concurrent) || 1)),
+    country: String(body.country || saved.country || "hongkong"),
+    headless: body.headless !== false,
+    product: String(body.product || saved.product || "codebuddy"),
+  };
+  if (body.saveConfig !== false) {
+    await saveCbcConfig({
+      ...cfg,
+      fiveSimToken: cfg.fiveSimToken,
+    });
+  }
+  try {
+    const job = await startCodebuddyCnFarm(cfg);
+    return c.json({ job }, 201);
+  } catch (e) {
+    return c.json({ error: e instanceof Error ? e.message : String(e) }, 400);
+  }
+});
+
+/** POST /api/automation/codebuddy-cn/cancel */
+automationRouter.post("/codebuddy-cn/cancel", (c) => {
+  const ok = cancelCodebuddyCnFarm();
+  if (!ok) return c.json({ error: "No running CodeBuddy CN farm job" }, 404);
   return c.json({ success: true });
 });
