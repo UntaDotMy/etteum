@@ -18,6 +18,7 @@ import {
 import { formatDateTimeID } from "@/lib/utils";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
+import { useWsEvent } from "@/hooks/useWebSocket";
 
 type LbMethod = "round_robin" | "sequential" | "least_inflight";
 type ApiFormat = "openai" | "anthropic" | "auto";
@@ -65,15 +66,54 @@ export default function ByokAccountList() {
     keys: [emptyKey()] as KeyDraft[],
   });
 
-  // SWR cache for BYOK providers
+  // Full refetch only on structural BYOK changes (not per-key account_status).
   const { data: byokData, mutate } = useApiCache<{ providers: ByokProvider[] }>(
     "byok-providers",
     () => fetchByokProviders(),
     {
       staleTime: 5000,
-      wsEvents: ["byok_created", "byok_updated", "byok_deleted", "account_status", "account_deleted"],
+      wsEvents: ["byok_created", "byok_updated", "byok_deleted", "account_deleted"],
     }
   );
+
+  // Live key status/error without reloading the whole form.
+  useWsEvent(["account_status", "account_updated"], (msg) => {
+    const d = (msg as { data?: Record<string, unknown> })?.data ?? (msg as Record<string, unknown>);
+    if (!d || typeof d.id !== "number") return;
+    setForm((current) => ({
+      ...current,
+      keys: current.keys.map((key) =>
+        key.id !== d.id
+          ? key
+          : {
+              ...key,
+              ...(typeof d.status === "string" ? { status: d.status } : null),
+              ...(d.error !== undefined ? { errorMessage: String(d.error) } : null),
+              ...(d.errorMessage !== undefined ? { errorMessage: String(d.errorMessage) } : null),
+              ...(typeof d.enabled === "boolean" ? { enabled: d.enabled } : null),
+            },
+      ),
+    }));
+    void mutate((prev) => {
+      if (!prev?.providers) return prev;
+      return {
+        ...prev,
+        providers: prev.providers.map((p) => ({
+          ...p,
+          keys: (p.keys || []).map((k) =>
+            k.id !== d.id
+              ? k
+              : {
+                  ...k,
+                  ...(typeof d.status === "string" ? { status: d.status } : null),
+                  ...(d.error !== undefined ? { errorMessage: String(d.error) } : null),
+                  ...(typeof d.enabled === "boolean" ? { enabled: d.enabled } : null),
+                },
+          ),
+        })),
+      };
+    });
+  });
 
   // Derive provider from cached data
   const provider = useMemo(() => {
@@ -226,7 +266,7 @@ export default function ByokAccountList() {
     try {
       await toggleAccountEnabled(key.id, next);
       showSuccess(next ? `Enabled ${key.label}` : `Disabled ${key.label}`);
-      await mutate();
+      // Form already updated; WS/account_updated may refine status.
     } catch (err) {
       updateKey(index, { enabled: key.enabled });
       showError(err);
@@ -240,7 +280,7 @@ export default function ByokAccountList() {
       const res = await testByokProvider(key.id);
       if (res.success) showSuccess(`✓ ${key.label} OK${res.latency_ms ? ` · ${res.latency_ms}ms` : ""}`);
       else showError(new Error(res.error || "Connection test failed"));
-      await mutate();
+      // Status arrives via account_status WS; no full-page mutate.
     } catch (err) {
       showError(err);
     } finally {

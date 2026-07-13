@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { fetchRequests, fetchRequestDetail } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
 import { useApiCache } from "@/hooks/useApiCache";
+import { useWsEvent } from "@/hooks/useWebSocket";
 
 interface RequestLog {
   id: number;
@@ -73,17 +74,49 @@ export default function Requests() {
   const [page, setPage] = useState(1);
   const perPage = 25;
 
-  // SWR cache: instant load, background revalidation
+  // Light list (no bodies). Smaller page + longer stale reduces load thrash.
+  // Live rows prepend via WS instead of full refetch on every request_log.
   const cacheKey = `requests-${provider}`;
   const { data: logsRes, mutate } = useApiCache<{ data: RequestLog[] }>(
     cacheKey,
-    () => fetchRequests(1, 100, provider) as Promise<{ data: RequestLog[] }>,
+    () => fetchRequests(1, 50, provider === "all" ? undefined : provider) as Promise<{ data: RequestLog[] }>,
     {
-      staleTime: 5000,
-      wsEvents: ["request_log"],
+      staleTime: 15_000,
+      wsEvents: [],
     }
   );
   const logs = logsRes?.data || [];
+
+  useWsEvent("request_log", (msg) => {
+    const row = (msg as { data?: RequestLog })?.data;
+    if (!row || typeof row.id !== "number") return;
+    if (provider !== "all" && row.provider !== provider) return;
+    void mutate((prev) => {
+      const list = prev?.data || [];
+      if (list.some((r) => r.id === row.id)) return prev;
+      // Prepend light fields only (match list endpoint shape).
+      const light: RequestLog = {
+        id: row.id,
+        createdAt: row.createdAt,
+        provider: row.provider,
+        model: row.model ?? null,
+        status: row.status,
+        durationMs: row.durationMs ?? null,
+        promptTokens: row.promptTokens ?? null,
+        completionTokens: row.completionTokens ?? null,
+        totalTokens: row.totalTokens ?? null,
+        creditsUsed: row.creditsUsed,
+        cost: row.cost,
+        accountId: row.accountId ?? null,
+        accountEmail: row.accountEmail,
+        accountQuotaBefore: row.accountQuotaBefore,
+        accountQuotaAfter: row.accountQuotaAfter,
+        errorMessage: row.errorMessage ?? null,
+        compressionStats: row.compressionStats,
+      };
+      return { data: [light, ...list].slice(0, 50) };
+    });
+  });
 
   /**
    * Open the detail drawer for a row. The list endpoint omits the heavy
