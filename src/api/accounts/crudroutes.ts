@@ -440,77 +440,86 @@ export function registerCrudRoutes(router: Hono): void {
     let success = 0;
     let failed = 0;
     const errors: string[] = [];
+    const pushErr = (msg: string) => {
+      if (errors.length < 50) errors.push(msg);
+    };
 
-    for (const refreshToken of body.tokens) {
-      const trimmed = refreshToken.trim();
-      if (!trimmed) { failed++; continue; }
+    // Parallel exchange (concurrency 8) so large pastes finish before client timeout.
+    const items = body.tokens;
+    let next = 0;
+    const workers = Array.from({ length: Math.min(8, Math.max(1, items.length)) }, async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        const refreshToken = items[i]!;
+        const trimmed = refreshToken.trim();
+        if (!trimmed) { failed++; continue; }
 
-      try {
-        const response = await fetch(REFRESH_URL, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ refreshToken: trimmed }),
-        });
-
-        if (!response.ok) {
-          errors.push(`token ...${trimmed.slice(-8)}: refresh failed (${response.status})`);
-          failed++;
-          continue;
-        }
-
-        const data = await response.json() as {
-          accessToken?: string;
-          refreshToken?: string;
-          expiresAt?: string;
-        };
-
-        if (!data.accessToken) {
-          errors.push(`token ...${trimmed.slice(-8)}: no access token received`);
-          failed++;
-          continue;
-        }
-
-        // Generate email identifier from token (Kiro tokens are not JWT, can't extract email)
-        // Use a hash of the refresh token as unique identifier
-        const tokenHash = trimmed.slice(10, 18);
-        let email = `kiro-${tokenHash}@token.local`;
-
-        const tokens = {
-          access_token: data.accessToken,
-          refresh_token: data.refreshToken || trimmed,
-          expires_at: data.expiresAt || null,
-          profile_arn: KIRO_PROFILE_ARN,
-        };
-
-        // Create or update account as active with tokens
-        const existing = await db.select().from(accounts)
-          .where(eq(accounts.email, email))
-          .then((rows) => rows.find((r) => r.provider === "kiro-pro"));
-
-        if (existing) {
-          await db.update(accounts).set({
-            status: "active",
-            tokens: tokens as unknown,
-            errorMessage: null,
-            lastLoginAt: new Date(),
-            updatedAt: new Date(),
-          }).where(eq(accounts.id, existing.id));
-        } else {
-          await db.insert(accounts).values({
-            provider: "kiro-pro",
-            email,
-            password: encrypt("instant-login"),
-            status: "active",
-            tokens: tokens as unknown,
-            lastLoginAt: new Date(),
+        try {
+          const response = await fetch(REFRESH_URL, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ refreshToken: trimmed }),
           });
+
+          if (!response.ok) {
+            pushErr(`token ...${trimmed.slice(-8)}: refresh failed (${response.status})`);
+            failed++;
+            continue;
+          }
+
+          const data = await response.json() as {
+            accessToken?: string;
+            refreshToken?: string;
+            expiresAt?: string;
+          };
+
+          if (!data.accessToken) {
+            pushErr(`token ...${trimmed.slice(-8)}: no access token received`);
+            failed++;
+            continue;
+          }
+
+          const tokenHash = trimmed.slice(10, 18);
+          const email = `kiro-${tokenHash}@token.local`;
+
+          const tokens = {
+            access_token: data.accessToken,
+            refresh_token: data.refreshToken || trimmed,
+            expires_at: data.expiresAt || null,
+            profile_arn: KIRO_PROFILE_ARN,
+          };
+
+          const existing = await db.select().from(accounts)
+            .where(eq(accounts.email, email))
+            .then((rows) => rows.find((r) => r.provider === "kiro-pro"));
+
+          if (existing) {
+            await db.update(accounts).set({
+              status: "active",
+              tokens: tokens as unknown,
+              errorMessage: null,
+              lastLoginAt: new Date(),
+              updatedAt: new Date(),
+            }).where(eq(accounts.id, existing.id));
+          } else {
+            await db.insert(accounts).values({
+              provider: "kiro-pro",
+              email,
+              password: encrypt("instant-login"),
+              status: "active",
+              tokens: tokens as unknown,
+              lastLoginAt: new Date(),
+            });
+          }
+          success++;
+        } catch (err) {
+          pushErr(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+          failed++;
         }
-        success++;
-      } catch (err) {
-        errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
-        failed++;
       }
-    }
+    });
+    await Promise.all(workers);
 
     pool.invalidate("kiro-pro" as ProviderName);
     if (success > 0) {
