@@ -391,15 +391,17 @@ export async function deleteCustomModel(model: string): Promise<{ success: boole
  * NOT the provider alias (cbc-/qd-/kp-/...), so they apply across providers.
  */
 export function toCanonicalModelName(model: string | undefined | null): string {
-  if (!model) return '';
-  let m = model;
-  if (m.startsWith('kp-')) m = 'claude-' + m.slice(3);
-  if (m.startsWith('cbc-')) m = m.slice(4);
-  else if (m.startsWith('cb-')) m = m.slice(3);
-  else if (m.startsWith('qd-')) m = m.slice(3);
-  else if (m.startsWith('ym-')) m = m.slice(3);
-  else if (m.startsWith('gitlab-duo:')) m = m.slice(11);
-  m = m.replace(/-thinking$/, '');
+  if (!model) return "";
+  let m = model.trim();
+  if (m.startsWith("kp-") || m.startsWith("kp_")) m = "claude-" + m.slice(3);
+  if (m.startsWith("cbc-") || m.startsWith("cbc_")) m = m.slice(4);
+  else if (m.startsWith("cb-") || m.startsWith("cb_")) m = m.slice(3);
+  else if (m.startsWith("qd-") || m.startsWith("qd_")) m = m.slice(3);
+  else if (m.startsWith("ym-") || m.startsWith("ym_")) m = m.slice(3);
+  else if (m.startsWith("gitlab-duo:")) m = m.slice(11);
+  m = m.replace(/[-_]thinking$/i, "");
+  // Lookup only: gpt_5.2 → gpt-5.2 for pricing/spec. Do not rewrite list ids.
+  m = m.replace(/_/g, "-");
   return m;
 }
 
