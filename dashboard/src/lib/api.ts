@@ -308,9 +308,26 @@ export async function fetchModels() {
   return fetchApi("/v1/models");
 }
 
-/** Fetch ONLY models backed by an active+enabled account (leaner than fetchModels). */
-export async function fetchActiveModels() {
-  return fetchApi("/api/models/active");
+/**
+ * Full catalog with resolved USD pricing (baseline MODEL_PRICING + kv overrides).
+ * Prefer this over /v1/models for the dashboard Models page — /v1/models is the
+ * OpenAI client surface and does not attach pricing.
+ */
+export async function fetchModelsCatalog(): Promise<{ data: Array<Record<string, unknown>> }> {
+  const res = (await fetchApi("/api/models/all")) as { models?: Array<Record<string, unknown>> };
+  return { data: res.models || [] };
+}
+
+/**
+ * Fetch ONLY models backed by an active+enabled account (with resolved pricing).
+ * Response is normalized to `{ data }` for the dashboard.
+ */
+export async function fetchActiveModels(): Promise<{ data: Array<Record<string, unknown>> }> {
+  const res = (await fetchApi("/api/models/active")) as {
+    models?: Array<Record<string, unknown>>;
+    data?: Array<Record<string, unknown>>;
+  };
+  return { data: res.data || res.models || [] };
 }
 
 // --- F15: dashboard-driven model catalog (custom / disabled / pricing CRUD) ---

@@ -87,15 +87,20 @@ describe("custom-models registry — listing", () => {
     expect(ids).toContain("extra-qoder-model");
   });
 
-  test("does not duplicate a custom model whose id already exists in the list", () => {
-    // A provider may already hardcode a model; a custom entry for the same id
-    // must not create a duplicate row in /v1/models.
+  test("custom entry with same id replaces the base row (no duplicate)", () => {
+    // Operator override is first-class catalog: one row, custom wins over hardcoded.
     __setCustomModelsForTest({
-      "qd-existing": { provider: "qoder", displayName: "Existing" },
+      "qd-existing": {
+        provider: "qoder",
+        displayName: "Overridden",
+        spec: { context_window: 999_000 },
+      },
     });
     const result = applyCustomModelsToList([baseModel("qd-existing", "qoder")]);
     const matches = result.filter((m) => m.id === "qd-existing");
     expect(matches).toHaveLength(1);
+    expect(matches[0]!.display_name).toBe("Overridden");
+    expect(matches[0]!.context_window).toBe(999_000);
   });
 
   test("rename: a custom entry with renameFrom REPLACES the base model id", () => {

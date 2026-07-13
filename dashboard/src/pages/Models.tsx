@@ -6,7 +6,7 @@ import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, Di
 import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, DollarSign, FlaskConical, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 import {
-  fetchModels,
+  fetchModelsCatalog,
   fetchActiveModels,
   fetchCustomModels,
   saveCustomModel,
@@ -20,6 +20,7 @@ import {
   type CustomModelsMap,
   type DisabledModelsMap,
   type PricingMap,
+  type ModelPricingEntry,
   type CustomModelSpec,
 } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
@@ -34,6 +35,45 @@ interface ModelData {
   thinking?: boolean;
   vision?: boolean;
   display_name?: string;
+  /** Resolved rates from GET /api/models/* (catalog + overrides). Shape may be
+   *  baseline `{ input, output }` or dashboard `{ inputPer1M, outputPer1M }`. */
+  pricing?: Record<string, number> | null;
+}
+
+/** Normalize any pricing shape into dashboard $/1M fields. */
+function toPricingEntry(raw: unknown): ModelPricingEntry | null {
+  if (!raw || typeof raw !== "object") return null;
+  const p = raw as Record<string, unknown>;
+  const input = Number(p.inputPer1M ?? p.input);
+  const output = Number(p.outputPer1M ?? p.output);
+  // Need at least one finite rate field. Free (0/0) catalog rows still display.
+  if (!Number.isFinite(input) && !Number.isFinite(output)) return null;
+  return {
+    inputPer1M: Number.isFinite(input) ? input : 0,
+    outputPer1M: Number.isFinite(output) ? output : 0,
+    cachedInputPer1M: Number(p.cachedInputPer1M ?? p.cached ?? 0) || 0,
+    reasoningPer1M: Number(p.reasoningPer1M ?? p.reasoning ?? 0) || 0,
+    cacheCreationPer1M: Number(p.cacheCreationPer1M ?? p.cacheCreation ?? 0) || 0,
+  };
+}
+
+/** User override (kv) wins; else resolved catalog pricing on the model row. */
+function resolveDisplayPricing(
+  model: ModelData,
+  pricingMap: PricingMap,
+): ModelPricingEntry | null {
+  const override =
+    pricingMap[model.id] || pricingMap[toCanonicalModelName(model.id)];
+  if (override) {
+    const e = toPricingEntry(override);
+    if (e) return e;
+  }
+  return toPricingEntry(model.pricing);
+}
+
+function formatPricingCell(p: ModelPricingEntry | null): string {
+  if (!p) return "—";
+  return `$${p.inputPer1M} / $${p.outputPer1M}`;
 }
 
 const providerColors: Record<string, string> = {
@@ -86,10 +126,13 @@ export default function Models() {
   const { message: statusMsg, setMessage: setStatusMsg } = useTimedMessage<string>(null, 3000);
 
   const reload = useCallback(async () => {
+    // Catalog path attaches baseline + override pricing. /v1/models does not —
+    // that was why the Pricing column was always "—".
     const [modelsRes, customRes, disabledRes, pricingRes] = await Promise.all([
-      (activeOnly ? fetchActiveModels() : fetchModels()).catch(() => ({ data: [] })),
+      (activeOnly ? fetchActiveModels() : fetchModelsCatalog()).catch(() => ({ data: [] })),
       fetchCustomModels().catch(() => ({ custom: {} })),
       fetchDisabledModels().catch(() => ({ disabled: {} })),
+      // User overrides only (for edit dialog); display uses model.pricing first.
       fetchModelPricing().catch(() => ({ pricing: {} })),
     ]);
     setModels((modelsRes as { data: ModelData[] }).data || []);
@@ -146,17 +189,45 @@ export default function Models() {
     }
   }
 
-  async function handleDeleteCustom(id: string) {
-    // Delete by canonical key (the store keys overrides canonically, so
-    // cbc-hy3-preview's override lives under hy3-preview).
-    const key = customMap[id] ? id : toCanonicalModelName(id);
-    if (!confirm(`Delete custom model "${key}"? This removes it from the catalog and routing.`)) return;
+  /**
+   * Remove a model from the live catalog.
+   * - Custom / override entry → delete KV custom row (hardcoded base returns if any).
+   * - Built-in only → disable (hidden from catalog + routing; re-enable later if needed).
+   * Code-hardcoded lists are never edited on disk; delete = catalog membership.
+   */
+  async function handleDeleteFromCatalog(provider: string, id: string) {
+    const customKey = customMap[id] ? id : customMap[toCanonicalModelName(id)] ? toCanonicalModelName(id) : null;
+    if (customKey) {
+      if (
+        !confirm(
+          `Remove "${id}" from the catalog?\n\nThis deletes the custom/override entry. If a built-in model used this id, it may reappear with defaults.`,
+        )
+      ) {
+        return;
+      }
+      try {
+        await deleteCustomModel(customKey);
+        setStatusMsg(`Removed custom catalog entry "${customKey}"`);
+        await reload();
+      } catch (e: any) {
+        setStatusMsg(e?.message || "Failed to delete");
+      }
+      return;
+    }
+
+    if (
+      !confirm(
+        `Remove "${id}" from the catalog?\n\nBuilt-in models cannot be wiped from the app binary — they are disabled (hidden from lists and routing). You can re-enable them later with the power control if you show disabled rows.`,
+      )
+    ) {
+      return;
+    }
     try {
-      await deleteCustomModel(key);
-      setStatusMsg("Custom model deleted");
+      await setModelDisabled(provider, id, true);
+      setStatusMsg(`"${id}" removed from catalog (disabled)`);
       await reload();
     } catch (e: any) {
-      setStatusMsg(e?.message || "Failed");
+      setStatusMsg(e?.message || "Failed to remove");
     }
   }
 
@@ -215,7 +286,12 @@ export default function Models() {
         <EditModelDialog
           model={models.find((m) => m.id === editing)!}
           custom={customMap[editing] || customMap[toCanonicalModelName(editing)]}
-          pricing={pricingMap[editing] || pricingMap[toCanonicalModelName(editing)]}
+          pricing={
+            pricingMap[editing] ||
+            pricingMap[toCanonicalModelName(editing)] ||
+            toPricingEntry(models.find((m) => m.id === editing)?.pricing) ||
+            undefined
+          }
           onDone={async () => {
             setEditing(null);
             await reload();
@@ -292,7 +368,7 @@ export default function Models() {
               </thead>
               <tbody>
                 {filtered.map((model) => {
-                  const pricing = pricingMap[model.id];
+                  const pricing = resolveDisplayPricing(model, pricingMap);
                   return (
                     <tr key={model.id} className="border-b border-[var(--border)] last:border-b-0 hover:bg-[var(--secondary)]/30 transition-colors">
                       <td className="py-3 px-4">
@@ -312,8 +388,8 @@ export default function Models() {
                         {model.thinking && <Badge variant="default" className="text-xs mr-1">Thinking</Badge>}
                         {model.vision && <Badge variant="outline" className="text-xs">Vision</Badge>}
                       </td>
-                      <td className="py-3 px-4 text-xs text-[var(--muted-foreground)]">
-                        {pricing ? `$${pricing.inputPer1M} / $${pricing.outputPer1M}` : "—"}
+                      <td className="py-3 px-4 text-xs tabular-nums text-[var(--muted-foreground)]" title="USD per 1M tokens (input / output)">
+                        {formatPricingCell(pricing)}
                       </td>
                       <td className="py-3 px-4">
                         <div className="flex items-center justify-end gap-1">
@@ -345,11 +421,18 @@ export default function Models() {
                           <button type="button" onClick={() => handleToggleDisabled(model.owned_by, model.id)} title="Disable / enable" className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors">
                             <Power className="w-4 h-4 text-[var(--muted-foreground)]" />
                           </button>
-                          {isCustom(model.id) && (
-                            <button type="button" onClick={() => handleDeleteCustom(model.id)} title="Delete custom model" className="p-1.5 rounded-md hover:bg-red-500/10 transition-colors">
-                              <Trash2 className="w-4 h-4 text-red-400" />
-                            </button>
-                          )}
+                          <button
+                            type="button"
+                            onClick={() => void handleDeleteFromCatalog(model.owned_by, model.id)}
+                            title={
+                              isCustom(model.id)
+                                ? "Delete custom catalog entry"
+                                : "Remove from catalog (disable built-in)"
+                            }
+                            className="p-1.5 rounded-md hover:bg-[color-mix(in_srgb,var(--error)_12%,transparent)] transition-colors"
+                          >
+                            <Trash2 className="w-4 h-4 text-[var(--error)]" />
+                          </button>
                           <button type="button" onClick={() => copyModelId(model.id)} title={`Copy model ID: ${model.id}`} className="p-1.5 rounded-md hover:bg-[var(--secondary)] transition-colors group">
                             {copiedModel === model.id ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4 text-[var(--muted-foreground)] group-hover:text-[var(--foreground)]" />}
                           </button>
