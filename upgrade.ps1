@@ -115,15 +115,20 @@ if ($LASTEXITCODE -ne 0) {
 }
 Ok "Code updated"
 
-# 5. Install dependencies
+# 5. Install dependencies (root + dashboard — separate package trees)
 Step "Installing dependencies..."
 & bun install 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) { Fail "bun install failed" }
-Ok "Dependencies installed"
+Set-Location (Join-Path $ProjectDir "dashboard")
+& bun install 2>&1 | Out-Null
+if ($LASTEXITCODE -ne 0) {
+    Set-Location $ProjectDir
+    Fail "dashboard bun install failed"
+}
+Ok "Dependencies installed (root + dashboard)"
 
 # 6. Build dashboard
 Step "Building dashboard..."
-Set-Location (Join-Path $ProjectDir "dashboard")
 & bun run build 2>&1 | Out-Null
 if ($LASTEXITCODE -ne 0) {
     Warn "Dashboard build failed — rolling back..."
