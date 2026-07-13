@@ -671,7 +671,7 @@ export default function Chat() {
         const res = await generateImage({
           prompt: userText,
           type: gen,
-          // Pass selected model so routing uses Grok Imagine / Canva / etc. — not always Canva.
+          // Pass selected model so media routing uses Canva (or other gen models).
           model,
           aspectRatio: "1:1",
           n: 1,
