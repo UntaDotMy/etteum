@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import { db } from "../../db/index";
-import { accounts, requestLogs, vccCards, vccTransactions, settings } from "../../db/schema";
+import { accounts, settings } from "../../db/schema";
 import { eq, inArray, and, sql, desc, ne, or, like, gte, lte, isNull, not, asc, count } from "drizzle-orm";
 import { encrypt, decrypt } from "../../utils/crypto";
 import { broadcast } from "../../ws/index";
@@ -25,6 +25,7 @@ import {
   getByokPrefix,
   getByokKeyLabel,
   normalizeModels,
+  detachAccountDependents,
   BYOK_PREFIX_RE,
   BYOK_KEY_LABEL_RE,
 } from "./shared";
@@ -715,9 +716,7 @@ export function registerCrudRoutes(router: Hono): void {
 
     // Atomic: FK cleanup + delete in one transaction (CWE-362).
     const deletedIds = await db.transaction(async (tx) => {
-      await tx.update(requestLogs).set({ accountId: null }).where(inArray(requestLogs.accountId, foundIds));
-      await tx.update(vccCards).set({ usedByAccountId: null }).where(inArray(vccCards.usedByAccountId, foundIds));
-      await tx.delete(vccTransactions).where(inArray(vccTransactions.accountId, foundIds));
+      await detachAccountDependents(tx, foundIds);
       const result = await tx.delete(accounts).where(inArray(accounts.id, foundIds)).returning();
       return result.map((r) => r.id);
     });
@@ -746,32 +745,32 @@ export function registerCrudRoutes(router: Hono): void {
 
   /**
    * DELETE /api/accounts/:id - Delete account
+   *
+   * Same FK order as bulk-delete: nullify/delete dependents FIRST, then the
+   * account row. Deleting the account first trips SQLite FK checks on
+   * request_logs / vcc_* (batch delete already did the safe order).
    */
   router.delete("/:id", async (c) => {
     const id = Number(c.req.param("id"));
-
-    // Wrap FK cleanup + delete in a transaction so a crash between steps cannot
-    // leave orphaned FKs or a half-deleted account (CWE-362). Delete the account
-    // FIRST with .returning(); rollback on not-found so we never side-effect
-    // other tables for a missing id.
-    let deleted: typeof accounts.$inferSelect | null = null;
-    try {
-      deleted = await db.transaction(async (tx) => {
-        const result = await tx.delete(accounts).where(eq(accounts.id, id)).returning();
-        if (result.length === 0) {
-          await tx.rollback();
-          return null;
-        }
-        await tx.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, id));
-        await tx.update(vccCards).set({ usedByAccountId: null }).where(eq(vccCards.usedByAccountId, id));
-        await tx.delete(vccTransactions).where(eq(vccTransactions.accountId, id));
-        return result[0]!;
-      });
-    } catch (err: any) {
-      // rollback throws; surface not-found distinctly.
-      if (err && err.message === "rollback") return c.json({ error: "Account not found" }, 404);
-      throw err;
+    if (!Number.isInteger(id) || id <= 0) {
+      return c.json({ error: "Invalid account id" }, 400);
     }
+
+    const [existing] = await db
+      .select({ id: accounts.id, provider: accounts.provider })
+      .from(accounts)
+      .where(eq(accounts.id, id))
+      .limit(1);
+
+    if (!existing) {
+      return c.json({ error: "Account not found" }, 404);
+    }
+
+    const deleted = await db.transaction(async (tx) => {
+      await detachAccountDependents(tx, id);
+      const result = await tx.delete(accounts).where(eq(accounts.id, id)).returning();
+      return result[0] ?? null;
+    });
 
     if (!deleted) {
       return c.json({ error: "Account not found" }, 404);
