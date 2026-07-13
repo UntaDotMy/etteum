@@ -138,10 +138,19 @@ export function computeStatus(force = false): StatusResult {
   const fetch = fetchOrigin();
   const remote = readRemoteCommit();
 
+  // True only when origin is *ahead* of local (commits we can pull).
+  // Plain local!==remote was wrong when local was ahead of origin (e.g. unpushed
+  // commits) — UI said "update available" and pull could no-op or conflict.
+  let behind = 0;
+  if (remote) {
+    const r = git(["rev-list", "--count", `HEAD..origin/${fetchBranch()}`]);
+    if (r.ok) behind = Number(r.out) || 0;
+  }
+
   const result: StatusResult = {
     currentCommit: local,
     latestCommit: remote,
-    updateAvailable: !!remote && remote !== local,
+    updateAvailable: behind > 0,
     currentVersion,
     branch,
     lastCheckedAt: new Date(now).toISOString(),

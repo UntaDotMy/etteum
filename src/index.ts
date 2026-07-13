@@ -364,8 +364,13 @@ const server = Bun.serve({
     // Responses API; GET = 404 -> SPA). Do NOT return 426 here — that breaks
     // the Codex CLI HTTP POST (wire_api=responses).
 
-    // Try Hono routes first (API, proxy, etc.)
-    const response = await app.fetch(req, { ip: server.requestIP(req) });
+    // Try Hono routes first (API, proxy, etc.).
+    // Pass both peer IP and the Bun server so adminGuard/peerIpFromHonoContext
+    // can resolve loopback for local-only admin routes (e.g. /api/update/apply).
+    const response = await app.fetch(req, {
+      ip: server.requestIP(req),
+      server,
+    });
     if (response.status !== 404) return response;
 
     // Fallback: serve dashboard static files

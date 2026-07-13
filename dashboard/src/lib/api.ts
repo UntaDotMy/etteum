@@ -790,8 +790,14 @@ export async function fetchUpdateStatus(force = false): Promise<{ data: UpdateSt
 }
 
 export async function applyUpdate(): Promise<{ data: ApplyResult }> {
-  // The apply can take a while (git pull + dashboard build + migrate).
-  return fetchApi("/api/update/apply", { method: "POST", timeoutMs: 180_000 });
+  // Backend requires { confirm: true } (accidental-trigger guard). UI already
+  // shows a confirm dialog before calling this. Apply can take a while
+  // (git pull + dashboard build + migrate + restart).
+  return fetchApi("/api/update/apply", {
+    method: "POST",
+    body: JSON.stringify({ confirm: true }),
+    timeoutMs: 180_000,
+  });
 }
 
 export async function clearProxyPool() {
