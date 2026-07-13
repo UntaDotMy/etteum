@@ -112,16 +112,27 @@ function forEachWorkerSession(job: GrokFarmJobState, fn: (sid: string) => void) 
   for (const sid of ids) fn(sid);
 }
 
+/** Cache import checks — spawning Python+camoufox is multi-second and was re-run on every modal open. */
+const camoufoxOkCache = new Map<string, { ok: boolean; at: number }>();
+const CAMOUFOX_CACHE_MS = 120_000;
+let resolvePythonCache: { python: string | null; at: number } | null = null;
+const RESOLVE_PYTHON_CACHE_MS = 60_000;
+
 /** True if this interpreter can import camoufox (farm requirement). */
 function pythonHasCamoufox(pythonExe: string): boolean {
+  const key = pythonExe;
+  const hit = camoufoxOkCache.get(key);
+  if (hit && Date.now() - hit.at < CAMOUFOX_CACHE_MS) return hit.ok;
   try {
     execFileSync(
       pythonExe,
       ["-c", "import camoufox; import playwright"],
-      { encoding: "utf8", timeout: 15_000, stdio: ["ignore", "pipe", "pipe"] },
+      { encoding: "utf8", timeout: 12_000, stdio: ["ignore", "pipe", "pipe"] },
     );
+    camoufoxOkCache.set(key, { ok: true, at: Date.now() });
     return true;
   } catch {
+    camoufoxOkCache.set(key, { ok: false, at: Date.now() });
     return false;
   }
 }
@@ -134,6 +145,10 @@ function pythonHasCamoufox(pythonExe: string): boolean {
  *   4. Optional farm-local .venv only as last resort (not required)
  */
 function resolvePython(): string | null {
+  if (resolvePythonCache && Date.now() - resolvePythonCache.at < RESOLVE_PYTHON_CACHE_MS) {
+    return resolvePythonCache.python;
+  }
+
   const candidates: string[] = [];
 
   const push = (p: string | null | undefined) => {
@@ -148,6 +163,7 @@ function resolvePython(): string | null {
   };
 
   // Official etteum interpreter first (scripts/auth/.venv via config.pythonPath).
+  // Prefer these before expensive PATH probes — usually the right answer.
   push(config.pythonPath);
   push(process.env.PYTHON_PATH);
   push(process.env.ETTEUM_PYTHON);
@@ -159,6 +175,21 @@ function resolvePython(): string | null {
       : path.join(config.authScriptCwd, ".venv", "bin", "python");
   push(authVenv);
 
+  // Fast path: first existing candidate with camoufox (auth venv usually).
+  for (const c of candidates) {
+    if (path.basename(c) === c) {
+      if (pythonHasCamoufox(c)) {
+        resolvePythonCache = { python: c, at: Date.now() };
+        return c;
+      }
+      continue;
+    }
+    if (existsSync(c) && pythonHasCamoufox(c)) {
+      resolvePythonCache = { python: c, at: Date.now() };
+      return c;
+    }
+  }
+
   // System installs that commonly have camoufox when install.ps1 ran pip global.
   if (process.platform === "win32") {
     const home = process.env.USERPROFILE || "";
@@ -169,7 +200,7 @@ function resolvePython(): string | null {
     }
   }
 
-  // PATH lookup last among "shared" interpreters.
+  // PATH lookup only if preferred paths failed (each where/which + import is costly).
   const whichCmds =
     process.platform === "win32"
       ? [["where", "python"], ["where", "python3"], ["where", "py"]]
@@ -192,11 +223,16 @@ function resolvePython(): string | null {
   // Prefer any candidate that already has camoufox+playwright.
   for (const c of candidates) {
     if (path.basename(c) === c) {
-      // bare name — still try import
-      if (pythonHasCamoufox(c)) return c;
+      if (pythonHasCamoufox(c)) {
+        resolvePythonCache = { python: c, at: Date.now() };
+        return c;
+      }
       continue;
     }
-    if (existsSync(c) && pythonHasCamoufox(c)) return c;
+    if (existsSync(c) && pythonHasCamoufox(c)) {
+      resolvePythonCache = { python: c, at: Date.now() };
+      return c;
+    }
   }
 
   // Farm-local venv only if someone created it (optional, not required).
@@ -204,12 +240,16 @@ function resolvePython(): string | null {
     process.platform === "win32"
       ? path.join(farmRoot(), ".venv", "Scripts", "python.exe")
       : path.join(farmRoot(), ".venv", "bin", "python");
-  if (existsSync(farmVenv) && pythonHasCamoufox(farmVenv)) return farmVenv;
+  if (existsSync(farmVenv) && pythonHasCamoufox(farmVenv)) {
+    resolvePythonCache = { python: farmVenv, at: Date.now() };
+    return farmVenv;
+  }
 
   // Fall back to etteum pythonPath even without camoufox so the error message
   // from farm.py / our validate is clear and points at scripts/auth deps.
-  if (config.pythonPath) return config.pythonPath;
-  return candidates[0] ?? null;
+  const fallback = config.pythonPath || candidates[0] || null;
+  resolvePythonCache = { python: fallback, at: Date.now() };
+  return fallback;
 }
 
 function farmRoot(): string {
@@ -524,7 +564,8 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     "-y",
   ];
 
-  // Overview session (job-level logs). Per-worker cards appear as workers start.
+  // Overview session (job-level logs). Worker cards are pre-registered so Browser
+  // Logs is not empty while Python/Camoufox boots (can take many seconds).
   registerSession({
     sessionId: id,
     accountId: 0,
@@ -544,6 +585,25 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     startedAt: Date.now(),
   });
 
+  // Concurrent slots 1..N → N Bot Logs cards immediately (phase: starting).
+  for (let w = 1; w <= concurrent; w++) {
+    const sid = ensureWorkerSession(job, w);
+    appendStep(sid, "queued", "Waiting for farm worker / browser…", "grok");
+    updatePhase(sid, "starting", "Waiting for farm worker / browser…");
+    broadcast({
+      type: "login_progress",
+      data: {
+        provider: "grok",
+        step: "starting",
+        message: `Worker #${w} slot ready — launching farm process…`,
+        jobId: id,
+        email: `Grok worker #${w}`,
+        sessionId: sid,
+        workerId: w,
+      },
+    });
+  }
+
   pushLog(job, `[etteum] starting farm (always headless, shared Camoufox): ${python}`);
   pushLog(job, `[etteum] args: ${args.slice(1).join(" ")}`);
   const proc = spawn(python, args, {
@@ -558,6 +618,10 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   // Attach proc for cancel from Browser Logs (overview + any workers).
   const sess = getSession(id);
   if (sess) sess.proc = proc;
+  for (const sid of job.workerSessionIds) {
+    const w = getSession(sid);
+    if (w) w.proc = proc;
+  }
 
   // Line-buffer stdout/stderr — ETTEUM_JSON frames are multi-KB; Node chunks
   // mid-line. Same pattern as pythonFlow.ts / runner.ts.

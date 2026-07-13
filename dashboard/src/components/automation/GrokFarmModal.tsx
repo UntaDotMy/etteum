@@ -43,7 +43,10 @@ interface Props {
 
 export default function GrokFarmModal({ onClose, onStarted }: Props) {
   const [form, setForm] = useState<GrokFarmForm>(empty);
-  const [loading, setLoading] = useState(true);
+  /** Config is a fast DB read — form is usable immediately with defaults. */
+  const [configLoading, setConfigLoading] = useState(true);
+  /** Setup probes Python/camoufox (cached server-side) — do not block the form. */
+  const [setupLoading, setSetupLoading] = useState(true);
   const [starting, setStarting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [setup, setSetup] = useState<{
@@ -56,22 +59,49 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
 
   useEffect(() => {
     let cancelled = false;
+    // Load config first (settings row) so the form fills without waiting on Python.
     (async () => {
       try {
-        const [cfgRes, setupRes] = await Promise.all([
-          fetchApi<{ config: Partial<GrokFarmForm> }>("/api/grok-farm/config"),
-          fetchApi<{ ok: boolean; errors: string[]; python: string | null }>("/api/grok-farm/setup"),
-        ]);
+        const cfgRes = await fetchApi<{ config: Partial<GrokFarmForm> }>("/api/grok-farm/config");
         if (cancelled) return;
-        setForm((f) => ({ ...f, ...cfgRes.config, imapPass: cfgRes.config.imapPass === "••••••••" ? "" : (cfgRes.config.imapPass || "") }));
-        setSetup(setupRes);
+        setForm((f) => ({
+          ...f,
+          ...cfgRes.config,
+          imapPass: cfgRes.config.imapPass === "••••••••" ? "" : (cfgRes.config.imapPass || ""),
+        }));
       } catch (e) {
         if (!cancelled) setError(e instanceof Error ? e.message : String(e));
       } finally {
-        if (!cancelled) setLoading(false);
+        if (!cancelled) setConfigLoading(false);
       }
     })();
-    return () => { cancelled = true; };
+    // Setup in parallel; may take longer the first time (Python import), then cached.
+    (async () => {
+      try {
+        const setupRes = await fetchApi<{
+          ok: boolean;
+          errors: string[];
+          python: string | null;
+          hasCamoufox?: boolean;
+          authVenv?: string;
+        }>("/api/grok-farm/setup");
+        if (cancelled) return;
+        setSetup(setupRes);
+      } catch (e) {
+        if (!cancelled) {
+          setSetup({
+            ok: false,
+            errors: [e instanceof Error ? e.message : String(e)],
+            python: null,
+          });
+        }
+      } finally {
+        if (!cancelled) setSetupLoading(false);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
   function set<K extends keyof GrokFarmForm>(key: K, value: GrokFarmForm[K]) {
@@ -141,7 +171,14 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
         </div>
 
         <div className="space-y-5 p-6">
-          {loading && <p className="text-sm text-[var(--muted-foreground)]">Loading config…</p>}
+          {configLoading && (
+            <p className="text-xs text-[var(--muted-foreground)]">Loading saved config…</p>
+          )}
+          {setupLoading && (
+            <p className="text-xs text-[var(--muted-foreground)]">
+              Checking Python / Camoufox (first open can take a few seconds; then cached)…
+            </p>
+          )}
 
           {setup && !setup.ok && (
             <div className="rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)] space-y-1">
@@ -285,7 +322,10 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
 
         <div className="flex justify-end gap-2 border-t border-[var(--border)] p-4">
           <Button variant="outline" onClick={onClose} disabled={starting}>Cancel</Button>
-          <Button onClick={handleStart} disabled={starting || loading}>
+          <Button
+            onClick={handleStart}
+            disabled={starting || configLoading || (setup !== null && !setup.ok)}
+          >
             {starting ? "Starting…" : "Start farm"}
           </Button>
         </div>
