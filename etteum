@@ -281,16 +281,17 @@ do_update() {
   echo "🔗 Refreshing CLI shims..."
   refresh_cli_home_pointer
 
-  # Only reinstall if package.json changed
-  if [ -f package.json ] && [ "$(stat -c%Y package.json 2>/dev/null || stat -f%m package.json 2>/dev/null)" -gt "$(stat -c%Y node_modules/.package-lock.json 2>/dev/null || stat -f%m node_modules/.package-lock.json 2>/dev/null || echo 0)" ]; then
-    echo "📦 Dependencies changed — reinstalling..."
-    bun install
-    (cd dashboard && bun install)
-  else
-    echo "✅ Dependencies up to date — skipping install"
+  # Root and dashboard are separate package trees (not a monorepo workspace).
+  # Always install both so new dashboard deps (e.g. react-markdown) land before build.
+  echo "📦 Installing dependencies..."
+  bun install
+  if [ ! -d dashboard ]; then
+    echo "❌ Dashboard folder missing at $PROJECT_DIR/dashboard"
+    exit 1
   fi
+  echo "📦 Installing dashboard dependencies..."
+  (cd dashboard && bun install)
 
-  # Only rebuild if source files changed
   echo " Building dashboard..."
   (cd dashboard && bun run build)
 

@@ -277,6 +277,17 @@ function Invoke-Update {
       Write-Host "Dashboard folder missing at $dashDir" -ForegroundColor Red
       exit 1
     }
+    # Dashboard is a separate package (not a workspace). Root bun install does
+    # not install react-markdown / remark-gfm etc. into dashboard/node_modules.
+    Write-Host "Installing dashboard dependencies..."
+    Push-Location $dashDir
+    try {
+      bun install
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "dashboard bun install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        exit 1
+      }
+    } finally { Pop-Location }
     Write-Host "Building dashboard..."
     Push-Location $dashDir
     try {
@@ -297,9 +308,26 @@ function Invoke-Update {
 }
 
 function Invoke-Build {
-  Write-Host "Building dashboard..."
-  Push-Location (Join-Path $ProjectDir "dashboard")
-  try { bun run build } finally { Pop-Location }
+  $dashDir = Join-Path $ProjectDir "dashboard"
+  if (-not (Test-Path -LiteralPath $dashDir)) {
+    Write-Host "Dashboard folder missing at $dashDir" -ForegroundColor Red
+    exit 1
+  }
+  Write-Host "Installing dashboard dependencies..."
+  Push-Location $dashDir
+  try {
+    bun install
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "dashboard bun install failed (exit $LASTEXITCODE)." -ForegroundColor Red
+      exit 1
+    }
+    Write-Host "Building dashboard..."
+    bun run build
+    if ($LASTEXITCODE -ne 0) {
+      Write-Host "Dashboard build failed (exit $LASTEXITCODE)." -ForegroundColor Red
+      exit 1
+    }
+  } finally { Pop-Location }
   Write-Host "Restarting..."
   Invoke-Stop
   Start-Sleep -Seconds 1
