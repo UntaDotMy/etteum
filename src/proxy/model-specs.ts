@@ -132,11 +132,6 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
   // Cursor docs: 200k context for composer-2.5 (xAI API models page has no entry).
   "composer-2.5":           { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  // Imagine image/video SKUs (docs.x.ai) — generation models, not chat context.
-  "grok-imagine-image":           { contextWindow: 1_000, maxOutput: 1, thinking: false, vision: false },
-  "grok-imagine-image-quality":   { contextWindow: 1_000, maxOutput: 1, thinking: false, vision: false },
-  "grok-imagine-video":           { contextWindow: 1_000, maxOutput: 1, thinking: false, vision: false },
-  "grok-imagine-video-1.5":       { contextWindow: 1_000, maxOutput: 1, thinking: false, vision: false },
   "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.3-reasoning":     { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.3-heavy":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },

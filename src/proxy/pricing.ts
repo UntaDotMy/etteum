@@ -124,16 +124,6 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // xAI docs do NOT list composer-2.5 on API pricing (Grok Build subscription
   // surface); rates used for cost UI when tokens are reported.
   "composer-2.5":                 { input: 0.50,  output: 2.50,  cached: 0.20,  reasoning: 2.50,   cacheCreation: 0.625 },
-  // Imagine — docs.x.ai Imagine Pricing (not token-billed). Unit prices mirrored
-  // into token fields for catalog/UI lookup only:
-  //   grok-imagine-image         $0.02 / image
-  //   grok-imagine-image-quality $0.05 / image
-  //   grok-imagine-video         $0.05 / sec
-  //   grok-imagine-video-1.5     $0.08 / sec
-  "grok-imagine-image":           { input: 0.02,  output: 0.02,  cached: 0.02,  reasoning: 0.02,   cacheCreation: 0.02  },
-  "grok-imagine-image-quality":   { input: 0.05,  output: 0.05,  cached: 0.05,  reasoning: 0.05,   cacheCreation: 0.05  },
-  "grok-imagine-video":           { input: 0.05,  output: 0.05,  cached: 0.05,  reasoning: 0.05,   cacheCreation: 0.05  },
-  "grok-imagine-video-1.5":       { input: 0.08,  output: 0.08,  cached: 0.08,  reasoning: 0.08,   cacheCreation: 0.08  },
   "grok-4.3":                     { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },
   "grok-4.3-reasoning":           { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },
   "grok-4.3-heavy":               { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },
