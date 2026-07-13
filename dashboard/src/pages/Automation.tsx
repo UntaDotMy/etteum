@@ -6,6 +6,7 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/com
 import { Progress } from "@/components/ui/progress";
 import StartAutomationModal from "@/components/automation/StartAutomationModal";
 import GrokFarmModal from "@/components/automation/GrokFarmModal";
+import CodeBuddyCnModal from "@/components/automation/CodeBuddyCnModal";
 import { fetchAuthQueue, importAccounts } from "@/lib/api";
 import { fetchBrowserSessions, type BrowserSessionInfo } from "@/lib/browserApi";
 import { fetchApi } from "@/lib/api";
@@ -40,8 +41,10 @@ interface ProviderConfig {
   description: string;
   icon: LucideIcon;
   comingSoon?: boolean;
-  engine: "camoufox" | "native" | "api" | "farm";
+  engine: "camoufox" | "native" | "api" | "farm" | "phone";
   farmModal?: boolean;
+  /** Dedicated CodeBuddy CN 5sim phone farm modal */
+  cbcModal?: boolean;
 }
 
 const PROVIDERS: ProviderConfig[] = [
@@ -95,13 +98,14 @@ const PROVIDERS: ProviderConfig[] = [
     farmModal: true,
   },
   {
-    value: "codebuddy-cn",
+    value: "codebuddy-china",
     label: "CodeBuddy CN",
-    subtitle: "OTP + HTTP API (no browser)",
-    description: "Warpize OTP registration — no live frame stream.",
+    subtitle: "5sim phone OTP → mint ck_* API key",
+    description:
+      "Rents a 5sim number, signs up on codebuddy.cn, mints an API key, imports into the codebuddy-china pool. Live frames on Browser Logs.",
     icon: Bot,
-    engine: "api",
-    comingSoon: true,
+    engine: "phone",
+    cbcModal: true,
   },
 ];
 
@@ -134,8 +138,17 @@ type GrokFarmJob = {
   imported?: number;
   failed?: number;
   lastMessage?: string;
-  config?: { maxAccounts?: number; concurrent?: number; mailMode?: string };
+  config?: { maxAccounts?: number; concurrent?: number; mailMode?: string; count?: number; country?: string };
   logTail?: string[];
+};
+
+type CbcFarmJob = {
+  id: string;
+  status: string;
+  imported?: number;
+  failed?: number;
+  lastMessage?: string;
+  config?: { count?: number; concurrent?: number; country?: string };
 };
 
 function isWorkerSession(s: BrowserSessionInfo): boolean {
@@ -186,10 +199,12 @@ export default function Automation() {
   const wsStatus = useWsStatus();
   const [modalProvider, setModalProvider] = useState<ProviderConfig | null>(null);
   const [grokFarmOpen, setGrokFarmOpen] = useState(false);
+  const [cbcFarmOpen, setCbcFarmOpen] = useState(false);
   const [live, setLive] = useState<LiveEvent[]>([]);
   const [queue, setQueue] = useState<QueueStatus | null>(null);
   const [sessions, setSessions] = useState<BrowserSessionInfo[]>([]);
   const [farmJob, setFarmJob] = useState<GrokFarmJob | null>(null);
+  const [cbcJob, setCbcJob] = useState<CbcFarmJob | null>(null);
   const [sessionSuccess, setSessionSuccess] = useState(0);
   const [sessionFailed, setSessionFailed] = useState(0);
   const [stopping, setStopping] = useState(false);
@@ -200,14 +215,18 @@ export default function Automation() {
 
   const refreshCockpit = useCallback(async () => {
     try {
-      const [q, sess, farm] = await Promise.all([
+      const [q, sess, farm, cbc] = await Promise.all([
         fetchAuthQueue().catch(() => null) as Promise<QueueStatus | null>,
         fetchBrowserSessions().catch(() => [] as BrowserSessionInfo[]),
         fetchApi<{ job: GrokFarmJob | null }>("/api/grok-farm/jobs/latest").catch(() => ({ job: null })),
+        fetchApi<{ job: CbcFarmJob | null }>("/api/automation/codebuddy-cn/jobs/latest").catch(() => ({
+          job: null,
+        })),
       ]);
       if (q) setQueue(q);
       setSessions((sess || []).filter(isWorkerSession));
       setFarmJob(farm?.job ?? null);
+      setCbcJob(cbc?.job ?? null);
     } catch {
       /* ignore poll errors */
     }
@@ -289,19 +308,26 @@ export default function Automation() {
   const success = Math.max(queue?.totalSuccess ?? 0, sessionSuccess);
   const failed = Math.max(queue?.totalFailed ?? 0, sessionFailed);
   const farmRunning = farmJob?.status === "running";
+  const cbcRunning = cbcJob?.status === "running";
   const farmTarget = farmJob?.config?.maxAccounts ?? 0;
+  const cbcTarget = cbcJob?.config?.count ?? 0;
   const farmDone = (farmJob?.imported ?? 0) + (farmJob?.failed ?? 0);
+  const cbcDone = (cbcJob?.imported ?? 0) + (cbcJob?.failed ?? 0);
 
   const batchTotal = useMemo(() => {
     // Best-effort total for progress bar: queue leftovers + already processed + farm target.
     const loginTotal = queued + active + processed;
-    if (farmRunning && farmTarget > 0) return Math.max(loginTotal, farmTarget);
-    return loginTotal;
-  }, [queued, active, processed, farmRunning, farmTarget]);
+    let t = loginTotal;
+    if (farmRunning && farmTarget > 0) t = Math.max(t, farmTarget);
+    if (cbcRunning && cbcTarget > 0) t = Math.max(t, cbcTarget);
+    return t;
+  }, [queued, active, processed, farmRunning, farmTarget, cbcRunning, cbcTarget]);
 
-  const batchDone = processed + (farmRunning ? farmDone : 0);
+  const batchDone =
+    processed + (farmRunning ? farmDone : 0) + (cbcRunning ? cbcDone : 0);
   const pct = batchTotal > 0 ? Math.min(100, Math.round((batchDone / batchTotal) * 100)) : 0;
-  const isBusy = Boolean(queue?.processing) || active > 0 || queued > 0 || farmRunning;
+  const isBusy =
+    Boolean(queue?.processing) || active > 0 || queued > 0 || farmRunning || cbcRunning;
 
   async function handleStart(config: {
     mode: "empas" | "refresh-token";
@@ -351,6 +377,9 @@ export default function Automation() {
       await fetchApi("/api/auth/queue", { method: "DELETE" });
       if (farmRunning) {
         await fetchApi("/api/grok-farm/cancel", { method: "POST" }).catch(() => null);
+      }
+      if (cbcRunning) {
+        await fetchApi("/api/automation/codebuddy-cn/cancel", { method: "POST" }).catch(() => null);
       }
       pushLive({
         ts: Date.now(),
@@ -449,7 +478,12 @@ export default function Automation() {
               <div className="flex items-center justify-between text-xs text-[var(--muted-foreground)]">
                 <span>
                   {batchDone} / {batchTotal || "—"} complete
-                  {farmRunning ? ` · farm ${farmJob?.imported ?? 0} ok / ${farmJob?.failed ?? 0} fail` : ""}
+                  {farmRunning
+                    ? ` · grok farm ${farmJob?.imported ?? 0} ok / ${farmJob?.failed ?? 0} fail`
+                    : ""}
+                  {cbcRunning
+                    ? ` · cbc farm ${cbcJob?.imported ?? 0} ok / ${cbcJob?.failed ?? 0} fail`
+                    : ""}
                 </span>
                 <span className="tabular-nums font-medium text-[var(--foreground)]">{pct}%</span>
               </div>
@@ -457,7 +491,7 @@ export default function Automation() {
             </div>
           )}
 
-          {/* Farm job strip */}
+          {/* Farm job strips */}
           {farmJob && (
             <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2.5">
               <div className="flex flex-wrap items-center gap-2 text-xs">
@@ -487,6 +521,40 @@ export default function Automation() {
               {farmJob.lastMessage && (
                 <p className="mt-1 truncate text-[11px] text-[var(--muted-foreground)]">
                   {farmJob.lastMessage}
+                </p>
+              )}
+            </div>
+          )}
+
+          {cbcJob && (
+            <div className="rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 px-3 py-2.5">
+              <div className="flex flex-wrap items-center gap-2 text-xs">
+                <Bot className="h-3.5 w-3.5 text-[var(--primary)]" />
+                <span className="font-medium text-[var(--foreground)]">CodeBuddy CN Farm</span>
+                <Badge
+                  variant={
+                    cbcJob.status === "running"
+                      ? "info"
+                      : cbcJob.status === "completed"
+                        ? "success"
+                        : cbcJob.status === "failed" || cbcJob.status === "cancelled"
+                          ? "error"
+                          : "secondary"
+                  }
+                >
+                  {cbcJob.status}
+                </Badge>
+                <span className="text-[var(--muted-foreground)]">
+                  target {cbcJob.config?.count ?? "—"} · concurrent{" "}
+                  {cbcJob.config?.concurrent ?? "—"} · country {cbcJob.config?.country ?? "—"}
+                </span>
+                <span className="ml-auto tabular-nums text-[var(--muted-foreground)]">
+                  +{cbcJob.imported ?? 0} imported / {cbcJob.failed ?? 0} failed
+                </span>
+              </div>
+              {cbcJob.lastMessage && (
+                <p className="mt-1 truncate text-[11px] text-[var(--muted-foreground)]">
+                  {cbcJob.lastMessage}
                 </p>
               )}
             </div>
@@ -706,6 +774,7 @@ export default function Automation() {
                         size="sm"
                         onClick={() => {
                           if (p.farmModal) setGrokFarmOpen(true);
+                          else if (p.cbcModal) setCbcFarmOpen(true);
                           else setModalProvider(p);
                         }}
                       >
@@ -746,7 +815,25 @@ export default function Automation() {
               level: "info",
             });
             void refreshCockpit();
-            // Stay on Automation; user can open Browser Logs for frames.
+          }}
+        />
+      )}
+
+      {cbcFarmOpen && (
+        <CodeBuddyCnModal
+          onClose={() => setCbcFarmOpen(false)}
+          onStarted={(jobId) => {
+            setCbcFarmOpen(false);
+            setSessionSuccess(0);
+            setSessionFailed(0);
+            pushLive({
+              ts: Date.now(),
+              provider: "codebuddy-china",
+              step: "farm",
+              message: jobId ? `CodeBuddy CN farm started ${jobId}` : "CodeBuddy CN farm started",
+              level: "info",
+            });
+            void refreshCockpit();
           }}
         />
       )}
