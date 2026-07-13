@@ -214,7 +214,21 @@ export function BrowserSessionCard({ session, challenge }: Props) {
             )}
           />
         ) : showEnded ? (
-          <p className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">Session ended.</p>
+          <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
+            <p className="text-sm text-[var(--muted-foreground)]">Session ended.</p>
+            {session.lastMessage && (
+              <p
+                className={cn(
+                  "max-w-[95%] text-xs leading-relaxed",
+                  session.phase === "complete"
+                    ? "text-[var(--success)]"
+                    : "text-[var(--error)]",
+                )}
+              >
+                {session.lastMessage}
+              </p>
+            )}
+          </div>
         ) : (
           <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
             <Loader2 className="h-5 w-5 animate-spin text-[var(--primary)]" />
