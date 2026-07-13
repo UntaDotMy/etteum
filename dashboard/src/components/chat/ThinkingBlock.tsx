@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import { Brain, ChevronDown, ChevronRight, Loader2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 
@@ -13,6 +13,7 @@ type ThinkingBlockProps = {
 
 /**
  * Collapsible chain-of-thought / reasoning panel for assistant replies.
+ * While streaming, the body stays open and auto-scrolls to the latest tokens.
  */
 export function ThinkingBlock({
   content,
@@ -21,6 +22,27 @@ export function ThinkingBlock({
   className,
 }: ThinkingBlockProps) {
   const [open, setOpen] = useState(defaultOpen ?? streaming);
+  const bodyRef = useRef<HTMLPreElement>(null);
+  const stickRef = useRef(true);
+
+  // Stay open while reasoning is in flight (re-open if user collapsed then new stream starts).
+  useEffect(() => {
+    if (streaming) setOpen(true);
+  }, [streaming]);
+
+  // Auto-scroll reasoning body to bottom while generating (unless user scrolled up).
+  useEffect(() => {
+    if (!open || !bodyRef.current) return;
+    const el = bodyRef.current;
+    if (!streaming) {
+      // Final content: snap once to end if still stuck.
+      if (stickRef.current) el.scrollTop = el.scrollHeight;
+      return;
+    }
+    if (stickRef.current) {
+      el.scrollTop = el.scrollHeight;
+    }
+  }, [content, open, streaming]);
 
   if (!content && !streaming) return null;
 
@@ -54,7 +76,16 @@ export function ThinkingBlock({
       {open && (
         <div className="border-t border-[var(--border)] px-2.5 py-2">
           {content ? (
-            <pre className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--muted-foreground)]">
+            <pre
+              ref={bodyRef}
+              onScroll={() => {
+                const el = bodyRef.current;
+                if (!el) return;
+                const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+                stickRef.current = dist < 48;
+              }}
+              className="max-h-56 overflow-y-auto whitespace-pre-wrap break-words font-mono text-[11px] leading-relaxed text-[var(--muted-foreground)]"
+            >
               {content}
               {streaming && (
                 <span className="ml-0.5 inline-block h-3 w-1 animate-pulse bg-[var(--primary)]/50 align-middle" />

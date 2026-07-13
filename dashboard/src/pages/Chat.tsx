@@ -414,6 +414,9 @@ export default function Chat() {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesScrollRef = useRef<HTMLDivElement>(null);
+  /** When true, stream/output keeps the message list pinned to the bottom. */
+  const stickMessagesToBottomRef = useRef(true);
   const inputRef = useRef<HTMLTextAreaElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
@@ -428,9 +431,24 @@ export default function Chat() {
     });
   }, []);
 
+  /** Pin message list to bottom without scrolling the whole page (instant while streaming). */
+  const scrollMessagesToBottom = useCallback((force = false) => {
+    const el = messagesScrollRef.current;
+    if (!el) return;
+    if (!force && !stickMessagesToBottomRef.current) return;
+    // Direct scrollTop is reliable during rapid token updates; smooth fights the stream.
+    el.scrollTop = el.scrollHeight;
+  }, []);
+
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.messages, streamingText, streamingThinking]);
+    scrollMessagesToBottom();
+  }, [active?.messages, streamingText, streamingThinking, streaming, scrollMessagesToBottom]);
+
+  // New conversation / switch: always show latest.
+  useEffect(() => {
+    stickMessagesToBottomRef.current = true;
+    scrollMessagesToBottom(true);
+  }, [activeId, scrollMessagesToBottom]);
 
   useEffect(() => {
     if (inputRef.current) {
@@ -662,6 +680,9 @@ export default function Chat() {
     setStreaming(true);
     setStreamingText("");
     setStreamingThinking("");
+    stickMessagesToBottomRef.current = true;
+    // Next frame so the user bubble is in the DOM before we pin to bottom.
+    requestAnimationFrame(() => scrollMessagesToBottom(true));
 
     // ── Image / video generation models (Canva Magic Media etc.) ───────────
     const gen = mediaGenKind(model);
@@ -1096,8 +1117,17 @@ export default function Chat() {
           </div>
         )}
 
-        {/* Messages */}
-        <div className="flex-1 overflow-y-auto">
+        {/* Messages — scroll container (do not use scrollIntoView; it moves the page). */}
+        <div
+          ref={messagesScrollRef}
+          className="flex-1 overflow-y-auto"
+          onScroll={() => {
+            const el = messagesScrollRef.current;
+            if (!el) return;
+            const dist = el.scrollHeight - el.scrollTop - el.clientHeight;
+            stickMessagesToBottomRef.current = dist < 80;
+          }}
+        >
           {active && active.messages.length === 0 && !streaming && (
             <div className="flex h-full flex-col items-center justify-center px-4 py-16 text-center">
               <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
@@ -1260,7 +1290,8 @@ export default function Chat() {
                     {streamingThinking ? (
                       <ThinkingBlock
                         content={streamingThinking}
-                        streaming={!streamingText}
+                        // Keep reasoning streaming (and auto-scroll) until reply text finishes too.
+                        streaming={streaming}
                         defaultOpen
                       />
                     ) : null}
