@@ -556,10 +556,8 @@ export function registerActionRoutes(router: Hono): void {
     // Import auth runner dynamically to avoid circular deps
     const { loginAccount } = await import("../../auth/runner");
 
-    // All providers (including antigravity) now route through the TS+Camoufox
-    // automation layer . The nodriver visible-frame manual-login
-    // flow has been removed; the stealth engine surfaces challenges as a `manual`
-    // result via the standard loginAccount path.
+    // All providers (including antigravity) route through Camoufox automation.
+    // Challenges surface as a `manual` result via the standard loginAccount path.
     const result = await loginAccount(account);
 
     return c.json(result);
@@ -704,13 +702,11 @@ export function registerActionRoutes(router: Hono): void {
     }
 
     try {
-      // Use nodriver to open a headed Chrome browser
-      const nodriverMod = await import("nodriver");
-      const browser = await nodriverMod.start({ headless: false });
+      // Headed Chromium via Playwright (shared dep) — leaves the window open for the user.
+      const { chromium } = await import("playwright");
 
       if (account.provider.startsWith("kiro")) {
         if (!tokens.refresh_token) {
-          await browser.stop();
           return c.json({ error: "No refresh token available" }, 400);
         }
 
@@ -722,7 +718,6 @@ export function registerActionRoutes(router: Hono): void {
         });
 
         if (!refreshResp.ok) {
-          await browser.stop();
           return c.json({ error: `Token refresh failed: ${refreshResp.status}` }, 500);
         }
 
@@ -758,30 +753,25 @@ export function registerActionRoutes(router: Hono): void {
           } catch { /* ignore */ }
         }
 
-        // Set cookies via browser CDP
-        const page = browser.pages[0] || await browser.get("about:blank");
-        await page.send("Network.setCookie", {
-          name: "AccessToken", value: accessToken || "", domain: "app.kiro.dev", path: "/",
-        });
-        await page.send("Network.setCookie", {
-          name: "RefreshToken", value: tokens.refresh_token, domain: "app.kiro.dev", path: "/",
-        });
+        const browser = await chromium.launch({ headless: false });
+        const context = await browser.newContext();
+        const cookies: Array<{ name: string; value: string; domain: string; path: string }> = [
+          { name: "AccessToken", value: accessToken || "", domain: "app.kiro.dev", path: "/" },
+          { name: "RefreshToken", value: String(tokens.refresh_token || ""), domain: "app.kiro.dev", path: "/" },
+          { name: "Idp", value: "Google", domain: "app.kiro.dev", path: "/" },
+        ];
         if (userId) {
-          await page.send("Network.setCookie", {
-            name: "UserId", value: userId, domain: "app.kiro.dev", path: "/",
-          });
+          cookies.push({ name: "UserId", value: userId, domain: "app.kiro.dev", path: "/" });
         }
-        await page.send("Network.setCookie", {
-          name: "Idp", value: "Google", domain: "app.kiro.dev", path: "/",
-        });
-
-        await page.navigate("https://app.kiro.dev/settings/account");
+        await context.addCookies(cookies);
+        const page = await context.newPage();
+        await page.goto("https://app.kiro.dev/settings/account", { waitUntil: "domcontentloaded" });
+        // Intentionally leave the browser open for the user (matches old open-panel UX).
         return c.json({ success: true, message: `Browser opened for ${account.email}` });
 
       } else if (account.provider === "qoder") {
         const webCookie = tokens.web_cookie as string | undefined;
         if (!webCookie) {
-          await browser.stop();
           return c.json({ error: "No web_cookie available for Qoder account" }, 400);
         }
 
@@ -802,18 +792,22 @@ export function registerActionRoutes(router: Hono): void {
           });
 
         if (qoderCookies.length === 0) {
-          await browser.stop();
           return c.json({ error: "No valid Qoder cookies found in web_cookie" }, 400);
         }
 
-        const page = browser.pages[0] || await browser.get("about:blank");
-        for (const cookie of qoderCookies) {
-          await page.send("Network.setCookie", {
-            name: cookie.name, value: cookie.value, domain: "qoder.com", path: "/",
-          });
-        }
-
-        await page.navigate("https://qoder.com/account/profile");
+        const browser = await chromium.launch({ headless: false });
+        const context = await browser.newContext();
+        await context.addCookies(
+          qoderCookies.map((c) => ({
+            name: c.name,
+            value: c.value,
+            domain: "qoder.com",
+            path: "/",
+          })),
+        );
+        const page = await context.newPage();
+        await page.goto("https://qoder.com/account/profile", { waitUntil: "domcontentloaded" });
+        // Leave browser open for the user.
         return c.json({
           success: true,
           message: `Browser opened for ${account.email}`,
@@ -821,7 +815,6 @@ export function registerActionRoutes(router: Hono): void {
         });
 
       } else {
-        await browser.stop();
         return c.json({
           error: `Open panel not supported for provider: ${account.provider}`,
         }, 400);

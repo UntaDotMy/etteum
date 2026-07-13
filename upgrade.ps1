@@ -163,10 +163,18 @@ if (-not $venvPy) {
         if (Test-Path $cand) { $venvPy = $cand; break }
     }
     if (-not $venvPy) { Fail "Failed to create Python venv. Try manually: python -m venv $venvDir" }
+}
+if ($venvPy) {
+    Info "Syncing shared auth venv (camoufox + playwright for login + farms)..."
     & $venvPy -m pip install --no-input --progress-bar off -r (Join-Path $ProjectDir "scripts\auth\requirements.txt") 2>&1 | Out-Null
-    Ok "Python venv rebuilt"
+    # Drop legacy nodriver; never uninstall camoufox.
+    & $venvPy -m pip uninstall -y --no-input nodriver 2>&1 | Out-Null
+    if ($env:ETTEUM_SKIP_BROWSERS -ne "1") {
+        & $venvPy -m camoufox fetch 2>&1 | Out-Null
+    }
+    Ok "Python auth venv ready (shared Camoufox)"
 } else {
-    Ok "Python venv OK"
+    Warn "Python venv missing — run install.ps1 or: python -m venv scripts\auth\.venv"
 }
 
 # 9. Restart server if it was running

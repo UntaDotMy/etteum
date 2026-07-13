@@ -289,8 +289,8 @@ class LoginQueue {
     });
 
     // Antigravity uses the per-account frame-streaming path (one isolated
-    // nodriver browser per account, like ennowxai's per-account kiro_login.py).
-    // Other providers keep the batch_login.py multi-worker path.
+    // Camoufox browser per account, like enowxai's per-account kiro_login.py).
+    // Other providers keep the batch multi-worker path.
     const allAntigravity = manifest.every((m) => m.provider === "antigravity");
     if (allAntigravity) {
       await this.runAntigravityBatch(manifest, generation, accountRows);
@@ -301,17 +301,13 @@ class LoginQueue {
   }
 
   /**
-   * Antigravity batch: spawn ONE antigravity_manual_login.py per account, up to
-   * `this.concurrency` at a time. Each spawn = one isolated nodriver browser that
-   * streams frames continuously (the Browser Logs page shows N live previews).
-   * Mirrors ennowxai's model where the backend spawns kiro_login.py per account
-   * and manages concurrency. runAntigravityManualLogin is self-contained: it
-   * registers its own session, bridges events, handles captcha, and applies the
-   * DB result. We just throttle how many run at once.
+   * Antigravity batch: one loginAccount() per account, up to `this.concurrency`
+   * at a time. Each run = one isolated Camoufox browser that streams frames
+   * (Browser Logs shows N live previews). Mirrors enowxai's per-account model.
+   * loginAccount is self-contained: session registry, events, captcha, DB.
    *
-   * When concurrency > 1, browsers run headless to avoid opening multiple
-   * visible windows and to allow the dashboard frame viewer to handle all
-   * sessions cleanly. CAPTCHA challenges still round-trip through the dashboard.
+   * When concurrency > 1, browsers run headless so the dashboard frame viewer
+   * owns the previews. CAPTCHA still round-trips through the dashboard.
    */
   private async runAntigravityBatch(
     manifest: Array<{ accountId: number; email: string; password: string; provider: string }>,
@@ -348,11 +344,8 @@ class LoginQueue {
           log(`worker ${idx + 1}/${total} start email=${item.email}`);
 
           // Fire-and-forget per account; resolve slot on completion.
-          // migration: loginAccount() now routes antigravity through the
-          // TS+Camoufox stealth engine (googleAutomation.ts), replacing the
-          // nodriver-based antigravity_manual_login.py subprocess. Manual/CAPTCHA
-          // challenges surface as a `manual` result and round-trip via the
-          // dashboard session layer.
+          // Antigravity uses Camoufox stealth login; manual/CAPTCHA challenges
+          // surface as a `manual` result via the dashboard session layer.
           loginAccount(account, { headless })
             .catch((err) => {
               log(`worker ${idx + 1}/${total} crash email=${item.email} error=${err?.message || err}`);

@@ -209,11 +209,19 @@ if [[ ! -f "$VENV_PY" ]]; then
   for cand in "$VENV_DIR/bin/python" "$VENV_DIR/bin/python3" "$VENV_DIR/Scripts/python.exe"; do
     if [[ -f "$cand" ]]; then VENV_PY="$cand"; break; fi
   done
+fi
+if [[ -n "$VENV_PY" && -f "$VENV_PY" ]]; then
+  info "Syncing shared auth venv (camoufox + playwright for login + farms)..."
   "$VENV_PY" -m pip install --no-input --progress-bar off --upgrade pip wheel >/dev/null 2>&1 || true
   "$VENV_PY" -m pip install --no-input --progress-bar off -r "$PROJECT_DIR/scripts/auth/requirements.txt" || err "pip install failed"
-  ok "Python venv rebuilt"
+  # Drop legacy nodriver; never uninstall camoufox.
+  "$VENV_PY" -m pip uninstall -y --no-input nodriver >/dev/null 2>&1 || true
+  if [[ "${ETTEUM_SKIP_BROWSERS:-0}" != "1" ]]; then
+    "$VENV_PY" -m camoufox fetch >/dev/null 2>&1 || warn "camoufox fetch failed — re-run: $VENV_PY -m camoufox fetch"
+  fi
+  ok "Python auth venv ready (shared Camoufox)"
 else
-  ok "Python venv OK"
+  warn "Python venv missing — run install.sh or: python3 -m venv scripts/auth/.venv"
 fi
 
 # 9. Restart server if it was running

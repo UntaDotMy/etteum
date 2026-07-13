@@ -133,7 +133,7 @@ export default function Accounts() {
   const [cookieValue, setCookieValue] = useState("");
   const [bulkText, setBulkText] = useState("");
   const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey">("single");
-  const [bulkBrowserEngine, setBulkBrowserEngine] = useState("nodriver");
+  const [bulkBrowserEngine, setBulkBrowserEngine] = useState("camoufox");
   const [bulkHeadless, setBulkHeadless] = useState(true);
   const [bulkConcurrency, setBulkConcurrency] = useState(3);
   const [codexOauthBusy, setCodexOauthBusy] = useState(false);
@@ -416,7 +416,7 @@ export default function Accounts() {
       const payload: any = { email: addForm.email, password: addForm.password, provider: addDialogProvider, headless: addForm.headless, browserEngine: addForm.browserEngine };
       await createAccount(payload);
       showSuccess("Account added and bot login started.");
-      setAddForm({ email: "", password: "", provider: "kiro", browserEngine: "nodriver", headless: false });
+      setAddForm({ email: "", password: "", provider: "kiro", browserEngine: "camoufox", headless: false });
       setAddDialogProvider(null);
       await load();
       navigate("/bot-logs");
