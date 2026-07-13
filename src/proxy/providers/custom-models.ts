@@ -25,6 +25,8 @@ import { db } from "../../db/index";
 import { kv } from "../../db/schema";
 import { eq } from "drizzle-orm";
 import type { ModelInfo } from "./base";
+import { resolveModelSpec } from "../model-specs";
+import { toCanonicalModelName } from "../pricing";
 
 /** A user-defined model spec override (all optional; absent = use defaults). */
 export interface CustomModelSpec {
@@ -113,17 +115,23 @@ class CustomModelsRegistry {
 
   /** All custom models as ModelInfo (for merging into /v1/models). */
   getCustomModels(): ModelInfo[] {
-    return Object.entries(this.custom).map(([id, entry]) => ({
-      id,
-      object: "model" as const,
-      created: Date.now(),
-      owned_by: entry.provider,
-      ...(entry.displayName ? { display_name: entry.displayName } : {}),
-      ...(entry.spec?.context_window != null ? { context_window: entry.spec.context_window } : {}),
-      ...(entry.spec?.max_output != null ? { max_output: entry.spec.max_output } : {}),
-      ...(entry.spec?.thinking != null ? { thinking: entry.spec.thinking } : {}),
-      ...(entry.spec?.vision != null ? { vision: entry.spec.vision } : {}),
-    }));
+    return Object.entries(this.custom).map(([id, entry]) => {
+      // Fill missing fields from MODEL_SPECS so custom/BYOK-style ids don't
+      // fall back to blank context when the operator only set provider.
+      const catalog = resolveModelSpec(toCanonicalModelName(id)) ??
+        resolveModelSpec(toCanonicalModelName(entry.upstreamName || entry.renameFrom || id));
+      return {
+        id,
+        object: "model" as const,
+        created: Date.now(),
+        owned_by: entry.provider,
+        ...(entry.displayName ? { display_name: entry.displayName } : {}),
+        context_window: entry.spec?.context_window ?? catalog?.contextWindow,
+        max_output: entry.spec?.max_output ?? catalog?.maxOutput,
+        thinking: entry.spec?.thinking ?? catalog?.thinking,
+        vision: entry.spec?.vision ?? catalog?.vision,
+      };
+    });
   }
 
   /** Is this model id disabled (by any provider)? Disabled is model-scoped. */
@@ -141,33 +149,28 @@ class CustomModelsRegistry {
    * Merge custom models into a base list AND filter out disabled models.
    * Used by getAllModels() to produce the final /v1/models catalog.
    *
-   * - A custom entry WITHOUT `renameFrom` is added if its id isn't already in
-   *   the base list (avoids duplicates).
-   * - A custom entry WITH `renameFrom` REPLACES the base model whose id equals
-   *   `renameFrom` with this entry's id (catalog rename). The base entry is
-   *   removed so only the new id remains.
+   * Custom entries are first-class catalog rows:
+   * - Same id as a hardcoded model → REPLACES that row (operator override).
+   * - renameFrom set → removes old id, inserts new id.
+   * - New id → added to the catalog.
    */
   applyCustomModelsToList(base: ModelInfo[]): ModelInfo[] {
-    // Build the set of ids to remove (renamed-away ids).
     const renamedAway = new Set<string>();
-    for (const entry of Object.values(this.custom)) {
+    const customIds = new Set<string>();
+    for (const [id, entry] of Object.entries(this.custom)) {
+      customIds.add(id);
       if (entry.renameFrom) renamedAway.add(entry.renameFrom);
     }
-    // Start from base, minus renamed-away entries.
-    let merged = base.filter((m) => !renamedAway.has(m.id));
 
-    // Add custom entries that are either new ids OR renames (their new id
-    // replaces the removed base entry). Skip pure-adds whose id already exists.
-    const existingIds = new Set(merged.map((m) => m.id));
+    // Drop hardcoded rows that custom replaces (same id) or renames away.
+    let merged = base.filter(
+      (m) => !renamedAway.has(m.id) && !customIds.has(m.id),
+    );
+
+    // Insert every custom entry as a normal catalog model.
     const customModels = this.getCustomModels();
     for (const cm of customModels) {
-      // Renames always go in (their new id replaced the old). Pure-adds only if
-      // the id isn't already present.
-      const isRename = !!this.findRenameEntry(cm.id);
-      if (isRename || !existingIds.has(cm.id)) {
-        merged.push(cm);
-        existingIds.add(cm.id);
-      }
+      merged.push(cm);
     }
     return merged.filter((m) => !this.isModelDisabled(m.id));
   }

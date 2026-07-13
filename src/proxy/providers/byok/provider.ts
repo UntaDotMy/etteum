@@ -13,6 +13,8 @@ import { eq } from "drizzle-orm";
 import { config } from "../../../config";
 import { decrypt } from "../../../utils/crypto";
 import { safeJsonParse } from "../../../utils/safe-json";
+import { resolveModelSpec } from "../../model-specs";
+import { toCanonicalModelName } from "../../pricing";
 
 /**
  * BYOK (Bring Your Own Key) Provider
@@ -126,13 +128,22 @@ export class ByokProvider extends BaseProvider {
         const modelId = `${prefix}-${model}`;
         if (modelIds.has(modelId)) continue;
         modelIds.add(modelId);
+        // Prefer MODEL_SPECS for known bare names (e.g. claude-opus-4.8 → 1M),
+        // not a hard-coded 200k default that mislabels frontier models.
+        const bare = String(model || "").trim();
+        const spec =
+          resolveModelSpec(toCanonicalModelName(bare)) ||
+          resolveModelSpec(bare) ||
+          resolveModelSpec(toCanonicalModelName(modelId));
         newSupportedModels.push({
           id: modelId,
           object: "model",
           created: Math.floor(Date.now() / 1000),
           owned_by: `byok:${prefix}`,
-          context_window: 200_000,
-          max_output: 8192,
+          context_window: spec?.contextWindow ?? 200_000,
+          max_output: spec?.maxOutput ?? 8192,
+          ...(spec?.thinking != null ? { thinking: spec.thinking } : {}),
+          ...(spec?.vision != null ? { vision: spec.vision } : {}),
         });
       }
     }
