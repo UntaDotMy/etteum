@@ -126,7 +126,50 @@ export function forwardInput(sessionId: string, msg: Record<string, unknown>): b
 }
 
 /**
- * Cancel a running session: write the cancel-signal-file + kill the process.
+ * Kill a process and its children (Windows: taskkill /T — same idea as farm.py).
+ * Bare process.kill(pid) leaves Camoufox/Firefox orphans when Python is the parent.
+ */
+function killProcessTree(pid: number | undefined | null): void {
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return;
+  const p = Math.floor(pid);
+  try {
+    if (process.platform === "win32") {
+      try {
+        // Prefer Bun.spawnSync so we don't need child_process import here.
+        Bun.spawnSync(["taskkill", "/F", "/T", "/PID", String(p)], {
+          stdout: "ignore",
+          stderr: "ignore",
+        });
+      } catch {
+        try {
+          process.kill(p, "SIGTERM");
+        } catch {
+          /* gone */
+        }
+      }
+      return;
+    }
+    try {
+      process.kill(-p, "SIGTERM");
+    } catch {
+      /* not group leader */
+    }
+    try {
+      process.kill(p, "SIGKILL");
+    } catch {
+      /* gone */
+    }
+  } catch {
+    try {
+      process.kill(p, "SIGTERM");
+    } catch {
+      /* gone */
+    }
+  }
+}
+
+/**
+ * Cancel a running session: write the cancel-signal-file + kill the process tree.
  */
 export function cancelSession(sessionId: string): boolean {
   const s = sessions.get(sessionId);
@@ -140,16 +183,17 @@ export function cancelSession(sessionId: string): boolean {
   if (s.cancelSignalFile) {
     try { writeFileSync(s.cancelSignalFile, "cancel"); } catch {}
   }
-  // 3. Last resort: kill the process (only for standalone manual sessions,
-  //    not batch sessions — batch sessions share one process).
+  // 3. Kill process tree (not batch-* shared runners — those share one process
+  //    and are stopped via the batch cancel path / cancelGrokFarm).
   if (s.proc && !sessionId.startsWith("batch-")) {
     const proc = s.proc;
-    const pid = proc.pid;
-    if (pid) {
-      try { Bun.spawnSync(["pterminate", "-9", "-P", String(pid)]); } catch {}
-      try { process.kill(pid, "SIGTERM"); } catch {}
+    const pid = proc.pid as number | undefined;
+    killProcessTree(pid);
+    try {
+      (proc as { kill?: (sig?: string) => void }).kill?.("SIGKILL");
+    } catch {
+      /* already dead */
     }
-    try { (proc as any).kill("SIGTERM"); } catch {}
   }
   s.terminal = true;
   s.phase = "cancelled";
