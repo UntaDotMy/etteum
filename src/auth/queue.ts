@@ -409,7 +409,9 @@ class LoginQueue {
       try {
         const result = await loginAccount(account, { headless: options.headless ?? config.headless });
         seenResultIds.add(acc.accountId);
-        if (!result.success) {
+        if (result.success) {
+          this.totalSuccess++;
+        } else {
           this.totalFailed++;
         }
         this.totalProcessed++;
