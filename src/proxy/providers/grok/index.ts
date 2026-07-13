@@ -95,15 +95,18 @@ const now = () => Math.floor(Date.now() / 1000);
 const GROK_CREATED = 1_718_000_000;
 
 /**
- * Catalog for /v1/models + dashboard — only grok-4.5 family.
+ * Catalog for /v1/models + dashboard.
  * - grok-4.5           → upstream "grok-4.5", reasoning_effort low|medium|high
- * - grok-4.5-reasoning → same upstream model; alias that defaults effort to high
+ * - grok-4.5-reasoning → same upstream model; alias (default effort high)
+ * - composer-2.5       → upstream "composer-2.5" (Grok Build coding model)
  *
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
  */
 const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  // Context 200k from Cursor model docs; vision not advertised for this SKU.
+  { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false },
 ];
 
 export type GrokReasoningEffort = "low" | "medium" | "high";
@@ -133,8 +136,8 @@ export class GrokProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    // Strict: only the two catalog models. Older grok-4.3 / 4.20 / aliases → 404.
-    return m === "grok-4.5" || m === "grok-4.5-reasoning";
+    // Strict catalog only. Older grok-4.3 / 4.20 / aliases → 404.
+    return m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5";
   }
 
   private resolveMode(model: string): GrokModeId {
@@ -334,9 +337,9 @@ export class GrokProvider extends BaseProvider {
     // Resolve the CLI version dynamically (rot-proof against CLI updates).
     const cliVersion = await getGrokCliVersion();
 
-    // Upstream free Build model id is always "grok-4.5" (alias slugs strip).
-    // "grok-build" 402s on free accounts; confirmed by CLI debug + live probes.
-    const upstreamModel = "grok-4.5";
+    // Map catalog slug → upstream Build model id (composer-2.5 vs grok-4.5).
+    // "grok-build" alias 402s on free accounts; confirmed by CLI debug + probes.
+    const upstreamModel = this.mapConsoleModel(request.model);
     const effort = resolveGrokReasoningEffort(request);
 
     const body: Record<string, unknown> = {
@@ -752,7 +755,10 @@ export class GrokProvider extends BaseProvider {
   // -------------------------------------------------------------------------
 
   /** Map an etteum grok model slug to the console.x.ai / cli-chat model name. */
-  private mapConsoleModel(_model: string): string {
+  private mapConsoleModel(model: string): string {
+    const m = (model || "").toLowerCase().trim();
+    if (m === "composer-2.5" || m === "composer-2-5") return "composer-2.5";
+    // grok-4.5-reasoning and any other 4.5 alias → upstream grok-4.5
     return "grok-4.5";
   }
 

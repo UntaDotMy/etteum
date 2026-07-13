@@ -21,7 +21,7 @@ const EXTRA: { source: string; id: string }[] = [
     "kp-haiku-4.5", "kp-haiku-4.5-thinking",
   ].map((id) => ({ source: "kiro-pro", id })),
   // grok oauth surface
-  ...["grok-4.5", "grok-4.5-reasoning"].map((id) => ({ source: "grok", id })),
+  ...["grok-4.5", "grok-4.5-reasoning", "composer-2.5"].map((id) => ({ source: "grok", id })),
   // antigravity
   ...["ag-gemini-3-pro", "ag-gemini-3-pro-high", "ag-gemini-3-flash"].map((id) => ({ source: "antigravity", id })),
   // canva (image/video — token pricing may not apply)

@@ -49,12 +49,13 @@ export type GrokModeId =
  * The modeId controls which Grok backend variant serves the request.
  */
 /**
- * Catalog is only grok-4.5 (+ reasoning alias). Both are CONSOLE / cli-chat-proxy
- * surface models — not the older grok.com web modeId map.
+ * Catalog: grok-4.5 family + composer-2.5. All use CONSOLE / cli-chat-proxy
+ * surfaces — not the older grok.com web modeId map.
  */
 export const MODEL_TO_MODE: Record<string, GrokModeId> = {
   "grok-4.5": "CONSOLE",
   "grok-4.5-reasoning": "CONSOLE",
+  "composer-2.5": "CONSOLE",
 };
 
 // ---------------------------------------------------------------------------
