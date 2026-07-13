@@ -20,8 +20,12 @@ const EXTRA: { source: string; id: string }[] = [
     "kp-opus-4.6", "kp-opus-4.6-thinking", "kp-opus-4.5", "kp-sonnet-4.6", "kp-sonnet-4.6-thinking",
     "kp-haiku-4.5", "kp-haiku-4.5-thinking",
   ].map((id) => ({ source: "kiro-pro", id })),
-  // grok oauth surface
-  ...["grok-4.5", "grok-4.5-reasoning", "composer-2.5"].map((id) => ({ source: "grok", id })),
+  // grok oauth surface + Imagine image/video (docs.x.ai)
+  ...[
+    "grok-4.5", "grok-4.5-reasoning", "composer-2.5",
+    "grok-imagine-image", "grok-imagine-image-quality",
+    "grok-imagine-video", "grok-imagine-video-1.5",
+  ].map((id) => ({ source: "grok", id })),
   // antigravity
   ...["ag-gemini-3-pro", "ag-gemini-3-pro-high", "ag-gemini-3-flash"].map((id) => ({ source: "antigravity", id })),
   // canva (image/video — token pricing may not apply)
