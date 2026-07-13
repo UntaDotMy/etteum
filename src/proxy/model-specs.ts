@@ -70,10 +70,16 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "glm-5.2":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "glm-5.1":                { contextWindow: 198_000,   maxOutput: 8_192,   thinking: true,  vision: true },
   "glm-5":                  { contextWindow: 200_000,   maxOutput: 8_192,   thinking: false, vision: false },
+  // GLM-5V-Turbo — ~203K context, vision; Z.AI docs 2026-07
+  "glm-5v-turbo":           { contextWindow: 202_752,   maxOutput: 16_384,  thinking: false, vision: true },
+  "glm-5-turbo":            { contextWindow: 202_752,   maxOutput: 16_384,  thinking: false, vision: false },
 
   // ── Kimi (Moonshot) — platform.kimi.ai + DashScope ──
+  // kimi-k2.7 bare id (cbc-kimi-k2.7) shares kimi-k2.7-code SKU.
+  "kimi-k2.7":              { contextWindow: 262_144,   maxOutput: 98_304,  thinking: true,  vision: true },
   "kimi-k2.7-code":         { contextWindow: 262_144,   maxOutput: 98_304,  thinking: false, vision: false },
   "kimi-k2.6":              { contextWindow: 262_144,   maxOutput: 65_536,  thinking: false, vision: true },
+  "kimi-k2.5":              { contextWindow: 164_000,   maxOutput: 8_192,   thinking: false, vision: true },
 
   // ── MiniMax — platform.minimaxi.com (M3 is current flagship, June 2026) ──
   "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
