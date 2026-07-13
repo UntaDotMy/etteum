@@ -7292,16 +7292,18 @@ async def main():
     if AsyncCamoufox is None:
         print("ERROR: camoufox not installed. Run: ./install.sh", flush=True)
         sys.exit(1)
-    if MAIL_MODE == "google":
-        if not IMAP_USER or not IMAP_PASS:
-            print("ERROR: set GROK_IMAP_USER and GROK_IMAP_PASS in .env (or use temp mail)", flush=True)
-            sys.exit(1)
-    if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
-        print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
-        sys.exit(1)
-    if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
-        print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
-        sys.exit(1)
+    # Mail / domain validation runs AFTER -m/--mail is known.
+    # Apply -m early so banner + checks match CLI (etteum always passes -m).
+    _early_args = sys.argv[1:]
+    for _i, _a in enumerate(_early_args):
+        if _a in ("-m", "--mail") and _i + 1 < len(_early_args):
+            _m = _early_args[_i + 1].strip().lower()
+            if _m in ("tempmail", "temp", "1"):
+                MAIL_MODE = "tempmail"
+            elif _m in ("google", "2"):
+                MAIL_MODE = "google"
+            # refresh handled later in full CLI parse
+            break
 
     _load_used_emails()
     known = len(_used_emails)
@@ -7432,10 +7434,21 @@ async def main():
             print("  Masukkan 1, 2, atau 3.")
         print()
 
-    # Re-validate config now that MAIL_MODE is final.
-    if MAIL_MODE == "google" and (not IMAP_USER or not IMAP_PASS):
-        print("ERROR: google mode but GROK_IMAP_USER / GROK_IMAP_PASS missing in .env", flush=True)
-        sys.exit(1)
+    # Re-validate config now that MAIL_MODE is final (CLI -m overrides .env).
+    # Tempmail does not need IMAP / catch-all domain / plus-trick settings.
+    if MAIL_MODE == "google":
+        if not IMAP_USER or not IMAP_PASS:
+            print(
+                "ERROR: google mode but GROK_IMAP_USER / GROK_IMAP_PASS missing in .env",
+                flush=True,
+            )
+            sys.exit(1)
+        if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
+            print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
+            sys.exit(1)
+        if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
+            print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
+            sys.exit(1)
 
     # ── Refresh mode: re-auth existing accounts, then exit (no farming) ────
     if RUN_MODE == "refresh":

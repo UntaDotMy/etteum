@@ -1,5 +1,13 @@
 import { Hono } from "hono";
-import { getSession, listSessions, forwardInput, cancelSession } from "../auth/browserSession";
+import {
+  getSession,
+  listSessions,
+  forwardInput,
+  cancelSession,
+  clearEndedSessions,
+  cancelAllSessions,
+} from "../auth/browserSession";
+import { cancelGrokFarm } from "../auth/automation/grokFarm";
 
 export const browserSessionRouter = new Hono();
 
@@ -21,6 +29,22 @@ browserSessionRouter.get("/", (c) => {
     steps: s.steps,
   }));
   return c.json({ sessions });
+});
+
+/** POST /api/browser-sessions/clear-ended — drop finished cards from the registry. */
+browserSessionRouter.post("/clear-ended", (c) => {
+  const result = clearEndedSessions();
+  return c.json({ success: true, ...result });
+});
+
+/**
+ * POST /api/browser-sessions/stop-all — cancel live sessions + running Grok farm.
+ * Must be registered before /:sessionId so "stop-all" is not treated as an id.
+ */
+browserSessionRouter.post("/stop-all", (c) => {
+  const farmCancelled = cancelGrokFarm();
+  const result = cancelAllSessions();
+  return c.json({ success: true, farmCancelled, ...result });
 });
 
 /**

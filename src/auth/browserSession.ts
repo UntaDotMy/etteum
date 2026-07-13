@@ -153,7 +153,40 @@ export function cancelSession(sessionId: string): boolean {
   }
   s.terminal = true;
   s.phase = "cancelled";
+  s.lastMessage = s.lastMessage || "cancelled";
   return true;
+}
+
+/** Remove finished (terminal) sessions from the registry — clears Browser Logs cards. */
+export function clearEndedSessions(): { cleared: number } {
+  let cleared = 0;
+  for (const [id, s] of sessions) {
+    if (s.terminal) {
+      sessions.delete(id);
+      cleared++;
+    }
+  }
+  return { cleared };
+}
+
+/** Cancel every non-terminal session (and kill shared farm procs once per unique pid). */
+export function cancelAllSessions(): { cancelled: number } {
+  const killedPids = new Set<number>();
+  let cancelled = 0;
+  for (const s of sessions.values()) {
+    if (s.terminal) continue;
+    // Prefer cancelSession; avoid double-kill of shared farm process.
+    if (s.proc?.pid && killedPids.has(s.proc.pid)) {
+      s.terminal = true;
+      s.phase = "cancelled";
+      s.lastMessage = "cancelled";
+      cancelled++;
+      continue;
+    }
+    if (s.proc?.pid) killedPids.add(s.proc.pid);
+    if (cancelSession(s.sessionId)) cancelled++;
+  }
+  return { cancelled };
 }
 
 import { writeFileSync } from "node:fs";
