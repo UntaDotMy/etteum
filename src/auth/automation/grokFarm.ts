@@ -356,15 +356,39 @@ function pushLog(job: GrokFarmJobState, line: string) {
 
       if (payload.type === "worker_start" && wid != null) {
         const sid = ensureWorkerSession(job, wid, payload.email);
-        const msg = payload.message || "Worker browser launching…";
+        const msg = payload.message || "SPAWN worker browser…";
         updatePhase(sid, "starting", msg);
-        appendStep(sid, "start", msg, "grok");
+        appendStep(sid, "spawn", msg, "grok");
         // Per-worker only — never fan out to siblings.
         broadcast({
           type: "login_progress",
           data: {
             provider: "grok",
             step: "starting",
+            message: msg,
+            jobId: job.id,
+            email: payload.email || `Grok worker #${wid}`,
+            sessionId: sid,
+            workerId: wid,
+          },
+        });
+        return;
+      }
+
+      // EXIT worker (browsers killed) before a NEW spawn on the same slot.
+      if (payload.type === "worker_exit" && wid != null) {
+        const sid = ensureWorkerSession(job, wid, payload.email);
+        const msg = payload.message || "EXIT worker → NEW spawn";
+        updatePhase(sid, "cleanup", msg);
+        appendStep(sid, "exit", msg, "grok");
+        job.lastMessage = `[#${wid}] ${msg}`.slice(0, 300);
+        appendStep(job.id, "exit", `[#${wid}] ${msg}`, "grok");
+        updatePhase(job.id, "farming", job.lastMessage);
+        broadcast({
+          type: "login_progress",
+          data: {
+            provider: "grok",
+            step: "cleanup",
             message: msg,
             jobId: job.id,
             email: payload.email || `Grok worker #${wid}`,
