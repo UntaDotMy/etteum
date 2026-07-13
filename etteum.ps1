@@ -421,6 +421,18 @@ switch ($Command.ToLower()) {
   "dev"       { Invoke-Dev }
   "export"    { Invoke-Export $Arg1 }
   "import"    { Invoke-Import $Arg1 }
+  "prune-logs" {
+    Push-Location $ProjectDir
+    try {
+      Write-Host "Stopping server for VACUUM (recommended on Windows)..."
+      Invoke-Stop
+      Start-Sleep -Seconds 1
+      if ($Arg1) { bun scripts/prune-request-logs.ts $Arg1 }
+      else { bun scripts/prune-request-logs.ts }
+      Start-Sleep -Seconds 1
+      Invoke-Start
+    } finally { Pop-Location }
+  }
   default {
     Write-Host "etteum - Etteum Pool Management CLI (Windows)`n"
     Write-Host "Usage: .\etteum.ps1 <command> [args]`n"
@@ -443,11 +455,13 @@ switch ($Command.ToLower()) {
     Write-Host "  update            Pull, install, build, restart"
     Write-Host "  export [path]     Backup DB + .env for another PC"
     Write-Host "  import <path>     Restore backup (stops/starts server)"
+    Write-Host "  prune-logs        Shrink request_logs + VACUUM disk"
     Write-Host ""
     Write-Host "Common workflows:"
     Write-Host "  First time:       irm bun.sh/install.ps1 | iex; .\install.ps1; etteum start"
     Write-Host "  After update:     etteum update"
     Write-Host "  Migrate PC:       etteum export; copy file; other PC: etteum import file"
+    Write-Host "  DB too big:       etteum prune-logs"
     Write-Host "  Something broke:  etteum doctor; etteum logs 50"
   }
 }

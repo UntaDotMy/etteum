@@ -56,7 +56,12 @@ proxyRouter.use("/v1/*", async (c, next) => {
   await next();
 });
 
-const MAX_REQUEST_LOGS = Number(process.env.POOLPROX_MAX_REQUEST_LOGS) || 2000;
+// Cap recent detail rows. History/analytics live in usage_summary (hourly).
+const MAX_REQUEST_LOGS = Number(process.env.POOLPROX_MAX_REQUEST_LOGS) || 500;
+// How often to reclaim free pages after prune (VACUUM is exclusive — keep rare).
+const VACUUM_EVERY_MS =
+  Number(process.env.POOLPROX_REQUEST_LOG_VACUUM_MS) || 6 * 60 * 60 * 1000; // 6h
+let lastVacuumAt = 0;
 
 /** Upsert a request's stats into the usage_summary table (hourly bucket) */
 async function upsertUsageSummary(entry: {
@@ -96,7 +101,17 @@ async function upsertUsageSummary(entry: {
   }
 }
 
-/** Prune request_logs to keep only the most recent MAX_REQUEST_LOGS rows */
+/**
+ * Prune request_logs so the table (and file) cannot grow without bound.
+ *
+ * 1. Keep only the newest MAX_REQUEST_LOGS rows (detail UI / recent feed).
+ * 2. Strip body blobs from any remaining rows that still have them (legacy
+ *    installs that stored multi-MB full bodies while logBodyFull defaulted on).
+ * 3. Periodically VACUUM so SQLite returns free pages to the OS — DELETE alone
+ *    does not shrink the file (that is why a 2000-row table reached multi-GB).
+ *
+ * Long-term totals stay in usage_summary (aggregated per hour).
+ */
 async function pruneRequestLogs() {
   try {
     await db.run(sql`
@@ -104,8 +119,34 @@ async function pruneRequestLogs() {
         SELECT id FROM request_logs ORDER BY created_at DESC LIMIT ${MAX_REQUEST_LOGS}
       )
     `);
+    // When body logging is off (default), strip legacy multi-MB blobs left by
+    // older builds that stored full prompts. If the operator opts into
+    // POOLPROX_LOG_BODY_ENABLED=true, keep whatever is stored for debugging.
+    if (!config.logBodyEnabled) {
+      await db.run(sql`
+        UPDATE request_logs
+        SET request_body = NULL,
+            response_body = NULL,
+            compressed_request_body = NULL
+        WHERE request_body IS NOT NULL
+           OR response_body IS NOT NULL
+           OR compressed_request_body IS NOT NULL
+      `);
+    }
   } catch (err) {
     console.error("[Proxy] Failed to prune request_logs:", err);
+    return;
+  }
+
+  const now = Date.now();
+  if (now - lastVacuumAt < VACUUM_EVERY_MS) return;
+  lastVacuumAt = now;
+  try {
+    // Exclusive lock briefly; only every VACUUM_EVERY_MS.
+    await db.run(sql`VACUUM`);
+    console.log("[Proxy] request_logs prune + VACUUM complete");
+  } catch (err) {
+    console.error("[Proxy] VACUUM after prune failed:", err);
   }
 }
 
@@ -318,10 +359,12 @@ async function logProxyError(entry: NewRequestLog, label: string) {
   }
 }
 
-// Prune request_logs periodically (every 60s) instead of inline on the hot
+// Prune request_logs periodically (every 5 min) instead of inline on the hot
 // path. The DELETE-with-subquery pattern competes with other writes for
 // SQLite's single-writer lock — moving it to a background timer avoids that.
-setInterval(() => { void pruneRequestLogs(); }, 60_000);
+// First run shortly after boot so legacy multi-GB body blobs get cleared soon.
+setTimeout(() => { void pruneRequestLogs(); }, 15_000);
+setInterval(() => { void pruneRequestLogs(); }, 5 * 60_000);
 
 function wrapStreamWithUsageFinalizer(
   stream: ReadableStream<Uint8Array>,

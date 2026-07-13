@@ -102,10 +102,14 @@ export const config = {
   proxyUrl: process.env.PROXY_URL || "",
   encryptionKey: process.env.ENCRYPTION_KEY || "",
   headless: process.env.HEADLESS !== "false", // default true
-  logBodyEnabled: process.env.POOLPROX_LOG_BODY_ENABLED !== "false",
-  logBodyFull: process.env.POOLPROX_LOG_BODY_FULL !== "false",
-  logBodyRedact: process.env.POOLPROX_LOG_BODY_REDACT === "true",
-  logBodyMaxBytes: Number(process.env.POOLPROX_LOG_BODY_MAX_BYTES) || 65536,
+  // Request log bodies are the main DB growth source (multi-MB per row if full).
+  // Defaults favour scalability: store stats only; opt in to bodies via env.
+  //   POOLPROX_LOG_BODY_ENABLED=true  — store request/response previews
+  //   POOLPROX_LOG_BODY_FULL=true      — store full bodies (can multi-GB the DB)
+  logBodyEnabled: process.env.POOLPROX_LOG_BODY_ENABLED === "true",
+  logBodyFull: process.env.POOLPROX_LOG_BODY_FULL === "true",
+  logBodyRedact: process.env.POOLPROX_LOG_BODY_REDACT !== "false",
+  logBodyMaxBytes: Number(process.env.POOLPROX_LOG_BODY_MAX_BYTES) || 4096,
   accountCacheTtlMs: Number(process.env.POOLPROX_ACCOUNT_CACHE_TTL_MS) || 3000,
   // ── Warmup queue tunables ────────────────────────────────────────────────
   // Max in-flight warmup jobs. Default raised from the old hard-coded 20 so
