@@ -214,6 +214,11 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // ── Proprietary / non-token surfaces (indicative for cost UI) ──
   "canva-image":                  { input: 5.00,  output: 5.00,  cached: 5.00,   reasoning: 5.00,  cacheCreation: 5.00  },
   "canva-video":                  { input: 20.00, output: 20.00, cached: 20.00,  reasoning: 20.00, cacheCreation: 20.00 },
+  // Grok Imagine (flat per-image / per-sec billed upstream; placeholders for cost UI)
+  "grok-imagine-image":           { input: 0.02,  output: 0.02,  cached: 0.02,   reasoning: 0.02,  cacheCreation: 0.02  },
+  "grok-imagine-image-quality":   { input: 0.05,  output: 0.05,  cached: 0.05,   reasoning: 0.05,  cacheCreation: 0.05  },
+  "grok-imagine-video":           { input: 0.05,  output: 0.05,  cached: 0.05,   reasoning: 0.05,  cacheCreation: 0.05  },
+  "grok-imagine-video-1.5":       { input: 0.08,  output: 0.08,  cached: 0.08,   reasoning: 0.08,  cacheCreation: 0.08  },
   "cursor-fast":                  { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.25  },
   "cursor-small":                 { input: 0.30,  output: 1.00,  cached: 0.03,   reasoning: 1.00,  cacheCreation: 0.375 },
 };

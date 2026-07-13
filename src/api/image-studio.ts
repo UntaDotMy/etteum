@@ -184,6 +184,8 @@ imageStudioRouter.post("/generate", async (c) => {
   const body = await c.req.json<{
     prompt: string;
     type?: "image" | "video";
+    /** Preferred model id (e.g. grok-imagine-image-quality, canva-image). */
+    model?: string;
     aspectRatio?: string;
     n?: number;
     chatId?: number | null;
@@ -196,8 +198,23 @@ imageStudioRouter.post("/generate", async (c) => {
 
   const chatId = typeof body.chatId === "number" && Number.isFinite(body.chatId) ? body.chatId : null;
 
-  const type = body.type === "video" ? "video" : "image";
-  const model = type === "video" ? "canva-video" : "canva-image";
+  const requestedModel = (body.model || "").trim();
+  const typeFromModel = /video/i.test(requestedModel)
+    ? "video"
+    : /image|imagine|flux|dall/i.test(requestedModel)
+      ? "image"
+      : null;
+  const type = body.type === "video" || typeFromModel === "video"
+    ? "video"
+    : body.type === "image" || typeFromModel === "image"
+      ? "image"
+      : (body.type === "video" ? "video" : "image");
+
+  // Use the client's model when provided so Grok Imagine / Canva / others route
+  // to the correct provider — do NOT always force canva-*.
+  const model =
+    requestedModel ||
+    (type === "video" ? "canva-video" : "canva-image");
   const aspectRatio = VALID_ASPECTS.has(body.aspectRatio || "") ? body.aspectRatio! : "1:1";
   const n = type === "video" ? 1 : Math.min(4, Math.max(1, Number(body.n) || 1));
 

@@ -48,6 +48,13 @@ import {
   fetchOAuthBillingQuota,
   type GrokOAuthTokens,
 } from "./oauth";
+import {
+  isGrokImagineModel,
+  isGrokImagineVideoModel,
+  grokImagineGenerateImage,
+  grokImagineGenerateVideo,
+  resolveImagineModelId,
+} from "./imagine";
 
 // ---------------------------------------------------------------------------
 // Token structure
@@ -96,17 +103,24 @@ const GROK_CREATED = 1_718_000_000;
 
 /**
  * Catalog for /v1/models + dashboard.
- * - grok-4.5           → upstream "grok-4.5", reasoning_effort low|medium|high
- * - grok-4.5-reasoning → same upstream model; alias (default effort high)
- * - composer-2.5       → upstream "composer-2.5" (Grok Build coding model)
+ * - grok-4.5           → chat (+ vision understand)
+ * - grok-4.5-reasoning → chat alias
+ * - composer-2.5       → Grok Build coding
+ * - grok-imagine-*     → Imagine API (images/videos) — NOT chat
  *
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
+ * Image gen uses dedicated Imagine models, not grok-4.5.
  */
 const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
   { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false },
+  // Grok Imagine (api.x.ai) — generation, not chat
+  { id: "grok-imagine-image", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
+  { id: "grok-imagine-image-quality", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
+  { id: "grok-imagine-video", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
+  { id: "grok-imagine-video-1.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
 ];
 
 export type GrokReasoningEffort = "low" | "medium" | "high";
@@ -136,8 +150,88 @@ export class GrokProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    // Strict catalog only. Older grok-4.3 / 4.20 / aliases → 404.
-    return m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5";
+    // Chat / Build catalog
+    if (m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5") return true;
+    // Imagine image/video (and common aliases)
+    if (isGrokImagineModel(m)) return true;
+    return false;
+  }
+
+  /** Image/video generation via api.x.ai Imagine — returned as markdown URLs. */
+  private async imagineCompletion(
+    account: Account,
+    request: ChatCompletionRequest,
+  ): Promise<ProviderResult> {
+    const lastUser = [...(request.messages || [])].reverse().find((m) => m.role === "user");
+    let prompt = "";
+    if (typeof lastUser?.content === "string") prompt = lastUser.content;
+    else if (Array.isArray(lastUser?.content)) {
+      prompt = lastUser.content
+        .map((p: any) => (typeof p === "string" ? p : p?.text || ""))
+        .join("\n")
+        .trim();
+    }
+    if (!prompt.trim()) {
+      return { success: false, error: "Empty prompt for image/video generation" };
+    }
+
+    const model = resolveImagineModelId(request.model || "grok-imagine-image-quality");
+    const n = Math.min(4, Math.max(1, Number((request as any).n) || 1));
+    const aspectRatio =
+      (request as any).aspect_ratio || (request as any).size || "1:1";
+
+    const result = isGrokImagineVideoModel(model)
+      ? await grokImagineGenerateVideo(account, {
+          prompt: prompt.trim(),
+          model,
+          aspectRatio,
+          duration: Number((request as any).duration) || 8,
+        })
+      : await grokImagineGenerateImage(account, {
+          prompt: prompt.trim(),
+          model,
+          n,
+          aspectRatio,
+        });
+
+    if (!result.ok || result.urls.length === 0) {
+      return {
+        success: false,
+        error: result.error || "Grok Imagine returned no media",
+      };
+    }
+
+    const isVideo = isGrokImagineVideoModel(model);
+    const content = isVideo
+      ? result.urls.map((u) => `[Video](${u})`).join("\n\n")
+      : result.urls.map((u, i) => `![Image ${i + 1}](${u})`).join("\n\n");
+
+    const response: ChatCompletionResponse = {
+      id: `chatcmpl-grok-imagine-${Date.now()}`,
+      object: "chat.completion",
+      created: now(),
+      model: request.model,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content },
+          finish_reason: "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: result.urls.length,
+      },
+    };
+
+    return {
+      success: true,
+      response,
+      tokensUsed: result.urls.length,
+      creditsUsed: result.urls.length,
+      creditSource: "fixed",
+    };
   }
 
   private resolveMode(model: string): GrokModeId {
@@ -168,6 +262,11 @@ export class GrokProvider extends BaseProvider {
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
     try {
+      // Imagine models are not chat — route to api.x.ai images/videos APIs.
+      if (isGrokImagineModel(request.model || "")) {
+        return this.imagineCompletion(account, request);
+      }
+
       const oauthAccount = isOAuthAccount(account);
       const tokens = oauthAccount ? null : this.getTokens(account);
       if (!oauthAccount && !tokens) throw new Error("expired: no tokens");
@@ -257,6 +356,10 @@ export class GrokProvider extends BaseProvider {
     account: Account,
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
+    // Imagine is non-streaming; return full result (router wraps if needed).
+    if (isGrokImagineModel(request.model || "")) {
+      return this.imagineCompletion(account, request);
+    }
     try {
       const oauthAccount = isOAuthAccount(account);
       const tokens = oauthAccount ? null : this.getTokens(account);
