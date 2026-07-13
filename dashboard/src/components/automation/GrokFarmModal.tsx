@@ -19,6 +19,19 @@ export interface GrokFarmForm {
   maxAccounts: number;
   concurrent: number;
   activateWeb: boolean;
+  /** Maps to GROK_* env — defaults match farm .env.example */
+  workerIsolation: boolean;
+  spawnDelay: number;
+  autoStagger: boolean;
+  autoSpawnDelay: number;
+  launchParallel: number;
+  tempmailBlockImages: boolean;
+  turnstileParallel: number;
+  uiRetries: number;
+  uiRetryBackoff: number;
+  probeRetries: number;
+  probeRetryBackoff: number;
+  proxyPool: string;
 }
 
 const empty: GrokFarmForm = {
@@ -34,6 +47,18 @@ const empty: GrokFarmForm = {
   maxAccounts: 5,
   concurrent: 1,
   activateWeb: true,
+  workerIsolation: true,
+  spawnDelay: 15,
+  autoStagger: true,
+  autoSpawnDelay: 15,
+  launchParallel: 2,
+  tempmailBlockImages: true,
+  turnstileParallel: 64,
+  uiRetries: 3,
+  uiRetryBackoff: 2,
+  probeRetries: 5,
+  probeRetryBackoff: 2.5,
+  proxyPool: "",
 };
 
 interface Props {
@@ -48,6 +73,7 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
   /** Setup probes Python/camoufox (cached server-side) — do not block the form. */
   const [setupLoading, setSetupLoading] = useState(true);
   const [starting, setStarting] = useState(false);
+  const [showAdvanced, setShowAdvanced] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [setup, setSetup] = useState<{
     ok: boolean;
@@ -311,12 +337,195 @@ export default function GrokFarmModal({ onClose, onStarted }: Props) {
             </div>
           </label>
 
+          {/* Advanced farm env (GROK_* — same as standalone .env.example) */}
+          <div className="rounded-lg border border-[var(--border)]">
+            <button
+              type="button"
+              onClick={() => setShowAdvanced((v) => !v)}
+              className="flex w-full items-center justify-between px-3 py-2.5 text-left text-sm font-medium text-[var(--foreground)] hover:bg-[var(--secondary)]/50"
+            >
+              <span>Advanced farm settings</span>
+              <span className="text-xs text-[var(--muted-foreground)]">
+                {showAdvanced ? "hide" : "spawn · launch · retries"}
+              </span>
+            </button>
+            {showAdvanced && (
+              <div className="space-y-3 border-t border-[var(--border)] p-3">
+                <p className="text-[11px] text-[var(--muted-foreground)]">
+                  These map to <code className="rounded bg-[var(--secondary)] px-1">GROK_*</code> env
+                  vars in <code className="rounded bg-[var(--secondary)] px-1">scripts/auth/grok-farm/.env.example</code>.
+                  Saved with your farm config and applied on Start.
+                </p>
+                <div className="grid gap-3 sm:grid-cols-2">
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Spawn delay (s)</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={600}
+                      value={form.spawnDelay}
+                      onChange={(e) => set("spawnDelay", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                    <p className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">
+                      Worker N starts after delay × (N−1). 0 = use auto-stagger only when c≥3.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Auto spawn delay (s)</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={600}
+                      value={form.autoSpawnDelay}
+                      onChange={(e) => set("autoSpawnDelay", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                    <p className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">
+                      Used when spawn delay is 0 and concurrent ≥ 3.
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Launch parallel</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={1}
+                      max={16}
+                      value={form.launchParallel}
+                      onChange={(e) =>
+                        set("launchParallel", Math.max(1, Math.min(16, Number(e.target.value) || 1)))
+                      }
+                    />
+                    <p className="mt-0.5 text-[10px] text-[var(--muted-foreground)]">
+                      Max simultaneous Camoufox boots (not total workers).
+                    </p>
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Turnstile parallel</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={1}
+                      max={256}
+                      value={form.turnstileParallel}
+                      onChange={(e) =>
+                        set("turnstileParallel", Math.max(1, Math.min(256, Number(e.target.value) || 1)))
+                      }
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">UI retries</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={20}
+                      value={form.uiRetries}
+                      onChange={(e) => set("uiRetries", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">UI retry backoff (s)</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={60}
+                      step={0.5}
+                      value={form.uiRetryBackoff}
+                      onChange={(e) => set("uiRetryBackoff", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Probe retries</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={20}
+                      value={form.probeRetries}
+                      onChange={(e) => set("probeRetries", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </div>
+                  <div>
+                    <label className="text-xs text-[var(--muted-foreground)]">Probe retry backoff (s)</label>
+                    <Input
+                      className="mt-1"
+                      type="number"
+                      min={0}
+                      max={60}
+                      step={0.5}
+                      value={form.probeRetryBackoff}
+                      onChange={(e) => set("probeRetryBackoff", Math.max(0, Number(e.target.value) || 0))}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="text-xs text-[var(--muted-foreground)]">
+                    Proxy pool (optional, comma-separated)
+                  </label>
+                  <Input
+                    className="mt-1 font-mono text-xs"
+                    value={form.proxyPool}
+                    onChange={(e) => set("proxyPool", e.target.value)}
+                    placeholder="http://user:pass@host:port,socks5://…"
+                  />
+                </div>
+                <div className="flex flex-col gap-2">
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--border)] p-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={form.workerIsolation}
+                      onChange={(e) => set("workerIsolation", e.target.checked)}
+                    />
+                    <div>
+                      <div className="text-xs font-medium">Worker isolation</div>
+                      <div className="text-[10px] text-[var(--muted-foreground)]">
+                        Each worker own browser + Turnstile (recommended).
+                      </div>
+                    </div>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--border)] p-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={form.autoStagger}
+                      onChange={(e) => set("autoStagger", e.target.checked)}
+                    />
+                    <div>
+                      <div className="text-xs font-medium">Auto stagger</div>
+                      <div className="text-[10px] text-[var(--muted-foreground)]">
+                        When spawn delay is 0 and concurrent ≥ 3, stagger starts automatically.
+                      </div>
+                    </div>
+                  </label>
+                  <label className="flex cursor-pointer items-start gap-2 rounded-md border border-[var(--border)] p-2">
+                    <input
+                      type="checkbox"
+                      className="mt-0.5"
+                      checked={form.tempmailBlockImages}
+                      onChange={(e) => set("tempmailBlockImages", e.target.checked)}
+                    />
+                    <div>
+                      <div className="text-xs font-medium">Temp-mail block images</div>
+                      <div className="text-[10px] text-[var(--muted-foreground)]">
+                        Cuts bandwidth on generator.email (OTP is text-only).
+                      </div>
+                    </div>
+                  </label>
+                </div>
+              </div>
+            )}
+          </div>
+
           <p className="text-[11px] text-[var(--muted-foreground)]">
             Runs Camoufox <strong>headless</strong> (no OS popup). Screenshots stream to{" "}
-            <strong>Browser Logs</strong> (enowxai-style). Uses etteum’s existing Python env
-            (<code className="rounded bg-[var(--secondary)] px-1">scripts/auth/.venv</code> +{" "}
-            <code className="rounded bg-[var(--secondary)] px-1">scripts/auth/requirements.txt</code>),
-            not a separate farm venv.
+            <strong>Browser Logs</strong>. Farm env knobs match{" "}
+            <code className="rounded bg-[var(--secondary)] px-1">scripts/auth/grok-farm/.env.example</code>.
+            Uses etteum’s Python env (
+            <code className="rounded bg-[var(--secondary)] px-1">scripts/auth/.venv</code>), not a separate farm venv.
           </p>
         </div>
 

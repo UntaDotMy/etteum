@@ -62,8 +62,13 @@ async def _run_io(fn: Callable[..., Any], /, *args: Any, **kwargs: Any) -> Any:
 _ROOT = Path(__file__).resolve().parent
 try:
     from dotenv import load_dotenv
-    # override=True so later keys in .env win (we append runtime overrides)
-    load_dotenv(_ROOT / ".env", override=True)
+    # When Etteum hosts the farm (ETTEUM_FRAME_RELAY / ETTEUM_FARM_HOST), process
+    # env already has the full config from the UI — do NOT let local .env clobber it.
+    # Standalone: empty env → .env fills everything (override=False still loads missing keys).
+    _hosted = bool(
+        os.environ.get("ETTEUM_FRAME_RELAY") or os.environ.get("ETTEUM_FARM_HOST")
+    )
+    load_dotenv(_ROOT / ".env", override=not _hosted)
 except ImportError:
     env_path = _ROOT / ".env"
     if env_path.is_file():
@@ -73,6 +78,7 @@ except ImportError:
                 continue
             k, _, v = line.partition("=")
             k, v = k.strip(), v.strip().strip('"').strip("'")
+            # Match dotenv override=False: never replace keys already set by host
             os.environ.setdefault(k, v)
 
 try:
