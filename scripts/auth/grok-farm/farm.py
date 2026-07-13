@@ -163,7 +163,7 @@ TEMPMAIL_BLOCK_IMAGES = _env_bool("GROK_TEMPMAIL_BLOCK_IMAGES", True)
 UI_RETRIES = max(1, min(8, int(_env("GROK_UI_RETRIES", "3") or "3")))
 UI_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_UI_RETRY_BACKOFF", "2") or "2"))
 # After activate, re-probe 403 a few times (IP rate-limit / entitlement lag).
-PROBE_RETRIES = max(1, min(5, int(_env("GROK_PROBE_RETRIES", "3") or "3")))
+PROBE_RETRIES = max(1, min(8, int(_env("GROK_PROBE_RETRIES", "5") or "5")))
 PROBE_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_PROBE_RETRY_BACKOFF", "2.5") or "2.5"))
 
 # Results root: each run creates results/batch_<id>/ (unless legacy single-file paths set)
@@ -505,6 +505,7 @@ _STEP_META: dict[str, tuple[str, int]] = {
     "token_exchange":   ("tokens", 9),
     "activate":         ("activate", 10),
     "chat_probe":       ("probe", 11),
+    "cleanup":          ("cleanup", 12),
     "domain_rejected":  ("re-roll", 2),
     "retry":            ("retry", 7),
     "ui_retry":         ("retry", 1),
@@ -2112,6 +2113,12 @@ def _is_recoverable_error(err: BaseException | str) -> bool:
         "protocol error",
         "oauth code not captured",
         "oauth succeeded but access_token missing",
+        "token exchange",
+        "invalid_grant",
+        "http 400",
+        "bad request",
+        "activatefail",
+        "activate_grok",
     )
     return any(n in msg for n in needles)
 
@@ -2533,13 +2540,18 @@ def _build_stealth_launch_kwargs(
     os_w = [w for _, w in _STEALTH_OS_WEIGHTS]
     os_pick = random.choices(os_names, weights=os_w, k=1)[0]
     max_w, max_h = random.choice(_STEALTH_SCREENS)
-    humanize = round(random.uniform(0.7, 1.8), 2)
+    # Low humanize — long mouse paths look like "animation" after Turnstile
+    # and slow every click. 0.15–0.35s is enough anti-bot without lag.
+    humanize = round(random.uniform(0.12, 0.35), 2)
 
     kwargs: dict[str, Any] = {
         "headless": headless,
         "humanize": humanize,
         "os": os_pick,
         "geoip": True,
+        # Prefer English UI on accounts.x.ai — geoip alone often serves zh/ms
+        # chooser labels our English heal strings never match → reload loops.
+        "locale": "en-US",
         "block_webrtc": True,
         "disable_coop": True,  # Turnstile iframe clicks
         # We intentionally set disable_coop; suppress Camoufox leak spam.
@@ -2551,6 +2563,7 @@ def _build_stealth_launch_kwargs(
             "privacy.trackingprotection.enabled": True,
             "network.http.sendRefererHeader": 2,
             "dom.event.clipboardevents.enabled": True,
+            "intl.accept_languages": "en-US,en",
         },
     }
     if block_images:
@@ -2568,7 +2581,6 @@ def _build_stealth_launch_kwargs(
         kwargs["proxy"] = _parse_proxy(proxy_url)
 
     return kwargs
-
 
 
 # ── Etteum Browser Logs frame relay (headless screenshots → stdout JSON) ────
@@ -2845,23 +2857,545 @@ async def screenshot(page, attempt: int, tag: str):
         pass  # never let a screenshot failure break the flow OR spam the console
 
 
+# ── UI language pack (detect + labels) ─────────────────────────────────────
+# accounts.x.ai follows geo/IP language even when browser prefers en-US.
+# We detect the live UI language from body/buttons/html lang, then prefer
+# that language's labels while still falling back to every other pack.
+
+UI_LANG_CODES = (
+    "en", "zh", "zh-tw", "ms", "id", "ja", "ko", "es", "pt", "fr",
+    "de", "ar", "th", "vi", "hi", "ta", "tr", "ru", "it", "nl", "pl", "uk",
+)
+
+# Per-language UI strings for critical actions (order = preference within lang)
+_UI_PACK: dict[str, dict[str, list[str]]] = {
+    "en": {
+        "signup_with_email": [
+            "Sign up with email", "Sign up with Email", "Continue with email",
+            "Sign up with Email address",
+        ],
+        "login_with_email": [
+            "Login with email", "Log in with email", "Sign in with email",
+            "Sign in with Email", "Continue with email",
+        ],
+        "complete_signup": ["Complete sign up", "Complete Sign Up", "Create account"],
+        "sign_up": ["Sign up", "Sign Up", "Create account"],
+        "cookie_accept": [
+            "Accept All Cookies", "Accept all cookies", "Allow All", "Accept All",
+            "I Accept", "Accept",
+        ],
+        "cookie_reject": ["Reject All", "Reject all", "Decline All", "Deny"],
+        "allow_oauth": ["Allow", "Authorize", "Accept", "Continue", "Agree"],
+        "go_back": ["Go back", "Back"],
+    },
+    "zh": {
+        "signup_with_email": [
+            "使用邮箱注册", "使用电子邮件注册", "用邮箱注册", "邮箱注册",
+        ],
+        "login_with_email": [
+            "使用邮箱登录", "使用邮箱登陆", "邮箱登录", "用邮箱登录",
+        ],
+        "complete_signup": ["完成注册", "完成注册信息", "完成注册表单", "创建账户"],
+        "sign_up": ["注册", "立即注册", "创建账户"],
+        "cookie_accept": ["接受所有 Cookie", "接受全部", "全部接受", "同意全部"],
+        "cookie_reject": ["全部拒绝", "拒绝所有", "拒绝全部"],
+        "allow_oauth": ["允许", "授权", "同意", "继续"],
+        "go_back": ["返回", "上一步"],
+    },
+    "zh-tw": {
+        "signup_with_email": [
+            "使用電子郵件註冊", "使用電子郵件注册", "使用電郵註冊", "電郵註冊",
+        ],
+        "login_with_email": ["使用電子郵件登入", "使用電郵登入", "電郵登入"],
+        "complete_signup": ["完成註冊", "完成注册", "建立帳戶"],
+        "sign_up": ["註冊", "立即註冊"],
+        "cookie_accept": ["接受所有 Cookie", "接受全部", "全部接受"],
+        "cookie_reject": ["全部拒絕", "拒絕所有"],
+        "allow_oauth": ["允許", "授權", "同意", "繼續"],
+        "go_back": ["返回", "上一步"],
+    },
+    "ms": {
+        "signup_with_email": [
+            "Daftar dengan e-mel", "Daftar dengan emel", "Daftar dengan email",
+        ],
+        "login_with_email": [
+            "Log masuk dengan e-mel", "Log masuk dengan emel", "Log masuk dengan email",
+        ],
+        "complete_signup": ["Selesaikan pendaftaran", "Lengkapkan pendaftaran"],
+        "sign_up": ["Daftar", "Mendaftar"],
+        "cookie_accept": [
+            "Terima Semua Kuki", "Terima semua kuki", "Terima Semua", "Benarkan Semua",
+        ],
+        "cookie_reject": ["Tolak Semua", "Tolak semua"],
+        "allow_oauth": ["Benarkan", "Izinkan", "Teruskan", "Setuju"],
+        "go_back": ["Kembali"],
+    },
+    "id": {
+        "signup_with_email": [
+            "Daftar dengan email", "Daftar dengan Email", "Daftar pakai email",
+        ],
+        "login_with_email": [
+            "Masuk dengan email", "Login dengan email", "Masuk pakai email",
+        ],
+        "complete_signup": ["Selesaikan pendaftaran", "Lengkapi pendaftaran"],
+        "sign_up": ["Daftar", "Buat akun"],
+        "cookie_accept": [
+            "Terima Semua Cookie", "Terima semua cookie", "Terima Semua", "Izinkan Semua",
+        ],
+        "cookie_reject": ["Tolak Semua", "Tolak semua"],
+        "allow_oauth": ["Izinkan", "Setuju", "Lanjutkan"],
+        "go_back": ["Kembali"],
+    },
+    "ja": {
+        "signup_with_email": ["メールで登録", "メールアドレスで登録", "メールでサインアップ"],
+        "login_with_email": ["メールでログイン", "メールでサインイン"],
+        "complete_signup": ["登録を完了", "サインアップを完了", "アカウントを作成"],
+        "sign_up": ["登録", "サインアップ"],
+        "cookie_accept": ["すべてのCookieを受け入れる", "すべて許可", "同意する"],
+        "cookie_reject": ["すべて拒否", "拒否"],
+        "allow_oauth": ["許可", "承認", "続行", "同意"],
+        "go_back": ["戻る"],
+    },
+    "ko": {
+        "signup_with_email": ["이메일로 가입", "이메일로 등록", "이메일로 회원가입"],
+        "login_with_email": ["이메일로 로그인", "이메일로 로그인하기"],
+        "complete_signup": ["가입 완료", "회원가입 완료", "계정 만들기"],
+        "sign_up": ["가입", "회원가입"],
+        "cookie_accept": ["모든 쿠키 수락", "모두 수락", "동의"],
+        "cookie_reject": ["모두 거부", "거부"],
+        "allow_oauth": ["허용", "승인", "계속", "동의"],
+        "go_back": ["뒤로"],
+    },
+    "es": {
+        "signup_with_email": [
+            "Regístrate con el correo", "Registrarse con el correo",
+            "Registrarse con email", "Continuar con el correo",
+        ],
+        "login_with_email": [
+            "Iniciar sesión con el correo", "Acceder con el correo",
+            "Iniciar sesión con email",
+        ],
+        "complete_signup": ["Completar registro", "Completar el registro", "Crear cuenta"],
+        "sign_up": ["Registrarse", "Regístrate", "Crear cuenta"],
+        "cookie_accept": [
+            "Aceptar todas las cookies", "Aceptar todo", "Permitir todo",
+        ],
+        "cookie_reject": ["Rechazar todo", "Rechazar todas"],
+        "allow_oauth": ["Permitir", "Autorizar", "Aceptar", "Continuar"],
+        "go_back": ["Volver", "Atrás"],
+    },
+    "pt": {
+        "signup_with_email": [
+            "Cadastrar com e-mail", "Inscrever-se com e-mail", "Continuar com e-mail",
+        ],
+        "login_with_email": [
+            "Entrar com e-mail", "Login com e-mail", "Iniciar sessão com e-mail",
+        ],
+        "complete_signup": ["Concluir cadastro", "Completar inscrição", "Criar conta"],
+        "sign_up": ["Cadastrar", "Inscrever-se", "Criar conta"],
+        "cookie_accept": [
+            "Aceitar todos os cookies", "Aceitar tudo", "Permitir tudo",
+        ],
+        "cookie_reject": ["Rejeitar tudo", "Recusar todos"],
+        "allow_oauth": ["Permitir", "Autorizar", "Aceitar", "Continuar"],
+        "go_back": ["Voltar"],
+    },
+    "fr": {
+        "signup_with_email": [
+            "S'inscrire avec un e-mail", "S'inscrire par e-mail",
+            "Continuer avec l'e-mail",
+        ],
+        "login_with_email": [
+            "Se connecter avec un e-mail", "Connexion par e-mail",
+        ],
+        "complete_signup": [
+            "Terminer l'inscription", "Compléter l'inscription", "Créer un compte",
+        ],
+        "sign_up": ["S'inscrire", "Créer un compte"],
+        "cookie_accept": [
+            "Accepter tous les cookies", "Tout accepter", "Autoriser tout",
+        ],
+        "cookie_reject": ["Tout refuser", "Refuser tout"],
+        "allow_oauth": ["Autoriser", "Accepter", "Continuer"],
+        "go_back": ["Retour"],
+    },
+    "de": {
+        "signup_with_email": [
+            "Mit E-Mail registrieren", "Mit E-Mail anmelden", "Weiter mit E-Mail",
+        ],
+        "login_with_email": [
+            "Mit E-Mail anmelden", "Mit E-Mail einloggen", "Mit E-Mail anmelden",
+        ],
+        "complete_signup": [
+            "Registrierung abschließen", "Anmeldung abschließen", "Konto erstellen",
+        ],
+        "sign_up": ["Registrieren", "Anmelden", "Konto erstellen"],
+        "cookie_accept": [
+            "Alle Cookies akzeptieren", "Alle akzeptieren", "Alles erlauben",
+        ],
+        "cookie_reject": ["Alle ablehnen", "Ablehnen"],
+        "allow_oauth": ["Zulassen", "Erlauben", "Akzeptieren", "Weiter"],
+        "go_back": ["Zurück"],
+    },
+    "ar": {
+        "signup_with_email": ["التسجيل بالبريد الإلكتروني", "اشترك بالبريد"],
+        "login_with_email": ["تسجيل الدخول بالبريد الإلكتروني", "الدخول بالبريد"],
+        "complete_signup": ["إكمال التسجيل", "إنشاء حساب"],
+        "sign_up": ["تسجيل", "إنشاء حساب"],
+        "cookie_accept": ["قبول جميع ملفات تعريف الارتباط", "قبول الكل"],
+        "cookie_reject": ["رفض الكل"],
+        "allow_oauth": ["سماح", "تفويض", "متابعة", "موافق"],
+        "go_back": ["رجوع"],
+    },
+    "th": {
+        "signup_with_email": ["สมัครด้วยอีเมล", "ลงทะเบียนด้วยอีเมล"],
+        "login_with_email": ["เข้าสู่ระบบด้วยอีเมล"],
+        "complete_signup": ["ลงทะเบียนให้เสร็จ", "สร้างบัญชี"],
+        "sign_up": ["สมัคร", "ลงทะเบียน"],
+        "cookie_accept": ["ยอมรับคุกกี้ทั้งหมด", "ยอมรับทั้งหมด"],
+        "cookie_reject": ["ปฏิเสธทั้งหมด"],
+        "allow_oauth": ["อนุญาต", "ยอมรับ", "ดำเนินการต่อ"],
+        "go_back": ["กลับ"],
+    },
+    "vi": {
+        "signup_with_email": [
+            "Đăng ký bằng email", "Đăng ký với email", "Tiếp tục với email",
+        ],
+        "login_with_email": ["Đăng nhập bằng email", "Đăng nhập với email"],
+        "complete_signup": ["Hoàn tất đăng ký", "Tạo tài khoản"],
+        "sign_up": ["Đăng ký", "Tạo tài khoản"],
+        "cookie_accept": ["Chấp nhận tất cả cookie", "Chấp nhận tất cả"],
+        "cookie_reject": ["Từ chối tất cả"],
+        "allow_oauth": ["Cho phép", "Chấp nhận", "Tiếp tục"],
+        "go_back": ["Quay lại"],
+    },
+    "hi": {
+        "signup_with_email": ["ईमेल से साइन अप करें", "ईमेल से पंजीकरण"],
+        "login_with_email": ["ईमेल से लॉग इन करें", "ईमेल से साइन इन"],
+        "complete_signup": ["साइन अप पूरा करें", "खाता बनाएं"],
+        "sign_up": ["साइन अप", "पंजीकरण"],
+        "cookie_accept": ["सभी कुकीज़ स्वीकार करें", "सभी स्वीकार करें"],
+        "cookie_reject": ["सभी अस्वीकार करें"],
+        "allow_oauth": ["अनुमति दें", "स्वीकार करें", "जारी रखें"],
+        "go_back": ["वापस"],
+    },
+    "ta": {
+        # Seen in farm logs: குக்கீகள் அமைப்புகள் / ஏற்றுக்கொள்
+        "signup_with_email": [
+            "மின்னஞ்சலுடன் பதிவு செய்", "மின்னஞ்சல் மூலம் பதிவு",
+        ],
+        "login_with_email": ["மின்னஞ்சலுடன் உள்நுழை", "மின்னஞ்சல் மூலம் உள்நுழை"],
+        "complete_signup": ["பதிவை முடிக்கவும்", "கணக்கை உருவாக்கு"],
+        "sign_up": ["பதிவு செய்", "பதிவு"],
+        "cookie_accept": [
+            "எல்லா குக்கீகளையும் ஏற்றுக்கொள்", "அனைத்தையும் ஏற்றுக்கொள்",
+        ],
+        "cookie_reject": ["அனைத்தையும் நிராகரி", "நிராகரி"],
+        "allow_oauth": ["அனுமதி", "ஏற்றுக்கொள்", "தொடர்"],
+        "go_back": ["பின்செல்"],
+    },
+    "tr": {
+        "signup_with_email": ["E-posta ile kaydol", "E-posta ile üye ol"],
+        "login_with_email": ["E-posta ile giriş yap", "E-posta ile oturum aç"],
+        "complete_signup": ["Kaydı tamamla", "Hesap oluştur"],
+        "sign_up": ["Kaydol", "Üye ol"],
+        "cookie_accept": ["Tüm çerezleri kabul et", "Tümünü kabul et"],
+        "cookie_reject": ["Tümünü reddet"],
+        "allow_oauth": ["İzin ver", "Kabul et", "Devam"],
+        "go_back": ["Geri"],
+    },
+    "ru": {
+        "signup_with_email": [
+            "Зарегистрироваться по электронной почте",
+            "Регистрация через email", "Продолжить с email",
+        ],
+        "login_with_email": [
+            "Войти по электронной почте", "Войти через email",
+        ],
+        "complete_signup": ["Завершить регистрацию", "Создать аккаунт"],
+        "sign_up": ["Зарегистрироваться", "Создать аккаунт"],
+        "cookie_accept": ["Принять все файлы cookie", "Принять все"],
+        "cookie_reject": ["Отклонить все"],
+        "allow_oauth": ["Разрешить", "Принять", "Продолжить"],
+        "go_back": ["Назад"],
+    },
+    "it": {
+        "signup_with_email": [
+            "Registrati con email", "Iscriviti con e-mail", "Continua con e-mail",
+        ],
+        "login_with_email": ["Accedi con email", "Accedi con e-mail"],
+        "complete_signup": ["Completa la registrazione", "Crea account"],
+        "sign_up": ["Registrati", "Iscriviti"],
+        "cookie_accept": ["Accetta tutti i cookie", "Accetta tutto"],
+        "cookie_reject": ["Rifiuta tutto"],
+        "allow_oauth": ["Consenti", "Autorizza", "Continua"],
+        "go_back": ["Indietro"],
+    },
+    "nl": {
+        "signup_with_email": [
+            "Aanmelden met e-mail", "Registreren met e-mail", "Doorgaan met e-mail",
+        ],
+        "login_with_email": ["Inloggen met e-mail", "Aanmelden met e-mail"],
+        "complete_signup": ["Registratie voltooien", "Account aanmaken"],
+        "sign_up": ["Aanmelden", "Registreren"],
+        "cookie_accept": ["Alle cookies accepteren", "Alles accepteren"],
+        "cookie_reject": ["Alles weigeren"],
+        "allow_oauth": ["Toestaan", "Accepteren", "Doorgaan"],
+        "go_back": ["Terug"],
+    },
+    "pl": {
+        "signup_with_email": [
+            "Zarejestruj się e-mailem", "Zarejestruj się za pomocą e-maila",
+        ],
+        "login_with_email": ["Zaloguj się e-mailem", "Zaloguj się za pomocą e-maila"],
+        "complete_signup": ["Dokończ rejestrację", "Utwórz konto"],
+        "sign_up": ["Zarejestruj się", "Utwórz konto"],
+        "cookie_accept": ["Zaakceptuj wszystkie pliki cookie", "Zaakceptuj wszystko"],
+        "cookie_reject": ["Odrzuć wszystko"],
+        "allow_oauth": ["Zezwól", "Akceptuj", "Kontynuuj"],
+        "go_back": ["Wstecz"],
+    },
+    "uk": {
+        "signup_with_email": [
+            "Зареєструватися електронною поштою", "Реєстрація через email",
+        ],
+        "login_with_email": ["Увійти електронною поштою", "Увійти через email"],
+        "complete_signup": ["Завершити реєстрацію", "Створити обліковий запис"],
+        "sign_up": ["Зареєструватися"],
+        "cookie_accept": ["Прийняти всі файли cookie", "Прийняти все"],
+        "cookie_reject": ["Відхилити все"],
+        "allow_oauth": ["Дозволити", "Прийняти", "Продовжити"],
+        "go_back": ["Назад"],
+    },
+}
+
+# Strong script/word markers for language scoring (unit-tested)
+_LANG_DETECT_MARKERS: dict[str, tuple[str, ...]] = {
+    "zh": (r"使用邮箱", r"注册", r"登录", r"完成注册", r"接受所有", r"[\u4e00-\u9fff]{3,}"),
+    "zh-tw": (r"使用電子郵", r"註冊", r"登入", r"接受所有 Cookie"),
+    "ms": (r"tetapan kuki", r"terima semua", r"tolak semua", r"daftar dengan"),
+    "id": (r"daftar dengan email", r"masuk dengan", r"terima semua cookie"),
+    "ja": (r"メールで", r"登録", r"ログイン", r"[\u3040-\u30ff]{2,}"),
+    "ko": (r"이메일로", r"가입", r"로그인", r"[\uac00-\ud7af]{2,}"),
+    "es": (r"regístrate", r"registrarse", r"iniciar sesión", r"aceptar todas"),
+    "pt": (r"cadastrar", r"inscrever", r"entrar com", r"aceitar todos"),
+    "fr": (r"s'inscrire", r"se connecter", r"accepter tous", r"e-mail"),
+    "de": (r"registrieren", r"anmelden", r"cookies akzeptieren", r"mit e-mail"),
+    "ar": (r"[\u0600-\u06ff]{3,}", r"تسجيل", r"البريد"),
+    "th": (r"[\u0e00-\u0e7f]{3,}", r"สมัคร", r"อีเมล"),
+    "vi": (r"đăng ký", r"đăng nhập", r"chấp nhận", r"email"),
+    "hi": (r"[\u0900-\u097f]{3,}", r"साइन", r"ईमेल"),
+    "ta": (r"[\u0b80-\u0bff]{3,}", r"குக்கீ", r"ஏற்றுக்கொள்", r"நிராகரி"),
+    "tr": (r"kaydol", r"giriş yap", r"çerez", r"e-posta"),
+    "ru": (r"[\u0400-\u04ff]{3,}", r"регистрац", r"войти", r"cookie"),
+    "it": (r"registrati", r"accedi", r"cookie", r"e-mail"),
+    "nl": (r"aanmelden", r"inloggen", r"cookies accepteren"),
+    "pl": (r"zarejestruj", r"zaloguj", r"plików cookie"),
+    "uk": (r"зареєстр", r"увійти", r"файли cookie"),
+    "en": (r"sign up with email", r"log in with email", r"accept all cookies", r"complete sign up"),
+}
+
+
+def detect_ui_language(
+    *,
+    body: str = "",
+    html_lang: str = "",
+    buttons: list[str] | None = None,
+) -> str:
+    """Detect accounts.x.ai / cookie UI language. Returns short code (en, zh, ms, …)."""
+    html_l = (html_lang or "").strip().lower().replace("_", "-")
+    if html_l:
+        # lang="zh-CN" → zh, lang="zh-TW" → zh-tw
+        if html_l.startswith("zh-tw") or html_l.startswith("zh-hant"):
+            return "zh-tw"
+        if html_l.startswith("zh"):
+            return "zh"
+        primary = html_l.split("-")[0]
+        if primary in _UI_PACK and primary != "en":
+            # Prefer non-en html lang when set (site chose it)
+            return primary
+
+    parts = [body or ""]
+    if buttons:
+        parts.extend(str(b) for b in buttons if b)
+    sample = " ".join(parts).lower()
+    if not sample.strip():
+        return "en"
+
+    scores: dict[str, float] = {code: 0.0 for code in UI_LANG_CODES}
+    for code, markers in _LANG_DETECT_MARKERS.items():
+        for m in markers:
+            try:
+                n = len(re.findall(m, sample, flags=re.I))
+            except re.error:
+                n = 1 if re.search(m, sample, flags=re.I) else 0
+            if n:
+                # Script-class markers (unicode ranges) weight less per hit
+                w = 0.5 if m.startswith("[") else 2.0
+                scores[code] = scores.get(code, 0.0) + n * w
+
+    # Prefer zh-tw over zh if traditional markers stronger
+    if scores.get("zh-tw", 0) >= scores.get("zh", 0) and scores.get("zh-tw", 0) > 0:
+        # keep both; max will pick
+        pass
+    best = max(scores.items(), key=lambda kv: kv[1])
+    if best[1] <= 0:
+        return "en"
+    return best[0]
+
+
+def ui_labels(key: str, lang: str | None = None) -> list[str]:
+    """Ordered labels for an action: preferred lang first, then en, then all others."""
+    lang = (lang or "en").lower()
+    if lang.startswith("zh-tw") or lang.startswith("zh-hant"):
+        lang = "zh-tw"
+    elif lang.startswith("zh"):
+        lang = "zh"
+    else:
+        lang = lang.split("-")[0]
+
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(items: list[str]) -> None:
+        for s in items:
+            s2 = (s or "").strip()
+            if s2 and s2 not in seen:
+                seen.add(s2)
+                out.append(s2)
+
+    if lang in _UI_PACK and key in _UI_PACK[lang]:
+        _add(_UI_PACK[lang][key])
+    if lang != "en" and key in _UI_PACK.get("en", {}):
+        _add(_UI_PACK["en"][key])
+    for code, pack in _UI_PACK.items():
+        if code in (lang, "en"):
+            continue
+        if key in pack:
+            _add(pack[key])
+    return out
+
+
+def all_ui_labels(key: str) -> list[str]:
+    """Every known label for a key (en first)."""
+    return ui_labels(key, "en")
+
+
+# Flat list used by older call sites
+_SIGNUP_WITH_EMAIL_LABELS = all_ui_labels("signup_with_email")
+_LOGIN_WITH_EMAIL_LABELS = all_ui_labels("login_with_email")
+_COOKIE_ACCEPT_LABELS = all_ui_labels("cookie_accept")
+_COOKIE_REJECT_LABELS = all_ui_labels("cookie_reject")
+_COMPLETE_SIGNUP_LABELS = all_ui_labels("complete_signup")
+
+
+async def detect_page_ui_lang(page) -> str:
+    """Read page sample and detect UI language (for logging + label preference)."""
+    try:
+        info = await page.evaluate(
+            """() => {
+              const body = (document.body && document.body.innerText) || '';
+              const htmlLang = (document.documentElement && document.documentElement.lang) || '';
+              const btns = [...document.querySelectorAll('button, a[role="button"], [role="button"]')]
+                .slice(0, 30)
+                .map(el => (el.innerText || el.textContent || '').trim())
+                .filter(t => t && t.length < 80);
+              return { body: body.slice(0, 2000), htmlLang, buttons: btns };
+            }"""
+        )
+        if isinstance(info, dict):
+            return detect_ui_language(
+                body=str(info.get("body") or ""),
+                html_lang=str(info.get("htmlLang") or ""),
+                buttons=list(info.get("buttons") or []),
+            )
+    except Exception:
+        pass
+    return "en"
+
+
 async def dismiss_cookie_banner(page) -> None:
-    """OneTrust cookie modal blocks clicks — accept/reject early."""
+    """OneTrust cookie modal — ACCEPT only. Never Deny / Reject / Tolak.
+
+    User report: farm was clicking Deny. We never touch reject handlers or
+    partial labels that could match the wrong button.
+    """
+    # 1) OneTrust accept IDs only (never #onetrust-reject-all-handler)
     for sel in (
         "#onetrust-accept-btn-handler",
-        "#onetrust-reject-all-handler",
         "#accept-recommended-btn-handler",
+        "button#onetrust-accept-btn-handler",
+        ".onetrust-accept-btn-handler",
+        "button[id*='accept-btn' i]",
     ):
         try:
             btn = page.locator(sel).first
             if await btn.count() > 0 and await btn.is_visible():
+                txt = ""
+                try:
+                    txt = (await btn.inner_text()).strip().lower()
+                except Exception:
+                    pass
+                if any(x in txt for x in ("reject", "deny", "tolak", "decline", "refuse")):
+                    continue
                 await btn.click(timeout=2000)
-                await asyncio.sleep(0.25)
+                await asyncio.sleep(0.2)
                 return
         except Exception:
             continue
+
+    # 2) Exact Accept-All labels only (no bare "Accept" / "Allow All" partials)
+    accept_exact = [
+        "Accept All Cookies",
+        "Accept all cookies",
+        "Accept All",
+        "Terima Semua Kuki",
+        "Terima semua kuki",
+        "Terima Semua Cookie",
+        "Terima Semua",
+        "接受所有 Cookie",
+        "接受全部",
+        "すべてのCookieを受け入れる",
+        "모든 쿠키 수락",
+        "Aceptar todas las cookies",
+        "Aceitar todos os cookies",
+        "Accepter tous les cookies",
+        "Alle Cookies akzeptieren",
+        "எல்லா குக்கீகளையும் ஏற்றுக்கொள்",
+    ]
+    for name in accept_exact:
+        try:
+            loc = page.get_by_role("button", name=re.compile(rf"^{re.escape(name)}$", re.I))
+            if await loc.count() == 0:
+                continue
+            txt = (await loc.first.inner_text()).strip().lower()
+            if any(x in txt for x in ("reject", "deny", "tolak", "decline", "refuse", "ablehnen")):
+                continue
+            await loc.first.click(timeout=2500)
+            await asyncio.sleep(0.2)
+            return
+        except Exception:
+            continue
+
+    # 3) JS: accept id or text that is clearly Accept-All, never Reject
     try:
-        await click_text_button(page, ["Accept All Cookies", "Reject All", "Allow All"])
+        await page.evaluate(
+            """() => {
+              const byId = document.querySelector(
+                '#onetrust-accept-btn-handler, #accept-recommended-btn-handler'
+              );
+              if (byId) { byId.click(); return 'id'; }
+              const deny = /reject|deny|decline|refuse|tolak|拒绝|拒否|거부|ablehnen|refuser|rejeitar|odmów|відхил|отклон|不同意|ไม่ยอมรับ/i;
+              const acceptAll = /accept\\s*all|allow\\s*all|terima\\s*semua|aceptar\\s*tod|aceitar\\s*tod|accepter\\s*tou|alle\\s*cookies\\s*akzept|接受所有|接受全部|すべて|모든\\s*쿠키|ஏற்றுக்கொள்|قبول\\s*الكل|przyjm.*wszyst|принять\\s*все/i;
+              for (const b of document.querySelectorAll('button, [role="button"]')) {
+                if (b.id && /reject/i.test(b.id)) continue;
+                const t = (b.innerText || b.textContent || '').trim();
+                if (!t || deny.test(t)) continue;
+                if (acceptAll.test(t)) { b.click(); return t.slice(0,40); }
+              }
+              return '';
+            }"""
+        )
     except Exception:
         pass
 
@@ -2933,29 +3467,39 @@ def parse_aria_snapshot_signals(aria: str) -> dict[str, Any]:
     if not text.strip():
         return out
 
-    # Button lines: - button "Complete sign up" [disabled]
-    if re.search(r'button\s+"[^"]*complete\s+sign\s*up[^"]*"', low):
+    # Button lines: Complete / Create account / multi-locale
+    complete_re = (
+        r'complete\s+sign\s*up|create\s+account|完成注册|完成註冊|'
+        r'selesaikan|lengkapkan|completar registro|concluir|登録を完了|가입'
+    )
+    if re.search(rf'button\s+"[^"]*(?:{complete_re})[^"]*"', low):
         out["completeBtn"] = True
         if re.search(
-            r'button\s+"[^"]*complete\s+sign\s*up[^"]*"[^\n]*\[disabled',
+            rf'button\s+"[^"]*(?:{complete_re})[^"]*"[^\n]*\[disabled',
             low,
         ):
             out["completeDisabled"] = True
     if re.search(r"\b(password|textbox\s+\"password\")\b", low):
         out["hasPassword"] = True
-    if re.search(r'textbox\s+"[^"]*password', low) or "password" in low and "textbox" in low:
+    if re.search(r'textbox\s+"[^"]*password', low) or ("password" in low and "textbox" in low):
         out["hasPassword"] = True
-    if re.search(r'textbox\s+"[^"]*email|email\b', low):
+    if re.search(r'textbox\s+"[^"]*email|email\b|邮箱|メール', low):
         out["hasEmail"] = True
-    if re.search(r'one-time|verification code|textbox\s+"[^"]*code', low):
+    if re.search(r'one-time|verification code|textbox\s+"[^"]*code|验证码|確認コード', low):
         out["hasOtp"] = True
-    if re.search(r'first\s*name|given.?name', low):
+    if re.search(r'first\s*name|given.?name|名|이름', low):
         out["hasFirstName"] = True
-    if re.search(r"complete your sign up|complete sign up", low):
+    if re.search(r"complete your sign up|complete sign up|完成注册|完成註冊", low):
         out["headingComplete"] = True
-    if re.search(r"sign up with email|continue with email", low):
+    if re.search(
+        r"sign up with email|continue with email|使用邮箱|daftar dengan|メールで登録|이메일로",
+        low,
+    ):
         out["signupChooser"] = True
-    if re.search(r"(log\s*in|sign\s*in)\s+with\s+email", low):
+    if re.search(
+        r"(log\s*in|sign\s*in)\s+with\s+email|使用邮箱登录|masuk dengan email|メールでログイン",
+        low,
+    ):
         out["signInChooser"] = True
     return out
 
@@ -3051,6 +3595,7 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
               const b = body.slice(0, 2500).toLowerCase();
               const url = location.href || '';
               const title = (document.title || '').toLowerCase();
+              const htmlLang = (document.documentElement && document.documentElement.lang) || '';
               const ready = document.readyState || '';
               const spinners = document.querySelectorAll(
                 '[aria-busy="true"], .loading, .spinner, [class*="spinner" i], [class*="Loading"]'
@@ -3070,19 +3615,35 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
                 'button, a[role="button"], [role="button"], input[type="submit"]'
               )].filter(vis).map(el => (el.innerText||el.textContent||el.value||'').trim())
                 .filter(t => t && t.length < 80).slice(0, 24);
+              const btnJoin = btns.join(' | ').toLowerCase();
+              const hasBtn = (re) => re.test(btnJoin);
               const cf = has(/verify you are human|just a moment|hanya sebentar|checking your browser|performing security verification|security service to protect/)
                 || q("iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]");
               const loadErr = has(/couldn't load|could not load|page isn't available|can't be reached|aw snap/);
-              const cookie = q('#onetrust-accept-btn-handler, #onetrust-banner-sdk, [id*="onetrust"]');
+              const cookie = q('#onetrust-accept-btn-handler, #onetrust-banner-sdk, [id*="onetrust"]')
+                || has(/cookie|kuki|çerez|куки|ملف تعريف الارتباط|குக்கீ/)
+                   && hasBtn(/accept|reject|terima|tolak|acept|aceitar|accepter|akzept|接受|拒绝|拒絕|수락|거부|อนุญาต|ปฏิเสธ|chấp nhận|ஏற்று|நிராகரி|قبول|رفض|zaakcept|прийнят|принять/i);
               const emailIn = q('input[type="email"], input[name="email"], input[autocomplete="email"]');
               const passIn = q('input[type="password"]');
               const otpIn = q('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="1"]');
               const firstIn = q('input[name*="first" i], input[autocomplete="given-name"]');
-              const chooserSignup = has(/sign up with email|sign up with google|continue with google/);
-              const chooserLogin = has(/log\\s*in with email|sign in with email|login with email/);
-              const complete = has(/complete your sign up|complete sign up/);
-              const verify = has(/verify your email|confirmation code/);
-              const consent = has(/\\ballow\\b|authorize this|grant access/) && (url.includes('oauth') || url.includes('consent'));
+              // Multi-locale provider chooser (geoip UI ≠ English)
+              const chooserSignup = hasBtn(/sign up with email|continue with email/i)
+                || hasBtn(/使用邮箱|使用電子郵|使用电子邮件|用邮箱/)
+                || hasBtn(/daftar dengan (e-?mel|email)/i)
+                || hasBtn(/s'inscrire|registrarse|cadastrar|メールで登録|이메일로|e-posta ile kaydol|зарегистрироваться|đăng ký bằng|สมัครด้วย|registrati con|aanmelden met e-mail|zarejestruj/i)
+                || hasBtn(/google|apple/) && hasBtn(/sign up|daftar|注册|註冊|登録|가입|registr|cadastr|inscri|สมัคร|đăng ký|kaydol|регистр/i)
+                && !emailIn;
+              const chooserLogin = hasBtn(/log\\s*in with email|sign in with email|login with email/i)
+                || hasBtn(/使用邮箱登录|使用邮箱登入|使用電子郵件登入/)
+                || hasBtn(/masuk dengan email|log masuk dengan|entrar com|se connecter|iniciar sesión|メールでログイン|이메일로 로그인|e-posta ile giriş|войти.*email|đăng nhập bằng|เข้าสู่ระบบด้วย|accedi con|inloggen met/i);
+              const complete = has(/complete your sign up|complete sign up/)
+                || has(/完成注册|完成註冊|selesaikan pendaftaran|registrierung abschließen|terminer l'inscription|completar registro|concluir cadastro|登録を完了|가입 완료|hoàn tất đăng ký|kaydı tamamla|завершить регистрацию/);
+              const verify = has(/verify your email|confirmation code/)
+                || has(/验证.*邮件|驗證|verifikasi|sahkan|確認コード|인증 코드|código de confirmación|code de confirmation/);
+              const consent = (has(/\\ballow\\b|authorize this|grant access/)
+                || has(/允许|允許|benarkan|izinkan|permitir|autoriser|zulassen|許可|허용|อนุญาت|cho phép|سماح|izin ver|разрешить/))
+                && (url.includes('oauth') || url.includes('consent') || url.includes('authorize'));
               const account = /accounts\\.x\\.ai\\/account\\/?$/.test(url.replace(/\\/$/,''))
                 || url.includes('accounts.x.ai/account');
               const grok = url.includes('grok.com') && !cf;
@@ -3094,10 +3655,10 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
               else if (ready !== 'complete' && spinners > 0 && !emailIn && !passIn) stage = 'loading';
               else if (otpIn || verify) stage = 'signup_otp';
               else if (complete || (firstIn && passIn)) stage = 'signup_profile';
-              else if (emailIn && !passIn && (url.includes('sign-up') || chooserSignup || has(/sign up/)))
+              else if (emailIn && !passIn && (url.includes('sign-up') || chooserSignup || has(/sign up|daftar|注册|註冊|registr/)))
                 stage = 'signup_email';
               else if (chooserSignup && !emailIn) stage = 'signup_chooser';
-              else if (passIn && (url.includes('sign-in') || chooserLogin || has(/log in|sign in/)))
+              else if (passIn && (url.includes('sign-in') || chooserLogin || has(/log in|sign in|masuk|登录|登入|ログイン|로그인/)))
                 stage = 'signin_form';
               else if (chooserLogin && !passIn) stage = 'signin_chooser';
               else if (consent) stage = 'oauth_consent';
@@ -3106,7 +3667,7 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
               else if (grok) stage = 'grok_chat';
               else if (ready !== 'complete' || spinners > 0) stage = 'loading';
               return {
-                url, title, ready, stage, spinners,
+                url, title, ready, stage, spinners, htmlLang,
                 loading: ready !== 'complete' || spinners > 0,
                 cf, loadErr, cookie, emailIn, passIn, otpIn, firstIn,
                 chooserSignup, chooserLogin, complete, verify, consent, account, grok, chat,
@@ -3116,6 +3677,15 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
             }"""
         )
         if isinstance(st, dict):
+            # Detect UI language from sample (geoip pages often not English)
+            try:
+                st["uiLang"] = detect_ui_language(
+                    body=str(st.get("bodySample") or ""),
+                    html_lang=str(st.get("htmlLang") or ""),
+                    buttons=list(st.get("buttons") or []),
+                )
+            except Exception:
+                st["uiLang"] = "en"
             # Optional hybrid overlay (roles/disabled). Off by default — heal polls
             # often; full a11y snapshot each tick is too slow.
             if aria:
@@ -3328,13 +3898,7 @@ async def heal_to_stage(
         # Signup path
         if "signup_email" in want or "signup_chooser" in want or "signup_otp" in want:
             if stage == "signup_chooser":
-                await smart_click(
-                    page,
-                    ["Sign up with email", "Sign up with Email", "Continue with email"],
-                    exclude=["Google", "Apple", "Microsoft", " with X"],
-                    timeout_s=4.0,
-                    attempt=attempt,
-                )
+                await _click_signup_with_email(page, attempt)
                 await asyncio.sleep(0.4)
                 continue
             if stage == "signup_email" and "signup_otp" in want and email_addr:
@@ -3379,13 +3943,7 @@ async def heal_to_stage(
         # Sign-in path
         if "signin_form" in want or "signin_chooser" in want:
             if stage == "signin_chooser":
-                await smart_click(
-                    page,
-                    ["Login with email", "Log in with email", "Sign in with email"],
-                    exclude=["Google", "Apple"],
-                    timeout_s=4.0,
-                    attempt=attempt,
-                )
+                await click_login_with_email(page)
                 await asyncio.sleep(0.4)
                 continue
             if stage in ("unknown", "loading") and "sign-in" not in (last.get("url") or ""):
@@ -3597,28 +4155,178 @@ async def turnstile_token_len(page) -> int:
         return 0
 
 
-async def turnstile_visible(page) -> bool:
+async def read_turnstile_state(page) -> dict[str, Any]:
+    """Trace Turnstile checkbox: token, mount, iframe success, fail banner.
+
+    phase:
+      solved     — hidden token present (safe to submit)
+      failed     — CF "Verification failed"
+      loading    — looks checked / settling, token not in DOM yet (WAIT, don't re-click)
+      need_click — checkbox still needs a click
+      absent     — no widget
+    """
+    st: dict[str, Any] = {
+        "token_len": 0,
+        "solved": False,
+        "mounted": False,
+        "iframe_n": 0,
+        "label": False,
+        "failed": False,
+        "success_ui": False,
+        "phase": "absent",
+    }
     try:
-        if await turnstile_token_len(page) > 20:
-            return False  # solved
-        # Text label "Verify you are human" / cloudflare widget
-        n = await page.locator(
-            "text=Verify you are human, iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]"
-        ).count()
-        if n > 0:
-            return True
-        for f in page.frames:
-            if "challenges.cloudflare.com" in (f.url or "") or "turnstile" in (f.url or ""):
-                return True
+        tok = await turnstile_token_len(page)
+        st["token_len"] = tok
+        if tok > 20:
+            st["solved"] = True
+            st["phase"] = "solved"
+            return st
     except Exception:
         pass
-    return False
+    try:
+        st["failed"] = await _turnstile_verification_failed(page)
+        if st["failed"]:
+            st["phase"] = "failed"
+            return st
+    except Exception:
+        pass
+    try:
+        st["mounted"] = await _turnstile_mount_present(page)
+    except Exception:
+        pass
+    try:
+        st["label"] = await page.locator("text=Verify you are human").count() > 0
+    except Exception:
+        pass
+
+    iframe_n = 0
+    success_ui = False
+    try:
+        for f in page.frames:
+            u = (f.url or "").lower()
+            if "challenges.cloudflare" not in u and "turnstile" not in u:
+                continue
+            iframe_n += 1
+            try:
+                hit = await f.evaluate(
+                    """() => {
+                      const html = document.body ? document.body.innerHTML : '';
+                      const text = document.body ? (document.body.innerText || '') : '';
+                      if (/aria-checked=["']true["']/i.test(html)) return true;
+                      if (/data-state=["']checked["']/i.test(html)) return true;
+                      if (/\\bsuccess\\b|\\bpassed\\b|\\bverified\\b/i.test(html)) return true;
+                      const cb = document.querySelector(
+                        'input[type="checkbox"], [role="checkbox"]'
+                      );
+                      if (cb && (cb.checked || cb.getAttribute('aria-checked') === 'true'))
+                        return true;
+                      // Solved managed widget often has short body + svg check
+                      if (document.querySelector('svg') && text.length < 30
+                          && !/verify you are human/i.test(text))
+                        return true;
+                      return false;
+                    }"""
+                )
+                if hit:
+                    success_ui = True
+            except Exception:
+                pass
+    except Exception:
+        pass
+    st["iframe_n"] = iframe_n
+    st["success_ui"] = success_ui
+    try:
+        n = await page.locator(
+            "iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]"
+        ).count()
+        st["iframe_n"] = max(st["iframe_n"], int(n or 0))
+    except Exception:
+        pass
+
+    if st["token_len"] > 20:
+        st["solved"] = True
+        st["phase"] = "solved"
+    elif st["failed"]:
+        st["phase"] = "failed"
+    elif success_ui:
+        st["phase"] = "loading"  # checked look, wait for token field
+    elif st["mounted"] or st["label"] or st["iframe_n"] > 0:
+        st["phase"] = "need_click" if (st["label"] or st["iframe_n"] > 0) else "loading"
+    else:
+        st["phase"] = "absent"
+    return st
+
+
+async def wait_for_turnstile_solved(
+    page,
+    attempt: int,
+    *,
+    timeout_s: float = 10.0,
+    after: str = "click",
+) -> dict[str, Any]:
+    """Wait 5–10s after click/mount; log phase so we know if checked vs stuck."""
+    deadline = time.monotonic() + max(3.0, timeout_s)
+    last_phase = ""
+    st: dict[str, Any] = {}
+    t0 = time.monotonic()
+    while time.monotonic() < deadline:
+        st = await read_turnstile_state(page)
+        phase = str(st.get("phase") or "")
+        if phase != last_phase:
+            print(
+                f"[{attempt}] Turnstile wait({after}): phase={phase} "
+                f"token_len={st.get('token_len')} success_ui={st.get('success_ui')} "
+                f"iframe={st.get('iframe_n')} left={max(0.0, deadline - time.monotonic()):.0f}s",
+                flush=True,
+            )
+            last_phase = phase
+        if st.get("solved") or int(st.get("token_len") or 0) > 20:
+            st["solved"] = True
+            st["phase"] = "solved"
+            print(
+                f"[{attempt}] Turnstile SOLVED after {after} "
+                f"in {time.monotonic() - t0:.1f}s token_len={st.get('token_len')}",
+                flush=True,
+            )
+            return st
+        if st.get("failed"):
+            print(f"[{attempt}] Turnstile FAILED during wait({after})", flush=True)
+            return st
+        await asyncio.sleep(0.5)
+    st = await read_turnstile_state(page)
+    print(
+        f"[{attempt}] Turnstile wait({after}) done: phase={st.get('phase')} "
+        f"token_len={st.get('token_len')} success_ui={st.get('success_ui')} "
+        f"({time.monotonic() - t0:.1f}s)",
+        flush=True,
+    )
+    return st
+
+
+async def turnstile_visible(page) -> bool:
+    try:
+        st = await read_turnstile_state(page)
+        if st.get("solved"):
+            return False
+        return st.get("phase") in ("need_click", "loading", "failed")
+    except Exception:
+        return False
 
 
 async def try_click_turnstile(page, attempt: int) -> bool:
-    """Humanized click on Cloudflare Turnstile managed checkbox."""
+    """Click Cloudflare Turnstile checkbox once — no humanize mouse path.
+
+    Prefer element/frame click over page.mouse (user: no mouse animation after check).
+    """
+    # Already solved — do nothing
     try:
-        # 1) Click by accessible text on host page (managed widget often projects this)
+        if await turnstile_token_len(page) > 20:
+            return True
+    except Exception:
+        pass
+    try:
+        # 1) Host-page label / accessible text
         for sel in (
             'text=Verify you are human',
             'label:has-text("Verify you are human")',
@@ -3627,21 +4335,16 @@ async def try_click_turnstile(page, attempt: int) -> bool:
             try:
                 loc = page.locator(sel).first
                 if await loc.count() > 0 and await loc.is_visible():
-                    box = await loc.bounding_box(timeout=2000)
-                    if box:
-                        x = box["x"] + min(18, box["width"] * 0.15)
-                        y = box["y"] + box["height"] / 2
-                        await page.mouse.move(x - 40, y - 20, steps=8)
-                        await asyncio.sleep(random.uniform(0.15, 0.4))
-                        await page.mouse.move(x, y, steps=10)
-                        await asyncio.sleep(random.uniform(0.2, 0.5))
-                        await page.mouse.click(x, y)
-                        vlog(f"Turnstile: clicked host text ({sel})", attempt)
-                        return True
+                    try:
+                        await loc.click(timeout=2500, force=True)
+                    except Exception:
+                        await loc.click(timeout=2000, force=True)
+                    vlog(f"Turnstile: clicked host text ({sel})", attempt)
+                    return True
             except Exception:
                 continue
 
-        # 2) Click left side of turnstile container / iframe
+        # 2) Iframe / sitekey element — direct locator click (no mouse.move trail)
         for sel in (
             'iframe[src*="challenges.cloudflare.com"]',
             'iframe[src*="turnstile"]',
@@ -3652,18 +4355,21 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                 loc = page.locator(sel).first
                 if await loc.count() == 0:
                     continue
-                box = await loc.bounding_box(timeout=2000)
-                if not box:
-                    continue
-                x = box["x"] + min(28, max(12, box["width"] * 0.12))
-                y = box["y"] + box["height"] / 2
-                await page.mouse.move(x - 50, y - 25, steps=8)
-                await asyncio.sleep(random.uniform(0.15, 0.4))
-                await page.mouse.move(x, y, steps=12)
-                await asyncio.sleep(random.uniform(0.25, 0.6))
-                await page.mouse.click(x, y)
-                vlog(f"Turnstile: clicked container {sel}", attempt)
-                return True
+                try:
+                    await loc.click(timeout=2500, force=True, position={"x": 20, "y": 20})
+                    vlog(f"Turnstile: force-click {sel}", attempt)
+                    return True
+                except Exception:
+                    box = await loc.bounding_box(timeout=1500)
+                    if not box:
+                        continue
+                    # Single click only — no multi-point animation
+                    await page.mouse.click(
+                        box["x"] + min(28, max(12, box["width"] * 0.12)),
+                        box["y"] + box["height"] / 2,
+                    )
+                    vlog(f"Turnstile: clicked container {sel}", attempt)
+                    return True
             except Exception:
                 continue
 
@@ -3682,14 +4388,17 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                     loc = f.locator(sel).first
                     if await loc.count() == 0:
                         continue
-                    box = await loc.bounding_box(timeout=2000)
-                    if not box:
-                        continue
-                    tx = box["x"] + min(20, box["width"] * 0.2)
-                    ty = box["y"] + box["height"] / 2
-                    await page.mouse.move(tx, ty, steps=12)
-                    await asyncio.sleep(random.uniform(0.2, 0.5))
-                    await page.mouse.click(tx, ty)
+                    try:
+                        await loc.click(timeout=2000)
+                    except Exception:
+                        box = await loc.bounding_box(timeout=1500)
+                        if box:
+                            await page.mouse.click(
+                                box["x"] + min(20, box["width"] * 0.2),
+                                box["y"] + box["height"] / 2,
+                            )
+                        else:
+                            continue
                     vlog(f"Turnstile: clicked frame {sel}", attempt)
                     return True
                 except Exception:
@@ -3740,7 +4449,7 @@ async def _turnstile_mount_present(page) -> bool:
 
 
 async def _click_turnstile_slot_above_complete(page, attempt: int) -> bool:
-    """Click the blank Turnstile slot that sits just above 'Complete sign up'."""
+    """Click the blank Turnstile slot just above 'Complete sign up' (direct click)."""
     try:
         btn = page.get_by_role("button", name=re.compile(r"complete\s+sign\s*up", re.I)).first
         if await btn.count() == 0:
@@ -3753,10 +4462,6 @@ async def _click_turnstile_slot_above_complete(page, attempt: int) -> bool:
         y = box["y"] - 36
         if y < 8:
             return False
-        await page.mouse.move(x - 30, y - 10, steps=6)
-        await asyncio.sleep(random.uniform(0.1, 0.25))
-        await page.mouse.move(x, y, steps=8)
-        await asyncio.sleep(random.uniform(0.15, 0.35))
         await page.mouse.click(x, y)
         vlog(f"Turnstile: clicked slot above Complete ({x:.0f},{y:.0f})", attempt)
         return True
@@ -3832,27 +4537,37 @@ async def _force_turnstile_remount(
     except Exception as e:
         vlog(f"Turnstile remount JS warn: {e}", attempt)
 
-    # Password re-focus often re-triggers CF mount on complete form
+    # Only re-type password if empty (remount must not wipe+retype every time)
     if password:
         try:
             loc = page.locator('input[type="password"]').first
             if await loc.count() > 0:
-                await loc.click(timeout=2000)
-                await asyncio.sleep(0.15)
-                await loc.fill("")
-                await loc.fill(password)
-                await loc.evaluate(
-                    """(el, v) => {
-                        const setter = Object.getOwnPropertyDescriptor(
-                            window.HTMLInputElement.prototype, 'value'
-                        ).set;
-                        setter.call(el, v);
-                        el.dispatchEvent(new Event('input', { bubbles: true }));
-                        el.dispatchEvent(new Event('change', { bubbles: true }));
-                        el.dispatchEvent(new Event('blur', { bubbles: true }));
-                    }""",
-                    password,
-                )
+                cur = ""
+                try:
+                    cur = await loc.input_value()
+                except Exception:
+                    cur = await _password_field_value(page)
+                if cur and len(cur) >= 4:
+                    try:
+                        await loc.evaluate("el => el.blur()")
+                    except Exception:
+                        pass
+                else:
+                    await loc.click(timeout=2000)
+                    await asyncio.sleep(0.1)
+                    await loc.fill(password)
+                    await loc.evaluate(
+                        """(el, v) => {
+                            const setter = Object.getOwnPropertyDescriptor(
+                                window.HTMLInputElement.prototype, 'value'
+                            ).set;
+                            setter.call(el, v);
+                            el.dispatchEvent(new Event('input', { bubbles: true }));
+                            el.dispatchEvent(new Event('change', { bubbles: true }));
+                            el.dispatchEvent(new Event('blur', { bubbles: true }));
+                        }""",
+                        password,
+                    )
         except Exception:
             pass
     # Give CF time to re-fetch challenge (concurrent IP needs breathing room)
@@ -3906,13 +4621,20 @@ async def _read_complete_form_state(page) -> dict[str, Any]:
               } catch(e) {}
               const body = (document.body?.innerText || '').slice(0, 1200).toLowerCase();
               const onComplete = body.includes('complete your sign up')
-                || body.includes('complete sign up');
+                || body.includes('complete sign up')
+                || body.includes('完成注册') || body.includes('完成註冊')
+                || body.includes('selesaikan pendaftaran')
+                || body.includes('registrierung abschließen')
+                || body.includes('completar registro')
+                || body.includes('登録を完了') || body.includes('가입 완료');
               const err = body.includes('required') || body.includes('invalid')
-                || body.includes('try again') || body.includes('verification failed');
+                || body.includes('try again') || body.includes('verification failed')
+                || body.includes('必填') || body.includes('无效') || body.includes('驗證失敗');
               const hasPw = !!document.querySelector('input[type="password"]');
-              const hasCompleteBtn = [...document.querySelectorAll('button')].some(b =>
-                /complete\\s*sign\\s*up/i.test((b.innerText||'').trim())
-              );
+              const hasCompleteBtn = [...document.querySelectorAll('button')].some(b => {
+                const t = (b.innerText||'').trim();
+                return /complete\\s*sign\\s*up|create account|完成注册|完成註冊|selesaikan|lengkapkan|abschließ|completar|concluir|登録を完了|가입 완료|hoàn tất|kaydı tamamla|завершить регистрац/i.test(t);
+              });
               const first = val('input[name="firstName"]')
                 || val('input[name="first_name"]')
                 || val('input[autocomplete="given-name"]')
@@ -4117,7 +4839,7 @@ async def _complete_button_state(page) -> dict[str, Any]:
         st = await page.evaluate(
             """() => {
               const btns = [...document.querySelectorAll('button')];
-              const b = btns.find(x => /complete\\s*sign\\s*up/i.test(
+              const b = btns.find(x => /complete\\s*sign\\s*up|create account|完成注册|完成註冊|selesaikan|lengkapkan pendaftaran|registrierung|completar registro|concluir cadastro|登録を完了|가입 완료|hoàn tất|kaydı tamamla|завершить регистрац/i.test(
                 (x.innerText||'').trim()));
               if (!b) return {found: false};
               const r = b.getBoundingClientRect();
@@ -4155,140 +4877,46 @@ async def _complete_button_state(page) -> dict[str, Any]:
 
 
 async def _submit_complete_signup(page, attempt: int) -> bool:
-    """Submit Complete while token is live — multi-wave (do not stop at first click).
+    """After Turnstile token: one direct Complete click (refer-style).
 
-    Log pattern: turnstile_ok + token_len~645 → click → still on form ts=0.
-    One role-click often fires CF consume without React form handlers.
+    No multi-wave mouse/pointer animation — user: token ready → just click button.
     """
     await dismiss_cookie_banner(page)
-    bst = await _complete_button_state(page)
-    vlog(
-        f"complete btn found={bst.get('found')} disabled={bst.get('disabled')} "
-        f"covered={bst.get('covered')} cover={bst.get('coverTag')!r}",
-        attempt,
-    )
-    if bst.get("covered"):
-        await dismiss_cookie_banner(page)
-        try:
-            await page.keyboard.press("Escape")
-        except Exception:
-            pass
-        await asyncio.sleep(0.3)
-
-    waves_hit: list[str] = []
-
-    # Wave 1: Playwright role click (and force if disabled attr is stale)
+    # Prefer exact Complete sign up (refer)
     try:
-        btn = page.get_by_role("button", name=re.compile(r"complete\s+sign\s*up", re.I))
-        if await btn.count() > 0:
-            await btn.first.scroll_into_view_if_needed(timeout=2000)
-            await asyncio.sleep(0.12)
-            if bst.get("disabled"):
-                # Nudge fields so React re-enables, then force click
-                try:
-                    pw = page.locator('input[type="password"]').first
-                    if await pw.count() > 0:
-                        await pw.click(timeout=1500)
-                        await pw.press("End")
-                except Exception:
-                    pass
-            try:
-                await btn.first.click(timeout=4000)
-            except Exception:
-                await btn.first.click(timeout=3000, force=True)
-            waves_hit.append("role")
-            vlog("complete: clicked role button", attempt)
-            await asyncio.sleep(0.35)
-            if await _complete_form_succeeded(page):
-                return True
-            if await turnstile_token_len(page) <= 20:
-                vlog(f"complete: token consumed after role click waves={waves_hit}", attempt)
-                return True  # click registered; caller re-solves if still on form
-    except Exception as e:
-        vlog(f"complete: role click warn {e}", attempt)
-
-    # Wave 2: Enter on password (native form submit)
-    if await turnstile_token_len(page) > 20:
-        try:
-            pw = page.locator('input[type="password"]').first
-            if await pw.count() > 0:
-                await pw.click(timeout=2000)
-                await pw.press("Enter")
-                waves_hit.append("enter")
-                vlog("complete: Enter on password", attempt)
-                await asyncio.sleep(0.4)
-                if await _complete_form_succeeded(page):
-                    return True
-                if await turnstile_token_len(page) <= 20:
-                    return True
-        except Exception as e:
-            vlog(f"complete: Enter warn {e}", attempt)
-
-    # Wave 3: smart_click text
-    if await turnstile_token_len(page) > 20:
-        hit = await smart_click(
-            page,
-            ["Complete sign up", "Complete Sign Up", "Create account"],
-            exclude=["Google", "Apple", "email"],
-            timeout_s=2.5,
-            attempt=attempt,
+        btn = page.get_by_role(
+            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
         )
-        if hit:
-            waves_hit.append(f"smart:{hit}")
-            vlog(f"complete: smart_click {hit!r}", attempt)
-            await asyncio.sleep(0.35)
-            if await _complete_form_succeeded(page) or await turnstile_token_len(page) <= 20:
-                return True
-
-    # Wave 4: JS — pointer events + clear disabled + requestSubmit
-    if await turnstile_token_len(page) > 20 or not waves_hit:
-        try:
-            ok = await page.evaluate(
-                """() => {
-                  const btns = [...document.querySelectorAll('button')];
-                  const b = btns.find(x => /complete\\s*sign\\s*up/i.test(
-                    (x.innerText||'').trim()));
-                  if (b) {
-                    try { b.disabled = false; b.removeAttribute('disabled');
-                      b.setAttribute('aria-disabled', 'false'); } catch(e) {}
-                    const r = b.getBoundingClientRect();
-                    const opts = {bubbles: true, cancelable: true, view: window,
-                      clientX: r.left + r.width/2, clientY: r.top + r.height/2};
-                    for (const t of ['pointerdown','mousedown','pointerup','mouseup','click']) {
-                      try { b.dispatchEvent(new MouseEvent(t, opts)); } catch(e) {}
-                    }
-                    try { b.click(); } catch(e) {}
-                  }
-                  const form = b ? b.closest('form') : document.querySelector('form');
-                  if (form && typeof form.requestSubmit === 'function') {
-                    try { form.requestSubmit(b || undefined); return 'requestSubmit'; } catch(e) {}
-                    try { form.requestSubmit(); return 'requestSubmit2'; } catch(e) {}
-                  }
-                  if (form) { try { form.submit(); return 'form.submit'; } catch(e) {} }
-                  return b ? 'js-click' : '';
-                }"""
-            )
-            if ok:
-                waves_hit.append(f"js:{ok}")
-                vlog(f"complete: js submit {ok}", attempt)
-                await asyncio.sleep(0.35)
-                if await _complete_form_succeeded(page) or await turnstile_token_len(page) <= 20:
-                    return True
-        except Exception as e:
-            vlog(f"complete: js submit warn {e}", attempt)
-
-    # Wave 5: type=submit any
+        if await btn.count() > 0 and await btn.first.is_visible():
+            await btn.first.click(timeout=5000, force=True)
+            vlog("complete: clicked Complete sign up", attempt)
+            return True
+    except Exception as e:
+        vlog(f"complete role click: {e}", attempt)
+    hit = await click_text_button(
+        page,
+        ["Complete sign up", "Complete Sign Up", "Create account"],
+        exclude=["Google", "Apple", "Deny", "Cancel"],
+    )
+    if hit:
+        vlog(f"complete: text click {hit!r}", attempt)
+        return True
     try:
-        sub = page.locator('button[type="submit"]').first
-        if await sub.count() > 0 and await sub.is_visible():
-            await sub.click(timeout=3000, force=True)
-            waves_hit.append("type=submit")
-            vlog("complete: clicked type=submit", attempt)
+        ok = await page.evaluate(
+            """() => {
+              const b = [...document.querySelectorAll('button')].find(x =>
+                /complete\\s*sign\\s*up/i.test((x.innerText||'').trim()));
+              if (!b) return false;
+              b.click();
+              return true;
+            }"""
+        )
+        if ok:
+            vlog("complete: js click", attempt)
+            return True
     except Exception:
         pass
-
-    vlog(f"complete: submit waves done {waves_hit}", attempt)
-    return bool(waves_hit)
+    return False
 
 
 async def handle_turnstile(
@@ -4337,135 +4965,156 @@ async def _handle_turnstile_inner(
     password: str | None = None,
     allow_remount: bool = True,
 ) -> bool:
+    """Observe → wait → click once → wait 5–10s for check (no blind r1–r5 spam)."""
     deadline = time.monotonic() + max_wait
     clicks = 0
     remounts = 0
+    # First look: Camoufox often auto-passes — wait before clicking
+    st0 = await wait_for_turnstile_solved(
+        page, attempt, timeout_s=min(6.0, max_wait * 0.35), after="mount"
+    )
+    if st0.get("solved"):
+        return True
+
     while time.monotonic() < deadline:
-        tok = await turnstile_token_len(page)
-        if tok > 20:
-            vlog(f"Turnstile: token present (len={tok})", attempt)
+        st = await read_turnstile_state(page)
+        phase = str(st.get("phase") or "absent")
+        print(
+            f"[{attempt}] Turnstile loop: phase={phase} token_len={st.get('token_len')} "
+            f"success_ui={st.get('success_ui')} clicks={clicks} remounts={remounts} "
+            f"left={max(0.0, deadline - time.monotonic()):.0f}s",
+            flush=True,
+        )
+
+        if st.get("solved") or int(st.get("token_len") or 0) > 20:
+            vlog(f"Turnstile: token present (len={st.get('token_len')})", attempt)
             return True
 
-        # CF hard-fail widget — must remount, clicking forever does nothing
-        if await _turnstile_verification_failed(page):
-            if allow_remount and remounts < 4:
+        # Loading / success_ui: DO NOT re-click (would reset checkbox)
+        if phase == "loading" or (st.get("success_ui") and not st.get("solved")):
+            stw = await wait_for_turnstile_solved(
+                page, attempt,
+                timeout_s=min(10.0, max(5.0, deadline - time.monotonic())),
+                after="settle",
+            )
+            if stw.get("solved"):
+                return True
+            # Still no token after settle — one soft remount max
+            if allow_remount and remounts < 2 and (deadline - time.monotonic()) > 8:
                 await _force_turnstile_remount(
-                    page, attempt, password, hard=(remounts >= 1)
+                    page, attempt, password, hard=(remounts >= 1),
                 )
                 remounts += 1
                 clicks = 0
                 continue
-            if not allow_remount:
-                # old style: keep clicking; don't abort early on CF fail banner
-                await try_click_turnstile(page, attempt)
-                await _click_turnstile_slot_above_complete(page, attempt)
-                clicks += 1
-                await asyncio.sleep(2.0)
-                continue
-            vlog(f"Turnstile: Verification failed (remounts exhausted)", attempt)
-            return False
-
-        visible = await turnstile_visible(page)
-        mounted = await _turnstile_mount_present(page)
-        if not visible and not mounted:
-            if require_token:
-                # Wait longer before aggressive clicking — blank mount often still loading
-                if clicks == 0:
-                    await asyncio.sleep(2.0)
-                if clicks < 6:
-                    await _click_turnstile_slot_above_complete(page, attempt)
-                    await try_click_turnstile(page, attempt)
-                    clicks += 1
-                # blank for a long time → soft then hard remount (login path)
-                if (
-                    allow_remount
-                    and clicks >= 3
-                    and remounts < 3
-                    and (deadline - time.monotonic()) > 10
-                ):
-                    await _force_turnstile_remount(
-                        page, attempt, password, hard=(remounts >= 1)
-                    )
-                    remounts += 1
-                    clicks = 0
-                await asyncio.sleep(1.5)
-                continue
-            # Other pages may not require it
-            return True
-        if not visible and mounted:
-            # Widget still loading (blank grey box) — wait first, then poke
-            if clicks == 0:
-                await asyncio.sleep(2.5)  # CF under concurrent IP is slow
-            if clicks < 4:
-                await _click_turnstile_slot_above_complete(page, attempt)
-                await try_click_turnstile(page, attempt)
-                clicks += 1
-            if (
-                allow_remount
-                and clicks >= 3
-                and remounts < 3
-                and (deadline - time.monotonic()) > 10
-            ):
-                await _force_turnstile_remount(
-                    page, attempt, password, hard=(remounts >= 1)
-                )
-                remounts += 1
-                clicks = 0
-            await asyncio.sleep(1.5)
-            continue
-
-        # Widget still needs interaction
-        if clicks < 6:
-            await try_click_turnstile(page, attempt)
-            await _click_turnstile_slot_above_complete(page, attempt)
-            clicks += 1
-            await asyncio.sleep(2.5)
-            if await turnstile_token_len(page) > 20:
-                vlog(f"Turnstile: solved after click", attempt)
+            if not require_token:
                 return True
             continue
 
-        # Still blocked — vision for interactive image challenge
-        try:
-            img = await page.screenshot(full_page=True)
-            b64 = base64.b64encode(img).decode("ascii")
-            resp = _call_vision_model(b64, _VISION_TURNSTILE_PROMPT)
-            if resp:
-                vlog(f"Turnstile vision: {resp[:120]}", attempt)
-                upper = resp.strip().upper()
-                if "NO_CAPTCHA" in upper:
-                    # only trust if no mount / token already ok
-                    if not await _turnstile_mount_present(page) or await turnstile_token_len(page) > 20:
-                        return True
-                if "CHECKBOX" in upper:
+        if phase == "failed":
+            if allow_remount and remounts < 3:
+                await _force_turnstile_remount(
+                    page, attempt, password, hard=(remounts >= 1),
+                )
+                remounts += 1
+                clicks = 0
+                await wait_for_turnstile_solved(
+                    page, attempt, timeout_s=5.0, after="remount",
+                )
+                continue
+            if not allow_remount:
+                await try_click_turnstile(page, attempt)
+                await wait_for_turnstile_solved(
+                    page, attempt, timeout_s=6.0, after="fail-click",
+                )
+                continue
+            vlog("Turnstile: Verification failed (remounts exhausted)", attempt)
+            return False
+
+        if phase == "absent":
+            if not require_token:
+                return True
+            # Widget not mounted yet
+            if clicks == 0:
+                await asyncio.sleep(2.0)
+            if clicks < 3:
+                await _click_turnstile_slot_above_complete(page, attempt)
+                await try_click_turnstile(page, attempt)
+                clicks += 1
+                stw = await wait_for_turnstile_solved(
+                    page, attempt, timeout_s=8.0, after=f"click#{clicks}",
+                )
+                if stw.get("solved"):
+                    return True
+            elif allow_remount and remounts < 2 and (deadline - time.monotonic()) > 10:
+                await _force_turnstile_remount(
+                    page, attempt, password, hard=(remounts >= 1),
+                )
+                remounts += 1
+                clicks = 0
+            else:
+                await asyncio.sleep(1.0)
+            continue
+
+        # need_click: click once, then wait 8–10s for check (do not spam clicks)
+        if phase == "need_click" and clicks < 4:
+            await try_click_turnstile(page, attempt)
+            await _click_turnstile_slot_above_complete(page, attempt)
+            clicks += 1
+            stw = await wait_for_turnstile_solved(
+                page, attempt,
+                timeout_s=min(10.0, max(6.0, deadline - time.monotonic())),
+                after=f"click#{clicks}",
+            )
+            if stw.get("solved"):
+                return True
+            if stw.get("phase") == "loading":
+                # Checked look — keep waiting, don't remount yet
+                stw2 = await wait_for_turnstile_solved(
+                    page, attempt, timeout_s=8.0, after="post-check",
+                )
+                if stw2.get("solved"):
+                    return True
+            continue
+
+        # Exhausted clicks — optional vision, then remount
+        if allow_remount and remounts < 3 and (deadline - time.monotonic()) > 10:
+            await _force_turnstile_remount(
+                page, attempt, password, hard=(remounts >= 1),
+            )
+            remounts += 1
+            clicks = 0
+            await wait_for_turnstile_solved(
+                page, attempt, timeout_s=6.0, after="remount",
+            )
+            continue
+
+        if CAPTCHA_PROXY_URL or CAPTCHA_API_KEY:
+            try:
+                img = await page.screenshot(full_page=True)
+                b64 = base64.b64encode(img).decode("ascii")
+                resp = _call_vision_model(b64, _VISION_TURNSTILE_PROMPT)
+                if resp and "CHECKBOX" in resp.upper():
                     await try_click_turnstile(page, attempt)
-                    await asyncio.sleep(2.0)
-                    clicks = 0
-                    continue
-                coords = _parse_vision_clicks(resp)
-                if coords:
-                    try:
-                        size = await page.evaluate(
-                            "() => ({w: Math.max(document.documentElement.scrollWidth, window.innerWidth), h: Math.max(document.documentElement.scrollHeight, window.innerHeight)})"
-                        )
-                        w, h = size["w"], size["h"]
-                    except Exception:
-                        vp = page.viewport_size or {"width": 1280, "height": 800}
-                        w, h = vp["width"], vp["height"]
-                    for px, py in coords:
-                        await page.mouse.click((px / 100.0) * w, (py / 100.0) * h)
-                        await asyncio.sleep(random.uniform(0.3, 0.6))
-                    await asyncio.sleep(2.0)
-                    continue
-        except Exception as e:
-            vlog(f"Turnstile vision fail: {e}", attempt)
+                    stw = await wait_for_turnstile_solved(
+                        page, attempt, timeout_s=8.0, after="vision",
+                    )
+                    if stw.get("solved"):
+                        return True
+            except Exception as e:
+                vlog(f"Turnstile vision fail: {e}", attempt)
 
-        await asyncio.sleep(1.2)
+        await asyncio.sleep(1.0)
 
-    tok = await turnstile_token_len(page)
-    if tok > 20:
+    stf = await read_turnstile_state(page)
+    if stf.get("solved") or int(stf.get("token_len") or 0) > 20:
         return True
-    vlog(f"Turnstile: timeout after {max_wait}s (token_len={tok})", attempt)
+    print(
+        f"[{attempt}] Turnstile TIMEOUT after {max_wait}s: phase={stf.get('phase')} "
+        f"token_len={stf.get('token_len')} success_ui={stf.get('success_ui')} "
+        f"clicks={clicks} remounts={remounts}",
+        flush=True,
+    )
     return False
 
 
@@ -4586,8 +5235,13 @@ class CliOAuthCallbackHub:
                 fut.cancel()
 
     def deliver(self, state: str | None, code: str | None) -> bool:
-        """Resolve waiter for state (thread-safe via call_soon_threadsafe not needed if same loop)."""
-        if not state or not code:
+        """Resolve waiter for *exact* state only.
+
+        Never deliver to a random pending waiter — concurrent workers each have
+        their own PKCE verifier; giving worker B worker A's code → token
+        exchange HTTP 400 (invalid_grant / code already used).
+        """
+        if not code or not state:
             return False
         fut = self._pending.get(state)
         if fut is None or fut.done():
@@ -4666,6 +5320,9 @@ async def stop_cli_oauth_server() -> None:
 
 
 def exchange_code_for_tokens(code: str, verifier: str) -> dict:
+    """POST auth.x.ai/oauth2/token. 400 usually = code already used / wrong verifier."""
+    if not code or not verifier:
+        raise RuntimeError("token exchange missing code or verifier")
     form = urlencode(
         {
             "grant_type": "authorization_code",
@@ -4684,8 +5341,19 @@ def exchange_code_for_tokens(code: str, verifier: str) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
-        data = json.loads(resp.read().decode("utf-8"))
+    try:
+        with urllib.request.urlopen(req, timeout=30) as resp:
+            data = json.loads(resp.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            body = e.read().decode("utf-8", errors="replace")[:300]
+        except Exception:
+            body = ""
+        # 400 invalid_grant common under concurrent OAuth (code reuse / race)
+        raise RuntimeError(
+            f"token exchange HTTP {e.code}: {body or e.reason} "
+            f"(code_len={len(code)} verifier_len={len(verifier)})"
+        ) from e
     access = data.get("access_token") or ""
     refresh = data.get("refresh_token") or ""
     if not access or not refresh:
@@ -5558,23 +6226,58 @@ async def wait_for_selector_any(page, selectors: list[str], timeout_ms: int = 15
 
 
 async def _click_signup_with_email(page, attempt: int) -> bool:
-    """Click provider chooser → email path (DOM-aware)."""
+    """Click provider chooser → email path (detect UI lang, prefer its labels)."""
     st = await heal_to_stage(
         page, attempt, {"signup_chooser", "signup_email", "signup_otp", "signup_profile"},
         timeout_s=8.0,
     )
     if st.get("stage") in ("signup_email", "signup_otp", "signup_profile"):
         return True  # already past chooser
+    lang = str(st.get("uiLang") or "") or await detect_page_ui_lang(page)
+    labels = ui_labels("signup_with_email", lang)
+    print(f"[{attempt}] uiLang={lang} signup-email labels={len(labels)}", flush=True)
     clicked = await smart_click(
         page,
-        ["Sign up with email", "Sign up with Email", "Continue with email"],
-        exclude=["Google", "Apple", "Microsoft", " with X"],
+        labels,
+        exclude=[
+            "Google", "Apple", "Microsoft", " with X", " X ",
+            "使用 X", "使用 Google", "使用 Apple", "con Google", "avec Google",
+            "mit Google", "dengan Google", "с Google",
+        ],
         timeout_s=5.0,
         attempt=attempt,
     )
     if clicked:
-        print(f"[{attempt}] Clicked: {clicked}", flush=True)
+        print(f"[{attempt}] Clicked signup-email ({lang}): {clicked}", flush=True)
         return True
+    # Semantic JS fallback — email path in any language
+    try:
+        hit = await page.evaluate(
+            """() => {
+              const reMail = /email|e-?mail|邮箱|郵件|電郵|メール|이메일|correo|e-?mel|почт|อีเมล|மின்|بريد|e-posta/i;
+              const reSign = /sign\\s*up|daftar|注册|註冊|登録|가입|regist|cadastr|inscri|สมัคร|đăng\\s*ký|kaydol|регистр|zarejestr|aanmelden|iscriv/i;
+              const skip = /google|apple|microsoft|\\bx\\b|推特|twitter/i;
+              const btns = [...document.querySelectorAll('button, a[role="button"], [role="button"]')];
+              for (const b of btns) {
+                const t = (b.innerText || b.textContent || '').trim();
+                if (!t || t.length > 80) continue;
+                if (skip.test(t) && !reMail.test(t)) continue;
+                if (reMail.test(t) && reSign.test(t)) { b.click(); return t.slice(0, 48); }
+              }
+              for (const b of btns) {
+                const t = (b.innerText || '').trim();
+                if (/使用邮箱|使用郵件|使用电子邮|使用電郵/.test(t)) {
+                  b.click(); return t.slice(0, 48);
+                }
+              }
+              return '';
+            }"""
+        )
+        if hit:
+            print(f"[{attempt}] Clicked signup-email (js/{lang}): {hit}", flush=True)
+            return True
+    except Exception as e:
+        vlog(f"signup email js click warn: {e}", attempt)
     return False
 
 
@@ -5671,20 +6374,27 @@ async def _wait_signup_email_input(page, attempt: int, timeout_s: float = 12.0) 
         if sel:
             return sel
 
-        # Provider chooser still showing — click email path
+        # Provider chooser still showing — click email path (multi-locale)
         chooser = False
         try:
             chooser = (
                 await page.locator(
-                    "text=/Sign up with email|Continue with Google|Sign up with Google/i"
+                    "text=/Sign up with email|Continue with Google|Sign up with Google|"
+                    "使用邮箱注册|使用電子郵件|使用 X 注册|使用 Google|Daftar dengan/i"
                 ).count()
                 > 0
             )
         except Exception:
             pass
+        if not chooser:
+            try:
+                stc = await read_page_state(page)
+                chooser = bool(stc.get("chooserSignup") or stc.get("stage") == "signup_chooser")
+            except Exception:
+                pass
         if chooser:
             if not reclicked:
-                print(f"[{attempt}] signup: click Sign up with email", flush=True)
+                print(f"[{attempt}] signup: click Sign up with email (i18n)", flush=True)
             await _click_signup_with_email(page, attempt)
             reclicked = True
             await asyncio.sleep(0.7)
@@ -6192,16 +6902,31 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
 
             # Step B: solve Turnstile only when token missing
             if tok <= 20:
-                # Aggressive mount when blank: password blur remounts CF widget
-                if round_i >= 2 or not st.get("tsIframe"):
+                # Trace first — may already be solved/loading without remount
+                ts0 = await read_turnstile_state(page)
+                print(
+                    f"[{attempt}] complete r{round_i} pre: phase={ts0.get('phase')} "
+                    f"token_len={ts0.get('token_len')} success_ui={ts0.get('success_ui')}",
+                    flush=True,
+                )
+                emit_progress(
+                    attempt, "complete_signup",
+                    f"r{round_i} TS {ts0.get('phase')} tok={ts0.get('token_len')}",
+                    email_addr,
+                )
+                # Only remount if failed or stuck need_click after r2+
+                if ts0.get("phase") == "failed" or (
+                    round_i >= 3 and ts0.get("phase") == "need_click" and not ever_had_token
+                ):
                     await _force_turnstile_remount(
-                        page, attempt, password, hard=(round_i >= 3 and not ever_had_token),
+                        page, attempt, password,
+                        hard=(round_i >= 4 and not ever_had_token),
                     )
                     st = await _refill_complete_profile(
                         page, first, last, password, attempt
                     )
-                # Short slices (12s) so we cycle strategies faster than 25s dead waits
-                slice_wait = min(12.0, remaining)
+                # Longer slice so wait_for_turnstile (5–10s) can settle after click
+                slice_wait = min(20.0, remaining)
                 ok_ts = await handle_turnstile(
                     page,
                     attempt,
@@ -6210,10 +6935,13 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     password=password,
                     allow_remount=True,
                 )
-                tok = await turnstile_token_len(page)
+                tsf = await read_turnstile_state(page)
+                tok = int(tsf.get("token_len") or await turnstile_token_len(page) or 0)
                 print(
                     f"[{attempt}] complete r{round_i}: turnstile_ok={ok_ts} "
-                    f"token_len={tok} mounted={await _turnstile_mount_present(page)}",
+                    f"phase={tsf.get('phase')} token_len={tok} "
+                    f"success_ui={tsf.get('success_ui')} "
+                    f"mounted={await _turnstile_mount_present(page)}",
                     flush=True,
                 )
                 # CF solve often remounts form → wipe password — re-fill carefully
@@ -6522,10 +7250,22 @@ async def _wait_password_ready(page, attempt: int, max_wait: float = 8.0) -> Non
 
 
 async def _ensure_password_filled(page, password: str, attempt: int) -> bool:
-    """Fill password and verify React state kept it (Turnstile re-render can wipe it)."""
+    """Fill password only when empty — skip re-typing if already present.
+
+    Re-entering every round remounts React/CF and wastes time; only fill when wiped.
+    """
+    if await page.locator('input[type="password"]').count() == 0:
+        return True  # password step not shown
+
+    # Already filled? Do not re-type (avoids CF remount + wasted seconds).
+    existing = await _password_field_value(page)
+    if existing and len(existing) >= min(4, len(password or "") or 4):
+        vlog(f"password already filled (len={len(existing)}) — skip re-enter", attempt)
+        return True
+
     for try_i in range(3):
         if await page.locator('input[type="password"]').count() == 0:
-            return True  # password step not shown
+            return True
         await fill_input(
             page,
             [
@@ -6537,7 +7277,6 @@ async def _ensure_password_filled(page, password: str, attempt: int) -> bool:
             password,
         )
         await asyncio.sleep(0.25)
-        # Prefer Playwright fill again if value empty
         try:
             loc = page.locator('input[type="password"]').first
             if await loc.count() > 0:
@@ -6548,7 +7287,6 @@ async def _ensure_password_filled(page, password: str, attempt: int) -> bool:
                     await asyncio.sleep(0.2)
                     val = await loc.input_value()
                 if val:
-                    # blur to commit React state + trigger CF mount
                     try:
                         await loc.evaluate("el => el.blur()")
                     except Exception:
@@ -6598,25 +7336,45 @@ async def recover_page_load_error(page, attempt: int) -> bool:
 
 
 async def click_login_with_email(page) -> bool:
-    """xAI UI uses both 'Sign in with email' and 'Login with email'."""
+    """xAI login chooser — multi-locale (detect UI lang first)."""
+    lang = await detect_page_ui_lang(page)
+    labels = ui_labels("login_with_email", lang)
     clicked = await click_text_button(
         page,
-        [
-            "Login with email",
-            "Log in with email",
-            "Sign in with email",
-            "Sign in with Email",
-            "Continue with email",
-        ],
-        exclude=["Google", "Apple", "Microsoft", " with X", " with x"],
+        labels,
+        exclude=["Google", "Apple", "Microsoft", " with X", " with x", "使用 Google", "使用 Apple"],
     )
     if clicked:
         return True
     try:
         await page.get_by_role(
-            "button", name=re.compile(r"(log\s*in|sign\s*in)\s+with\s+email", re.I)
+            "button",
+            name=re.compile(
+                r"(log\s*in|sign\s*in|masuk|登录|登入|ログイン|로그인|entrar|connexion|"
+                r"anmelden|giriş|войти|đăng\s*nhập|เข้าสู่ระบบ).{0,12}"
+                r"(email|e-?mail|邮箱|郵件|メール|correo|почт)",
+                re.I,
+            ),
         ).click(timeout=4000)
         return True
+    except Exception:
+        pass
+    try:
+        hit = await page.evaluate(
+            """() => {
+              const reMail = /email|e-?mail|邮箱|郵件|メール|이메일|correo|почт|อีเมล|بريد|e-posta/i;
+              const reLogin = /log\\s*in|sign\\s*in|masuk|登录|登入|ログイン|로그인|entrar|connexion|anmelden|giriş|войти|đăng\\s*nhập|เข้าสู่ระบบ|accedi|inloggen/i;
+              const skip = /google|apple|microsoft/i;
+              for (const b of document.querySelectorAll('button, a[role="button"]')) {
+                const t = (b.innerText || '').trim();
+                if (!t || t.length > 80) continue;
+                if (skip.test(t) && !reMail.test(t)) continue;
+                if (reMail.test(t) && reLogin.test(t)) { b.click(); return t.slice(0, 40); }
+              }
+              return '';
+            }"""
+        )
+        return bool(hit)
     except Exception:
         return False
 
@@ -6630,8 +7388,8 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
     Same email as registration is re-entered (NOT a change-email step). xAI OAuth
     often starts a fresh sign-in even right after signup.
 
-    Order matters: always re-fill password AFTER turnstile, because solving CF
-    can remount the form and wipe the password field (turnstile checked + empty pw).
+    Password: fill once; after Turnstile only re-fill if the field was wiped
+    (do not re-type every round).
 
     use_global_limit=False (default): each browser solves Turnstile independently —
     workers never wait on each other (same isolation as refresh).
@@ -6704,31 +7462,47 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
             or await _turnstile_verification_failed(page)
         )
         if needs_ts:
-            # One progress line only when actually solving (avoid HUD spam /
-            # looking "stuck on round 1/2" when already done).
-            emit_progress(
-                attempt,
-                "login",
-                f"Turnstile · try {round_i + 1}/{rounds}",
-                email_addr,
-            )
-            await handle_turnstile(
-                page,
-                attempt,
-                max_wait=ts_max_wait,
-                require_token=True,
-                password=password,
-                use_global_limit=use_global_limit,
-            )
+            ts_pre = await read_turnstile_state(page)
+            if ts_pre.get("solved"):
+                print(
+                    f"[{attempt}] login: Turnstile already solved "
+                    f"(token_len={ts_pre.get('token_len')}) — skip re-click",
+                    flush=True,
+                )
+            else:
+                emit_progress(
+                    attempt,
+                    "login",
+                    f"Turnstile · try {round_i + 1}/{rounds} "
+                    f"phase={ts_pre.get('phase')}",
+                    email_addr,
+                )
+                await handle_turnstile(
+                    page,
+                    attempt,
+                    max_wait=ts_max_wait,
+                    require_token=True,
+                    password=password,
+                    use_global_limit=use_global_limit,
+                )
+                ts_post = await read_turnstile_state(page)
+                print(
+                    f"[{attempt}] login TS after try {round_i + 1}: "
+                    f"phase={ts_post.get('phase')} token_len={ts_post.get('token_len')} "
+                    f"success_ui={ts_post.get('success_ui')}",
+                    flush=True,
+                )
 
-        # 2) ALWAYS re-fill password after turnstile — CF widget often remounts the form
-        if not await _ensure_password_filled(page, password, attempt):
-            vlog(f"password still empty after turnstile (round {round_i+1})", attempt)
-            await asyncio.sleep(0.5)
-            continue
+        # 2) Re-fill password only if CF wipe emptied it (skip if still filled)
+        pw_now = await _password_field_value(page)
+        if not pw_now:
+            if not await _ensure_password_filled(page, password, attempt):
+                vlog(f"password still empty after turnstile (round {round_i+1})", attempt)
+                await asyncio.sleep(0.5)
+                continue
+            pw_now = await _password_field_value(page)
 
         # 3) Click Login only when password non-empty + token ok (or no mount)
-        pw_now = await _password_field_value(page)
         tok_now = await turnstile_token_len(page)
         if not pw_now:
             continue
@@ -6845,6 +7619,164 @@ async def do_email_login(page, email_addr: str, password: str, attempt: int,
     return ok
 
 
+# Hard ban list — never click these during OAuth consent (Deny was hit via cookie path)
+_OAUTH_CONSENT_EXCLUDE = [
+    "Google", "Apple", "Microsoft", "Deny", "Cancel", "Go back", "Reject",
+    "Decline", "Refuse", "Sign out", "Sign Out", "Log out", "Logout",
+    "Login with email", "Log in with email", "Sign in with email",
+    "Sign up with email", "Continue with email",
+    "使用邮箱", "登录", "登出", "退出", "Masuk", "Keluar", "Tolak",
+]
+
+
+def _is_oauth_allow_label(txt: str) -> bool:
+    """True only for Allow/Authorize — never Deny, Accept, Continue, Sign out."""
+    t = (txt or "").strip()
+    if not t or len(t) > 48:
+        return False
+    low = t.lower()
+    ban = (
+        "deny", "reject", "decline", "refuse", "cancel", "go back",
+        "accept", "continue", "agree",  # cookie / wrong CTAs
+        "sign out", "log out", "logout", "sign-out",
+        "login with", "log in with", "sign in with", "sign up with",
+        "continue with", "google", "apple",
+        "登出", "退出", "keluar", "tolak",
+    )
+    if any(b in low for b in ban):
+        return False
+    if re.match(r"^(allow|authorize|approve)(\s+access)?$", low):
+        return True
+    if re.match(
+        r"^(允许|允許|benarkan|izinkan|permitir|autoriser|zulassen|"
+        r"許可|허용|อนุญาต|cho phép|سماح|izin ver|разрешить|"
+        r"zezwól|дозволити)$",
+        t,
+        re.I,
+    ):
+        return True
+    if re.match(r"^allow\b", low) and "email" not in low and "sign" not in low:
+        return True
+    if re.match(r"^authorize\b", low) and "email" not in low:
+        return True
+    return False
+
+
+async def click_oauth_consent_allow(page, attempt: int) -> str | None:
+    """Click OAuth **Allow** only (refer-style). Never Deny / Accept / Continue.
+
+    Accept/Continue are cookie/login CTAs and caused Deny/wrong clicks.
+    """
+    await dismiss_cookie_banner(page)
+
+    # ONLY Allow / Authorize class — never Accept/Continue/Agree/Deny
+    allow_names = [
+        "Allow",
+        "Authorize",
+        "Approve",
+        "Allow access",
+        "允许",
+        "允許",
+        "Benarkan",
+        "Izinkan",
+        "Permitir",
+        "Autoriser",
+        "Zulassen",
+        "許可",
+        "허용",
+        "อนุญาต",
+        "Cho phép",
+        "Разрешить",
+        "Toestaan",
+        "Zezwól",
+    ]
+    for name in allow_names:
+        try:
+            loc = page.get_by_role("button", name=re.compile(rf"^{re.escape(name)}$", re.I))
+            if await loc.count() == 0:
+                continue
+            btn = loc.first
+            if not await btn.is_visible():
+                continue
+            txt = (await btn.inner_text()).strip()
+            if not _is_oauth_allow_label(txt):
+                continue
+            # Double-check not Deny (Playwright name match can be weird)
+            if re.search(r"deny|reject|decline|tolak|拒绝", txt, re.I):
+                continue
+            try:
+                await btn.click(timeout=4000, force=True)
+            except Exception:
+                await btn.click(timeout=3000, force=True)
+            print(f"[{attempt}] OAuth Allow: {txt!r}", flush=True)
+            return txt
+        except Exception:
+            continue
+
+    # refer-style text — Allow/Authorize only + hard exclude Deny
+    hit = await click_text_button(
+        page,
+        ["Allow", "Authorize", "Approve", "允许", "允許", "Benarkan", "Izinkan", "許可", "허용"],
+        exclude=_OAUTH_CONSENT_EXCLUDE + [
+            "Deny", "Reject", "Decline", "Accept", "Continue", "Agree",
+            "Accept All", "Reject All",
+        ],
+    )
+    if hit and _is_oauth_allow_label(hit) and not re.search(r"deny|reject", hit, re.I):
+        print(f"[{attempt}] OAuth Allow (text): {hit!r}", flush=True)
+        return hit
+    if hit:
+        print(f"[{attempt}] OAuth refused wrong button: {hit!r}", flush=True)
+
+    # Strict JS: only exact Allow/Authorize — never Accept/Continue/Deny
+    try:
+        js_hit = await page.evaluate(
+            """() => {
+              const bad = /deny|reject|decline|refuse|cancel|accept|continue|agree|sign\\s*out|log\\s*out|login|sign\\s*in|email|google|apple|tolak|拒绝/i;
+              const good = /^(allow|authorize|approve)(\\s+access)?$/i;
+              const goodI18n = /^(允许|允許|benarkan|izinkan|permitir|autoriser|zulassen|許可|허용|อนุญาต|cho phép|سماح|izin ver|разрешить)$/i;
+              const btns = [...document.querySelectorAll('button, [role="button"], input[type="submit"]')];
+              let best = null;
+              for (const b of btns) {
+                const t = (b.innerText || b.textContent || b.value || '').trim();
+                if (!t || t.length > 40 || bad.test(t)) continue;
+                if (!(good.test(t) || goodI18n.test(t))) continue;
+                const r = b.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) continue;
+                // Prefer Allow over Authorize
+                const score = /^allow/i.test(t) ? 2 : 1;
+                if (!best || score > best.score) best = { b, t, score };
+              }
+              if (best) { best.b.click(); return best.t.slice(0, 40); }
+              return '';
+            }"""
+        )
+        if js_hit and _is_oauth_allow_label(str(js_hit)):
+            print(f"[{attempt}] OAuth Allow (js): {js_hit!r}", flush=True)
+            return str(js_hit)
+    except Exception as e:
+        vlog(f"oauth allow js warn: {e}", attempt)
+
+    try:
+        info = await page.evaluate(
+            """() => {
+              const btns = [...document.querySelectorAll('button, [role="button"]')]
+                .filter(b => { const r=b.getBoundingClientRect(); return r.width>2&&r.height>2; })
+                .map(b => (b.innerText||b.value||'').trim().slice(0,40))
+                .filter(Boolean).slice(0, 12);
+              return { url: (location.href||'').slice(0,140), buttons: btns };
+            }"""
+        )
+        print(
+            f"[{attempt}] OAuth: no Allow button "
+            f"url={(info or {}).get('url')} buttons={(info or {}).get('buttons')}",
+            flush=True,
+        )
+    except Exception:
+        pass
+    return None
+
+
 async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
                              *, fast: bool = True, skip_login: bool = False) -> dict:
     """Grok CLI-style OIDC: local callback server + PKCE + browser login/Allow.
@@ -6854,7 +7786,8 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
       - same client_id + scopes as ~/.grok/auth.json
       - browser only drives login/Allow; code is captured by the server
       - no Turnstile on OAuth (only login/signup paths)
-      - if stuck >20s without code → refresh authorize URL
+      - consent page: multi-locale Allow click before authorize-refresh
+      - if stuck >25s without code AND not mid-consent click → refresh authorize
     """
     emit_progress(attempt, "oauth", "CLI OAuth PKCE (local callback)", email_addr)
     server_ok = await ensure_cli_oauth_server()
@@ -6902,9 +7835,12 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
             code, st = extract_oauth_callback(req_url)
             if code:
                 auth_code["code"] = code
-                if st:
-                    _OAUTH_HUB.deliver(st, code)
-                print(f"[{attempt}] OAuth code seen on route", flush=True)
+                delivered = _OAUTH_HUB.deliver(st, code)
+                print(
+                    f"[{attempt}] OAuth code seen on route "
+                    f"state={(st or '')[:12]} delivered={delivered}",
+                    flush=True,
+                )
             if server_ok:
                 # Real CLI path: browser completes redirect to our HTTP server
                 try:
@@ -6939,11 +7875,12 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
     except Exception:
         await page.goto(auth_url, wait_until="commit", timeout=45000)
 
-    OAUTH_STUCK_REFRESH_S = 20.0
-    deadline = time.monotonic() + (75.0 if fast else 120.0)
+    OAUTH_STUCK_REFRESH_S = 25.0
+    deadline = time.monotonic() + (90.0 if fast else 130.0)
     last_progress_t = time.monotonic()
     last_refresh_t = 0.0
     refresh_count = 0
+    consent_attempts = 0
 
     def _code_ready() -> str | None:
         if auth_code.get("code"):
@@ -6991,36 +7928,98 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
             if code:
                 auth_code["code"] = code
                 break
+            # Also poll any popup/tab the consent redirect may have opened
+            try:
+                for p in page.context.pages:
+                    c2 = extract_code_from_url(p.url or "")
+                    if c2:
+                        auth_code["code"] = c2
+                        break
+            except Exception:
+                pass
+            if _code_ready():
+                break
             await asyncio.sleep(0.2)
         if _code_ready():
             break
 
         await recover_page_load_error(page, attempt)
 
-        stuck_for = time.monotonic() - last_progress_t
-        since_refresh = time.monotonic() - last_refresh_t
-        if stuck_for >= OAUTH_STUCK_REFRESH_S and since_refresh >= OAUTH_STUCK_REFRESH_S:
-            await _goto_authorize(reason=f"stuck {stuck_for:.0f}s no code")
-            continue
-
         try:
             cur = page.url or ""
         except Exception:
             cur = ""
 
+        # Strict: only real consent URL — never treat sign-in as consent
+        # (bug: loose match + last-button JS clicked "Sign out" / "Login with email")
+        on_consent = "/oauth2/consent" in cur
+        on_signin = "/sign-in" in cur or "/login" in cur
+        on_xai = "accounts.x.ai" in cur or "auth.x.ai" in cur
+
+        stuck_for = time.monotonic() - last_progress_t
+        since_refresh = time.monotonic() - last_refresh_t
+
+        # ── Consent: Allow only (refer-style), never Sign out ───────────
+        if on_consent:
+            emit_progress(
+                attempt, "oauth",
+                f"consent Allow try {consent_attempts + 1}…",
+                email_addr,
+            )
+            clicked_allow = await click_oauth_consent_allow(page, attempt)
+            consent_attempts += 1
+            if clicked_allow:
+                last_progress_t = time.monotonic()
+                emit_progress(
+                    attempt, "oauth",
+                    f"Clicked {clicked_allow} → CLI callback",
+                    email_addr,
+                )
+                spin_deadline = time.monotonic() + 18.0
+                while time.monotonic() < spin_deadline:
+                    if _code_ready():
+                        break
+                    try:
+                        for p in page.context.pages:
+                            c2 = extract_code_from_url(p.url or "")
+                            if c2:
+                                auth_code["code"] = c2
+                                break
+                    except Exception:
+                        pass
+                    await asyncio.sleep(0.12)
+                if _code_ready():
+                    break
+                if consent_attempts >= 2 and time.monotonic() - last_refresh_t > 12:
+                    await _goto_authorize(reason="Allow clicked, no callback yet")
+                continue
+            if consent_attempts >= 3 and time.monotonic() - last_refresh_t >= 15:
+                await _goto_authorize(reason=f"consent no Allow x{consent_attempts}")
+            await asyncio.sleep(0.5)
+            continue
+
+        if (
+            stuck_for >= OAUTH_STUCK_REFRESH_S
+            and since_refresh >= OAUTH_STUCK_REFRESH_S
+            and not on_consent
+        ):
+            await _goto_authorize(reason=f"stuck {stuck_for:.0f}s no code")
+            continue
+
         if cur.rstrip("/").endswith("accounts.x.ai/account") or cur.rstrip("/") == "https://accounts.x.ai/account":
             await _goto_authorize(reason="on /account, force redirect")
             continue
 
-        on_xai = "accounts.x.ai" in cur or "auth.x.ai" in cur
-        if (not skip_login) and on_xai:
+        # ── Sign-in / authorize (refer loop shape) ──────────────────────
+        if (not skip_login) and on_xai and (on_signin or not on_consent):
             await dismiss_cookie_banner(page)
             if await page.locator('input[type="email"], input[type="password"]').count() == 0:
                 await click_login_with_email(page)
                 await asyncio.sleep(0.5)
             has_form = await page.locator('input[type="email"], input[type="password"]').count() > 0
             has_email_btn = await page.locator(
-                "text=/Login with email|Log in with email|Sign in with email/i"
+                "text=/Login with email|Log in with email|Sign in with email|"
+                "使用邮箱登录|Masuk dengan|メールでログイン/i"
             ).count() > 0
             if has_form or has_email_btn:
                 emit_progress(attempt, "oauth", "CLI OAuth needs login", email_addr)
@@ -7035,18 +8034,13 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
                 await _goto_authorize(reason="post-login")
                 continue
 
-        if on_xai or "auth.x.ai" in cur:
+        # On authorize/consent-ish xAI pages: try Allow only if labels match
+        if on_xai and not on_signin:
             await dismiss_cookie_banner(page)
-            clicked_allow = await click_text_button(
-                page,
-                ["Allow", "Authorize", "Approve", "Accept", "Continue"],
-                exclude=["Google", "Deny", "Cancel", "Go back", "Reject"],
-            )
+            clicked_allow = await click_oauth_consent_allow(page, attempt)
             if clicked_allow:
-                vlog(f"OAuth consent: clicked {clicked_allow!r}", attempt)
                 last_progress_t = time.monotonic()
                 emit_progress(attempt, "oauth", f"Clicked {clicked_allow} → CLI callback", email_addr)
-                # Wait for real localhost callback (CLI path)
                 spin_deadline = time.monotonic() + 15.0
                 while time.monotonic() < spin_deadline:
                     if _code_ready():
@@ -7111,7 +8105,16 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
         )
 
     emit_progress(attempt, "token_exchange", "Exchanging code (CLI token endpoint)", email_addr)
-    tokens = await _run_io(exchange_code_for_tokens, code, verifier)
+    try:
+        tokens = await _run_io(exchange_code_for_tokens, code, verifier)
+    except Exception as e:
+        # 400 invalid_grant under concurrent OAuth → re-run OAuth, not permanent fail
+        print(f"[{attempt}] token exchange failed: {e}", flush=True)
+        raise RecoverableFarmError(
+            f"token exchange failed: {e}",
+            delay_s=2.0,
+            tag="TokenExchange400",
+        ) from e
     if not tokens.get("email"):
         tokens["email"] = email_addr
     tokens["auth_mode"] = "oidc"
@@ -7211,9 +8214,15 @@ async def activate_grok_com(
             except Exception:
                 pass
 
-    async def _solve_cf_if_needed(round_label: str) -> bool:
+    async def _solve_cf_if_needed(round_label: str, *, max_wait: float = 25.0) -> bool:
+        """Shorter CF wait — concurrent c>3 must not sit 60s×3 on activate."""
         if await _page_ready():
             return True
+        emit_progress(
+            attempt, "activate",
+            f"grok.com CF ({round_label})…",
+            email_addr,
+        )
         if await _cf_managed_challenge_visible():
             print(f"[{attempt}] activate CF challenge ({round_label})", flush=True)
             try:
@@ -7224,7 +8233,7 @@ async def activate_grok_com(
                 ok = await handle_turnstile(
                     page,
                     attempt,
-                    max_wait=45.0,
+                    max_wait=min(22.0, max_wait),
                     require_token=False,
                     use_global_limit=False,
                     allow_remount=True,
@@ -7235,44 +8244,58 @@ async def activate_grok_com(
                 )
             except Exception as e:
                 print(f"[{attempt}] activate CF handle warn: {e}", flush=True)
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(1.0)
             try:
-                await page.wait_for_load_state("domcontentloaded", timeout=15000)
+                await page.wait_for_load_state("domcontentloaded", timeout=10000)
             except Exception:
                 pass
-        deadline = time.monotonic() + 60.0
+        deadline = time.monotonic() + max_wait
+        tick = 0
         while time.monotonic() < deadline:
             if await _page_ready():
                 return True
+            tick += 1
+            if tick % 8 == 0:
+                emit_progress(
+                    attempt, "activate",
+                    f"waiting grok.com ({round_label}) {int(deadline - time.monotonic())}s…",
+                    email_addr,
+                )
             if await _cf_managed_challenge_visible():
                 try:
                     await try_click_turnstile(page, attempt)
                 except Exception:
                     pass
-            await asyncio.sleep(0.6)
+            await asyncio.sleep(0.5)
         return await _page_ready()
 
+    # Wall clock for whole activate (avoid multi-minute hang under concurrent load)
+    activate_deadline = time.monotonic() + 90.0
+
     await _goto_grok()
-    ready = await _solve_cf_if_needed("r1")
-    if not ready:
+    ready = await _solve_cf_if_needed("r1", max_wait=22.0)
+    if not ready and time.monotonic() < activate_deadline:
         print(f"[{attempt}] activate: reload grok.com", flush=True)
+        emit_progress(attempt, "activate", "reload grok.com…", email_addr)
         try:
-            await page.reload(wait_until="domcontentloaded", timeout=60000)
+            await page.reload(wait_until="domcontentloaded", timeout=45000)
         except Exception:
             await _goto_grok()
-        await asyncio.sleep(1.0)
-        ready = await _solve_cf_if_needed("r2")
-    if not ready:
+        await asyncio.sleep(0.8)
+        ready = await _solve_cf_if_needed("r2", max_wait=18.0)
+    if not ready and time.monotonic() < activate_deadline:
         print(f"[{attempt}] activate: cool-down + retry", flush=True)
-        await asyncio.sleep(3.0)
+        emit_progress(attempt, "activate", "activate cool-down…", email_addr)
+        await asyncio.sleep(2.0)
         await _goto_grok()
-        ready = await _solve_cf_if_needed("r3")
+        ready = await _solve_cf_if_needed("r3", max_wait=15.0)
     if not ready:
         print(f"[{attempt}] grok.com not ready after CF retries", flush=True)
         await screenshot(page, attempt, "grok_com_not_ready")
         return False
 
     print(f"[{attempt}] grok.com ready", flush=True)
+    emit_progress(attempt, "activate", "grok.com ready", email_addr)
     await dismiss_cookie_banner(page)
 
     needs_login = True
@@ -7311,27 +8334,26 @@ async def activate_grok_com(
                     use_global_limit=False,
                 )
             await handle_turnstile(
-                page, attempt, max_wait=20, use_global_limit=False,
+                page, attempt, max_wait=15, use_global_limit=False,
             )
-            await click_text_button(
-                page,
-                ["Allow", "Authorize", "Accept", "Continue", "Agree"],
-                exclude=["Google", "Deny", "Cancel", "Go back"],
-            )
-            await asyncio.sleep(2)
+            # OAuth consent if any — Allow only (never Deny)
+            if "/oauth2/consent" in (page.url or ""):
+                await click_oauth_consent_allow(page, attempt)
+            await asyncio.sleep(1.2)
             try:
-                await page.wait_for_url("**/grok.com/**", timeout=20000)
+                await page.wait_for_url("**/grok.com/**", timeout=15000)
             except Exception:
                 pass
-            await asyncio.sleep(2)
+            await asyncio.sleep(1.0)
             if not await _page_ready():
-                await _solve_cf_if_needed("post-login")
+                await _solve_cf_if_needed("post-login", max_wait=12.0)
 
     try:
+        # Onboarding only — never cookie Reject / OAuth Deny
         await click_text_button(
             page,
-            ["Accept", "Agree", "I agree", "Continue", "OK", "Got it", "Start"],
-            exclude=["Deny", "Cancel", "Decline", "No thanks"],
+            ["Got it", "Start", "OK", "I agree"],
+            exclude=["Deny", "Cancel", "Decline", "No thanks", "Reject", "Sign out"],
         )
     except Exception:
         pass
@@ -7458,18 +8480,25 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 break
             print(
                 f"[{attempt_num}] chat 403 soft-retry {probe_i}/{PROBE_RETRIES} "
-                f"(re-activate + re-probe after {PROBE_RETRY_BACKOFF_S * probe_i:.1f}s)",
+                f"(wait entitlement; re-activate only once) "
+                f"after {PROBE_RETRY_BACKOFF_S * probe_i:.1f}s",
                 flush=True,
             )
             emit_progress(
                 attempt_num,
                 "chat_probe",
-                f"403 soft-retry {probe_i}/{PROBE_RETRIES} · re-activate…",
+                f"403 soft-retry {probe_i}/{PROBE_RETRIES}…",
                 email_addr,
             )
             await asyncio.sleep(PROBE_RETRY_BACKOFF_S * probe_i)
-            if ACTIVATE_WEB:
+            # Full re-activate is slow under concurrent load — only once
+            if ACTIVATE_WEB and probe_i == 1:
                 try:
+                    emit_progress(
+                        attempt_num, "activate",
+                        "403 re-activate once…",
+                        email_addr,
+                    )
                     await activate_grok_com(page, email_addr, password, attempt_num)
                 except Exception as _ae:
                     print(f"[{attempt_num}] re-activate warn: {_ae}", flush=True)
@@ -7519,6 +8548,13 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
         tokens["probe_model"] = credits.get("model") or CLI_PROBE_MODEL
         # HUD batch totals + per-account success line
         HUD.record_credits(rem, lim)
+        # Leave "probe" stage before slow browser teardown (HUD looked stuck 200+s)
+        emit_progress(
+            attempt_num,
+            "cleanup",
+            "probe OK — closing browsers…",
+            email_addr,
+        )
         return {
             "email": email_addr,
             "password": password,
@@ -7536,6 +8572,17 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
     finally:
         # ALWAYS kill this attempt's browsers — success or 403 re-roll.
         # Re-roll must not inherit cookies/profile from a denied account.
+        # Windows tree-kill can take tens of seconds — not a hang on probe.
+        if manager is not None or mail_page is not None:
+            try:
+                emit_progress(
+                    attempt_num,
+                    "cleanup",
+                    "closing browsers (Windows cleanup can take a while)…",
+                    email_addr or "",
+                )
+            except Exception:
+                pass
         if manager is not None:
             print(
                 f"[{attempt_num}] closing signup browser (fresh spawn on next try)",
@@ -8584,6 +9631,22 @@ async def main():
         f"tempmail_block_images={TEMPMAIL_BLOCK_IMAGES}",
         flush=True,
     )
+    # Banner uses .env default; final concurrent is chosen after prompts below
+    _conc_hint = max(1, CONCURRENT)
+    _est = _conc_hint * (2 if MAIL_MODE == "tempmail" else 1)
+    if _conc_hint > 3:
+        print(
+            f"  WARN       : concurrent≈{_conc_hint} → ~{_est} browsers; "
+            f"home net often bottlenecks OAuth/activate. Prefer c=2–3, "
+            f"LAUNCH_PARALLEL=2, or residential proxies.",
+            flush=True,
+        )
+    elif _conc_hint >= 3:
+        print(
+            f"  Tip        : concurrent≈{_conc_hint} (~{_est} browsers) — "
+            f"OK if launch_parallel≤2; raise SPAWN_DELAY if pages stall.",
+            flush=True,
+        )
     print(
         f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES}",
         flush=True,
