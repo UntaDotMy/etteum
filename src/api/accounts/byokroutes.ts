@@ -1,6 +1,6 @@
 import type { Hono } from "hono";
 import { db } from "../../db/index";
-import { accounts, requestLogs, vccCards, vccTransactions, settings } from "../../db/schema";
+import { accounts, settings } from "../../db/schema";
 import { eq, inArray, and, sql, desc, ne, or, like, gte, lte, isNull, not, asc, count } from "drizzle-orm";
 import { encrypt, decrypt } from "../../utils/crypto";
 import { broadcast } from "../../ws/index";
@@ -31,6 +31,7 @@ import {
   setByokLbMethod,
   getByokLbMethods,
   refreshByokRuntime,
+  detachAccountDependents,
   BYOK_PREFIX_RE,
   BYOK_KEY_LABEL_RE,
   type ByokKeyInput,
@@ -350,7 +351,8 @@ export function registerByokRoutes(router: Hono): void {
 
           const toDelete = groupAccounts.filter((acc) => !touchedIds.has(acc.id));
           for (const acc of toDelete) {
-            await tx.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
+            // Full FK detach (request_logs + vcc_*), same as single/bulk account delete.
+            await detachAccountDependents(tx, acc.id);
             await tx.delete(accounts).where(eq(accounts.id, acc.id));
           }
         } else {
@@ -406,11 +408,14 @@ export function registerByokRoutes(router: Hono): void {
     const groupAccounts = allByok.filter((acc) => getByokPrefix(acc) === prefix);
     const deletedIds: number[] = [];
 
-    for (const acc of groupAccounts) {
-      await db.update(requestLogs).set({ accountId: null }).where(eq(requestLogs.accountId, acc.id));
-      const result = await db.delete(accounts).where(eq(accounts.id, acc.id)).returning();
-      if (result[0]) deletedIds.push(result[0].id);
-    }
+    // One transaction for the whole group so a partial multi-delete cannot leave orphaned keys.
+    await db.transaction(async (tx) => {
+      for (const acc of groupAccounts) {
+        await detachAccountDependents(tx, acc.id);
+        const result = await tx.delete(accounts).where(eq(accounts.id, acc.id)).returning();
+        if (result[0]) deletedIds.push(result[0].id);
+      }
+    });
 
     await refreshByokRuntime();
     broadcast({ type: "byok_deleted", data: { id, label: prefix, deletedIds } });

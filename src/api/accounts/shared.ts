@@ -2,9 +2,32 @@
  * Shared helpers for accounts API modules.
  */
 import { db } from "../../db/index";
-import { settings } from "../../db/schema";
-import { eq } from "drizzle-orm";
+import { settings, requestLogs, vccCards, vccTransactions } from "../../db/schema";
+import { eq, inArray } from "drizzle-orm";
 import { pool, type ProviderName } from "../../proxy/pool";
+
+/** Nullify/delete FK children of accounts.id before account row delete. */
+export async function detachAccountDependents(
+  executor: {
+    update: typeof db.update;
+    delete: typeof db.delete;
+  },
+  accountIds: number | number[],
+): Promise<void> {
+  const ids = (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(
+    (n) => Number.isInteger(n) && n > 0,
+  );
+  if (ids.length === 0) return;
+  const whereId = ids.length === 1 ? eq(requestLogs.accountId, ids[0]!) : inArray(requestLogs.accountId, ids);
+  const whereVccUsed =
+    ids.length === 1 ? eq(vccCards.usedByAccountId, ids[0]!) : inArray(vccCards.usedByAccountId, ids);
+  const whereVccTx =
+    ids.length === 1 ? eq(vccTransactions.accountId, ids[0]!) : inArray(vccTransactions.accountId, ids);
+
+  await executor.update(requestLogs).set({ accountId: null }).where(whereId);
+  await executor.update(vccCards).set({ usedByAccountId: null }).where(whereVccUsed);
+  await executor.delete(vccTransactions).where(whereVccTx);
+}
 
 /** Thrown inside a transaction to abort + surface an HTTP status to the client. */
 export class HttpError extends Error {

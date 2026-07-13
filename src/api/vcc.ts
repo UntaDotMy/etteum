@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { db } from "../db/index";
 import { vccCards, vccTransactions, accounts } from "../db/schema";
-import { eq, desc } from "drizzle-orm";
+import { eq, and, desc } from "drizzle-orm";
 import { encrypt, decrypt, isGcm } from "../utils/crypto";
 
 const vccRouter = new Hono();
@@ -156,26 +156,37 @@ export async function getVccPoolFromDb(): Promise<DecryptedCard[]> {
 }
 
 export async function reserveCardForAccount(accountId: number): Promise<DecryptedCard | null> {
-  // Atomic claim: UPDATE ... WHERE status='active' RETURNING * — avoids the
-  // read-then-write race where two concurrent reservations grab the same card.
-  const claimed = await db
-    .update(vccCards)
-    .set({
-      status: "reserved",
-      usedByAccountId: accountId,
-      updatedAt: new Date(),
-    })
-    .where(eq(vccCards.status, "active"))
-    .returning();
-  const card = claimed[0];
-  if (!card) return null;
+  // Claim one active card (not all status=active rows). Retry on concurrent claim races.
+  if (!Number.isInteger(accountId) || accountId <= 0) return null;
 
-  return {
-    number: safeDecrypt(card.number),
-    exp: `${safeDecrypt(card.expMonth)}/${safeDecrypt(card.expYear).slice(-2)}`,
-    cvv: safeDecrypt(card.cvv),
-    name: card.name || "John Doe",
-  };
+  for (let attempt = 0; attempt < 5; attempt++) {
+    const [pick] = await db
+      .select({ id: vccCards.id })
+      .from(vccCards)
+      .where(eq(vccCards.status, "active"))
+      .limit(1);
+    if (!pick) return null;
+
+    const claimed = await db
+      .update(vccCards)
+      .set({
+        status: "reserved",
+        usedByAccountId: accountId,
+        updatedAt: new Date(),
+      })
+      .where(and(eq(vccCards.id, pick.id), eq(vccCards.status, "active")))
+      .returning();
+    const card = claimed[0];
+    if (!card) continue; // lost race — try next active card
+
+    return {
+      number: safeDecrypt(card.number),
+      exp: `${safeDecrypt(card.expMonth)}/${safeDecrypt(card.expYear).slice(-2)}`,
+      cvv: safeDecrypt(card.cvv),
+      name: card.name || "John Doe",
+    };
+  }
+  return null;
 }
 
 export async function releaseReservedCard(accountId: number): Promise<void> {
@@ -210,13 +221,23 @@ export async function handleCardResult(
     }
   }
 
-  await db.insert(vccTransactions).values({
-    accountId,
-    cardLast4,
-    amount: 0,
-    currency: "usd",
-    status,
-  });
+  // Skip txn insert if account already deleted (FK to accounts.id).
+  if (Number.isInteger(accountId) && accountId > 0) {
+    const [acc] = await db
+      .select({ id: accounts.id })
+      .from(accounts)
+      .where(eq(accounts.id, accountId))
+      .limit(1);
+    if (acc) {
+      await db.insert(vccTransactions).values({
+        accountId,
+        cardLast4,
+        amount: 0,
+        currency: "usd",
+        status,
+      });
+    }
+  }
 }
 
 /**
