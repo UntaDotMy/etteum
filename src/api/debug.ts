@@ -34,6 +34,46 @@ export function pushConsoleLine(level: string, msg: string): void {
   }
 }
 
+let consoleBridgeInstalled = false;
+let consoleBridgeReentry = false;
+
+function formatConsoleArg(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (value instanceof Error) return value.stack || value.message;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+/**
+ * Mirror console.log/info/warn/error into the Live Console ring buffer.
+ * Without this, /api/console/stream has nothing to show (pushConsoleLine was never called).
+ */
+export function installConsoleBridge(): void {
+  if (consoleBridgeInstalled) return;
+  consoleBridgeInstalled = true;
+
+  const levels = ["log", "info", "warn", "error"] as const;
+  for (const level of levels) {
+    const original = console[level].bind(console);
+    console[level] = (...args: unknown[]) => {
+      original(...args);
+      if (consoleBridgeReentry) return;
+      consoleBridgeReentry = true;
+      try {
+        const msg = args.map(formatConsoleArg).join(" ");
+        if (msg) pushConsoleLine(level === "log" ? "info" : level, msg);
+      } catch {
+        /* never throw from console bridge */
+      } finally {
+        consoleBridgeReentry = false;
+      }
+    };
+  }
+}
+
 /** Inline model-id normalization (mirrors proxy/index.ts normalizeModelId). */
 function normalizeModelId(model: string): string {
   if (!model) return model;

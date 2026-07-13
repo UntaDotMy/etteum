@@ -79,6 +79,27 @@ class LoginQueue {
     }
   }
 
+  /** Drop queued login work for deleted accounts (in-flight batch may still finish). */
+  cancelAccounts(accountIds: number | number[]): { cancelled: number } {
+    const ids = new Set(
+      (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(
+        (n) => Number.isInteger(n) && n > 0,
+      ),
+    );
+    if (ids.size === 0) return { cancelled: 0 };
+    const before = this.queue.length;
+    this.queue = this.queue.filter((item) => !ids.has(item.accountId));
+    for (const id of ids) {
+      const t = this.retryTimers.get(id);
+      if (t) {
+        clearTimeout(t);
+        this.retryTimers.delete(id);
+      }
+      this.activeAccountIds.delete(id);
+    }
+    return { cancelled: before - this.queue.length };
+  }
+
   /**
    * Queue all pending accounts for login
    */

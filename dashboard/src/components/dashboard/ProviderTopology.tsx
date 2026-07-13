@@ -1,15 +1,18 @@
 "use client";
 
-import { useMemo, useState, useCallback, useRef, useEffect } from "react";
+import { useMemo, useCallback, useRef, useEffect } from "react";
 import {
   ReactFlow,
   Handle,
   Position,
   Controls,
+  Background,
+  BackgroundVariant,
 } from "@xyflow/react";
 import "@xyflow/react/dist/style.css";
+import { useTheme } from "@/hooks/useTheme";
 
-// ── Provider config ─────────────────────────────────────────────────
+// ── Provider identity colors (stable per provider; not theme semantic status) ─
 
 const PROVIDER_COLORS: Record<string, string> = {
   kiro: "#10b981",
@@ -23,10 +26,23 @@ const PROVIDER_COLORS: Record<string, string> = {
   youmind: "#06b6d4",
   byok: "#78716c",
   alibaba: "#ef4444",
+  grok: "#00ff88",
 };
 
 function getColor(provider: string): string {
   return PROVIDER_COLORS[provider] || "#6b7280";
+}
+
+/** Theme semantic status colors (read live so light/dark both work). */
+function statusColor(kind: "active" | "error"): string {
+  if (typeof document === "undefined") {
+    return kind === "active" ? "#00ff88" : "#ff5c5c";
+  }
+  const styles = getComputedStyle(document.documentElement);
+  return (
+    styles.getPropertyValue(kind === "active" ? "--success" : "--error").trim() ||
+    (kind === "active" ? "#00ff88" : "#ff5c5c")
+  );
 }
 
 function getLabel(provider: string): string {
@@ -46,13 +62,19 @@ function getIcon(provider: string): string {
 
 function ProviderNode({ data }: { data: any }) {
   const { label, color, icon, active, error } = data;
+  const activeColor = statusColor("active");
+  const errorColor = statusColor("error");
 
   return (
     <div
       className="flex items-center gap-2.5 px-4 py-2.5 rounded-lg border-2 transition-all duration-300"
       style={{
-        borderColor: active ? "#22c55e" : error ? "#ef4444" : "var(--border)",
-        boxShadow: active ? "0 0 16px rgba(34,197,94,0.3)" : error ? "0 0 12px rgba(239,68,68,0.25)" : "none",
+        borderColor: active ? activeColor : error ? errorColor : "var(--border)",
+        boxShadow: active
+          ? `0 0 16px color-mix(in srgb, ${activeColor} 35%, transparent)`
+          : error
+            ? `0 0 12px color-mix(in srgb, ${errorColor} 30%, transparent)`
+            : "none",
         backgroundColor: "var(--card)",
         minWidth: "150px",
       }}
@@ -71,22 +93,22 @@ function ProviderNode({ data }: { data: any }) {
 
       <span
         className="text-sm font-medium truncate"
-        style={{ color: active ? "#22c55e" : error ? "#ef4444" : "var(--foreground)" }}
+        style={{ color: active ? activeColor : error ? errorColor : "var(--foreground)" }}
       >
         {label}
       </span>
 
       {active && (
         <span className="relative flex h-2.5 w-2.5 shrink-0">
-          <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: "#22c55e" }} />
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ backgroundColor: "#22c55e" }} />
+          <span className="animate-ping absolute inline-flex h-full w-full rounded-full opacity-75" style={{ backgroundColor: activeColor }} />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ backgroundColor: activeColor }} />
         </span>
       )}
 
-      {error && (
+      {error && !active && (
         <span className="relative flex h-2.5 w-2.5 shrink-0">
-          <span className="absolute inline-flex h-full w-full rounded-full opacity-50" style={{ backgroundColor: "#ef4444" }} />
-          <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ backgroundColor: "#ef4444" }} />
+          <span className="absolute inline-flex h-full w-full rounded-full opacity-50" style={{ backgroundColor: errorColor }} />
+          <span className="relative inline-flex rounded-full h-2.5 w-2.5" style={{ backgroundColor: errorColor }} />
         </span>
       )}
     </div>
@@ -95,7 +117,7 @@ function ProviderNode({ data }: { data: any }) {
 
 function RouterNode({ data }: { data: any }) {
   return (
-    <div className="flex items-center justify-center px-5 py-3 rounded-xl border-2 border-[var(--primary)] bg-[var(--primary)]/5 shadow-md min-w-[120px]">
+    <div className="flex items-center justify-center px-5 py-3 rounded-xl border-2 border-[var(--primary)] bg-[color-mix(in_srgb,var(--primary)_8%,var(--card))] shadow-[var(--shadow-card)] min-w-[120px]">
       <Handle type="source" position={Position.Top} id="top" className="!bg-transparent !border-0 !w-0 !h-0" />
       <Handle type="source" position={Position.Bottom} id="bottom" className="!bg-transparent !border-0 !w-0 !h-0" />
       <Handle type="source" position={Position.Left} id="left" className="!bg-transparent !border-0 !w-0 !h-0" />
@@ -107,7 +129,7 @@ function RouterNode({ data }: { data: any }) {
       </svg>
       <span className="text-sm font-bold text-[var(--primary)]">Pool Proxy</span>
       {data.activeCount > 0 && (
-        <span className="ml-2 px-1.5 py-0.5 rounded-full bg-[var(--primary)] text-white text-xs font-bold">
+        <span className="ml-2 px-1.5 py-0.5 rounded-full bg-[var(--primary)] text-[var(--primary-foreground)] text-xs font-bold">
           {data.activeCount}
         </span>
       )}
@@ -191,6 +213,8 @@ function buildLayout(
       draggable: false,
     });
 
+    const activeColor = statusColor("active");
+    const errorColor = statusColor("error");
     edges.push({
       id: `e-${nodeId}`,
       source: "router",
@@ -199,10 +223,10 @@ function buildLayout(
       targetHandle,
       animated: p.active,
       style: p.error
-        ? { stroke: "#ef4444", strokeWidth: 2.5, opacity: 0.9 }
+        ? { stroke: errorColor, strokeWidth: 2.5, opacity: 0.9 }
         : p.active
-          ? { stroke: "#22c55e", strokeWidth: 2.5, opacity: 0.9 }
-          : { stroke: "var(--border)", strokeWidth: 1, opacity: 0.3 },
+          ? { stroke: activeColor, strokeWidth: 2.5, opacity: 0.9 }
+          : { stroke: "var(--border)", strokeWidth: 1, opacity: 0.35 },
     });
   });
 
@@ -223,7 +247,9 @@ interface Props {
 }
 
 export default function ProviderTopology({ providers }: Props) {
-  const { nodes, edges } = useMemo(() => buildLayout(providers), [providers]);
+  const { theme } = useTheme();
+  // Rebuild when theme flips so edge/node status colors pick up new CSS vars.
+  const { nodes, edges } = useMemo(() => buildLayout(providers), [providers, theme]);
 
   const rfInstance = useRef<any>(null);
   const containerRef = useRef<HTMLDivElement>(null);
@@ -268,10 +294,11 @@ export default function ProviderTopology({ providers }: Props) {
   return (
     <div ref={containerRef} className="h-[300px] sm:h-[400px] w-full min-w-0 rounded-lg border border-[var(--border)] bg-[var(--card)]/30">
       <ReactFlow
-        key={providersKey}
+        key={`${providersKey}-${theme}`}
         nodes={nodes}
         edges={edges}
         nodeTypes={nodeTypes}
+        colorMode={theme}
         fitView
         fitViewOptions={fitOpts}
         minZoom={0.1}
@@ -286,8 +313,18 @@ export default function ProviderTopology({ providers }: Props) {
         nodesDraggable={false}
         nodesConnectable={false}
         elementsSelectable={false}
+        style={{ background: "transparent" }}
       >
-        <Controls showInteractive={false} />
+        <Background
+          variant={BackgroundVariant.Dots}
+          gap={18}
+          size={1}
+          color="var(--border)"
+        />
+        <Controls
+          showInteractive={false}
+          className="!rounded-md !border !border-[var(--border)] !bg-[var(--card)] !shadow-[var(--shadow-card)] [&>button]:!border-[var(--border)] [&>button]:!bg-[var(--card)] [&>button]:!text-[var(--foreground)] [&>button:hover]:!bg-[var(--secondary)]"
+        />
       </ReactFlow>
     </div>
   );

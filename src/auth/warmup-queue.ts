@@ -63,10 +63,85 @@ class WarmupQueue {
   // run again — stop is a one-shot cancel, not a permanent disable.
   private stopController: AbortController | null = null;
 
+  /** Per-account abort so delete account stops that job without killing all warmups. */
+  private accountAbort = new Map<number, AbortController>();
+
   /** The signal in-flight jobs should observe. Never null once work is running. */
   private stopSignal(): AbortSignal {
     if (!this.stopController) this.stopController = new AbortController();
     return this.stopController.signal;
+  }
+
+  private accountSignal(accountId: number): AbortSignal {
+    let c = this.accountAbort.get(accountId);
+    if (!c || c.signal.aborted) {
+      c = new AbortController();
+      this.accountAbort.set(accountId, c);
+    }
+    return c.signal;
+  }
+
+  private combinedSignal(accountId: number): AbortSignal {
+    const global = this.stopSignal();
+    const local = this.accountSignal(accountId);
+    if (typeof AbortSignal !== "undefined" && typeof (AbortSignal as { any?: Function }).any === "function") {
+      return AbortSignal.any([global, local]);
+    }
+    // Older runtimes: pass local; processItem also checks global abort flag.
+    return local;
+  }
+
+  /**
+   * Drop queued warmup for deleted accounts and abort in-flight probes.
+   * Called from account delete paths so warmup does not continue after delete.
+   */
+  cancelAccounts(accountIds: number | number[]): { cancelled: number } {
+    const ids = new Set(
+      (Array.isArray(accountIds) ? accountIds : [accountIds]).filter(
+        (n) => Number.isInteger(n) && n > 0,
+      ),
+    );
+    if (ids.size === 0) return { cancelled: 0 };
+
+    let cancelled = 0;
+    for (const item of this.queue) {
+      if (!ids.has(item.accountId)) continue;
+      if (item.status === "completed" || item.status === "failed") continue;
+      if (item.status === "queued" || item.status === "retrying") {
+        item.status = "failed";
+        cancelled++;
+        const provider = this.getCachedAccountProvider(item.accountId);
+        if (provider && this.progressByProvider[provider]) {
+          this.progressByProvider[provider]!.completed = Math.min(
+            this.progressByProvider[provider]!.total,
+            this.progressByProvider[provider]!.completed + 1,
+          );
+        }
+      } else if (item.status === "processing") {
+        // Abort HTTP; processItem marks failed when signal aborts.
+        this.accountAbort.get(item.accountId)?.abort();
+        cancelled++;
+      }
+    }
+
+    for (const id of ids) {
+      this.accountAbort.get(id)?.abort();
+      this.accountAbort.delete(id);
+      this.accountProviderCache.delete(id);
+    }
+
+    this.queue = this.queue.filter(
+      (item) =>
+        !(ids.has(item.accountId) && (item.status === "failed" || item.status === "completed")),
+    );
+
+    if (cancelled > 0) {
+      broadcast({
+        type: "warmup_accounts_cancelled",
+        data: { accountIds: [...ids], cancelled },
+      });
+    }
+    return { cancelled };
   }
 
   async enqueue(accountId: number): Promise<void> {
@@ -74,6 +149,8 @@ class WarmupQueue {
     if (this.queue.some((item) => item.accountId === accountId && item.status !== "completed" && item.status !== "failed")) {
       return;
     }
+    // Fresh abort controller if this id was cancelled earlier.
+    this.accountAbort.delete(accountId);
 
     const item: QueueItem = { accountId, retries: 0, status: "queued", addedAt: new Date() };
     this.queue.push(item);
@@ -133,6 +210,7 @@ class WarmupQueue {
 
     // Add all items to queue
     for (const id of newIds) {
+      this.accountAbort.delete(id);
       const account = accountMap.get(id);
       const item: QueueItem = { accountId: id, retries: 0, status: "queued", addedAt: new Date() };
       this.queue.push(item);
@@ -378,19 +456,20 @@ class WarmupQueue {
   }
 
   private async processItem(item: QueueItem): Promise<void> {
-    // Capture the stop signal at dispatch time. If stop() fires after this
-    // point, the in-flight warmupAccount() observes the abort and bails out.
-    // We snapshot the signal of the controller that's current right now; a
-    // later stop() creates a fresh controller, so it can't retroactively
-    // abort this job (only future ones).
-    const stopSignal = this.stopSignal();
+    // Combined stop (global) + per-account delete abort.
+    const stopSignal = this.combinedSignal(item.accountId);
+    const isCancelled = () =>
+      stopSignal.aborted ||
+      this.accountAbort.get(item.accountId)?.signal.aborted === true ||
+      this.stopController?.signal.aborted === true;
+
     const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
     if (!account) {
       item.status = "failed";
+      this.accountAbort.delete(item.accountId);
       return;
     }
 
-    // Cache the provider for this account
     this.setCachedAccountProvider(account.id, account.provider);
 
     const log = addAuthLog({
@@ -419,9 +498,18 @@ class WarmupQueue {
     try {
       const result = await warmupAccount(account, stopSignal);
 
-      // Never retry a job that was cancelled by stop() — it would resurrect
-      // work the operator just asked to halt.
-      if (stopSignal.aborted) {
+      if (isCancelled()) {
+        item.status = "failed";
+        return;
+      }
+
+      // Account deleted mid-warmup: do not write status back.
+      const [stillThere] = await db
+        .select({ id: accounts.id })
+        .from(accounts)
+        .where(eq(accounts.id, item.accountId))
+        .limit(1);
+      if (!stillThere) {
         item.status = "failed";
         return;
       }
@@ -430,9 +518,7 @@ class WarmupQueue {
         item.retries++;
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
-        // Re-check abort after the backoff sleep — stop() may have fired while
-        // we were waiting. Don't re-queue a cancelled job.
-        if (stopSignal.aborted) {
+        if (isCancelled()) {
           item.status = "failed";
           return;
         }
@@ -440,17 +526,16 @@ class WarmupQueue {
         return;
       }
 
-      const success = result.success || result.kind === "unsupported" || result.kind === "transient_error";
+      const success =
+        result.success || result.kind === "unsupported" || result.kind === "transient_error";
       item.status = success ? "completed" : "failed";
 
-      // Track completion per provider
       const provProgress = this.progressByProvider[account.provider];
       if (provProgress) {
         provProgress.completed++;
       }
     } catch (error) {
-      // A cancellation abort surfaces here as an AbortError — don't retry it.
-      if (stopSignal.aborted) {
+      if (isCancelled()) {
         item.status = "failed";
         return;
       }
@@ -458,7 +543,7 @@ class WarmupQueue {
         item.retries++;
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
-        if (stopSignal.aborted) {
+        if (isCancelled()) {
           item.status = "failed";
           return;
         }
@@ -493,6 +578,8 @@ class WarmupQueue {
           timestamp: log.timestamp,
         },
       });
+    } finally {
+      this.accountAbort.delete(item.accountId);
     }
   }
 

@@ -11,7 +11,7 @@ import {
   DialogTitle as DTitle,
   DialogDescription,
 } from "@/components/ui/dialog";
-import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText } from "lucide-react";
+import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText, Square } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
@@ -43,6 +43,7 @@ import {
   warmupAccount,
   warmupAccounts,
   warmupAllAccounts,
+  stopWarmup,
   type AutoWarmupStatus,
   type ByokProvider,
 } from "@/lib/api";
@@ -925,6 +926,20 @@ export default function Accounts() {
     } catch (err) { showError(err); }
   }
 
+  /** Hard-stop all WarmUp: drop queue + abort in-flight probes. */
+  async function handleStopWarmup() {
+    try {
+      const res = (await stopWarmup()) as { message?: string; dropped?: number; active?: number };
+      setWarmupProgress({});
+      showSuccess(res.message || "WarmUp stopped.");
+      await load(true);
+    } catch (err) {
+      showError(err);
+    }
+  }
+
+  const warmupRunning = Object.values(warmupProgress).some((p) => p && p.total > 0 && p.completed < p.total);
+
   async function handleRetryErrors(provider: Provider) {
     const ids = accounts.filter((a) => a.provider === provider && a.status === "error").map((a) => a.id);
     if (ids.length === 0) return;
@@ -1402,6 +1417,16 @@ export default function Accounts() {
           <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>
             <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
           </Button>
+          {warmupRunning && (
+            <Button
+              variant="outline"
+              size="sm"
+              onClick={() => void handleStopWarmup()}
+              className="border-[var(--error)]/40 text-[var(--error)]"
+            >
+              <Square className="w-4 h-4 mr-2" /> Stop WarmUp
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={handleLoginAll}>
             <Play className="w-4 h-4 mr-2" /> Login Pending
           </Button>
@@ -1656,16 +1681,28 @@ export default function Accounts() {
               {/* WarmUp progress - shown while warmup is active */}
               {warmupProgress[stat.provider] && warmupProgress[stat.provider].total > 0 && (
                 <div className="space-y-1.5">
-                  <div className="flex justify-between text-xs">
+                  <div className="flex items-center justify-between gap-2 text-xs">
                     <span className="text-[var(--muted-foreground)]">WarmUp</span>
-                    <span className="text-[var(--foreground)]">
-                      {warmupProgress[stat.provider].completed} / {warmupProgress[stat.provider].total} completed
+                    <span className="tabular-nums text-[var(--foreground)]">
+                      {warmupProgress[stat.provider].completed} / {warmupProgress[stat.provider].total}
                     </span>
                   </div>
                   <Progress
                     value={warmupProgress[stat.provider].total > 0 ? Math.round((warmupProgress[stat.provider].completed / warmupProgress[stat.provider].total) * 100) : 0}
                     className="h-2"
                   />
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    className="h-7 w-full border-[var(--error)]/40 text-[11px] text-[var(--error)]"
+                    onClick={(e) => {
+                      e.stopPropagation();
+                      void handleStopWarmup();
+                    }}
+                  >
+                    <Square className="mr-1 h-3 w-3" />
+                    Stop WarmUp
+                  </Button>
                 </div>
               )}
 

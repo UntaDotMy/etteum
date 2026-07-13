@@ -25,6 +25,10 @@ import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refres
 import { setupLogRotation } from "./utils/log-rotation";
 import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
 import { disableMitm } from "./proxy/mitm/manager";
+import { installConsoleBridge } from "./api/debug";
+
+// Mirror console output into Live Console SSE ring buffer (dashboard /console).
+installConsoleBridge();
 
 // ── Security config gate ────────────────────────────────────────────────
 const securityProblems = validateSecurityConfig();

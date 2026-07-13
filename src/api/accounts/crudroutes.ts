@@ -721,6 +721,10 @@ export function registerCrudRoutes(router: Hono): void {
       return result.map((r) => r.id);
     });
 
+    // Stop warmup/login for deleted ids so probes do not continue after delete.
+    warmupQueue.cancelAccounts(deletedIds);
+    loginQueue.cancelAccounts(deletedIds);
+
     for (const provider of providersAffected) {
       pool.invalidate(provider as ProviderName);
     }
@@ -775,6 +779,9 @@ export function registerCrudRoutes(router: Hono): void {
     if (!deleted) {
       return c.json({ error: "Account not found" }, 404);
     }
+
+    warmupQueue.cancelAccounts(id);
+    loginQueue.cancelAccounts(id);
 
     pool.invalidate(deleted.provider as ProviderName);
     broadcast({ type: "account_deleted", data: { id } });

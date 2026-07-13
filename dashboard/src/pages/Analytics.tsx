@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback } from "react";
+import { useEffect, useState, useCallback } from "react";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import { Card, CardContent } from "@/components/ui/card";
 import { fetchProviders, fetchRecentRequests } from "@/lib/api";
@@ -30,6 +30,7 @@ const PROVIDER_COLORS: Record<string, string> = {
   youmind: "#06b6d4",
   byok: "#78716c",
   alibaba: "#ef4444",
+  grok: "#00ff88",
 };
 
 function providerColor(p: string): string {
@@ -177,6 +178,14 @@ export default function Analytics() {
         next.add(provider);
         return next;
       });
+      // Clear error highlight after a short window (was sticky forever).
+      setTimeout(() => {
+        setErrorProviders((prev) => {
+          const next = new Set(prev);
+          next.delete(provider);
+          return next;
+        });
+      }, 12_000);
     }
 
     // Update recent requests (compact live feed — last 15)
@@ -243,21 +252,21 @@ export default function Analytics() {
       </Card>
 
       {/* ═══ Legend ═══ */}
-      <div className="flex items-center gap-4 px-1 text-xs text-[var(--muted-foreground)]">
+      <div className="flex flex-wrap items-center gap-4 px-1 text-xs text-[var(--muted-foreground)]">
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-3 h-3 rounded-full bg-[#22c55e]" />
+          <span className="inline-block h-3 w-3 rounded-full bg-[var(--success)]" />
           Active request
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-3 h-3 rounded-full bg-[#ef4444]" />
+          <span className="inline-block h-3 w-3 rounded-full bg-[var(--error)]" />
           Error
         </span>
         <span className="flex items-center gap-1.5">
-          <span className="inline-block w-3 h-3 rounded border border-[var(--border)] bg-transparent" />
+          <span className="inline-block h-3 w-3 rounded border border-[var(--border)] bg-[var(--card)]" />
           Idle / connected
         </span>
-        <span className="text-[var(--muted-foreground)] ml-auto">
-          Pro tip: Drag to pan · Scroll to zoom
+        <span className="ml-auto text-[var(--muted-foreground)]">
+          Drag to pan · Scroll to zoom
         </span>
       </div>
 
