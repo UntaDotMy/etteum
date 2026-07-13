@@ -227,6 +227,17 @@ export function adminGuardFromPeer(
  */
 export function peerIpFromHonoContext(c: any): string | null {
   try {
+    // Bun.serve wrapper in src/index.ts injects the peer as c.env.ip via
+    // app.fetch(req, { ip: server.requestIP(req) }). Prefer that first —
+    // c.env.server is NOT set by our wrapper, so looking only at server
+    // left peerIp always null and every adminGuardFromPeer call failed closed.
+    const injected = c?.env?.ip;
+    if (typeof injected === "string" && injected) return injected;
+    if (injected && typeof injected === "object") {
+      const addr = (injected as { address?: string }).address;
+      if (typeof addr === "string" && addr) return addr;
+    }
+
     const server = c?.env?.server ?? c?.env?.runtime?.server;
     if (server && typeof server.requestIP === "function") {
       const addr = server.requestIP(c.req.raw);
