@@ -331,8 +331,22 @@ function pushLog(job: GrokFarmJobState, line: string) {
 
       if (payload.type === "worker_start" && wid != null) {
         const sid = ensureWorkerSession(job, wid, payload.email);
-        updatePhase(sid, "starting", payload.message || "Worker browser launching…");
-        appendStep(sid, "start", payload.message || "worker start", "grok");
+        const msg = payload.message || "Worker browser launching…";
+        updatePhase(sid, "starting", msg);
+        appendStep(sid, "start", msg, "grok");
+        // Per-worker only — never fan out to siblings.
+        broadcast({
+          type: "login_progress",
+          data: {
+            provider: "grok",
+            step: "starting",
+            message: msg,
+            jobId: job.id,
+            email: payload.email || `Grok worker #${wid}`,
+            sessionId: sid,
+            workerId: wid,
+          },
+        });
         return;
       }
 
@@ -391,49 +405,25 @@ function pushLog(job: GrokFarmJobState, line: string) {
   if (job.logTail.length > 200) job.logTail.splice(0, job.logTail.length - 200);
   job.lastMessage = msg.slice(0, 300);
 
+  // Process-wide stdout (non-ETTEUM_JSON) belongs on the job overview only.
+  // Never fan the same line/phase onto every worker card — that made all
+  // concurrent workers show identical status/messages. Per-worker progress
+  // arrives as ETTEUM_JSON with workerId (progress / worker_start / worker_done).
   const sid = job.id;
   const isErr = /error|failed|traceback|exception|sys\.exit|ModuleNotFound|ImportError/i.test(msg);
   appendStep(sid, isErr ? "error" : "farm", job.lastMessage, "grok");
   updatePhase(sid, isErr ? "error" : "farming", job.lastMessage);
-
-  // Bot Logs hides the job overview card (grok-farm-* without -wN). Mirror
-  // process lines onto live workers so the user sees real farm errors, not only
-  // "Waiting for farm worker…".
-  const noteworthy =
-    isErr ||
-    /\[etteum\]|BATCH|Mail mode|Batch|Import|succeed|fail|ERROR|starting farm|closing|signup|OAuth|probe|token|camoufox|Traceback/i.test(
-      msg,
-    );
-  if (noteworthy) {
-    for (const wsid of job.workerSessionIds) {
-      const w = getSession(wsid);
-      if (!w || w.terminal) continue;
-      appendStep(wsid, isErr ? "error" : "farm", job.lastMessage, "grok");
-      if (isErr) updatePhase(wsid, "farming", job.lastMessage);
-      broadcast({
-        type: "login_progress",
-        data: {
-          provider: "grok",
-          step: isErr ? "error" : "farm",
-          message: job.lastMessage,
-          jobId: job.id,
-          email: w.email,
-          sessionId: wsid,
-        },
-      });
-    }
-    broadcast({
-      type: "login_progress",
-      data: {
-        provider: "grok",
-        step: isErr ? "error" : "farm",
-        message: job.lastMessage,
-        jobId: job.id,
-        email: "Grok Farm",
-        sessionId: sid,
-      },
-    });
-  }
+  broadcast({
+    type: "login_progress",
+    data: {
+      provider: "grok",
+      step: isErr ? "error" : "farm",
+      message: job.lastMessage,
+      jobId: job.id,
+      email: "Grok Farm",
+      sessionId: sid,
+    },
+  });
 }
 
 /** Prefer a concrete farm ERROR/traceback line over the generic batch-missing message. */

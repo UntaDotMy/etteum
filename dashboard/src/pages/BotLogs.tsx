@@ -70,20 +70,60 @@ export default function BotLogs() {
     const e = (msg as any)?.data ?? msg;
     if (!e) return;
 
-    if (e.sessionId || e.email) {
+    // Prefer sessionId only. Matching by email alone applied one worker's
+    // step/message to every card that shared a label (or all farm workers
+    // when process logs were fan-out with the same text).
+    if (e.sessionId) {
       setSessions((prev) =>
         prev.map((s) => {
-          const match =
-            (e.sessionId && s.sessionId === e.sessionId) ||
-            (e.email && s.email === e.email);
-          if (!match) return s;
+          if (s.sessionId !== e.sessionId) return s;
+          const nextPhase =
+            typeof e.phase === "string" && e.phase
+              ? e.phase
+              : e.step === "phase"
+                ? e.phase || s.phase
+                : e.step || s.phase;
+          const msg = typeof e.message === "string" ? e.message : "";
+          const stepName = typeof e.step === "string" && e.step !== "phase" ? e.step : nextPhase;
+          let steps = s.steps;
+          if (msg && stepName) {
+            const last = steps?.[steps.length - 1];
+            if (!last || last.step !== stepName || last.message !== msg) {
+              steps = [
+                ...(steps || []),
+                {
+                  ts: Date.now(),
+                  step: stepName,
+                  message: msg,
+                  provider: s.provider,
+                },
+              ];
+            }
+          }
+          return {
+            ...s,
+            phase: nextPhase,
+            lastMessage: msg || s.lastMessage,
+            steps,
+            ...(e.terminal === true ? { terminal: true } : null),
+          };
+        }),
+      );
+    } else if (e.email) {
+      // Legacy events without sessionId: match a single email, not all workers.
+      setSessions((prev) => {
+        const hits = prev.filter((s) => s.email === e.email);
+        if (hits.length !== 1) return prev;
+        const onlyId = hits[0]!.sessionId;
+        return prev.map((s) => {
+          if (s.sessionId !== onlyId) return s;
           return {
             ...s,
             phase: e.step === "phase" ? e.phase || s.phase : e.step || s.phase,
             lastMessage: e.message || s.lastMessage,
           };
-        }),
-      );
+        });
+      });
     }
 
     if (e.step === "manual_challenge") {
@@ -97,22 +137,70 @@ export default function BotLogs() {
         setChallenges((c) => ({ ...c, [e.sessionId]: challengePayload }));
       } else if (e.email) {
         setSessions((prev) => {
-          const sid = prev.find((s) => s.email === e.email)?.sessionId;
-          if (sid) setChallenges((c) => ({ ...c, [sid]: challengePayload }));
+          const matches = prev.filter((s) => s.email === e.email);
+          if (matches.length === 1) {
+            const sid = matches[0]!.sessionId;
+            setChallenges((c) => ({ ...c, [sid]: challengePayload }));
+          }
           return prev;
         });
       }
     }
   });
 
-  useWsEvent("login_failed", () => {
+  // Reload only the finished/terminal session when we have a sessionId —
+  // avoid full list reload thrash (and layout jump) on every success.
+  useWsEvent("login_failed", (msg) => {
+    const e = (msg as any)?.data ?? msg;
+    if (e?.sessionId) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.sessionId === e.sessionId
+            ? {
+                ...s,
+                terminal: true,
+                phase: e.phase || e.step || "failed",
+                lastMessage: e.message || e.error || s.lastMessage,
+              }
+            : s,
+        ),
+      );
+    }
     void load();
   });
-  useWsEvent("login_success", () => {
+  useWsEvent("login_success", (msg) => {
+    const e = (msg as any)?.data ?? msg;
+    if (e?.sessionId) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.sessionId === e.sessionId
+            ? {
+                ...s,
+                terminal: true,
+                phase: e.phase || "complete",
+                lastMessage: e.message || s.lastMessage,
+              }
+            : s,
+        ),
+      );
+    }
     void load();
   });
-  useWsEvent("browser_frame", () => {
-    void load();
+  // Frame bytes stream via SSE on each card — do not reload the whole page
+  // list on every browser_frame (that reordered DOM and felt like auto-scroll).
+  useWsEvent("browser_frame", (msg) => {
+    const e = (msg as any)?.data ?? msg;
+    if (!e?.sessionId) return;
+    // Terminal flag on frame end-of-job can mark a card done without full reload.
+    if (e.terminal === true) {
+      setSessions((prev) =>
+        prev.map((s) =>
+          s.sessionId === e.sessionId
+            ? { ...s, terminal: true, phase: e.phase || s.phase }
+            : s,
+        ),
+      );
+    }
   });
 
   useEffect(() => {
