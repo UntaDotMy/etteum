@@ -10,7 +10,6 @@ import CodeBuddyCnModal from "@/components/automation/CodeBuddyCnModal";
 import { fetchApi, importAccounts } from "@/lib/api";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
 import {
-  ExternalLink,
   Zap,
   Bot,
   Globe,
@@ -102,14 +101,6 @@ const PROVIDERS: ProviderConfig[] = [
   },
 ];
 
-type LiveEvent = {
-  ts: number;
-  provider: string;
-  step: string;
-  message: string;
-  level: "info" | "error" | "success";
-};
-
 /** Minimal farm job shape from /jobs/latest — only fields the card progress needs. */
 type FarmJobSnapshot = {
   id: string;
@@ -139,7 +130,6 @@ export default function Automation() {
   const [modalProvider, setModalProvider] = useState<ProviderConfig | null>(null);
   const [grokFarmOpen, setGrokFarmOpen] = useState(false);
   const [cbcFarmOpen, setCbcFarmOpen] = useState(false);
-  const [live, setLive] = useState<LiveEvent[]>([]);
   const [grokJob, setGrokJob] = useState<FarmJobSnapshot | null>(null);
   const [cbcJob, setCbcJob] = useState<FarmJobSnapshot | null>(null);
 
@@ -166,49 +156,14 @@ export default function Automation() {
     return () => clearInterval(t);
   }, [refreshFarmJobs]);
 
-  useWsEvent("login_progress", (msg) => {
-    const e = msg?.data ?? msg;
-    if (!e) return;
-    setLive((prev) => [
-      ...prev.slice(-39),
-      {
-        ts: Date.now(),
-        provider: String(e.provider || ""),
-        step: String(e.step || "progress"),
-        message: String(e.message || ""),
-        level: "info" as const,
-      },
-    ]);
+  // Refresh card progress when farm jobs emit login events (no activity log UI).
+  useWsEvent("login_progress", () => {
     void refreshFarmJobs();
   });
-  useWsEvent("login_failed", (msg) => {
-    const e = msg?.data ?? msg;
-    if (!e) return;
-    setLive((prev) => [
-      ...prev.slice(-39),
-      {
-        ts: Date.now(),
-        provider: String(e.provider || ""),
-        step: "failed",
-        message: String(e.error || e.message || "login failed"),
-        level: "error" as const,
-      },
-    ]);
+  useWsEvent("login_failed", () => {
     void refreshFarmJobs();
   });
-  useWsEvent("login_success", (msg) => {
-    const e = msg?.data ?? msg;
-    if (!e) return;
-    setLive((prev) => [
-      ...prev.slice(-39),
-      {
-        ts: Date.now(),
-        provider: String(e.provider || ""),
-        step: "success",
-        message: "login succeeded",
-        level: "success" as const,
-      },
-    ]);
+  useWsEvent("login_success", () => {
     void refreshFarmJobs();
   });
 
@@ -301,16 +256,11 @@ export default function Automation() {
         {PROVIDERS.map((p) => {
           const Icon = p.icon;
           // Card progress only for farm providers (Grok / CodeBuddy CN) — existing job APIs.
-          const job =
-            p.farmModal ? grokJob : p.cbcModal ? cbcJob : null;
+          const job = p.farmModal ? grokJob : p.cbcModal ? cbcJob : null;
           const prog = farmProgress(job);
           const showFarmProgress = Boolean(job && (job.status === "running" || prog));
           const pct =
-            prog && prog.target > 0
-              ? Math.min(100, Math.round((prog.done / prog.target) * 100))
-              : job?.status === "running"
-                ? 0
-                : 0;
+            prog && prog.target > 0 ? Math.min(100, Math.round((prog.done / prog.target) * 100)) : 0;
 
           return (
             <Card
@@ -387,58 +337,6 @@ export default function Automation() {
           );
         })}
       </div>
-
-      {/* Live strip — shared WS stream Browser Logs also consumes */}
-      <Card>
-        <CardHeader className="flex flex-row items-center justify-between space-y-0 pb-3">
-          <div>
-            <CardTitle className="text-sm">Live activity</CardTitle>
-            <CardDescription className="text-xs">
-              Same WebSocket events as Browser Logs ({live.length} recent)
-            </CardDescription>
-          </div>
-          <Button variant="ghost" size="sm" onClick={() => navigate("/bot-logs")}>
-            Open logs
-            <ExternalLink className="ml-1.5 h-3.5 w-3.5" />
-          </Button>
-        </CardHeader>
-        <CardContent>
-          {live.length === 0 ? (
-            <div className="rounded-lg border border-dashed border-[var(--border)] bg-[var(--secondary)]/40 px-4 py-8 text-center text-xs text-[var(--muted-foreground)]">
-              No login events yet. Start a provider to stream progress here.
-            </div>
-          ) : (
-            <div className="max-h-48 overflow-y-auto rounded-lg border border-[var(--border)] bg-[var(--secondary)]/30 font-mono text-[11px]">
-              {live
-                .slice()
-                .reverse()
-                .map((ev, i) => (
-                  <div
-                    key={`${ev.ts}-${i}`}
-                    className="flex gap-2 border-b border-[var(--border)]/60 px-3 py-1.5 last:border-0"
-                  >
-                    <span className="shrink-0 text-[var(--muted-foreground)]">
-                      {new Date(ev.ts).toLocaleTimeString()}
-                    </span>
-                    <span className="shrink-0 text-[var(--primary)]">{ev.provider || "—"}</span>
-                    <span
-                      className={
-                        ev.level === "error"
-                          ? "text-[var(--error)]"
-                          : ev.level === "success"
-                            ? "text-[var(--success)]"
-                            : "text-[var(--warning)]"
-                      }
-                    >
-                      {ev.step}
-                    </span>
-                    <span className="min-w-0 flex-1 truncate text-[var(--foreground)]">{ev.message}</span>
-                  </div>
-                ))}
-            </div>
-          )}
-        </CardContent>
-      </Card>
 
       {modalProvider && (
         <StartAutomationModal
