@@ -5,10 +5,13 @@
  * Farm remains the producer (signup + OIDC). Etteum owns config (UI → env),
  * process lifecycle, progress events, and account persistence.
  */
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import {
+  spawn,
+  execFileSync,
+  type ChildProcessWithoutNullStreams,
+} from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import { broadcast } from "../../ws/index";
 import { config } from "../../config";
 import {
@@ -270,6 +273,21 @@ export function getGrokFarmJob(id?: string): GrokFarmJobState | null {
 
 export function listGrokFarmJobs(): GrokFarmJobState[] {
   return [...jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 20);
+}
+
+/**
+ * Drop finished/cancelled farm jobs from memory so Automation card progress
+ * disappears when Browser Logs is cleared. Does not touch a still-running job.
+ */
+export function clearFinishedGrokFarmJobs(): { cleared: number } {
+  let cleared = 0;
+  for (const [id, job] of jobs) {
+    if (job.status === "running") continue;
+    jobs.delete(id);
+    cleared++;
+  }
+  if (activeJobId && !jobs.has(activeJobId)) activeJobId = null;
+  return { cleared };
 }
 
 function pushLog(job: GrokFarmJobState, line: string) {
@@ -825,17 +843,83 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
   return job;
 }
 
+/**
+ * Kill farm Python + its full process tree (Camoufox/Firefox children).
+ * Mirrors farm.py `_kill_pid_tree` / `taskkill /T` so Stop all does not leave
+ * orphan browsers the way a bare `proc.kill()` can on Windows.
+ */
+export function killProcessTree(pid: number | undefined | null): void {
+  if (!pid || !Number.isFinite(pid) || pid <= 0) return;
+  const p = Math.floor(pid);
+  try {
+    if (process.platform === "win32") {
+      // /T = kill tree rooted at this pid (python → camoufox → firefox)
+      execFileSync("taskkill", ["/F", "/T", `/PID`, String(p)], {
+        stdio: "ignore",
+        timeout: 15_000,
+        windowsHide: true,
+      });
+      return;
+    }
+    // Unix: kill process group if spawned detached; else children then parent.
+    try {
+      process.kill(-p, "SIGTERM");
+    } catch {
+      /* not a group leader */
+    }
+    try {
+      const kids = execFileSync("pgrep", ["-P", String(p)], {
+        encoding: "utf8",
+        timeout: 3_000,
+      })
+        .trim()
+        .split(/\s+/)
+        .filter(Boolean);
+      for (const k of kids) {
+        try {
+          process.kill(Number(k), "SIGKILL");
+        } catch {
+          /* gone */
+        }
+      }
+    } catch {
+      /* no pgrep / no children */
+    }
+    try {
+      process.kill(p, "SIGKILL");
+    } catch {
+      /* gone */
+    }
+  } catch {
+    try {
+      process.kill(p, "SIGTERM");
+    } catch {
+      /* already dead */
+    }
+  }
+}
+
 export function cancelGrokFarm(): boolean {
   if (!activeProc || !activeJobId) return false;
   const job = jobs.get(activeJobId);
+  const pid = activeProc.pid;
+  // Tree-kill first (Windows taskkill /T). Farm atexit may not run if we force
+  // kill, but browsers + python both die — no Camoufox zombies.
+  killProcessTree(pid);
   try {
-    activeProc.kill();
-  } catch { /* */ }
+    activeProc.kill("SIGKILL");
+  } catch {
+    /* already dead after taskkill */
+  }
   if (job) {
     job.status = "cancelled";
     job.finishedAt = new Date().toISOString();
-    pushLog(job, "[etteum] cancelled by user");
-    forEachWorkerSession(job, (sid) => updatePhase(sid, "cancelled", "cancelled by user"));
+    job.lastMessage = "cancelled by user";
+    pushLog(job, "[etteum] cancelled by user (process tree killed)");
+    forEachWorkerSession(job, (sid) => {
+      appendStep(sid, "cancelled", "cancelled by user", "grok");
+      updatePhase(sid, "cancelled", "cancelled by user");
+    });
   }
   activeProc = null;
   activeJobId = null;

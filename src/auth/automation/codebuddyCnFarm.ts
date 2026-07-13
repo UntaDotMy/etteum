@@ -154,6 +154,18 @@ export function listCodebuddyCnFarmJobs(): CodebuddyCnFarmJob[] {
   return [...jobs.values()].sort((a, b) => b.startedAt.localeCompare(a.startedAt)).slice(0, 20);
 }
 
+/** Drop finished farm jobs so Automation card progress clears with Browser Logs. */
+export function clearFinishedCodebuddyCnFarmJobs(): { cleared: number } {
+  let cleared = 0;
+  for (const [id, job] of jobs) {
+    if (job.status === "running") continue;
+    jobs.delete(id);
+    cleared++;
+  }
+  if (activeJobId && !jobs.has(activeJobId)) activeJobId = null;
+  return { cleared };
+}
+
 export function cancelCodebuddyCnFarm(): boolean {
   if (!activeJobId) return false;
   const job = jobs.get(activeJobId);

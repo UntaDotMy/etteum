@@ -258,6 +258,7 @@ export default function Automation() {
           // Card progress only for farm providers (Grok / CodeBuddy CN) — existing job APIs.
           const job = p.farmModal ? grokJob : p.cbcModal ? cbcJob : null;
           const prog = farmProgress(job);
+          // Cleared with Browser Logs → jobs/latest is null → bar hidden.
           const showFarmProgress = Boolean(job && (job.status === "running" || prog));
           const pct =
             prog && prog.target > 0 ? Math.min(100, Math.round((prog.done / prog.target) * 100)) : 0;

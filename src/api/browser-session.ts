@@ -7,9 +7,33 @@ import {
   clearEndedSessions,
   cancelAllSessions,
 } from "../auth/browserSession";
-import { cancelGrokFarm } from "../auth/automation/grokFarm";
+import { cancelGrokFarm, clearFinishedGrokFarmJobs } from "../auth/automation/grokFarm";
+import {
+  cancelCodebuddyCnFarm,
+  clearFinishedCodebuddyCnFarmJobs,
+} from "../auth/automation/codebuddyCnFarm";
+import { broadcast } from "../ws/index";
 
 export const browserSessionRouter = new Hono();
+
+/** Clear finished farm job snapshots so Automation provider cards hide progress. */
+function clearFinishedFarmJobsAndNotify(): {
+  grokJobsCleared: number;
+  cbcJobsCleared: number;
+} {
+  const grok = clearFinishedGrokFarmJobs();
+  const cbc = clearFinishedCodebuddyCnFarmJobs();
+  // Automation page listens to login_* WS to refresh card progress.
+  broadcast({
+    type: "login_progress",
+    data: {
+      provider: "",
+      step: "cleared",
+      message: "Browser logs / farm history cleared",
+    },
+  });
+  return { grokJobsCleared: grok.cleared, cbcJobsCleared: cbc.cleared };
+}
 
 /**
  * GET /api/browser-sessions — list active browser sessions (for the session
@@ -31,20 +55,37 @@ browserSessionRouter.get("/", (c) => {
   return c.json({ sessions });
 });
 
-/** POST /api/browser-sessions/clear-ended — drop finished cards from the registry. */
+/**
+ * POST /api/browser-sessions/clear-ended — drop finished cards from the registry
+ * and clear finished farm jobs so Automation cards reset progress bars.
+ */
 browserSessionRouter.post("/clear-ended", (c) => {
   const result = clearEndedSessions();
-  return c.json({ success: true, ...result });
+  const farms = clearFinishedFarmJobsAndNotify();
+  return c.json({ success: true, ...result, ...farms });
 });
 
 /**
  * POST /api/browser-sessions/stop-all — cancel live sessions + running Grok farm.
+ * Farm is cancelled first (taskkill /T tree kill) so Camoufox children die with
+ * the Python parent; then any remaining session cards are marked cancelled.
  * Must be registered before /:sessionId so "stop-all" is not treated as an id.
  */
 browserSessionRouter.post("/stop-all", (c) => {
+  // Farm tree-kill first — workers share that single farm.py PID.
   const farmCancelled = cancelGrokFarm();
+  const cbcCancelled = cancelCodebuddyCnFarm();
   const result = cancelAllSessions();
-  return c.json({ success: true, farmCancelled, ...result });
+  // Cancelled jobs are finished — clear them so Automation progress bar resets
+  // even before the user hits Clear ended (sessions stay until Clear ended).
+  const farms = clearFinishedFarmJobsAndNotify();
+  return c.json({
+    success: true,
+    farmCancelled,
+    cbcCancelled,
+    ...result,
+    ...farms,
+  });
 });
 
 /**
