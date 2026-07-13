@@ -50,7 +50,7 @@ describe("getProviderForModel", () => {
     // New F13 catalog providers (prefix-routed):
     ["openai-gpt-4o", "openai"],
     ["groq-llama-3.3-70b-versatile", "groq"],
-    // Grok owns grok-4.5 family + composer-2.5; older slugs unclaimed.
+    // Grok owns grok-4.5 family + composer-2.5 + Imagine image/video; older slugs unclaimed.
     ["grok-2-latest", null],
     ["grok-4", null],
     ["grok-auto", null],
@@ -58,6 +58,10 @@ describe("getProviderForModel", () => {
     ["grok-4.5", "grok"],
     ["grok-4.5-reasoning", "grok"],
     ["composer-2.5", "grok"],
+    ["grok-imagine-image", "grok"],
+    ["grok-imagine-image-quality", "grok"],
+    ["grok-imagine-video", "grok"],
+    ["grok-imagine-video-1.5", "grok"],
     ["glm-5", "kiro"],
     ["glm-5-thinking", "kiro"],
     ["minimax-m2.1", "kiro"],

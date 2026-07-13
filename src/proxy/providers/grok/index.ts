@@ -116,11 +116,11 @@ const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
   { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false },
-  // Grok Imagine (api.x.ai) — generation, not chat
-  { id: "grok-imagine-image", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
-  { id: "grok-imagine-image-quality", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
-  { id: "grok-imagine-video", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
-  { id: "grok-imagine-video-1.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false },
+  // Imagine — docs.x.ai pricing (USD unit price in creditRate). Generation, not chat.
+  { id: "grok-imagine-image", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 0.02, creditSource: "fixed" },
+  { id: "grok-imagine-image-quality", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 0.05, creditSource: "fixed" },
+  { id: "grok-imagine-video", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 0.05, creditSource: "fixed" },
+  { id: "grok-imagine-video-1.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 0.08, creditSource: "fixed" },
 ];
 
 export type GrokReasoningEffort = "low" | "medium" | "high";
