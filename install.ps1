@@ -589,7 +589,30 @@ function Install-CliShims {
         Warn "etteum.cmd not found at $srcCmd"
     }
 
-    Ok "Installed etteum command to $target"
+    # Global shims live outside the checkout, so record where the install is.
+    # etteum.ps1 reads this pointer (plus ETTEUM_HOME) so update/start work
+    # from any directory for every user.
+    $installRoot = [System.IO.Path]::GetFullPath($script:ProjectDir)
+    $pointerBesideShim = Join-Path $target "etteum.home"
+    $configDir = Join-Path $HOME ".config\etteum"
+    $pointerConfig = Join-Path $configDir "home"
+    Set-Content -LiteralPath $pointerBesideShim -Value $installRoot -Encoding ascii -NoNewline
+    if (-not (Test-Path $configDir)) {
+        New-Item -ItemType Directory -Path $configDir -Force | Out-Null
+    }
+    Set-Content -LiteralPath $pointerConfig -Value $installRoot -Encoding ascii -NoNewline
+
+    # Persist ETTEUM_HOME so upgrade.ps1 / services / new shells resolve the same path.
+    $env:ETTEUM_HOME = $installRoot
+    try {
+        [Environment]::SetEnvironmentVariable("ETTEUM_HOME", $installRoot, "User")
+        Ok "Set user ETTEUM_HOME=$installRoot"
+    } catch {
+        Warn "Could not set user ETTEUM_HOME permanently: $_"
+        Info "You can set it manually: setx ETTEUM_HOME `"$installRoot`""
+    }
+
+    Ok "Installed etteum command to $target (home pointer -> $installRoot)"
 
     if (($env:Path -split ';') -notcontains $target) {
         Warn "$target is not on your PATH."

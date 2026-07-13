@@ -560,7 +560,17 @@ install_cli_symlink() {
   mkdir -p "$target"
   ln -sf "$PROJECT_DIR/etteum" "$target/etteum"
   chmod +x "$PROJECT_DIR/etteum"
-  ok "Linked $target/etteum -> $PROJECT_DIR/etteum"
+
+  # Record install root so a copied (non-symlink) shim or env-less shell
+  # still finds the project. Symlink installs already resolve via realpath.
+  local install_root
+  install_root=$(cd -P "$PROJECT_DIR" >/dev/null 2>&1 && pwd)
+  printf '%s\n' "$install_root" > "$target/etteum.home"
+  mkdir -p "$HOME/.config/etteum"
+  printf '%s\n' "$install_root" > "$HOME/.config/etteum/home"
+  export ETTEUM_HOME="$install_root"
+
+  ok "Linked $target/etteum -> $PROJECT_DIR/etteum (home pointer -> $install_root)"
 
   case ":$PATH:" in
     *":$target:"*) ;;
@@ -568,6 +578,7 @@ install_cli_symlink() {
       warn "$target is not on your PATH."
       info "Add this to your shell rc file (~/.bashrc, ~/.zshrc, ~/.config/fish/config.fish):"
       info "  export PATH=\"\$HOME/.local/bin:\$PATH\""
+      info "  export ETTEUM_HOME=\"$install_root\""
       ;;
   esac
 }
