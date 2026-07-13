@@ -246,14 +246,38 @@ export async function exchangeCodexAuthorizationCode(input: {
   };
 }
 
+/** Bounded parallel map for bulk token exchange (keeps upstream load reasonable). */
+async function mapPool<T>(
+  items: T[],
+  concurrency: number,
+  worker: (item: T, index: number) => Promise<void>,
+): Promise<void> {
+  if (items.length === 0) return;
+  const limit = Math.max(1, Math.min(concurrency, items.length));
+  let next = 0;
+  await Promise.all(
+    Array.from({ length: limit }, async () => {
+      while (true) {
+        const i = next++;
+        if (i >= items.length) return;
+        await worker(items[i]!, i);
+      }
+    }),
+  );
+}
+
 export async function exchangeCodexRefreshTokens(tokens: string[]) {
   let success = 0;
   let failed = 0;
   const errors: string[] = [];
+  // Cap error list so huge batches don't balloon the response body.
+  const pushErr = (msg: string) => {
+    if (errors.length < 50) errors.push(msg);
+  };
 
-  for (const refreshToken of tokens) {
+  await mapPool(tokens, 8, async (refreshToken) => {
     const trimmed = refreshToken.trim();
-    if (!trimmed) { failed++; continue; }
+    if (!trimmed) { failed++; return; }
 
     try {
       const form = new URLSearchParams({
@@ -271,9 +295,9 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
 
       if (!response.ok) {
         const text = await response.text().catch(() => "");
-        errors.push(`token ...${trimmed.slice(-8)}: refresh failed (${response.status}): ${text.slice(0, 100)}`);
+        pushErr(`token ...${trimmed.slice(-8)}: refresh failed (${response.status}): ${text.slice(0, 100)}`);
         failed++;
-        continue;
+        return;
       }
 
       const data = await response.json() as {
@@ -284,9 +308,9 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
       };
 
       if (!data.access_token) {
-        errors.push(`token ...${trimmed.slice(-8)}: no access_token in response`);
+        pushErr(`token ...${trimmed.slice(-8)}: no access_token in response`);
         failed++;
-        continue;
+        return;
       }
 
       const claims = data.id_token ? decodeJwtPayload(data.id_token) : {};
@@ -338,10 +362,10 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
       await upsertCodexAccount(email, newTokens);
       success++;
     } catch (err) {
-      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      pushErr(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
       failed++;
     }
-  }
+  });
 
   pool.invalidate("codex" as ProviderName);
   if (success > 0) {
@@ -366,10 +390,16 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
   let success = 0;
   let failed = 0;
   const errors: string[] = [];
+  const pushErr = (msg: string) => {
+    if (errors.length < 50) errors.push(msg);
+  };
+  // Credit probe is one extra HTTP round-trip per token; for large pastes skip
+  // it so import finishes (warmup / refresh-quota can fill credits later).
+  const probeCredits = tokens.length <= 25;
 
-  for (const token of tokens) {
+  await mapPool(tokens, 8, async (token) => {
     const trimmed = token.trim();
-    if (!trimmed) { failed++; continue; }
+    if (!trimmed) { failed++; return; }
 
     try {
       let oauthTokens;
@@ -387,25 +417,26 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
           : `grok-${trimmed.slice(-8)}@token.local`;
       }
 
-      // Probe free Build absolute credits (farm-compatible rate-limit headers).
-      try {
-        const { probeOAuthChatCredits } = await import("../../proxy/providers/grok/oauth");
-        const q = await probeOAuthChatCredits(oauthTokens.access_token);
-        if (q && q.limit > 0) {
-          oauthTokens.credits_limit = q.limit;
-          oauthTokens.credits_remaining = q.remaining;
+      if (probeCredits) {
+        try {
+          const { probeOAuthChatCredits } = await import("../../proxy/providers/grok/oauth");
+          const q = await probeOAuthChatCredits(oauthTokens.access_token);
+          if (q && q.limit > 0) {
+            oauthTokens.credits_limit = q.limit;
+            oauthTokens.credits_remaining = q.remaining;
+          }
+        } catch {
+          /* non-fatal */
         }
-      } catch {
-        /* non-fatal */
       }
 
       await upsertGrokOAuthAccount(email, oauthTokens);
       success++;
     } catch (err) {
-      errors.push(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
+      pushErr(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
       failed++;
     }
-  }
+  });
 
   pool.invalidate("grok" as ProviderName);
   if (success > 0) {

@@ -1,3 +1,6 @@
+import { bulkTimeoutMs, BULK_API_TIMEOUT_MS } from "./bulkTimeout";
+export { bulkTimeoutMs, BULK_API_TIMEOUT_MS };
+
 function resolveApiBase(): string {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
   const { port, hostname, protocol } = window.location;
@@ -66,7 +69,25 @@ export function logout() {
   localStorage.removeItem("api_key");
 }
 
-type FetchApiOptions = RequestInit & { timeoutMs?: number };
+type FetchApiOptions = RequestInit & {
+  /**
+   * Client abort timeout (ms). Default 30s for normal UI calls.
+   * Use bulkTimeoutMs(n) for bulk add/import/instant-login so the browser does
+   * not abort while the server is still writing accounts.
+   * Set 0 to disable the client timeout.
+   */
+  timeoutMs?: number;
+};
+
+function isAbortError(err: unknown): boolean {
+  if (!err || typeof err !== "object") return false;
+  const e = err as { name?: string; message?: string };
+  return (
+    e.name === "AbortError" ||
+    e.name === "TimeoutError" ||
+    /aborted|AbortError|The operation was aborted/i.test(String(e.message || ""))
+  );
+}
 
 /**
  * Normalize API error payloads. Auth middleware returns
@@ -131,6 +152,16 @@ export async function fetchApi<T = any>(path: string, options?: FetchApiOptions)
     if (res.status === 204) return undefined as T;
     const text = await res.text();
     return text ? JSON.parse(text) : (undefined as T);
+  } catch (err) {
+    if (isAbortError(err)) {
+      const secs = timeoutMs > 0 ? Math.round(timeoutMs / 1000) : 0;
+      throw new Error(
+        timeoutMs > 0
+          ? `Request timed out after ${secs}s. For bulk add/import the server may still be writing accounts — refresh the list. If this keeps happening, split into smaller batches.`
+          : "Request was aborted.",
+      );
+    }
+    throw err;
   } finally {
     if (timer) clearTimeout(timer);
     signal?.removeEventListener("abort", abortOnSignal);
@@ -569,6 +600,7 @@ export async function bulkDeleteAccounts(ids: number[]): Promise<{
   return fetchApi("/api/accounts/bulk-delete", {
     method: "POST",
     body: JSON.stringify({ ids }),
+    timeoutMs: bulkTimeoutMs(ids.length, 500),
   });
 }
 
@@ -647,9 +679,25 @@ export async function cancelManualLogin(accountId: number) {
 }
 
 export async function importAccounts(text: string, providers: string[], options?: { headless?: boolean; concurrency?: number; browserEngine?: string }) {
+  const lines = text.split(/\r?\n/).filter((l) => l.trim() && !l.trim().startsWith("#")).length;
   return fetchApi("/api/auth/import", {
     method: "POST",
     body: JSON.stringify({ text, providers, ...(options || {}) }),
+    // Queue + DB inserts for large pastes; 30s default aborted mid-way.
+    timeoutMs: bulkTimeoutMs(lines, 200),
+  });
+}
+
+/** Instant-login / bulk refresh-token exchange (kiro-pro, codex, grok). */
+export async function instantLoginTokens(
+  tokens: string[],
+  provider: string,
+): Promise<{ success: number; failed: number; errors?: string[] }> {
+  return fetchApi("/api/accounts/instant-login", {
+    method: "POST",
+    body: JSON.stringify({ tokens, provider }),
+    // Per-token upstream exchange; 100 tokens easily exceeds 30s.
+    timeoutMs: bulkTimeoutMs(tokens.length, 3_000),
   });
 }
 

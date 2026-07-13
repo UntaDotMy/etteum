@@ -28,6 +28,8 @@ import {
   fetchWarmupQueue,
   getCodexAuthorize,
   importAccounts,
+  instantLoginTokens,
+  bulkTimeoutMs,
   loginAccounts,
   loginAllAccounts,
   pollCodexOAuthStatus,
@@ -431,12 +433,10 @@ export default function Accounts() {
     const isGrok = addDialogProvider === "grok";
     if (isGrok) setGrokBusy(true);
     try {
-      const res = await fetchApi<{ success: number; failed: number; errors?: string[] }>("/api/accounts/instant-login", {
-        method: "POST",
-        body: JSON.stringify({ tokens, provider: addDialogProvider }),
-      });
+      // Long client timeout — default 30s aborts while server still exchanges tokens.
+      const res = await instantLoginTokens(tokens, addDialogProvider || "kiro-pro");
       showSuccess(`Instant login: ${res.success} success, ${res.failed} failed`);
-      if (res.failed > 0 && res.errors?.length) showError(new Error(res.errors.join("; ")));
+      if (res.failed > 0 && res.errors?.length) showError(new Error(res.errors.slice(0, 5).join("; ")));
       setInstantTokens("");
       setAddDialogProvider(null);
       await load();
@@ -587,6 +587,7 @@ export default function Accounts() {
           provider: "codebuddy-china",
           apiKeys: keysText,
         }),
+        timeoutMs: bulkTimeoutMs(keys.length, 300),
       });
       const cbMsg = res.skipped > 0
         ? `Added ${res.count} CodeBuddy CN account(s), skipped ${res.skipped} duplicate(s)`
@@ -604,9 +605,11 @@ export default function Accounts() {
     if (!text) { showError(new Error("Paste Antigravity refresh tokens")); return; }
     setAntigravityBusy(true);
     try {
+      const lineCount = text.split(/\r?\n/).filter((l) => l.trim()).length;
       const res = await fetchApi<any>("/api/accounts", {
         method: "POST",
         body: JSON.stringify({ provider: "antigravity", refreshTokens: text }),
+        timeoutMs: bulkTimeoutMs(lineCount, 300),
       });
       const msg = res.skipped > 0
         ? `Added ${res.count} Antigravity account(s), skipped ${res.skipped} duplicate(s)`
@@ -625,9 +628,11 @@ export default function Accounts() {
 
     setAlibabaBusy(true);
     try {
+      const lineCount = keysText.split(/\r?\n/).filter((l) => l.trim()).length;
       const res = await fetchApi<any>("/api/accounts/alibaba", {
         method: "POST",
         body: JSON.stringify({ api_keys: keysText }),
+        timeoutMs: bulkTimeoutMs(lineCount, 300),
       });
       const msg = res.skipped > 0
         ? `Added ${res.count} Alibaba API key(s), skipped ${res.skipped} duplicate(s)`
