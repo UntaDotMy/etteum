@@ -48,27 +48,13 @@ export type GrokModeId =
  * Model slug → grok.com modeId mapping.
  * The modeId controls which Grok backend variant serves the request.
  */
+/**
+ * Catalog is only grok-4.5 (+ reasoning alias). Both are CONSOLE / cli-chat-proxy
+ * surface models — not the older grok.com web modeId map.
+ */
 export const MODEL_TO_MODE: Record<string, GrokModeId> = {
-  // Default / fast models
-  "grok-4.20":              "AUTO",
-  "grok-4.20-fast":         "FAST",
-  "grok-4.20-reasoning":    "EXPERT",
-  "grok-4.20-super":        "EXPERT",
-  "grok-4.20-heavy":        "HEAVY",
-  // grok-4.3
-  "grok-4.3":               "GROK_4_3",
-  "grok-4.3-beta":          "GROK_4_3",
-  "grok-4.3-fast":          "FAST",
-  "grok-4.3-reasoning":     "GROK_4_3",
-  "grok-4.3-heavy":         "HEAVY",
-  // Console API models (use console.x.ai instead of grok.com)
-  "grok-4.5":               "CONSOLE",
-  "grok-4.5-reasoning":     "CONSOLE",
-  // Aliases
-  "grok-auto":              "AUTO",
-  "grok-reasoning":         "EXPERT",
-  "grok-heavy":             "HEAVY",
-  "grok-fast":              "FAST",
+  "grok-4.5": "CONSOLE",
+  "grok-4.5-reasoning": "CONSOLE",
 };
 
 // ---------------------------------------------------------------------------

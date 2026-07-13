@@ -30,7 +30,8 @@ describe("getProviderForModel — strict per-provider routing (no kiro catch-all
     expect((providers as Record<string, unknown>).xai).toBeUndefined();
     expect(getProviderForModel("grok-4.5")).toBe("grok");
     expect(getProviderForModel("grok-4.5-reasoning")).toBe("grok");
-    expect(getProviderForModel("grok-auto")).toBe("grok");
+    expect(getProviderForModel("grok-auto")).toBeNull();
+    expect(getProviderForModel("grok-4.3")).toBeNull();
     // Legacy console API ids are not claimed by any provider after xai removal.
     expect(getProviderForModel("grok-2")).toBeNull();
     // Catalog models are all owned_by "grok" (active-account list has one group).

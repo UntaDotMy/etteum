@@ -3,11 +3,21 @@ export function isInvalidModelError(error?: string): boolean {
   const normalized = error.toLowerCase();
   return (
     normalized.includes("invalid_model_id") ||
+    normalized.includes("invalid_model") ||
     normalized.includes("invalid model") ||
     normalized.includes("model_not_found") ||
     normalized.includes("no such model") ||
+    normalized.includes("unknown model") ||
+    normalized.includes("model does not exist") ||
     normalized.includes("model is not supported") ||
-    normalized.includes("model not supported")
+    normalized.includes("model not supported") ||
+    normalized.includes("unsupported model") ||
+    normalized.includes("does not support model") ||
+    normalized.includes("does not support the model") ||
+    normalized.includes("model is not available") ||
+    normalized.includes("model not available") ||
+    // Prefix used by GrokProvider.classifyError for non-account model failures
+    normalized.includes("invalid_model:")
   );
 }
 
