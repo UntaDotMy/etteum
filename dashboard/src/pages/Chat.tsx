@@ -17,15 +17,49 @@ import {
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
+import { MarkdownContent } from "@/components/chat/MarkdownContent";
+import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
 import { getApiKey, API_BASE } from "@/lib/api";
 import { cn, formatDateTimeID } from "@/lib/utils";
 
 interface Message {
   role: "user" | "assistant" | "system";
   content: string;
+  /** Model chain-of-thought / reasoning (not sent back as assistant history text). */
+  thinking?: string;
   id: string;
   model?: string;
   timestamp?: number;
+}
+
+type StreamUpdate = {
+  content: string;
+  thinking: string;
+};
+
+/** Pull embedded `<think>` / `<thinking>` tags some models put in content. */
+function extractEmbeddedThinking(text: string): { thinking: string; content: string } {
+  let thinking = "";
+  let content = text;
+  const patterns = [/<think>([\s\S]*?)<\/think>/gi, /<thinking>([\s\S]*?)<\/thinking>/gi];
+  for (const re of patterns) {
+    content = content.replace(re, (_m, body: string) => {
+      const t = String(body || "").trim();
+      if (t) thinking = thinking ? `${thinking}\n\n${t}` : t;
+      return "";
+    });
+  }
+  return { thinking: thinking.trim(), content: content.replace(/^\s+/, "") };
+}
+
+function deltaTextPiece(value: unknown): string {
+  if (typeof value === "string") return value;
+  if (Array.isArray(value)) {
+    return value
+      .map((p: { text?: string } | string) => (typeof p === "string" ? p : p?.text || ""))
+      .join("");
+  }
+  return "";
 }
 
 interface Conversation {
@@ -125,9 +159,9 @@ function providerFromPrefix(prefix: string): string {
 async function streamChat(
   messages: { role: string; content: string }[],
   model: string,
-  onChunk: (text: string) => void,
+  onChunk: (update: StreamUpdate) => void,
   signal: AbortSignal,
-): Promise<{ success: boolean; error?: string }> {
+): Promise<{ success: boolean; error?: string; content?: string; thinking?: string }> {
   try {
     const res = await fetch(`${API_BASE}/v1/chat/completions`, {
       method: "POST",
@@ -157,6 +191,13 @@ async function streamChat(
     const decoder = new TextDecoder();
     let buffer = "";
     let fullText = "";
+    let fullThinking = "";
+
+    const emit = () => {
+      const embedded = extractEmbeddedThinking(fullText);
+      const thinking = [fullThinking, embedded.thinking].filter(Boolean).join("\n\n");
+      onChunk({ content: embedded.content, thinking });
+    };
 
     while (true) {
       const { value, done } = await reader.read();
@@ -175,29 +216,41 @@ async function streamChat(
 
         try {
           const chunk = JSON.parse(payload);
-          const delta = chunk.choices?.[0]?.delta?.content;
-          let piece = "";
-          if (typeof delta === "string") piece = delta;
-          else if (Array.isArray(delta)) {
-            piece = delta
-              .map((p: { text?: string } | string) =>
-                typeof p === "string" ? p : p?.text || "",
-              )
-              .join("");
-          } else if (typeof chunk.choices?.[0]?.message?.content === "string") {
-            piece = chunk.choices[0].message.content;
+          const choice = chunk.choices?.[0];
+          const delta = choice?.delta ?? {};
+          const message = choice?.message ?? {};
+
+          const contentPiece =
+            deltaTextPiece(delta.content) ||
+            (typeof message.content === "string" ? message.content : "") ||
+            deltaTextPiece(message.content);
+
+          const thinkingPiece =
+            deltaTextPiece(delta.reasoning_content) ||
+            deltaTextPiece(delta.thinking) ||
+            deltaTextPiece(delta.reasoning) ||
+            deltaTextPiece(message.reasoning_content) ||
+            deltaTextPiece(message.thinking);
+
+          let changed = false;
+          if (contentPiece) {
+            fullText += contentPiece;
+            changed = true;
           }
-          if (piece) {
-            fullText += piece;
-            onChunk(fullText);
+          if (thinkingPiece) {
+            fullThinking += thinkingPiece;
+            changed = true;
           }
+          if (changed) emit();
         } catch {
           /* skip malformed */
         }
       }
     }
 
-    return { success: true };
+    const embedded = extractEmbeddedThinking(fullText);
+    const thinking = [fullThinking, embedded.thinking].filter(Boolean).join("\n\n");
+    return { success: true, content: embedded.content, thinking };
   } catch (err: unknown) {
     if (err instanceof Error && err.name === "AbortError") {
       return { success: false, error: "Cancelled" };
@@ -221,6 +274,7 @@ export default function Chat() {
   const [input, setInput] = useState("");
   const [streaming, setStreaming] = useState(false);
   const [streamingText, setStreamingText] = useState("");
+  const [streamingThinking, setStreamingThinking] = useState("");
   const [models, setModels] = useState<ProviderModel[]>([]);
   const [modelsLoading, setModelsLoading] = useState(true);
   const [showModelSelect, setShowModelSelect] = useState(false);
@@ -243,7 +297,7 @@ export default function Chat() {
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
-  }, [active?.messages, streamingText]);
+  }, [active?.messages, streamingText, streamingThinking]);
 
   useEffect(() => {
     if (inputRef.current) {
@@ -285,6 +339,7 @@ export default function Chat() {
     setActiveId(conv.id);
     setInput("");
     setStreamingText("");
+    setStreamingThinking("");
   }
 
   function handleDeleteConversation(id: string, e: React.MouseEvent) {
@@ -300,6 +355,7 @@ export default function Chat() {
   function handleSelectConversation(id: string) {
     setActiveId(id);
     setStreamingText("");
+    setStreamingThinking("");
     setInput("");
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
       setShowHistory(false);
@@ -341,14 +397,17 @@ export default function Chat() {
     setInput("");
     setStreaming(true);
     setStreamingText("");
+    setStreamingThinking("");
 
     let latestText = "";
+    let latestThinking = "";
 
     const apiMessages: { role: string; content: string }[] = [];
     if (systemPrompt.trim()) {
       apiMessages.push({ role: "system", content: systemPrompt.trim() });
     }
     for (const m of conv.messages) {
+      // History sends visible content only — not reasoning blocks.
       if (m.role === "system" || m.role === "user" || m.role === "assistant") {
         apiMessages.push({ role: m.role, content: m.content });
       }
@@ -379,9 +438,11 @@ export default function Chat() {
     const result = await streamChat(
       apiMessages,
       model,
-      (chunkText) => {
-        setStreamingText(chunkText);
-        latestText = chunkText;
+      (update) => {
+        latestText = update.content;
+        latestThinking = update.thinking;
+        setStreamingText(update.content);
+        setStreamingThinking(update.thinking);
       },
       abort.signal,
     );
@@ -389,13 +450,16 @@ export default function Chat() {
     abortRef.current = null;
 
     if (result.success) {
+      const finalContent = (result.content ?? latestText) || "(empty response)";
+      const finalThinking = (result.thinking ?? latestThinking) || undefined;
       updateConversation(conv.id, (c) => ({
         ...c,
         messages: [
           ...c.messages,
           {
             role: "assistant",
-            content: latestText || "(empty response)",
+            content: finalContent,
+            ...(finalThinking ? { thinking: finalThinking } : {}),
             id: generateId(),
             model,
             timestamp: Date.now(),
@@ -403,7 +467,6 @@ export default function Chat() {
         ],
         updatedAt: Date.now(),
       }));
-      setStreamingText("");
     } else if (result.error && result.error !== "Cancelled") {
       updateConversation(conv.id, (c) => ({
         ...c,
@@ -418,11 +481,28 @@ export default function Chat() {
         ],
         updatedAt: Date.now(),
       }));
-      setStreamingText("");
+    } else if (result.error === "Cancelled" && (latestText || latestThinking)) {
+      // Keep partial reply if user stopped mid-stream.
+      updateConversation(conv.id, (c) => ({
+        ...c,
+        messages: [
+          ...c.messages,
+          {
+            role: "assistant",
+            content: latestText || "(stopped)",
+            ...(latestThinking ? { thinking: latestThinking } : {}),
+            id: generateId(),
+            model,
+            timestamp: Date.now(),
+          },
+        ],
+        updatedAt: Date.now(),
+      }));
     }
 
     setStreaming(false);
     setStreamingText("");
+    setStreamingThinking("");
   }
 
   function handleStop() {
@@ -668,13 +748,6 @@ export default function Chat() {
             <Settings2 className="mr-1.5 h-3.5 w-3.5" />
             System
           </Button>
-
-          {streaming && (
-            <Badge variant="info" className="ml-auto gap-1">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              Streaming
-            </Badge>
-          )}
         </div>
 
         {showSystemPrompt && (
@@ -734,6 +807,7 @@ export default function Chat() {
                 const isError =
                   !isUser &&
                   (msg.content.startsWith("Error:") || msg.content.startsWith("**Error**"));
+                const displayContent = msg.content.replace(/^\*\*Error\*\*:\s*/i, "Error: ");
                 return (
                   <div
                     key={msg.id}
@@ -753,18 +827,25 @@ export default function Chat() {
                         <Bot className="h-3.5 w-3.5 text-[var(--primary)]" />
                       )}
                     </div>
-                    <div className={cn("min-w-0 max-w-[min(100%,36rem)]", isUser && "text-right")}>
+                    <div className={cn("min-w-0 max-w-[min(100%,42rem)]", isUser && "text-right")}>
                       <div
                         className={cn(
-                          "rounded-lg border px-3 py-2.5 text-left text-sm leading-relaxed whitespace-pre-wrap shadow-[var(--shadow-card)]",
+                          "rounded-lg border px-3 py-2.5 text-left shadow-[var(--shadow-card)]",
                           isUser
-                            ? "border-[var(--primary)]/35 bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))] text-[var(--foreground)]"
+                            ? "border-[var(--primary)]/35 bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))] text-sm leading-relaxed text-[var(--foreground)] whitespace-pre-wrap"
                             : isError
-                              ? "border-[var(--error)]/40 bg-[color-mix(in_srgb,var(--error)_10%,var(--card))] text-[var(--error)]"
+                              ? "border-[var(--error)]/40 bg-[color-mix(in_srgb,var(--error)_10%,var(--card))] text-sm leading-relaxed text-[var(--error)] whitespace-pre-wrap"
                               : "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]",
                         )}
                       >
-                        {msg.content.replace(/^\*\*Error\*\*:\s*/i, "Error: ")}
+                        {!isUser && !isError && msg.thinking ? (
+                          <ThinkingBlock content={msg.thinking} defaultOpen={false} />
+                        ) : null}
+                        {isUser || isError ? (
+                          displayContent
+                        ) : (
+                          <MarkdownContent content={displayContent} />
+                        )}
                       </div>
                       <div
                         className={cn(
@@ -775,6 +856,11 @@ export default function Chat() {
                         {msg.model && !isUser && (
                           <Badge variant="outline" className="h-5 font-mono text-[9px]">
                             {msg.model}
+                          </Badge>
+                        )}
+                        {msg.thinking && !isUser && (
+                          <Badge variant="outline" className="h-5 text-[9px]">
+                            thinking
                           </Badge>
                         )}
                         {msg.timestamp ? <span>{formatMsgTime(msg.timestamp)}</span> : null}
@@ -789,16 +875,23 @@ export default function Chat() {
                   <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--primary)]/30 bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
                     <Bot className="h-3.5 w-3.5 text-[var(--primary)]" />
                   </div>
-                  <div className="min-w-0 max-w-[min(100%,36rem)] rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2.5 text-sm leading-relaxed whitespace-pre-wrap shadow-[var(--shadow-card)]">
+                  <div className="min-w-0 max-w-[min(100%,42rem)] rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2.5 shadow-[var(--shadow-card)]">
+                    {streamingThinking ? (
+                      <ThinkingBlock
+                        content={streamingThinking}
+                        streaming={!streamingText}
+                        defaultOpen
+                      />
+                    ) : null}
                     {streamingText ? (
-                      <>
-                        {streamingText}
+                      <div className="relative">
+                        <MarkdownContent content={streamingText} />
                         <span className="ml-0.5 inline-block h-4 w-1.5 animate-pulse bg-[var(--primary)]/60 align-middle" />
-                      </>
+                      </div>
                     ) : (
                       <span className="inline-flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
                         <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--primary)]" />
-                        Generating…
+                        {streamingThinking ? "Writing reply…" : "Generating…"}
                       </span>
                     )}
                   </div>

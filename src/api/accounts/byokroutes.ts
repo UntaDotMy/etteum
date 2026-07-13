@@ -295,6 +295,7 @@ export function registerByokRoutes(router: Hono): void {
       // between add/update/delete cannot leave a half-reconciled BYOK group
       // (CWE-362). Post-transaction side-effects (cache refresh, broadcast) run
       // after commit.
+      const removedKeyIds: number[] = [];
       await db.transaction(async (tx) => {
         if (keyPayloadProvided) {
           const seenLabels = new Set<string>();
@@ -351,9 +352,9 @@ export function registerByokRoutes(router: Hono): void {
 
           const toDelete = groupAccounts.filter((acc) => !touchedIds.has(acc.id));
           for (const acc of toDelete) {
-            // Full FK detach (request_logs + vcc_*), same as single/bulk account delete.
             await detachAccountDependents(tx, acc.id);
             await tx.delete(accounts).where(eq(accounts.id, acc.id));
+            removedKeyIds.push(acc.id);
           }
         } else {
           for (const acc of groupAccounts) {
@@ -375,6 +376,11 @@ export function registerByokRoutes(router: Hono): void {
           }
         }
       });
+
+      if (removedKeyIds.length > 0) {
+        warmupQueue.cancelAccounts(removedKeyIds);
+        loginQueue.cancelAccounts(removedKeyIds);
+      }
 
       await setByokLbMethod(prefix, normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method));
       await refreshByokRuntime();
@@ -416,6 +422,9 @@ export function registerByokRoutes(router: Hono): void {
         if (result[0]) deletedIds.push(result[0].id);
       }
     });
+
+    warmupQueue.cancelAccounts(deletedIds);
+    loginQueue.cancelAccounts(deletedIds);
 
     await refreshByokRuntime();
     broadcast({ type: "byok_deleted", data: { id, label: prefix, deletedIds } });
