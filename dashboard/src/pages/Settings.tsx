@@ -2,7 +2,7 @@ import { useEffect, useMemo, useState } from "react";
 import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Save, RefreshCw, Zap, Flame, Globe, Wand2, Download, CheckCircle2, AlertCircle, Loader2 } from "lucide-react";
+import { Save, RefreshCw, Zap, Flame, Globe, Wand2, Download, Upload, CheckCircle2, AlertCircle, Loader2, HardDrive } from "lucide-react";
 import {
   fetchSettings,
   updateSettings,
@@ -10,9 +10,13 @@ import {
   fetchAutoWarmupStatus,
   fetchUpdateStatus,
   applyUpdate,
+  fetchBackupStatus,
+  createAndDownloadBackup,
+  importBackupZip,
   type AutoWarmupStatus,
   type UpdateStatus,
   type ApplyResult,
+  type BackupStatusCounts,
 } from "@/lib/api";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import { useApi } from "@/hooks/useApi";
@@ -53,6 +57,12 @@ export default function Settings() {
   const [applying, setApplying] = useState(false);
   const [applyResult, setApplyResult] = useState<ApplyResult | null>(null);
 
+  // ── Backup export / import ────────────────────────────────────────────────
+  const [backupCounts, setBackupCounts] = useState<BackupStatusCounts | null>(null);
+  const [exporting, setExporting] = useState(false);
+  const [importing, setImporting] = useState(false);
+  const [backupMsg, setBackupMsg] = useState<string | null>(null);
+
   async function checkUpdate(force = false) {
     setCheckingUpdate(true);
     try {
@@ -62,6 +72,71 @@ export default function Settings() {
       // Non-fatal — leave previous status.
     } finally {
       setCheckingUpdate(false);
+    }
+  }
+
+  async function refreshBackupStatus() {
+    try {
+      const res = await fetchBackupStatus();
+      setBackupCounts(res.data);
+    } catch {
+      /* non-fatal */
+    }
+  }
+
+  async function handleExportBackup(mode: "essential" | "full" = "essential") {
+    if (mode === "full") {
+      const ok = confirm(
+        "Full export includes request history and can be multi-GB.\n\n" +
+          "Prefer “Export accounts & config” for moving to another PC.\n\nContinue with full export?",
+      );
+      if (!ok) return;
+    }
+    setExporting(true);
+    setBackupMsg(null);
+    try {
+      const data = await createAndDownloadBackup(mode);
+      const mb = (data.databaseBytes / (1024 * 1024)).toFixed(1);
+      setBackupMsg(
+        data.downloadUrl
+          ? `Downloaded ${mode} backup (${mb} MB DB). Keep it private — includes ENCRYPTION_KEY and tokens. Also on disk: ${data.dir}`
+          : `Pack created (${mb} MB DB) at ${data.dir} — copy that folder to the other PC (zip was unavailable).`,
+      );
+      void refreshBackupStatus();
+    } catch (e: any) {
+      setBackupMsg(e?.message || "Export failed");
+    } finally {
+      setExporting(false);
+    }
+  }
+
+  async function handleImportBackup(file: File | null) {
+    if (!file) return;
+    const ok = confirm(
+      "Import will REPLACE this PC's database and .env with the backup.\n\n" +
+        "A safety copy of the current data is saved under data/backups/pre-import-*.\n\n" +
+        "Continue?",
+    );
+    if (!ok) return;
+    setImporting(true);
+    setBackupMsg(null);
+    try {
+      const res = await importBackupZip(file);
+      setBackupMsg(res.data.message);
+      void refreshBackupStatus();
+      if (res.data.needsRestart) {
+        setTimeout(() => {
+          setBackupMsg((m) => (m || "") + " Reloading page…");
+          window.location.reload();
+        }, 2500);
+      }
+    } catch (e: any) {
+      setBackupMsg(
+        (e?.message || "Import failed") +
+          " If the DB is locked, run: etteum stop → bun scripts/backup.ts import <zip> --yes → etteum start",
+      );
+    } finally {
+      setImporting(false);
     }
   }
 
@@ -114,6 +189,7 @@ export default function Settings() {
     setForm((current) => ({ ...current, ...(res.data || {}) }));
     setDirty(false);
     fetchAutoWarmupStatus().then(setWarmupStatus).catch(() => {});
+    void refreshBackupStatus();
     setLoading(false);
   }
 
@@ -305,6 +381,78 @@ export default function Settings() {
                   </pre>
                 </div>
               )}
+            </div>
+          )}
+        </CardContent>
+      </Card>
+
+      {/* ── Backup / migrate to another PC ── */}
+      <Card>
+        <CardHeader>
+          <CardTitle className="flex items-center gap-2">
+            <HardDrive className="w-5 h-5" /> Backup &amp; migrate
+          </CardTitle>
+          <CardDescription>
+            Export everything (accounts, tokens, settings, API keys, proxies, .env including ENCRYPTION_KEY)
+            and import on another PC for an identical install.
+          </CardDescription>
+        </CardHeader>
+        <CardContent className="space-y-4">
+          {backupCounts && (
+            <div className="flex flex-wrap gap-x-4 gap-y-1 text-xs text-[var(--muted-foreground)] font-mono">
+              <span>accounts={backupCounts.accounts}</span>
+              <span>settings={backupCounts.settings}</span>
+              <span>api_keys={backupCounts.apiKeys}</span>
+              <span>proxies={backupCounts.proxyPool}</span>
+              <span>request_logs={backupCounts.requestLogs}</span>
+              <span>filters={backupCounts.filterRules}</span>
+            </div>
+          )}
+          <div className="flex flex-wrap items-center gap-2">
+            <Button size="sm" onClick={() => void handleExportBackup("essential")} disabled={exporting || importing}>
+              {exporting ? <Loader2 className="w-4 h-4 mr-2 animate-spin" /> : <Download className="w-4 h-4 mr-2" />}
+              {exporting ? "Exporting…" : "Export accounts & config"}
+            </Button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={() => void handleExportBackup("full")}
+              disabled={exporting || importing}
+            >
+              Export full (incl. logs)
+            </Button>
+            <label className="inline-flex">
+              <input
+                type="file"
+                accept=".zip,application/zip"
+                className="hidden"
+                disabled={exporting || importing}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] || null;
+                  e.target.value = "";
+                  void handleImportBackup(f);
+                }}
+              />
+              <Button size="sm" variant="outline" asChild disabled={exporting || importing}>
+                <span>
+                  {importing ? <Loader2 className="w-4 h-4 mr-2 animate-spin inline" /> : <Upload className="w-4 h-4 mr-2 inline" />}
+                  {importing ? "Importing…" : "Import zip"}
+                </span>
+              </Button>
+            </label>
+            <Button size="sm" variant="ghost" onClick={() => void refreshBackupStatus()}>
+              <RefreshCw className="w-4 h-4 mr-2" /> Refresh counts
+            </Button>
+          </div>
+          <p className="text-xs text-[var(--muted-foreground)]">
+            Essential export skips request history (your DB history can be multi‑GB). CLI:{" "}
+            <code className="font-mono">etteum export</code>
+            {" · "}
+            <code className="font-mono">etteum import backup.zip</code>
+          </p>
+          {backupMsg && (
+            <div className="rounded-md bg-[var(--secondary)]/50 border border-[var(--border)] p-3 text-sm text-[var(--foreground)]">
+              {backupMsg}
             </div>
           )}
         </CardContent>
