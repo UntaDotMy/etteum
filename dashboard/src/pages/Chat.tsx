@@ -1,4 +1,4 @@
-import { useState, useRef, useEffect } from "react";
+import { useState, useRef, useEffect, useCallback } from "react";
 import {
   Send,
   Plus,
@@ -13,23 +13,147 @@ import {
   PanelLeft,
   MessageSquare,
   X,
+  Paperclip,
+  Image as ImageIcon,
+  FileText,
+  Video,
+  Download,
+  Wand2,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
-import { getApiKey, API_BASE } from "@/lib/api";
+import { getApiKey, API_BASE, generateImage } from "@/lib/api";
 import { cn, formatDateTimeID } from "@/lib/utils";
+
+/** OpenAI-style multimodal content parts. */
+type ContentPart =
+  | { type: "text"; text: string }
+  | { type: "image_url"; image_url: { url: string } };
+
+interface ChatAttachment {
+  id: string;
+  kind: "image" | "file";
+  name: string;
+  mime: string;
+  /** data: URL (images) or text extract (files). */
+  dataUrl?: string;
+  textContent?: string;
+  size: number;
+}
+
+interface MessageMedia {
+  type: "image" | "video" | "file";
+  url: string;
+  name?: string;
+}
 
 interface Message {
   role: "user" | "assistant" | "system";
+  /** Plain-text / markdown body for display + history text. */
   content: string;
+  /** Multimodal parts sent to the API (vision). */
+  parts?: ContentPart[];
+  /** Generated or attached media rendered in the bubble. */
+  media?: MessageMedia[];
   /** Model chain-of-thought / reasoning (not sent back as assistant history text). */
   thinking?: string;
   id: string;
   model?: string;
   timestamp?: number;
+}
+
+const IMAGE_MIME = /^image\/(png|jpe?g|gif|webp|bmp)$/i;
+const TEXT_MIME =
+  /^(text\/|application\/(json|xml|javascript|x-yaml|yaml|csv|toml)|application\/(x-)?sh)/i;
+const TEXT_EXT = /\.(txt|md|markdown|json|csv|tsv|xml|yml|yaml|log|js|ts|tsx|jsx|py|rs|go|java|c|cpp|h|css|html|sql|toml|ini|env|sh|bat|ps1)$/i;
+const MAX_ATTACH_BYTES = 8 * 1024 * 1024; // 8 MB per file
+const MAX_IMAGE_EDGE = 1536;
+
+/** Detect image/video *generation* models (Canva Magic Media etc.). */
+function mediaGenKind(modelId: string): "image" | "video" | null {
+  const l = (modelId || "").toLowerCase();
+  if (!l) return null;
+  if (l.includes("video") || l === "canva-video") return "video";
+  if (
+    l.includes("image") ||
+    l.startsWith("canva-image") ||
+    l.includes("dall-e") ||
+    l.includes("flux") ||
+    l.includes("stable-image") ||
+    l.includes("imagen")
+  ) {
+    return "image";
+  }
+  return null;
+}
+
+async function fileToDataUrl(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("Failed to read file"));
+    r.readAsDataURL(file);
+  });
+}
+
+async function fileToText(file: File): Promise<string> {
+  return new Promise((resolve, reject) => {
+    const r = new FileReader();
+    r.onload = () => resolve(String(r.result || ""));
+    r.onerror = () => reject(new Error("Failed to read file"));
+    r.readAsText(file);
+  });
+}
+
+/** Downscale large images to keep localStorage + vision payloads reasonable. */
+async function compressImageFile(file: File): Promise<{ dataUrl: string; size: number }> {
+  const raw = await fileToDataUrl(file);
+  return new Promise((resolve) => {
+    const img = new Image();
+    img.onload = () => {
+      let { width, height } = img;
+      const max = MAX_IMAGE_EDGE;
+      if (width > max || height > max) {
+        const scale = Math.min(max / width, max / height);
+        width = Math.round(width * scale);
+        height = Math.round(height * scale);
+      }
+      const canvas = document.createElement("canvas");
+      canvas.width = width;
+      canvas.height = height;
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        resolve({ dataUrl: raw, size: file.size });
+        return;
+      }
+      ctx.drawImage(img, 0, 0, width, height);
+      const dataUrl = canvas.toDataURL("image/jpeg", 0.85);
+      resolve({ dataUrl, size: Math.round((dataUrl.length * 3) / 4) });
+    };
+    img.onerror = () => resolve({ dataUrl: raw, size: file.size });
+    img.src = raw;
+  });
+}
+
+function extractMediaUrlsFromText(text: string): MessageMedia[] {
+  const media: MessageMedia[] = [];
+  const md = /\[[^\]]*\]\((https?:\/\/[^)\s]+)\)/g;
+  let m: RegExpExecArray | null;
+  while ((m = md.exec(text)) !== null) {
+    const url = m[1]!;
+    const isVid = /\.(mp4|webm|mov)(\?|$)/i.test(url) || /video/i.test(url);
+    media.push({ type: isVid ? "video" : "image", url });
+  }
+  const bare = text.match(/https?:\/\/[^\s)"']+/g) || [];
+  for (const url of bare) {
+    if (media.some((x) => x.url === url)) continue;
+    if (/\.(png|jpe?g|gif|webp|bmp)(\?|$)/i.test(url)) media.push({ type: "image", url });
+    if (/\.(mp4|webm|mov)(\?|$)/i.test(url)) media.push({ type: "video", url });
+  }
+  return media;
 }
 
 type StreamUpdate = {
@@ -156,8 +280,13 @@ function providerFromPrefix(prefix: string): string {
   return map[prefix] || prefix || "Other";
 }
 
+type ApiMessage = {
+  role: string;
+  content: string | ContentPart[];
+};
+
 async function streamChat(
-  messages: { role: string; content: string }[],
+  messages: ApiMessage[],
   model: string,
   onChunk: (update: StreamUpdate) => void,
   signal: AbortSignal,
@@ -282,11 +411,15 @@ export default function Chat() {
   const [systemPrompt, setSystemPrompt] = useState(() => loadSystemPrompt());
   const [searchQuery, setSearchQuery] = useState("");
   const [showHistory, setShowHistory] = useState(true);
+  const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
+  const [attachError, setAttachError] = useState<string | null>(null);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const inputRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const abortRef = useRef<AbortController | null>(null);
 
   const active = conversations.find((c) => c.id === activeId) || null;
+  const genKind = mediaGenKind(active?.model || models[0]?.id || "");
 
   useEffect(() => {
     fetchModels().then((m) => {
@@ -338,6 +471,8 @@ export default function Chat() {
     });
     setActiveId(conv.id);
     setInput("");
+    setAttachments([]);
+    setAttachError(null);
     setStreamingText("");
     setStreamingThinking("");
   }
@@ -357,8 +492,81 @@ export default function Chat() {
     setStreamingText("");
     setStreamingThinking("");
     setInput("");
+    setAttachments([]);
+    setAttachError(null);
     if (typeof window !== "undefined" && window.matchMedia("(max-width: 767px)").matches) {
       setShowHistory(false);
+    }
+  }
+
+  const addFiles = useCallback(async (files: FileList | File[]) => {
+    setAttachError(null);
+    const list = Array.from(files);
+    const next: ChatAttachment[] = [];
+    for (const file of list) {
+      if (file.size > MAX_ATTACH_BYTES) {
+        setAttachError(`${file.name} is larger than 8 MB — skipped`);
+        continue;
+      }
+      const id = generateId();
+      if (IMAGE_MIME.test(file.type) || /\.(png|jpe?g|gif|webp|bmp)$/i.test(file.name)) {
+        try {
+          const { dataUrl, size } = await compressImageFile(file);
+          next.push({
+            id,
+            kind: "image",
+            name: file.name,
+            mime: file.type || "image/jpeg",
+            dataUrl,
+            size,
+          });
+        } catch {
+          setAttachError(`Failed to read image ${file.name}`);
+        }
+        continue;
+      }
+      const isText =
+        TEXT_MIME.test(file.type) || TEXT_EXT.test(file.name) || file.type === "" || file.type === "application/octet-stream";
+      if (isText && file.size < 1_500_000) {
+        try {
+          const textContent = await fileToText(file);
+          next.push({
+            id,
+            kind: "file",
+            name: file.name,
+            mime: file.type || "text/plain",
+            textContent,
+            size: file.size,
+          });
+        } catch {
+          setAttachError(`Failed to read ${file.name}`);
+        }
+        continue;
+      }
+      setAttachError(
+        `${file.name}: only images and text-like files are supported in chat (use Image Studio for Canva-only flows).`,
+      );
+    }
+    if (next.length) setAttachments((prev) => [...prev, ...next].slice(0, 8));
+  }, []);
+
+  function removeAttachment(id: string) {
+    setAttachments((prev) => prev.filter((a) => a.id !== id));
+  }
+
+  function handlePaste(e: React.ClipboardEvent) {
+    const items = e.clipboardData?.items;
+    if (!items) return;
+    const files: File[] = [];
+    for (const item of Array.from(items)) {
+      if (item.kind === "file") {
+        const f = item.getAsFile();
+        if (f) files.push(f);
+      }
+    }
+    if (files.length) {
+      e.preventDefault();
+      void addFiles(files);
     }
   }
 
@@ -375,48 +583,13 @@ export default function Chat() {
 
   async function handleSend() {
     const text = input.trim();
-    if (!text || streaming || !active) return;
+    if ((!text && attachments.length === 0) || streaming || !active) return;
 
     const conv = conversations.find((c) => c.id === active.id);
     if (!conv) return;
 
-    const userMsg: Message = {
-      role: "user",
-      content: text,
-      id: generateId(),
-      timestamp: Date.now(),
-    };
-
-    updateConversation(conv.id, (c) => ({
-      ...c,
-      messages: [...c.messages, userMsg],
-      updatedAt: Date.now(),
-      title: c.messages.length === 0 ? text.slice(0, 40) + (text.length > 40 ? "…" : "") : c.title,
-    }));
-
-    setInput("");
-    setStreaming(true);
-    setStreamingText("");
-    setStreamingThinking("");
-
-    let latestText = "";
-    let latestThinking = "";
-
-    const apiMessages: { role: string; content: string }[] = [];
-    if (systemPrompt.trim()) {
-      apiMessages.push({ role: "system", content: systemPrompt.trim() });
-    }
-    for (const m of conv.messages) {
-      // History sends visible content only — not reasoning blocks.
-      if (m.role === "system" || m.role === "user" || m.role === "assistant") {
-        apiMessages.push({ role: m.role, content: m.content });
-      }
-    }
-    apiMessages.push({ role: "user", content: text });
-
     const model = conv.model || models[0]?.id || "";
     if (!model) {
-      setStreaming(false);
       updateConversation(conv.id, (c) => ({
         ...c,
         messages: [
@@ -431,6 +604,146 @@ export default function Chat() {
       }));
       return;
     }
+
+    // Build user message: text + file extracts + image previews
+    const fileBlocks: string[] = [];
+    const imageParts: ContentPart[] = [];
+    const displayMedia: MessageMedia[] = [];
+    for (const a of attachments) {
+      if (a.kind === "image" && a.dataUrl) {
+        imageParts.push({ type: "image_url", image_url: { url: a.dataUrl } });
+        displayMedia.push({ type: "image", url: a.dataUrl, name: a.name });
+      } else if (a.kind === "file" && a.textContent != null) {
+        const clipped =
+          a.textContent.length > 80_000
+            ? a.textContent.slice(0, 80_000) + "\n…[truncated]"
+            : a.textContent;
+        fileBlocks.push(`--- File: ${a.name} ---\n${clipped}`);
+        displayMedia.push({ type: "file", url: "", name: a.name });
+      }
+    }
+
+    let userText = text;
+    if (fileBlocks.length) {
+      userText = [text, ...fileBlocks].filter(Boolean).join("\n\n");
+    }
+    if (!userText && imageParts.length) {
+      userText = "Describe the attached image(s).";
+    }
+
+    const parts: ContentPart[] | undefined =
+      imageParts.length > 0
+        ? [{ type: "text", text: userText }, ...imageParts]
+        : undefined;
+
+    const userMsg: Message = {
+      role: "user",
+      content: userText,
+      ...(parts ? { parts } : {}),
+      ...(displayMedia.length ? { media: displayMedia } : {}),
+      id: generateId(),
+      timestamp: Date.now(),
+    };
+
+    const titleBase = text || attachments[0]?.name || "Attachment";
+    updateConversation(conv.id, (c) => ({
+      ...c,
+      messages: [...c.messages, userMsg],
+      updatedAt: Date.now(),
+      title:
+        c.messages.length === 0
+          ? titleBase.slice(0, 40) + (titleBase.length > 40 ? "…" : "")
+          : c.title,
+    }));
+
+    setInput("");
+    setAttachments([]);
+    setAttachError(null);
+    setStreaming(true);
+    setStreamingText("");
+    setStreamingThinking("");
+
+    // ── Image / video generation models (Canva Magic Media etc.) ───────────
+    const gen = mediaGenKind(model);
+    if (gen) {
+      try {
+        setStreamingText(gen === "video" ? "Generating video…" : "Generating image…");
+        const res = await generateImage({
+          prompt: userText,
+          type: gen,
+          aspectRatio: "1:1",
+          n: gen === "video" ? 1 : 1,
+        });
+        const urls = res.urls || [];
+        const media: MessageMedia[] = urls.map((url) => ({
+          type: gen,
+          url,
+        }));
+        const content =
+          urls.length > 0
+            ? (gen === "video" ? "Generated video:" : "Generated image(s):") +
+              "\n" +
+              urls.map((u) => `![](${u})`).join("\n")
+            : "Generation finished but no media URL was returned.";
+        updateConversation(conv.id, (c) => ({
+          ...c,
+          messages: [
+            ...c.messages,
+            {
+              role: "assistant",
+              content,
+              media,
+              id: generateId(),
+              model,
+              timestamp: Date.now(),
+            },
+          ],
+          updatedAt: Date.now(),
+        }));
+      } catch (e: unknown) {
+        const errMsg = e instanceof Error ? e.message : String(e);
+        updateConversation(conv.id, (c) => ({
+          ...c,
+          messages: [
+            ...c.messages,
+            {
+              role: "assistant",
+              content: `Error: ${errMsg}`,
+              id: generateId(),
+              timestamp: Date.now(),
+            },
+          ],
+          updatedAt: Date.now(),
+        }));
+      }
+      setStreaming(false);
+      setStreamingText("");
+      setStreamingThinking("");
+      return;
+    }
+
+    // ── Normal chat / vision completions ───────────────────────────────────
+    let latestText = "";
+    let latestThinking = "";
+
+    const apiMessages: ApiMessage[] = [];
+    if (systemPrompt.trim()) {
+      apiMessages.push({ role: "system", content: systemPrompt.trim() });
+    }
+    for (const m of conv.messages) {
+      if (m.role === "system" || m.role === "user" || m.role === "assistant") {
+        // Prefer stored multimodal parts for user history when present
+        if (m.role === "user" && m.parts && m.parts.length > 0) {
+          apiMessages.push({ role: m.role, content: m.parts });
+        } else {
+          apiMessages.push({ role: m.role, content: m.content });
+        }
+      }
+    }
+    apiMessages.push({
+      role: "user",
+      content: parts && parts.length > 0 ? parts : userText,
+    });
 
     const abort = new AbortController();
     abortRef.current = abort;
@@ -452,6 +765,7 @@ export default function Chat() {
     if (result.success) {
       const finalContent = (result.content ?? latestText) || "(empty response)";
       const finalThinking = (result.thinking ?? latestThinking) || undefined;
+      const media = extractMediaUrlsFromText(finalContent);
       updateConversation(conv.id, (c) => ({
         ...c,
         messages: [
@@ -460,6 +774,7 @@ export default function Chat() {
             role: "assistant",
             content: finalContent,
             ...(finalThinking ? { thinking: finalThinking } : {}),
+            ...(media.length ? { media } : {}),
             id: generateId(),
             model,
             timestamp: Date.now(),
@@ -482,7 +797,6 @@ export default function Chat() {
         updatedAt: Date.now(),
       }));
     } else if (result.error === "Cancelled" && (latestText || latestThinking)) {
-      // Keep partial reply if user stopped mid-stream.
       updateConversation(conv.id, (c) => ({
         ...c,
         messages: [
@@ -841,10 +1155,75 @@ export default function Chat() {
                         {!isUser && !isError && msg.thinking ? (
                           <ThinkingBlock content={msg.thinking} defaultOpen={false} />
                         ) : null}
+                        {msg.media && msg.media.length > 0 && (
+                          <div className={cn("mb-2 flex flex-col gap-2", isUser && "items-end")}>
+                            {msg.media.map((med, i) => {
+                              if (med.type === "image" && med.url) {
+                                return (
+                                  <a
+                                    key={i}
+                                    href={med.url}
+                                    target="_blank"
+                                    rel="noopener noreferrer"
+                                    className="block max-w-full overflow-hidden rounded-md border border-[var(--border)]"
+                                  >
+                                    <img
+                                      src={med.url}
+                                      alt={med.name || "attachment"}
+                                      className="max-h-72 max-w-full object-contain"
+                                      loading="lazy"
+                                    />
+                                  </a>
+                                );
+                              }
+                              if (med.type === "video" && med.url) {
+                                return (
+                                  <video
+                                    key={i}
+                                    src={med.url}
+                                    controls
+                                    className="max-h-80 max-w-full rounded-md border border-[var(--border)]"
+                                  />
+                                );
+                              }
+                              if (med.type === "file") {
+                                return (
+                                  <span
+                                    key={i}
+                                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-1 text-[11px] text-[var(--muted-foreground)]"
+                                  >
+                                    <FileText className="h-3 w-3" />
+                                    {med.name || "file"}
+                                  </span>
+                                );
+                              }
+                              return null;
+                            })}
+                          </div>
+                        )}
                         {isUser || isError ? (
                           displayContent
                         ) : (
                           <MarkdownContent content={displayContent} />
+                        )}
+                        {!isUser && msg.media && msg.media.some((m) => m.url && (m.type === "image" || m.type === "video")) && (
+                          <div className="mt-2 flex flex-wrap gap-2">
+                            {msg.media
+                              .filter((m) => m.url && (m.type === "image" || m.type === "video"))
+                              .map((m, i) => (
+                                <a
+                                  key={`dl-${i}`}
+                                  href={m.url}
+                                  download
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  className="inline-flex items-center gap-1 text-[10px] text-[var(--primary)] hover:underline"
+                                >
+                                  <Download className="h-3 w-3" />
+                                  Open {m.type}
+                                </a>
+                              ))}
+                          </div>
                         )}
                       </div>
                       <div
@@ -905,18 +1284,113 @@ export default function Chat() {
         {/* Composer */}
         <div className="border-t border-[var(--border)] bg-[var(--card)] px-3 py-3 sm:px-4">
           <div className="mx-auto max-w-3xl">
+            {genKind && (
+              <div className="mb-2 flex items-center gap-2 rounded-md border border-[var(--primary)]/25 bg-[color-mix(in_srgb,var(--primary)_8%,transparent)] px-2.5 py-1.5 text-[11px] text-[var(--foreground)]">
+                {genKind === "video" ? (
+                  <Video className="h-3.5 w-3.5 text-[var(--primary)]" />
+                ) : (
+                  <Wand2 className="h-3.5 w-3.5 text-[var(--primary)]" />
+                )}
+                <span>
+                  This model generates <strong>{genKind}</strong>. Your message is used as the prompt;
+                  results appear in the thread.
+                </span>
+              </div>
+            )}
+            {attachments.length > 0 && (
+              <div className="mb-2 flex flex-wrap gap-2">
+                {attachments.map((a) => (
+                  <div
+                    key={a.id}
+                    className="group relative flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 px-2 py-1.5"
+                  >
+                    {a.kind === "image" && a.dataUrl ? (
+                      <img src={a.dataUrl} alt="" className="h-10 w-10 rounded object-cover" />
+                    ) : (
+                      <FileText className="h-4 w-4 text-[var(--muted-foreground)]" />
+                    )}
+                    <span className="max-w-[8rem] truncate text-[11px] text-[var(--foreground)]">
+                      {a.name}
+                    </span>
+                    <button
+                      type="button"
+                      className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--secondary)] hover:text-[var(--error)]"
+                      onClick={() => removeAttachment(a.id)}
+                      aria-label="Remove attachment"
+                    >
+                      <X className="h-3 w-3" />
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
+            {attachError && (
+              <p className="mb-2 text-[11px] text-[var(--error)]">{attachError}</p>
+            )}
             <div
               className={cn(
                 "flex items-end gap-2 rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2",
                 "focus-within:border-[var(--primary)]/40 focus-within:shadow-[var(--glow)]",
               )}
             >
+              <input
+                ref={fileInputRef}
+                type="file"
+                multiple
+                accept="image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml"
+                className="hidden"
+                onChange={(e) => {
+                  if (e.target.files?.length) void addFiles(e.target.files);
+                  e.target.value = "";
+                }}
+              />
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0"
+                disabled={streaming || !active || !!genKind}
+                title={genKind ? "Attachments not used for generation models" : "Attach images or text files"}
+                onClick={() => fileInputRef.current?.click()}
+              >
+                <Paperclip className="h-4 w-4" />
+              </Button>
+              <Button
+                type="button"
+                variant="ghost"
+                size="icon"
+                className="shrink-0"
+                disabled={streaming || !active || !!genKind}
+                title="Attach image"
+                onClick={() => {
+                  if (fileInputRef.current) {
+                    fileInputRef.current.accept = "image/*";
+                    fileInputRef.current.click();
+                    // restore broad accept after open
+                    setTimeout(() => {
+                      if (fileInputRef.current) {
+                        fileInputRef.current.accept =
+                          "image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml";
+                      }
+                    }, 500);
+                  }
+                }}
+              >
+                <ImageIcon className="h-4 w-4" />
+              </Button>
               <textarea
                 ref={inputRef}
                 value={input}
                 onChange={(e) => setInput(e.target.value)}
                 onKeyDown={handleKeyDown}
-                placeholder={streaming ? "Waiting for response…" : "Message the selected model…"}
+                onPaste={handlePaste}
+                placeholder={
+                  streaming
+                    ? "Waiting for response…"
+                    : genKind
+                      ? `Describe the ${genKind} to generate…`
+                      : "Message… (paste or attach images/files)"
+                }
                 disabled={streaming || !active}
                 rows={1}
                 className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none disabled:opacity-60"
@@ -936,15 +1410,15 @@ export default function Chat() {
                   size="icon"
                   className="shrink-0"
                   onClick={() => void handleSend()}
-                  disabled={!input.trim() || !active || !activeModel}
-                  title="Send"
+                  disabled={(!input.trim() && attachments.length === 0) || !active || !activeModel}
+                  title={genKind ? `Generate ${genKind}` : "Send"}
                 >
-                  <Send className="h-4 w-4" />
+                  {genKind ? <Wand2 className="h-4 w-4" /> : <Send className="h-4 w-4" />}
                 </Button>
               )}
             </div>
             <p className="mt-2 text-center text-[10px] text-[var(--muted-foreground)]">
-              Proxied via Etteum · Enter to send · Shift+Enter for newline
+              Proxied via Etteum · Enter to send · Shift+Enter newline · Paste images · Vision models see attachments
             </p>
           </div>
         </div>
