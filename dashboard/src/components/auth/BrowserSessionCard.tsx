@@ -217,8 +217,17 @@ export function BrowserSessionCard({ session, challenge }: Props) {
           <p className="px-4 py-10 text-center text-sm text-[var(--muted-foreground)]">Session ended.</p>
         ) : (
           <div className="flex flex-col items-center gap-2 px-4 py-10 text-center">
-            <div className="h-5 w-5 animate-spin rounded-full border-2 border-[var(--primary)] border-t-transparent" />
-            <p className="text-xs text-[var(--muted-foreground)]">Waiting for frame…</p>
+            <Loader2 className="h-5 w-5 animate-spin text-[var(--primary)]" />
+            <p className="text-xs font-medium text-[var(--foreground)]">
+              {session.phase === "starting" || session.phase === "queued"
+                ? "Starting browser…"
+                : "Waiting for frame…"}
+            </p>
+            {session.lastMessage && (
+              <p className="max-w-[90%] truncate text-[11px] text-[var(--muted-foreground)]">
+                {session.lastMessage}
+              </p>
+            )}
           </div>
         )}
 

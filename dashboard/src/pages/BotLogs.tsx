@@ -1,12 +1,12 @@
-import { useEffect, useState, useCallback } from "react";
-import { useNavigate } from "react-router-dom";
+import { useEffect, useState, useCallback, useMemo } from "react";
+import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { BrowserSessionCard } from "@/components/auth/BrowserSessionCard";
 import { fetchBrowserSessions, BrowserSessionInfo } from "@/lib/browserApi";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
-import { ArrowLeft, ArrowRight, Radio, Monitor, Zap } from "lucide-react";
+import { ArrowLeft, ArrowRight, Radio, Monitor, Zap, Loader2 } from "lucide-react";
 
 interface Challenge {
   image_base64: string;
@@ -29,6 +29,8 @@ function isWorkerDisplaySession(s: BrowserSessionInfo): boolean {
 
 export default function BotLogs() {
   const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const farmJobId = searchParams.get("farm") || "";
   const wsStatus = useWsStatus();
   const [sessions, setSessions] = useState<BrowserSessionInfo[]>([]);
   const [challenges, setChallenges] = useState<Record<string, Challenge>>({});
@@ -44,11 +46,19 @@ export default function BotLogs() {
     }
   }, []);
 
+  // Poll faster right after navigating from farm Start so worker cards appear quickly.
+  const hasLive = sessions.some((s) => !s.terminal);
+  const pollMs = useMemo(() => {
+    if (farmJobId && !hasLive) return 800;
+    if (hasLive) return 1500;
+    return 2000;
+  }, [farmJobId, hasLive]);
+
   useEffect(() => {
-    load();
-    const interval = setInterval(load, 2000);
+    void load();
+    const interval = setInterval(() => void load(), pollMs);
     return () => clearInterval(interval);
-  }, [load]);
+  }, [load, pollMs]);
 
   useWsEvent("login_progress", (msg) => {
     const e = (msg as any)?.data ?? msg;
@@ -164,17 +174,33 @@ export default function BotLogs() {
       ) : activeSessions.length === 0 && doneSessions.length === 0 ? (
         <Card className="border-[var(--primary)]/20 shadow-[var(--shadow-card)]">
           <CardContent className="flex flex-col items-center justify-center py-16 text-center">
-            <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
-              <Monitor className="h-7 w-7 text-[var(--primary)]" />
-            </div>
-            <h2 className="text-lg font-semibold text-[var(--foreground)]">No browser sessions</h2>
-            <p className="mt-2 max-w-sm text-sm text-[var(--muted-foreground)]">
-              Start a provider from Automation. Each worker registers here with a live frame and its own log.
-            </p>
-            <Button className="mt-5" size="sm" onClick={() => navigate("/automation")}>
-              <Zap className="mr-1.5 h-4 w-4" />
-              Go to Automation
-            </Button>
+            {farmJobId ? (
+              <>
+                <Loader2 className="mb-4 h-10 w-10 animate-spin text-[var(--primary)]" />
+                <h2 className="text-lg font-semibold text-[var(--foreground)]">Farm starting…</h2>
+                <p className="mt-2 max-w-md text-sm text-[var(--muted-foreground)]">
+                  Worker slots register as the farm process boots. Camoufox can take several seconds
+                  before the first frame — this page is polling automatically.
+                </p>
+                <p className="mt-2 font-mono text-[11px] text-[var(--muted-foreground)]">
+                  job {farmJobId}
+                </p>
+              </>
+            ) : (
+              <>
+                <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
+                  <Monitor className="h-7 w-7 text-[var(--primary)]" />
+                </div>
+                <h2 className="text-lg font-semibold text-[var(--foreground)]">No browser sessions</h2>
+                <p className="mt-2 max-w-sm text-sm text-[var(--muted-foreground)]">
+                  Start a provider from Automation. Each worker registers here with a live frame and its own log.
+                </p>
+                <Button className="mt-5" size="sm" onClick={() => navigate("/automation")}>
+                  <Zap className="mr-1.5 h-4 w-4" />
+                  Go to Automation
+                </Button>
+              </>
+            )}
           </CardContent>
         </Card>
       ) : (
