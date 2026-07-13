@@ -43,6 +43,31 @@ export interface GrokFarmConfig {
   proxyFile?: string;
   captchaApiKey?: string;
   captchaProxyUrl?: string;
+  captchaModel?: string;
+  /**
+   * Advanced farm knobs (map 1:1 to GROK_* env — see scripts/auth/grok-farm/.env.example).
+   * Defaults match the standalone farm .env.example so UI and CLI stay aligned.
+   */
+  workerIsolation?: boolean;
+  /** Seconds between each worker *start* (worker N waits delay × (N-1)). 0 = auto-stagger only. */
+  spawnDelay?: number;
+  autoStagger?: boolean;
+  autoSpawnDelay?: number;
+  /** Max simultaneous Camoufox boots (not total workers). */
+  launchParallel?: number;
+  tempmailBlockImages?: boolean;
+  turnstileParallel?: number;
+  uiRetries?: number;
+  uiRetryBackoff?: number;
+  probeRetries?: number;
+  probeRetryBackoff?: number;
+  otpTimeout?: number;
+  confirmTimeout?: number;
+  completeTimeout?: number;
+  accountTimeout?: number;
+  proxyShuffle?: boolean;
+  proxyPool?: string;
+  emailLocalLen?: number;
 }
 
 export interface GrokFarmJobState {
@@ -451,13 +476,56 @@ function bestFarmErrorMessage(job: GrokFarmJobState, fallback: string): string {
   return fallback;
 }
 
+/** Defaults aligned with scripts/auth/grok-farm/.env.example (standalone farm). */
+export const GROK_FARM_ENV_DEFAULTS = {
+  workerIsolation: true,
+  spawnDelay: 15,
+  autoStagger: true,
+  autoSpawnDelay: 15,
+  launchParallel: 2,
+  tempmailBlockImages: true,
+  turnstileParallel: 64,
+  uiRetries: 3,
+  uiRetryBackoff: 2,
+  probeRetries: 5,
+  probeRetryBackoff: 2.5,
+} as const;
+
+function num(v: unknown, fallback: number, min: number, max: number): number {
+  const n = Number(v);
+  if (!Number.isFinite(n)) return fallback;
+  return Math.max(min, Math.min(max, n));
+}
+
+function bool(v: unknown, fallback: boolean): boolean {
+  if (typeof v === "boolean") return v;
+  if (v === "true" || v === "1" || v === 1) return true;
+  if (v === "false" || v === "0" || v === 0) return false;
+  return fallback;
+}
+
 function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
   const resultsDir = path.join(farmRoot(), "results");
   mkdirSync(resultsDir, { recursive: true });
   mkdirSync(path.join(farmRoot(), "screenshots"), { recursive: true });
 
+  const d = GROK_FARM_ENV_DEFAULTS;
+  const workerIsolation = bool(cfg.workerIsolation, d.workerIsolation);
+  const spawnDelay = num(cfg.spawnDelay, d.spawnDelay, 0, 600);
+  const autoStagger = bool(cfg.autoStagger, d.autoStagger);
+  const autoSpawnDelay = num(cfg.autoSpawnDelay, d.autoSpawnDelay, 0, 600);
+  const launchParallel = num(cfg.launchParallel, d.launchParallel, 1, 16);
+  const tempmailBlockImages = bool(cfg.tempmailBlockImages, d.tempmailBlockImages);
+  const turnstileParallel = num(cfg.turnstileParallel, d.turnstileParallel, 1, 256);
+  const uiRetries = num(cfg.uiRetries, d.uiRetries, 0, 20);
+  const uiRetryBackoff = num(cfg.uiRetryBackoff, d.uiRetryBackoff, 0, 60);
+  const probeRetries = num(cfg.probeRetries, d.probeRetries, 0, 20);
+  const probeRetryBackoff = num(cfg.probeRetryBackoff, d.probeRetryBackoff, 0, 60);
+
   const env: NodeJS.ProcessEnv = {
     ...process.env,
+    // Mark host-owned config so farm.py .env load does not clobber these.
+    ETTEUM_FARM_HOST: "1",
     GROK_UI: "log",
     GROK_VERBOSE: "true",
     GROK_MAIL_MODE: cfg.mailMode === "tempmail" ? "tempmail" : "google",
@@ -465,13 +533,25 @@ function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
     GROK_MAX_ACCOUNTS: String(cfg.maxAccounts),
     GROK_CONCURRENT: String(cfg.concurrent),
     // Headless OS window (no popup) — frames still stream via screenshot relay.
-    GROK_HEADLESS: "true",
+    GROK_HEADLESS: cfg.headless === false ? "false" : "true",
     ETTEUM_FRAME_RELAY: "true",
     ETTEUM_FRAME_INTERVAL: "1.5",
     GROK_ACTIVATE_WEB: cfg.activateWeb ? "true" : "false",
     GROK_RESULTS_DIR: resultsDir,
     GROK_USED_EMAILS_FILE: path.join(resultsDir, "used_emails.txt"),
     GROK_SCREENSHOTS: "false",
+    // Worker / launch (standalone .env.example)
+    GROK_WORKER_ISOLATION: workerIsolation ? "true" : "false",
+    GROK_SPAWN_DELAY: String(spawnDelay),
+    GROK_AUTO_STAGGER: autoStagger ? "true" : "false",
+    GROK_AUTO_SPAWN_DELAY: String(autoSpawnDelay),
+    GROK_LAUNCH_PARALLEL: String(launchParallel),
+    GROK_TEMPMAIL_BLOCK_IMAGES: tempmailBlockImages ? "true" : "false",
+    GROK_TURNSTILE_PARALLEL: String(turnstileParallel),
+    GROK_UI_RETRIES: String(uiRetries),
+    GROK_UI_RETRY_BACKOFF: String(uiRetryBackoff),
+    GROK_PROBE_RETRIES: String(probeRetries),
+    GROK_PROBE_RETRY_BACKOFF: String(probeRetryBackoff),
     PYTHONUNBUFFERED: "1",
     // Avoid Windows cp1252 UnicodeEncodeError on arrows/emoji in print().
     PYTHONIOENCODING: "utf-8",
@@ -494,9 +574,22 @@ function buildEnv(cfg: GrokFarmConfig): NodeJS.ProcessEnv {
     const defaultProxy = path.join(farmRoot(), "proxies.txt");
     if (existsSync(defaultProxy)) env.GROK_PROXY_FILE = defaultProxy;
   }
+  if (cfg.proxyPool && cfg.proxyPool.trim()) {
+    env.GROK_PROXY_POOL = cfg.proxyPool.trim();
+  }
+  if (cfg.proxyShuffle != null) {
+    env.GROK_PROXY_SHUFFLE = cfg.proxyShuffle ? "true" : "false";
+  }
 
   if (cfg.captchaApiKey) env.GROK_CAPTCHA_API_KEY = cfg.captchaApiKey;
   if (cfg.captchaProxyUrl) env.GROK_CAPTCHA_PROXY_URL = cfg.captchaProxyUrl;
+  if (cfg.captchaModel) env.GROK_CAPTCHA_MODEL = cfg.captchaModel;
+
+  if (cfg.otpTimeout != null) env.GROK_OTP_TIMEOUT = String(num(cfg.otpTimeout, 120, 10, 3600));
+  if (cfg.confirmTimeout != null) env.GROK_CONFIRM_TIMEOUT = String(num(cfg.confirmTimeout, 45, 5, 600));
+  if (cfg.completeTimeout != null) env.GROK_COMPLETE_TIMEOUT = String(num(cfg.completeTimeout, 90, 10, 600));
+  if (cfg.accountTimeout != null) env.GROK_ACCOUNT_TIMEOUT = String(num(cfg.accountTimeout, 480, 60, 7200));
+  if (cfg.emailLocalLen != null) env.GROK_EMAIL_LOCAL_LEN = String(num(cfg.emailLocalLen, 16, 6, 48));
 
   return env;
 }
