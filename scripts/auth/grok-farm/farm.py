@@ -46,6 +46,23 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse, unquote
 
+import farm_helpers
+from farm_helpers import (
+    claim_bits as _claim_bits_pure,
+    decode_access_jwt_claims as decode_access_jwt_claims_pure,
+    email_domain as email_domain_pure,
+    extract_xai_code as extract_xai_code_pure,
+    finalize_batch_meta as finalize_batch_meta_helper,
+    is_plausible_xai_otp as is_plausible_xai_otp_pure,
+    normalize_proxy_url as normalize_proxy_url_pure,
+    parse_proxy_entry as parse_proxy_entry_pure,
+    parse_proxy_for_playwright as parse_proxy_for_playwright_pure,
+    parse_rate_limit_credits as parse_rate_limit_credits_pure,
+    rate_limit_bits as rate_limit_bits_pure,
+    secure_chmod_file,
+    urlopen as urlopen_proxied,
+)
+
 # Dedicated pool for blocking I/O (disk, process kill, temp sweeps).
 # Keeps the asyncio event loop free so the HUD ticker never freezes.
 _IO_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="farm-io")
@@ -75,11 +92,13 @@ except ImportError:
             k, v = k.strip(), v.strip().strip('"').strip("'")
             os.environ.setdefault(k, v)
 
+# Camoufox is required for live farm; unit tests / --diagnose may skip it.
+AsyncCamoufox = None  # type: ignore
 try:
-    from camoufox.async_api import AsyncCamoufox
+    from camoufox.async_api import AsyncCamoufox as _AsyncCamoufox
+    AsyncCamoufox = _AsyncCamoufox
 except ImportError:
-    print("ERROR: camoufox not installed. Run: ./install.sh", flush=True)
-    sys.exit(1)
+    AsyncCamoufox = None  # type: ignore
 
 # ── Config from env ──────────────────────────────────────────────────────────
 def _env(key: str, default: str = "") -> str:
@@ -110,6 +129,18 @@ ACCOUNT_PASSWORD = _env("GROK_PASSWORD", "$Priyo000")
 MAX_ACCOUNTS = int(_env("GROK_MAX_ACCOUNTS", "5") or "5")
 CONCURRENT = int(_env("GROK_CONCURRENT", "1") or "1")
 HEADLESS = _env_bool("GROK_HEADLESS", False)  # headed recommended for Turnstile
+# How "invisible" browsers run when HEADLESS=true (or force mode):
+#   auto    = Linux+Xvfb → headless="virtual" (headed paint, no window); else True
+#   virtual = always request Camoufox virtual display (Linux/Xvfb; best Turnstile)
+#   true    = real headless=True (more CF risk)
+#   false   = never headless (ignore GROK_HEADLESS for launch)
+_HEADLESS_MODE_RAW = _env("GROK_HEADLESS_MODE", "auto").lower()
+if _HEADLESS_MODE_RAW not in ("auto", "virtual", "true", "false", "0", "1"):
+    _HEADLESS_MODE_RAW = "auto"
+# Camoufox humanize cursor — MUST stay on for headless/virtual (CF mouse scoring).
+# false only for debugging. Max duration seconds for humanize=float path.
+HUMANIZE = _env_bool("GROK_HUMANIZE", True)
+HUMANIZE_MAX_S = max(0.5, min(4.0, float(_env("GROK_HUMANIZE_MAX", "2.2") or "2.2")))
 # 0 = no stagger (workers start together). Isolation mode defaults toward 0.
 SPAWN_DELAY = float(_env("GROK_SPAWN_DELAY", "0") or "0")
 
@@ -153,8 +184,18 @@ else:
 UI_RETRIES = max(1, min(8, int(_env("GROK_UI_RETRIES", "3") or "3")))
 UI_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_UI_RETRY_BACKOFF", "2") or "2"))
 # After activate, re-probe 403 a few times (IP rate-limit / entitlement lag).
-PROBE_RETRIES = max(1, min(5, int(_env("GROK_PROBE_RETRIES", "3") or "3")))
+# Default 4: concurrent farms often need an extra entitlement soft-retry.
+PROBE_RETRIES = max(1, min(8, int(_env("GROK_PROBE_RETRIES", "4") or "4")))
 PROBE_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_PROBE_RETRY_BACKOFF", "2.5") or "2.5"))
+# Route CLI probe + OAuth token exchange through the same proxy as the browser
+# (default on). SOCKS needs optional PySocks; else falls back to direct with warn.
+PROBE_USE_PROXY = _env_bool("GROK_PROBE_USE_PROXY", True)
+# Signup email field: soft page refreshes before raising (CF/chooser lag).
+SIGNUP_PAGE_REFRESHES = max(1, min(10, int(_env("GROK_SIGNUP_PAGE_REFRESHES", "5") or "5")))
+# Per-round wait for email input after each refresh.
+SIGNUP_EMAIL_WAIT_S = max(5.0, float(_env("GROK_SIGNUP_EMAIL_WAIT", "15") or "15"))
+# Turnstile max wait on complete-signup / managed CF (seconds).
+TURNSTILE_MAX_WAIT_S = max(15, int(_env("GROK_TURNSTILE_MAX_WAIT", "90") or "90"))
 
 # Results root: each run creates results/batch_<id>/ (unless legacy single-file paths set)
 RESULTS_ROOT = Path(_env("GROK_RESULTS_DIR", str(_ROOT / "results")))
@@ -247,59 +288,12 @@ LAST_NAMES = [
 
 def _normalize_proxy_url(raw: str) -> str | None:
     """Turn free-form proxy string into a URL Camoufox/Playwright accepts."""
-    s = (raw or "").strip()
-    if not s:
-        return None
-    # strip surrounding quotes
-    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
-        s = s[1:-1].strip()
-    if not s:
-        return None
-
-    # Already has scheme
-    if "://" in s:
-        return s
-
-    parts = s.split(":")
-    # host:port:user:pass  (reseller format; pass may contain ':' or '@')
-    # Detect before user:pass@host so passwords with @ still work.
-    if len(parts) >= 4 and parts[1].isdigit() and "@" not in parts[0]:
-        host, port, user = parts[0], parts[1], parts[2]
-        password = ":".join(parts[3:])
-        if host and user:
-            return f"http://{user}:{password}@{host}:{port}"
-
-    # user:pass@host:port
-    if "@" in s:
-        return f"http://{s}"
-
-    # host:port
-    if len(parts) == 2 and parts[1].isdigit():
-        return f"http://{parts[0]}:{parts[1]}"
-    # bare host — reject (need port)
-    return None
+    return normalize_proxy_url_pure(raw)
 
 
 def _parse_proxy_entry(item: str) -> tuple[str, str] | None:
     """Parse one proxy entry → (url, optional_id) or None."""
-    item = (item or "").strip()
-    if not item or item.startswith("#"):
-        return None
-    # inline comment: url  # note  (but keep user:pass#weird if scheme present carefully)
-    # Prefer optional id after last unquoted ' #' or trailing #id without space when URL has scheme
-    pid = ""
-    if " #" in item:
-        item, _, comment = item.partition(" #")
-        item = item.strip()
-        pid = comment.strip()
-    elif item.count("#") == 1 and "://" in item:
-        # http://host:port#myid
-        url_part, _, maybe_id = item.partition("#")
-        item, pid = url_part.strip(), maybe_id.strip()
-    url = _normalize_proxy_url(item)
-    if not url:
-        return None
-    return (url, pid)
+    return parse_proxy_entry_pure(item)
 
 
 def _load_proxy_file(path: Path) -> list[tuple[str, str]]:
@@ -407,19 +401,37 @@ async def next_proxy():
 
 
 def _parse_proxy(url: str) -> dict:
-    if "://" not in url:
-        url = f"http://{url}"
-    u = urlparse(url)
-    scheme = (u.scheme or "http").lower()
-    server = f"{scheme}://{u.hostname}"
-    if u.port:
-        server += f":{u.port}"
-    out: dict[str, Any] = {"server": server}
-    if u.username:
-        out["username"] = unquote(u.username)
-    if u.password:
-        out["password"] = unquote(u.password)
-    return out
+    return parse_proxy_for_playwright_pure(url)
+
+
+_SOCKS_PROBE_WARNED = False
+
+
+def _http_proxy_for_attempt(proxy_url: str | None) -> str | None:
+    """Proxy URL for non-browser HTTP (probe/token). None = direct.
+
+    Honours GROK_PROBE_USE_PROXY. SOCKS without PySocks → direct + one-line warn.
+    """
+    global _SOCKS_PROBE_WARNED
+    if not PROBE_USE_PROXY or not proxy_url:
+        return None
+    scheme = farm_helpers.proxy_scheme(proxy_url)
+    if scheme.startswith("socks"):
+        try:
+            import socks  # noqa: F401
+            from sockshandler import SocksiPyHandler  # noqa: F401
+            return proxy_url
+        except Exception:
+            if not _SOCKS_PROBE_WARNED:
+                _SOCKS_PROBE_WARNED = True
+                print(
+                    "[proxy] WARN: SOCKS proxy set but PySocks/sockshandler missing — "
+                    "probe/token use direct IP (browser still uses SOCKS). "
+                    "pip install PySocks  OR use http:// proxies.",
+                    flush=True,
+                )
+            return None
+    return proxy_url
 
 
 # ── Logging / HUD ────────────────────────────────────────────────────────────
@@ -1118,39 +1130,12 @@ def install_quiet_print() -> None:
         # force_console=True escapes mute (interrupt messages, fatal errors)
         force = bool(kwargs.pop("force_console", False))
         sep = kwargs.get("sep", " ")
-        # Windows cp1252 consoles crash on arrows/emoji (→ etc). Always
-        # ASCII-safe when writing to stdout/stderr pipes (etteum capture).
-        safe_args = []
-        for a in args:
-            s = str(a)
-            try:
-                enc = getattr(sys.stdout, "encoding", None) or "utf-8"
-                s.encode(enc)
-            except Exception:
-                s = s.encode("ascii", errors="replace").decode("ascii")
-            safe_args.append(s)
-        msg = sep.join(safe_args)
+        msg = sep.join(str(a) for a in args)
         if force or not HUD.enabled or not HUD._active or VERBOSE:
             if _ORIG_PRINT is not None:
                 # I/O lock only — never take state lock (that froze HUD paint)
                 with HUD._io_lock:
-                    try:
-                        _ORIG_PRINT(
-                            *safe_args,
-                            **{k: v for k, v in kwargs.items() if k != "force_console"},
-                        )
-                    except UnicodeEncodeError:
-                        # Last resort for pipes / cp1252
-                        text = sep.join(safe_args)
-                        try:
-                            sys.stdout.buffer.write(
-                                (text + ("\n" if kwargs.get("end", "\n") == "\n" else "")).encode(
-                                    "utf-8", errors="replace"
-                                )
-                            )
-                            sys.stdout.buffer.flush()
-                        except Exception:
-                            pass
+                    _ORIG_PRINT(*args, **{k: v for k, v in kwargs.items() if k != "force_console"})
             return
         HUD.log_line(msg)
 
@@ -1399,50 +1384,12 @@ _claimed_otps_lock = threading.Lock()
 
 
 def _is_plausible_xai_otp(code: str) -> bool:
-    """Accept real xAI codes; reject CSS noise (PER-100, RGB-255, PX-16).
-
-    xAI codes are XXX-XXX alnum — often mixed (Y34-FHY) but ALSO pure alpha (WGJ-HKA).
-    Do NOT require a digit.
-    """
-    code = (code or "").upper().strip()
-    if not re.fullmatch(r"[A-Z0-9]{3}-[A-Z0-9]{3}", code):
-        return False
-    left, right = code.split("-", 1)
-    # CSS-ish: all-alpha left + all-digit right (PER-100, EM-16) — reject
-    if re.fullmatch(r"[A-Z]+", left) and re.fullmatch(r"\d+", right):
-        return False
-    # all-digit both sides unlikely for xAI (and CSS-ish)
-    if re.fullmatch(r"\d+", left) and re.fullmatch(r"\d+", right):
-        return False
-    if code in {"PER-100", "RGB-255", "PX-16", "EM-16", "REM-16", "MS-300", "MS-200"}:
-        return False
-    return True
+    """Accept real xAI codes; reject CSS noise (PER-100, RGB-255, PX-16)."""
+    return is_plausible_xai_otp_pure(code)
 
 
 def _extract_xai_code(subject: str, body: str) -> str | None:
-    # 1) Prefer subject line — authoritative for xAI
-    m = _XAI_SUBJ_CODE_RE.search(subject or "")
-    if m:
-        code = m.group(1).upper()
-        if _is_plausible_xai_otp(code):
-            return code
-    # 2) Any XXX-XXX in subject
-    for m in _XAI_CODE_RE.finditer(subject or ""):
-        code = m.group(1).upper()
-        if _is_plausible_xai_otp(code):
-            return code
-    # 3) Body plain-text only (strip style/script to avoid CSS PER-100 etc.)
-    plain = body or ""
-    plain = re.sub(r"<style[\s\S]*?</style>", " ", plain, flags=re.I)
-    plain = re.sub(r"<script[\s\S]*?</script>", " ", plain, flags=re.I)
-    plain = re.sub(r"<[^>]+>", " ", plain)
-    for m in _XAI_CODE_RE.finditer(plain):
-        code = m.group(1).upper()
-        if _is_plausible_xai_otp(code):
-            return code
-    # Fallback 6-digit (unlikely for xAI but keep)
-    m = re.search(r"\b(\d{6})\b", plain)
-    return m.group(1) if m else None
+    return extract_xai_code_pure(subject, body)
 
 
 def read_otp_from_imap_sync(target_email: str, timeout: int = 180, since_ts: float | None = None) -> str | None:
@@ -2168,18 +2115,17 @@ def blacklist_contains(domain: str) -> bool:
 
 def email_domain(email: str) -> str:
     """Extract domain from an email address (lowercased, no @)."""
-    if not email or "@" not in email:
-        return ""
-    return email.rsplit("@", 1)[-1].strip().lower().lstrip("@")
+    return email_domain_pure(email)
 
 
-def get_grok_cli_version() -> str:
+def get_grok_cli_version(proxy_url: str | None = None) -> str:
     """Resolve x-grok-client-version (CLI version gate). Cached process-wide."""
     global _CLI_VERSION_CACHE
     if _CLI_VERSION_CACHE:
         return _CLI_VERSION_CACHE
     try:
-        with urllib.request.urlopen(CLI_VERSION_URL, timeout=10) as resp:
+        req = urllib.request.Request(CLI_VERSION_URL, method="GET")
+        with urlopen_proxied(req, timeout=10, proxy_url=proxy_url) as resp:
             v = (resp.read().decode("utf-8", errors="replace") or "").strip()
         if re.match(r"^\d+\.\d+\.\d+$", v):
             _CLI_VERSION_CACHE = v
@@ -2191,66 +2137,21 @@ def get_grok_cli_version() -> str:
 
 def decode_access_jwt_claims(access_token: str) -> dict[str, Any]:
     """Decode OIDC access JWT payload (no verify) for diagnostics."""
-    try:
-        parts = (access_token or "").split(".")
-        if len(parts) < 2:
-            return {}
-        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
-        return json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
-    except Exception:
-        return {}
+    return decode_access_jwt_claims_pure(access_token)
 
 
 def _claim_bits(access_token: str) -> list[str]:
-    claims = decode_access_jwt_claims(access_token)
-    bits: list[str] = []
-    if claims.get("tier") is not None:
-        bits.append(f"tier={claims.get('tier')}")
-    if claims.get("scope"):
-        sc = str(claims.get("scope"))
-        bits.append(
-            "scopes=ok" if "grok-cli:access" in sc else f"scopes_missing_cli={sc[:40]}"
-        )
-    if claims.get("sub"):
-        bits.append(f"sub={str(claims.get('sub'))[:8]}…")
-    return bits
+    return _claim_bits_pure(access_token)
 
 
 def _parse_rate_limit_credits(headers) -> dict[str, Any]:
     """Extract free Build token quota from response headers (refer-compatible)."""
-    out: dict[str, Any] = {
-        "credits_remaining": None,
-        "credits_limit": None,
-        "req_remaining": None,
-        "model": None,
-    }
-    if headers is None:
-        return out
-    try:
-        rem = headers.get("x-ratelimit-remaining-tokens")
-        lim = headers.get("x-ratelimit-limit-tokens")
-        rrem = headers.get("x-ratelimit-remaining-requests")
-        if rem is not None and str(rem).strip() != "":
-            out["credits_remaining"] = float(rem)
-        if lim is not None and str(lim).strip() != "":
-            out["credits_limit"] = float(lim)
-        if rrem is not None and str(rrem).strip() != "":
-            out["req_remaining"] = float(rrem)
-    except Exception:
-        pass
-    return out
+    return parse_rate_limit_credits_pure(headers)
 
 
 def _rate_limit_bits(credits: dict[str, Any]) -> list[str]:
     """Format credits dict into probe detail bits."""
-    bits: list[str] = []
-    if credits.get("credits_remaining") is not None:
-        bits.append(f"credits_remaining={int(credits['credits_remaining'])}")
-    if credits.get("credits_limit") is not None:
-        bits.append(f"credits_limit={int(credits['credits_limit'])}")
-    if credits.get("req_remaining") is not None:
-        bits.append(f"req_remaining={int(credits['req_remaining'])}")
-    return bits
+    return rate_limit_bits_pure(credits)
 
 
 def _probe_one(
@@ -2261,6 +2162,7 @@ def _probe_one(
     label: str,
     claim_bits: list[str],
     content_extractor: Callable[[dict, str], str],
+    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """Single POST probe. Blocking. Returns (ok, status, detail, credits)."""
     empty_c: dict[str, Any] = {
@@ -2275,7 +2177,7 @@ def _probe_one(
         url, data=raw_body, headers=headers, method="POST",
     )
     try:
-        with urllib.request.urlopen(req, timeout=60) as resp:
+        with urlopen_proxied(req, timeout=60, proxy_url=proxy_url) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             code = int(getattr(resp, "status", 200) or 200)
             ms = int((time.monotonic() - t0) * 1000)
@@ -2329,12 +2231,14 @@ def _probe_one(
 def probe_cli_chat(
     access_token: str,
     version: str | None = None,
+    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """CLI smoke: POST /v1/responses model=grok-4.5 only.
 
     Returns (ok, status, detail, credits) where credits has
     credits_remaining / credits_limit (free Build quota tokens).
 
+    proxy_url: optional same egress as browser (see GROK_PROBE_USE_PROXY).
     Blocking — call via ``await _run_io(probe_cli_chat, …)``.
     """
     empty_c: dict[str, Any] = {
@@ -2345,7 +2249,8 @@ def probe_cli_chat(
     }
     if not access_token:
         return False, 0, "missing access_token", empty_c
-    version = version or get_grok_cli_version()
+    http_proxy = _http_proxy_for_attempt(proxy_url)
+    version = version or get_grok_cli_version(http_proxy)
     claims = _claim_bits(access_token)
 
     def _extract_responses(parsed: dict, raw: str) -> str:
@@ -2383,6 +2288,7 @@ def probe_cli_chat(
         label=f"responses/{CLI_PROBE_MODEL}",
         claim_bits=claims,
         content_extractor=_extract_responses,
+        proxy_url=http_proxy,
     )
 
 
@@ -2392,6 +2298,7 @@ async def run_chat_probe_with_hud(
     access_token: str,
     *,
     context: str = "farm",
+    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """HUD-friendly grok-4.5 Responses probe. Returns (ok, status, detail, credits)."""
     at = (access_token or "").strip()
@@ -2418,23 +2325,25 @@ async def run_chat_probe_with_hud(
         f"[{context}] resolve x-grok-client-version…",
         email_addr,
     )
-    version = await _run_io(get_grok_cli_version)
+    http_proxy = _http_proxy_for_attempt(proxy_url)
+    version = await _run_io(get_grok_cli_version, http_proxy)
     await asyncio.sleep(0)
 
+    egress = "proxy" if http_proxy else ("direct" if not proxy_url else "direct(socks-fallback)")
     emit_progress(
         attempt,
         "chat_probe",
-        f"[{context}] POST responses model={CLI_PROBE_MODEL} cli={version}",
+        f"[{context}] POST responses model={CLI_PROBE_MODEL} cli={version} egress={egress}",
         email_addr,
     )
     vlog(
         f"chat_probe: {CLI_RESPONSES_URL} model={CLI_PROBE_MODEL} "
         f"surface=grok-build token_len={len(at)} preview={at_preview} "
-        f"cli={version} domain={domain}",
+        f"cli={version} domain={domain} egress={egress}",
         attempt,
     )
     t_wait = time.monotonic()
-    result = await _run_io(probe_cli_chat, at, version)
+    result = await _run_io(probe_cli_chat, at, version, proxy_url)
     if not isinstance(result, tuple) or len(result) < 3:
         ok, status, detail, credits = False, 0, "bad probe result", empty_c
     elif len(result) == 3:
@@ -2505,8 +2414,68 @@ _STEALTH_OS_WEIGHTS: list[tuple[str, int]] = [
 ]
 
 
+def _xvfb_available() -> bool:
+    """True when Xvfb binary exists (Linux virtual display for Camoufox)."""
+    if sys.platform.startswith("win"):
+        return False
+    return bool(shutil.which("Xvfb"))
+
+
+def resolve_camoufox_headless(
+    want_headless: bool | None = None,
+) -> bool | str:
+    """Map user want-headless → Camoufox headless arg.
+
+    Research (Camoufox docs + 2026 Turnstile practice):
+      - True headless is often weaker vs CF Turnstile than headed.
+      - headless=\"virtual\" = headed paint inside Xvfb (Linux) — preferred
+        for server/farm when no physical display.
+      - Windows has no Xvfb → fall back to True or False.
+
+    GROK_HEADLESS_MODE: auto | virtual | true | false
+    """
+    if want_headless is None:
+        want_headless = HEADLESS
+    mode = _HEADLESS_MODE_RAW
+    if mode in ("false", "0"):
+        return False
+    if mode == "true" or mode == "1":
+        return True if want_headless else False
+    if mode == "virtual":
+        if not want_headless:
+            return False
+        if _xvfb_available():
+            return "virtual"
+        print(
+            "[stealth] WARN GROK_HEADLESS_MODE=virtual but Xvfb missing — "
+            "using headless=True (install xvfb on Linux for better Turnstile)",
+            flush=True,
+        )
+        return True
+    # auto
+    if not want_headless:
+        return False
+    if _xvfb_available():
+        return "virtual"
+    return True
+
+
+def _humanize_value(*, for_invisible: bool) -> bool | float:
+    """Camoufox humanize: always on unless GROK_HUMANIZE=false.
+
+    Pass a MAX duration (seconds) so cursor paths stay natural. Invisible
+    (headless/virtual) uses the full HUMANIZE_MAX_S band — CF scores mouse.
+    """
+    if not HUMANIZE:
+        return False
+    # Visible: slightly snappier; invisible: allow slower arcs (docs: ~1.5s typical)
+    lo = 0.9 if for_invisible else 0.7
+    hi = max(lo + 0.3, HUMANIZE_MAX_S if for_invisible else min(HUMANIZE_MAX_S, 1.8))
+    return round(random.uniform(lo, hi), 2)
+
+
 def _build_stealth_launch_kwargs(
-    headless: bool,
+    headless: bool | str,
     proxy_url: str | None,
 ) -> dict[str, Any]:
     """Camoufox launch options: geoIP, randomized FP, anti-automation.
@@ -2517,15 +2486,17 @@ def _build_stealth_launch_kwargs(
     - block_webrtc: no real-IP leak via STUN.
     - disable_coop: required so Cloudflare Turnstile checkbox is clickable
       inside cross-origin iframes (Camoufox official Turnstile pattern).
-    - humanize: random cursor max duration (looks less robotic than fixed 0.5).
+    - humanize: ALWAYS on for farm (bool/float max duration). Camoufox C++
+      HumanCursor path — do not pass mouse.move(..., steps=N) or it overrides.
+    - headless: False | True | \"virtual\" (Xvfb headed paint — best headless parity).
     - os + screen: fresh BrowserForge fingerprint per browser instance.
-    - Camoufox itself strips Playwright automation markers / webdriver.
     """
     os_names = [n for n, _ in _STEALTH_OS_WEIGHTS]
     os_w = [w for _, w in _STEALTH_OS_WEIGHTS]
     os_pick = random.choices(os_names, weights=os_w, k=1)[0]
     max_w, max_h = random.choice(_STEALTH_SCREENS)
-    humanize = round(random.uniform(0.7, 1.8), 2)
+    invisible = headless is True or headless == "virtual"
+    humanize = _humanize_value(for_invisible=invisible)
 
     kwargs: dict[str, Any] = {
         "headless": headless,
@@ -2558,6 +2529,7 @@ def _build_stealth_launch_kwargs(
         kwargs["proxy"] = _parse_proxy(proxy_url)
 
     return kwargs
+
 
 
 # ── Etteum Browser Logs frame relay (headless screenshots → stdout JSON) ────
@@ -2688,16 +2660,28 @@ async def launch_browser(
     Pass headless=True/False to force it — used by the temp-mail flow so the
     generator.email window can stay headless even when signup is headed.
 
+    When want-headless is True, resolve_camoufox_headless() prefers
+    headless="virtual" on Linux+Xvfb so Turnstile sees headed rendering.
+
     Isolation (WORKER_ISOLATION=true, default):
       - Camoufox process start runs OUTSIDE the global lock so workers do not
         wait on each other for multi-second browser boot.
       - Profile ownership claim is a short critical section only (so cleanup
         never deletes a sibling worker's temp profile).
+
+    preview/worker_id/email: etteum Browser Logs frame relay (preview=False
+    skips temp-mail browser streaming).
     """
     global _launch_lock
+    if AsyncCamoufox is None:
+        raise RuntimeError(
+            "camoufox not installed. Run: ./install.sh  (or pip install -r requirements.txt "
+            "&& python -m camoufox fetch)"
+        )
     if headless is None:
         headless = HEADLESS
-    kwargs = _build_stealth_launch_kwargs(bool(headless), proxy_url)
+    cam_headless = resolve_camoufox_headless(bool(headless))
+    kwargs = _build_stealth_launch_kwargs(cam_headless, proxy_url)
 
     if _launch_lock is None:
         _launch_lock = asyncio.Lock()
@@ -2739,13 +2723,65 @@ async def launch_browser(
             else "auto"
         )
         print(
-            f"[stealth] os={_os} humanize={_hum}s screen≤{_scr_s} "
-            f"geoip=on webrtc=block coop=off headless={headless}",
+            f"[stealth] os={_os} humanize={_hum} screen≤{_scr_s} "
+            f"geoip=on webrtc=block coop=off "
+            f"want_headless={headless} cam_headless={cam_headless!r}",
             flush=True,
         )
     except Exception:
         pass
+    # Warm cursor once so first Turnstile click is not a cold teleport
+    try:
+        await _human_warmup_mouse(page)
+    except Exception:
+        pass
     return manager, browser, page
+
+
+async def _human_warmup_mouse(page) -> None:
+    """Small idle move so Camoufox humanize path is exercised before CF."""
+    try:
+        dims = await page.evaluate(
+            "() => ({w: window.innerWidth || 1200, h: window.innerHeight || 800})"
+        )
+        w = int(dims.get("w") or 1200)
+        h = int(dims.get("h") or 800)
+    except Exception:
+        w, h = 1200, 800
+    x1 = random.randint(40, max(80, w // 4))
+    y1 = random.randint(40, max(80, h // 4))
+    x2 = random.randint(w // 3, max(w // 3 + 1, (2 * w) // 3))
+    y2 = random.randint(h // 4, max(h // 4 + 1, h // 2))
+    await _human_move(page, x1, y1)
+    await asyncio.sleep(random.uniform(0.15, 0.4))
+    await _human_move(page, x2, y2)
+
+
+async def _human_move(page, x: float, y: float) -> None:
+    """Move cursor via Camoufox humanize — do NOT pass steps= (overrides natural path)."""
+    try:
+        # No steps= → Camoufox C++ HumanCursor when humanize=True/float
+        await page.mouse.move(float(x), float(y))
+    except TypeError:
+        # Older playwright: steps required
+        await page.mouse.move(float(x), float(y), steps=random.randint(12, 28))
+    except Exception:
+        try:
+            await page.mouse.move(float(x), float(y), steps=18)
+        except Exception:
+            pass
+
+
+async def _human_click_xy(page, x: float, y: float) -> None:
+    """Humanized move + click (Turnstile / Complete)."""
+    # Approach from a slight offset so path is not a single teleport
+    ox = float(x) + random.uniform(-40, -12)
+    oy = float(y) + random.uniform(-28, 12)
+    await _human_move(page, max(2.0, ox), max(2.0, oy))
+    await asyncio.sleep(random.uniform(0.08, 0.22))
+    await _human_move(page, float(x), float(y))
+    await asyncio.sleep(random.uniform(0.12, 0.4))
+    await page.mouse.click(float(x), float(y))
 
 
 async def close_browser(manager) -> None:
@@ -2802,7 +2838,7 @@ async def close_browser(manager) -> None:
         _cleanup_self_profiles()
         if my_driver and _pid_alive(my_driver):
             print(
-                f"[cleanup] self driver still alive -> kill self tree pid={my_driver}",
+                f"[cleanup] self driver still alive → kill self tree pid={my_driver}",
                 flush=True,
             )
             _kill_pid_tree(my_driver, allow_untracked=True)
@@ -3013,9 +3049,7 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                         y = box["y"] + box["height"] / 2
                         await page.mouse.move(x - 40, y - 20, steps=8)
                         await asyncio.sleep(random.uniform(0.15, 0.4))
-                        await page.mouse.move(x, y, steps=10)
-                        await asyncio.sleep(random.uniform(0.2, 0.5))
-                        await page.mouse.click(x, y)
+                        await _human_click_xy(page, x, y)
                         vlog(f"Turnstile: clicked host text ({sel})", attempt)
                         return True
             except Exception:
@@ -3037,11 +3071,7 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                     continue
                 x = box["x"] + min(28, max(12, box["width"] * 0.12))
                 y = box["y"] + box["height"] / 2
-                await page.mouse.move(x - 50, y - 25, steps=8)
-                await asyncio.sleep(random.uniform(0.15, 0.4))
-                await page.mouse.move(x, y, steps=12)
-                await asyncio.sleep(random.uniform(0.25, 0.6))
-                await page.mouse.click(x, y)
+                await _human_click_xy(page, x, y)
                 vlog(f"Turnstile: clicked container {sel}", attempt)
                 return True
             except Exception:
@@ -3067,9 +3097,7 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                         continue
                     tx = box["x"] + min(20, box["width"] * 0.2)
                     ty = box["y"] + box["height"] / 2
-                    await page.mouse.move(tx, ty, steps=12)
-                    await asyncio.sleep(random.uniform(0.2, 0.5))
-                    await page.mouse.click(tx, ty)
+                    await _human_click_xy(page, tx, ty)
                     vlog(f"Turnstile: clicked frame {sel}", attempt)
                     return True
                 except Exception:
@@ -3133,11 +3161,7 @@ async def _click_turnstile_slot_above_complete(page, attempt: int) -> bool:
         y = box["y"] - 36
         if y < 8:
             return False
-        await page.mouse.move(x - 30, y - 10, steps=6)
-        await asyncio.sleep(random.uniform(0.1, 0.25))
-        await page.mouse.move(x, y, steps=8)
-        await asyncio.sleep(random.uniform(0.15, 0.35))
-        await page.mouse.click(x, y)
+        await _human_click_xy(page, x, y)
         vlog(f"Turnstile: clicked slot above Complete ({x:.0f},{y:.0f})", attempt)
         return True
     except Exception as e:
@@ -3257,7 +3281,7 @@ async def _on_complete_signup_form(page) -> bool:
 async def handle_turnstile(
     page,
     attempt: int,
-    max_wait: float = 35.0,
+    max_wait: float | None = None,
     *,
     require_token: bool = False,
     password: str | None = None,
@@ -3270,7 +3294,10 @@ async def handle_turnstile(
     never treat absence of iframe as success.
     use_global_limit=True: acquire TURNSTILE_PARALLEL semaphore (concurrent farm).
     allow_remount=False: click-only (old complete_signup style — no soft/hard remount).
+    max_wait=None: use GROK_TURNSTILE_MAX_WAIT (default 90s).
     """
+    if max_wait is None:
+        max_wait = float(TURNSTILE_MAX_WAIT_S)
     if use_global_limit:
         async with _get_turnstile_sem():
             return await _handle_turnstile_inner(
@@ -3289,6 +3316,56 @@ async def handle_turnstile(
         password=password,
         allow_remount=allow_remount,
     )
+
+
+async def capture_page_diagnostics(page) -> dict[str, Any]:
+    """Snapshot for failed.json when signup/CF stalls (debuggable without screenshots)."""
+    diag: dict[str, Any] = {}
+    try:
+        diag["url"] = (page.url or "")[:400]
+    except Exception as e:
+        diag["url_error"] = str(e)[:80]
+    try:
+        diag["title"] = ((await page.title()) or "")[:160]
+    except Exception:
+        pass
+    try:
+        body = ((await page.inner_text("body")) or "")[:500]
+        diag["body_preview"] = " ".join(body.split())
+    except Exception:
+        pass
+    try:
+        body_l = (diag.get("body_preview") or "").lower()
+        diag["cf_challenge"] = any(
+            n in body_l
+            for n in (
+                "verify you are human",
+                "just a moment",
+                "checking your browser",
+                "hanya sebentar",
+                "attention required",
+            )
+        )
+        diag["has_email_chooser"] = any(
+            n in body_l
+            for n in ("sign up with email", "continue with google", "sign up with google")
+        )
+    except Exception:
+        pass
+    try:
+        diag["turnstile_visible"] = bool(await turnstile_visible(page))
+        diag["turnstile_token_len"] = int(await turnstile_token_len(page) or 0)
+    except Exception:
+        pass
+    try:
+        diag["email_input_count"] = int(
+            await page.locator(
+                'input[type="email"], input[name="email"], input[autocomplete="email"]'
+            ).count()
+        )
+    except Exception:
+        pass
+    return diag
 
 
 async def _handle_turnstile_inner(
@@ -3628,7 +3705,11 @@ async def stop_cli_oauth_server() -> None:
     await _OAUTH_HUB.stop()
 
 
-def exchange_code_for_tokens(code: str, verifier: str) -> dict:
+def exchange_code_for_tokens(
+    code: str,
+    verifier: str,
+    proxy_url: str | None = None,
+) -> dict:
     form = urlencode(
         {
             "grant_type": "authorization_code",
@@ -3647,7 +3728,8 @@ def exchange_code_for_tokens(code: str, verifier: str) -> dict:
         },
         method="POST",
     )
-    with urllib.request.urlopen(req, timeout=30) as resp:
+    http_proxy = _http_proxy_for_attempt(proxy_url)
+    with urlopen_proxied(req, timeout=30, proxy_url=http_proxy) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     access = data.get("access_token") or ""
     refresh = data.get("refresh_token") or ""
@@ -3961,7 +4043,7 @@ async def fill_xai_otp_boxes(page, otp_chars: str, attempt: int) -> bool:
 
 
 # ── temp mail (generator.email via Camoufox/Playwright) ─────────────────────
-# Ported from refer/alibaba/farm.py → Camoufox (Playwright API).
+# Ported from refer/alibaba/farm.py (nodriver) → Camoufox (Playwright API).
 # The mail browser runs headless by default (TEMPMAIL_HEADLESS=True). Set
 # GROK_TEMPMAIL_HEADLESS=false to make it visible for debugging. One persistent
 # mail page per worker:
@@ -4372,12 +4454,16 @@ async def _wait_signup_email_input(page, attempt: int, timeout_s: float = 12.0) 
 
 
 async def _ensure_signup_email_ready(
-    page, attempt: int, email_addr: str, *, page_refreshes: int = 3,
+    page, attempt: int, email_addr: str, *, page_refreshes: int | None = None,
 ) -> str:
     """Find email input; on miss, refresh THIS page (same browser), not full farm restart.
 
-    page_refreshes: how many times to reload sign-up before giving up.
+    page_refreshes: how many times to reload sign-up before giving up
+    (default GROK_SIGNUP_PAGE_REFRESHES).
     """
+    if page_refreshes is None:
+        page_refreshes = SIGNUP_PAGE_REFRESHES
+    email_wait = float(SIGNUP_EMAIL_WAIT_S)
     for refresh_i in range(page_refreshes + 1):
         if refresh_i == 0:
             emit_progress(attempt, "signup_open", "Opening sign-up page", email_addr)
@@ -4398,7 +4484,10 @@ async def _ensure_signup_email_ready(
             await _goto_signup_page(page, attempt)
 
         try:
-            await handle_turnstile(page, attempt, max_wait=8)
+            # Managed CF on accounts.x.ai — give Turnstile more time under concurrency
+            await handle_turnstile(
+                page, attempt, max_wait=min(25.0, float(TURNSTILE_MAX_WAIT_S)),
+            )
         except Exception:
             pass
 
@@ -4413,8 +4502,10 @@ async def _ensure_signup_email_ready(
         await dismiss_cookie_banner(page)
 
         emit_progress(attempt, "fill_email", "Filling registration email", email_addr)
-        # Short wait per page load; refresh loop covers longer total budget
-        email_sel = await _wait_signup_email_input(page, attempt, timeout_s=12.0)
+        # Per-refresh wait; outer loop covers longer total budget
+        email_sel = await _wait_signup_email_input(
+            page, attempt, timeout_s=email_wait,
+        )
         if email_sel:
             return email_sel
 
@@ -4425,32 +4516,46 @@ async def _ensure_signup_email_ready(
                 await page.reload(wait_until="domcontentloaded", timeout=30000)
                 await asyncio.sleep(1.0)
                 await dismiss_cookie_banner(page)
+                try:
+                    await handle_turnstile(page, attempt, max_wait=12.0)
+                except Exception:
+                    pass
                 await _click_signup_with_email(page, attempt)
-                email_sel = await _wait_signup_email_input(page, attempt, timeout_s=8.0)
+                email_sel = await _wait_signup_email_input(
+                    page, attempt, timeout_s=max(8.0, email_wait * 0.6),
+                )
                 if email_sel:
                     return email_sel
             except Exception as e:
                 print(f"[{attempt}] signup reload warn: {e}", flush=True)
 
     await screenshot(page, attempt, "no_email_input")
+    diag = await capture_page_diagnostics(page)
     try:
-        snap = ((await page.inner_text("body")) or "")[:200].replace("\n", " ")
-        print(f"[{attempt}] signup page body: {snap!r}", flush=True)
+        print(
+            f"[{attempt}] signup miss diag: url={diag.get('url')!r} "
+            f"cf={diag.get('cf_challenge')} email_inputs={diag.get('email_input_count')} "
+            f"body={diag.get('body_preview', '')[:180]!r}",
+            flush=True,
+        )
     except Exception:
         pass
     # Only then escalate to full browser re-spawn (outer self-heal)
-    raise RecoverableFarmError(
+    err = RecoverableFarmError(
         f"Could not find email input after {page_refreshes} page refresh(es) "
-        f"— will re-spawn browser",
+        f"— will re-spawn browser | url={diag.get('url', '')[:120]} "
+        f"cf={diag.get('cf_challenge')} title={diag.get('title', '')[:60]}",
         delay_s=1.5,
         tag="NoEmailInput",
     )
+    err.diagnostics = diag  # type: ignore[attr-defined]
+    raise err
 
 
 async def do_signup(page, email_addr: str, password: str, attempt: int, mail_page=None) -> bool:
     # Find email field with in-page refresh first (same browser) — not full restart.
     email_sel = await _ensure_signup_email_ready(
-        page, attempt, email_addr, page_refreshes=3,
+        page, attempt, email_addr, page_refreshes=SIGNUP_PAGE_REFRESHES,
     )
     filled = await fill_input(page, [email_sel], email_addr)
     if not filled:
@@ -4458,7 +4563,7 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         print(f"[{attempt}] fill email failed — refresh page and retry fill", flush=True)
         emit_progress(attempt, "fill_email", "Fill failed — refresh + retry", email_addr)
         email_sel = await _ensure_signup_email_ready(
-            page, attempt, email_addr, page_refreshes=2,
+            page, attempt, email_addr, page_refreshes=max(2, SIGNUP_PAGE_REFRESHES // 2),
         )
         filled = await fill_input(page, [email_sel], email_addr)
         if not filled:
@@ -4862,25 +4967,13 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 await asyncio.sleep(2.0)
                 continue
 
-            try:
-                await page.get_by_role(
-                    "button", name=re.compile(r"complete\s+sign\s*up", re.I)
-                ).click(timeout=5000)
-            except Exception:
-                await click_text_button(
-                    page,
-                    ["Complete sign up", "Complete Sign Up", "Create account", "Continue"],
-                )
-            await asyncio.sleep(2.5)
-            # Success: left the complete form
-            try:
-                if await page.locator("text=Complete your sign up").count() == 0:
-                    completed = True
-                    break
-                print(f"[{attempt}] still on complete form after click", flush=True)
-            except Exception:
+            await _click_complete_signup_button(page, attempt)
+            # Headless/virtual: navigation can lag (headed debug saw brief
+            # "couldn't load" then /account). Give CF more settle time.
+            if await _wait_left_complete_form(page, attempt, settle_s=6.5):
                 completed = True
                 break
+            print(f"[{attempt}] still on complete form after click", flush=True)
 
         if not completed:
             # Last chance: soft-refresh + one more short complete cycle
@@ -4907,16 +5000,8 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     await handle_turnstile(
                         page, attempt, max_wait=20, require_token=True, allow_remount=False,
                     )
-                    try:
-                        await page.get_by_role(
-                            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
-                        ).click(timeout=5000)
-                    except Exception:
-                        await click_text_button(
-                            page, ["Complete sign up", "Create account", "Continue"]
-                        )
-                    await asyncio.sleep(2.5)
-                    if await page.locator("text=Complete your sign up").count() == 0:
+                    await _click_complete_signup_button(page, attempt)
+                    if await _wait_left_complete_form(page, attempt, settle_s=7.0):
                         completed = True
                 except Exception as e:
                     print(f"[{attempt}] complete final refresh warn: {e}", flush=True)
@@ -4931,6 +5016,117 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
 
     await screenshot(page, attempt, "after_signup")
     return True
+
+
+def _is_xai_account_page(url: str) -> bool:
+    """True only for /account page — not host 'accounts.x.ai' (substring trap)."""
+    try:
+        path = (urlparse(url or "").path or "").rstrip("/").lower()
+    except Exception:
+        path = ""
+    # path is /account or /account/...
+    return path == "/account" or path.startswith("/account/")
+
+
+async def _click_complete_signup_button(page, attempt: int) -> None:
+    """Prefer humanized mouse click on Complete (same path as Turnstile)."""
+    try:
+        btn = page.get_by_role(
+            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
+        ).first
+        if await btn.count() > 0:
+            box = await btn.bounding_box(timeout=4000)
+            if box:
+                x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
+                y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
+                await _human_click_xy(page, x, y)
+                vlog("Complete sign up: humanized click", attempt)
+                return
+    except Exception as e:
+        vlog(f"Complete human click warn: {e}", attempt)
+    try:
+        await page.get_by_role(
+            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
+        ).click(timeout=5000)
+    except Exception:
+        await click_text_button(
+            page,
+            ["Complete sign up", "Complete Sign Up", "Create account", "Continue"],
+        )
+
+
+async def _wait_left_complete_form(
+    page, attempt: int, *, settle_s: float = 6.0,
+) -> bool:
+    """True when we left Complete form (account page, navigation, or form gone).
+
+    Headed proof: after Complete, brief 'couldn't load' then /account — need wait.
+    Never treat host 'accounts.x.ai' as success (see _is_xai_account_page).
+    """
+    deadline = time.monotonic() + max(2.5, settle_s)
+    while time.monotonic() < deadline:
+        try:
+            url = (page.url or "").lower()
+        except Exception:
+            url = ""
+        if _is_xai_account_page(url):
+            vlog(f"left complete → account url={url[:80]}", attempt)
+            return True
+        if "grok.com" in url and "sign" not in url and "accounts.x.ai" not in url:
+            return True
+        try:
+            body = ((await page.inner_text("body")) or "")[:600].lower()
+        except Exception:
+            body = ""
+        # Transient error page right after successful submit (seen headed)
+        if (
+            "couldn't load" in body
+            or "couldn’t load" in body
+            or "reload to try again" in body
+        ):
+            await asyncio.sleep(1.2)
+            try:
+                await page.wait_for_load_state("domcontentloaded", timeout=4000)
+            except Exception:
+                pass
+            continue
+        try:
+            still = await page.locator("text=Complete your sign up").count()
+        except Exception:
+            still = 0
+        if still == 0:
+            # Form title gone — only success if not still clearly on complete step
+            if "verify you are human" in body and "complete" in body:
+                await asyncio.sleep(0.8)
+                continue
+            # Welcome / Manage account / Your account → done
+            if any(
+                n in body
+                for n in (
+                    "welcome,",
+                    "manage your account",
+                    "your account",
+                    "sign-in methods",
+                    "subscription",
+                )
+            ):
+                vlog("left complete → account body text", attempt)
+                return True
+            # Still on sign-up path without complete title can be mid-nav
+            if "sign-up" in url or "sign_up" in url:
+                await asyncio.sleep(0.6)
+                continue
+            return True
+        await asyncio.sleep(0.45)
+    try:
+        if _is_xai_account_page((page.url or "").lower()):
+            return True
+        still = await page.locator("text=Complete your sign up").count()
+        return still == 0 and "complete your sign up" not in (
+            ((await page.inner_text("body")) or "")[:400].lower()
+        )
+    except Exception:
+        return False
 
 
 async def _password_field_value(page) -> str:
@@ -5286,7 +5482,8 @@ async def do_email_login(page, email_addr: str, password: str, attempt: int,
 
 
 async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
-                             *, fast: bool = True, skip_login: bool = False) -> dict:
+                             *, fast: bool = True, skip_login: bool = False,
+                             proxy_url: str | None = None) -> dict:
     """Grok CLI-style OIDC: local callback server + PKCE + browser login/Allow.
 
     Mirrors official Grok CLI / CLIProxyAPI:
@@ -5295,6 +5492,7 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
       - browser only drives login/Allow; code is captured by the server
       - no Turnstile on OAuth (only login/signup paths)
       - if stuck >20s without code → refresh authorize URL
+      - token exchange uses same proxy egress when GROK_PROBE_USE_PROXY=true
     """
     emit_progress(attempt, "oauth", "CLI OAuth PKCE (local callback)", email_addr)
     server_ok = await ensure_cli_oauth_server()
@@ -5551,7 +5749,7 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
         )
 
     emit_progress(attempt, "token_exchange", "Exchanging code (CLI token endpoint)", email_addr)
-    tokens = await _run_io(exchange_code_for_tokens, code, verifier)
+    tokens = await _run_io(exchange_code_for_tokens, code, verifier, proxy_url)
     if not tokens.get("email"):
         tokens["email"] = email_addr
     tokens["auth_mode"] = "oidc"
@@ -5854,6 +6052,7 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             attempt_num,
             fast=True,
             skip_login=bool(login_ok),
+            proxy_url=proxy_url,
         )
         access = str(tokens.get("access_token") or "")
         if not access:
@@ -5881,10 +6080,12 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
 
         # Gate: grok-4.5 Responses. Soft-retry probe (and re-activate once) on 403
         # before giving up — concurrent farms often hit brief entitlement lag.
+        # Probe uses same proxy as browser when GROK_PROBE_USE_PROXY=true.
         ok, status, detail, credits = False, 0, "", {}
         for probe_i in range(1, PROBE_RETRIES + 1):
             ok, status, detail, credits = await run_chat_probe_with_hud(
                 attempt_num, email_addr, access, context="farm",
+                proxy_url=proxy_url,
             )
             if ok:
                 break
@@ -6207,7 +6408,13 @@ async def _do_register(attempt_num: int) -> dict | None:
             )
             emit_failed(attempt_num, last_err_msg[:200], tag)
             try:
-                await save_failed_to_file(attempt_num, email_addr, last_err_msg[:400])
+                ctx = getattr(re_err, "diagnostics", None)
+                await save_failed_to_file(
+                    attempt_num,
+                    email_addr,
+                    last_err_msg[:400],
+                    context=ctx if isinstance(ctx, dict) else {"tag": tag},
+                )
             except Exception:
                 pass
             return None
@@ -6234,7 +6441,13 @@ async def _do_register(attempt_num: int) -> dict | None:
             print(f"[{attempt_num}] FAILED: {e}", flush=True)
             emit_failed(attempt_num, str(e)[:200], type(e).__name__)
             try:
-                await save_failed_to_file(attempt_num, email_addr, str(e)[:400])
+                ctx = getattr(e, "diagnostics", None)
+                await save_failed_to_file(
+                    attempt_num,
+                    email_addr,
+                    str(e)[:400],
+                    context=ctx if isinstance(ctx, dict) else {"exc": type(e).__name__},
+                )
             except Exception:
                 pass
             return None
@@ -6331,25 +6544,38 @@ def _save_result_sync(result: dict) -> None:
         access_token = tokens.get("access_token")
         if access_token:
             _append_line_sync(ACCESS_TOKEN_FILE, str(access_token))
+            secure_chmod_file(ACCESS_TOKEN_FILE)
         refresh_token = tokens.get("refresh_token")
         if refresh_token:
             _append_line_sync(REFRESH_TOKEN_FILE, str(refresh_token))
+            secure_chmod_file(REFRESH_TOKEN_FILE)
+        secure_chmod_file(RESULTS_JSON)
+        secure_chmod_file(RESULTS_TXT)
         email = (result.get("email") or "").lower()
         if email:
             # generate_email already reserved used_emails.txt; keep set in sync only
             _used_emails.add(email)
 
 
-def _save_failed_sync(attempt: int, email: str, error: str) -> None:
+def _save_failed_sync(
+    attempt: int,
+    email: str,
+    error: str,
+    context: dict | None = None,
+) -> None:
     global _failed_mem
     with _results_thread_lock:
         _load_results_memory_unlocked()
-        _failed_mem.append({
+        row: dict[str, Any] = {
             "attempt": attempt,
             "email": email,
             "error": error,
             "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        })
+        }
+        if context:
+            # Additive diagnostics — never drop the error string
+            row["context"] = context
+        _failed_mem.append(row)
         _write_json_atomic(FAILED_JSON, _failed_mem)
 
 
@@ -6362,8 +6588,10 @@ def _save_refresh_success_sync(acct: dict, tokens: dict) -> None:
         rt = tokens.get("refresh_token")
         if at:
             _append_line_sync(ACCESS_TOKEN_FILE, str(at))
+            secure_chmod_file(ACCESS_TOKEN_FILE)
         if rt:
             _append_line_sync(REFRESH_TOKEN_FILE, str(rt))
+            secure_chmod_file(REFRESH_TOKEN_FILE)
         _accounts_mem.append({
             "email": acct["email"],
             "password": acct["password"],
@@ -6371,6 +6599,7 @@ def _save_refresh_success_sync(acct: dict, tokens: dict) -> None:
             "tokens": tokens,
         })
         _write_json_atomic(RESULTS_JSON, _accounts_mem)
+        secure_chmod_file(RESULTS_JSON)
 
 
 async def _ensure_write_worker() -> None:
@@ -6391,7 +6620,9 @@ async def _ensure_write_worker() -> None:
                 if kind == "result":
                     await _run_io(_save_result_sync, job[1])
                 elif kind == "failed":
-                    await _run_io(_save_failed_sync, job[1], job[2], job[3])
+                    # job: ("failed", attempt, email, error[, context])
+                    ctx = job[4] if len(job) > 4 else None
+                    await _run_io(_save_failed_sync, job[1], job[2], job[3], ctx)
                 elif kind == "refresh":
                     await _run_io(_save_refresh_success_sync, job[1], job[2])
                 elif kind == "fn":
@@ -6459,14 +6690,21 @@ async def save_result_to_file(result: dict, *, wait: bool = False) -> None:
     )
 
 
-async def save_failed_to_file(attempt: int, email: str, error: str, *, wait: bool = False) -> None:
+async def save_failed_to_file(
+    attempt: int,
+    email: str,
+    error: str,
+    *,
+    wait: bool = False,
+    context: dict | None = None,
+) -> None:
     """Queue a failed-row write without freezing the HUD."""
     await _ensure_write_worker()
     assert _write_q is not None
     if wait:
-        await _run_io(_save_failed_sync, attempt, email, error)
+        await _run_io(_save_failed_sync, attempt, email, error, context)
     else:
-        await _write_q.put(("failed", attempt, email, error))
+        await _write_q.put(("failed", attempt, email, error, context))
 
 
 async def save_refresh_success(acct: dict, tokens: dict, *, wait: bool = False) -> None:
@@ -6581,6 +6819,7 @@ async def _refresh_one_account(
                     idx,
                     fast=True,
                     skip_login=bool(login_ok),
+                    proxy_url=proxy_url,
                 )
                 if ACTIVATE_WEB:
                     try:
@@ -6606,6 +6845,7 @@ async def _refresh_one_account(
             ok, status, detail, credits = await run_chat_probe_with_hud(
                 idx, email, str(tokens.get("access_token") or ""),
                 context="refresh",
+                proxy_url=proxy_url,
             )
             if not ok:
                 # NEVER blacklist on refresh. Blacklist is tempmail-farm only
@@ -6902,6 +7142,17 @@ async def refresh_tokens_main(concurrent: int) -> int:
             f"in {int(time.time() - start)}s",
             flush=True,
         )
+        try:
+            finalize_batch_meta_helper(
+                BATCH_DIR / "batch_meta.json",
+                created=refreshed,
+                failed=failed,
+                elapsed_s=int(time.time() - start),
+                interrupted=True,
+                extra={"mode": "refresh", "retried": retried},
+            )
+        except Exception as e:
+            print(f"[refresh] batch_meta finalize failed: {e}", flush=True)
         os._exit(130)
 
     print("=" * 60, flush=True)
@@ -6918,6 +7169,80 @@ async def refresh_tokens_main(concurrent: int) -> int:
         )
     print("=" * 60, flush=True)
     return refreshed
+
+
+def _run_diagnose_and_exit() -> None:
+    """Print config + dependency check without launching browsers (e2e debug aid)."""
+    print("=" * 60, flush=True)
+    print("  Grok Farm — diagnose / self-check", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  ROOT           : {_ROOT}", flush=True)
+    print(f"  camoufox       : {'OK' if AsyncCamoufox is not None else 'MISSING — install.sh'}", flush=True)
+    try:
+        import dotenv  # noqa: F401
+        print("  python-dotenv  : OK", flush=True)
+    except ImportError:
+        print("  python-dotenv  : MISSING", flush=True)
+    try:
+        import socks  # noqa: F401
+        print("  PySocks        : OK (SOCKS probe egress available)", flush=True)
+    except ImportError:
+        print("  PySocks        : not installed (HTTP proxies OK; SOCKS probe → direct)", flush=True)
+
+    print("-" * 60, flush=True)
+    print("  Mail / identity", flush=True)
+    print(f"  MAIL_MODE      : {MAIL_MODE}", flush=True)
+    print(f"  EMAIL_MODE     : {EMAIL_MODE}", flush=True)
+    print(f"  EMAIL_DOMAIN   : {EMAIL_DOMAIN or '(unset)'}", flush=True)
+    print(f"  IMAP_USER      : {IMAP_USER or '(unset)'}", flush=True)
+    print(f"  IMAP set       : {'yes' if IMAP_USER and IMAP_PASS else 'no'}", flush=True)
+    print(f"  HEADLESS       : {HEADLESS}  mode={_HEADLESS_MODE_RAW} "
+          f"→ cam={resolve_camoufox_headless(HEADLESS)!r}", flush=True)
+    print(f"  HUMANIZE       : {HUMANIZE}  max={HUMANIZE_MAX_S}s  xvfb={_xvfb_available()}", flush=True)
+    print(f"  ACTIVATE_WEB   : {ACTIVATE_WEB}", flush=True)
+    print("-" * 60, flush=True)
+    print("  Self-heal / Turnstile / probe knobs", flush=True)
+    print(f"  UI_RETRIES     : {UI_RETRIES}  backoff={UI_RETRY_BACKOFF_S}s", flush=True)
+    print(f"  PROBE_RETRIES  : {PROBE_RETRIES}  backoff={PROBE_RETRY_BACKOFF_S}s", flush=True)
+    print(f"  PROBE_USE_PROXY: {PROBE_USE_PROXY}", flush=True)
+    print(f"  SIGNUP_REFRESH : {SIGNUP_PAGE_REFRESHES}  email_wait={SIGNUP_EMAIL_WAIT_S}s", flush=True)
+    print(f"  TURNSTILE_WAIT : {TURNSTILE_MAX_WAIT_S}s  parallel_cap={TURNSTILE_PARALLEL}", flush=True)
+    print(f"  WORKER_ISOLATE : {WORKER_ISOLATION}  spawn_delay={SPAWN_DELAY}s", flush=True)
+    print(f"  TIMEOUTS       : account={ACCOUNT_TIMEOUT_S}s otp={OTP_TIMEOUT_S}s "
+          f"complete={COMPLETE_SIGNUP_TIMEOUT_S}s confirm={CONFIRM_EMAIL_TIMEOUT_S}s", flush=True)
+    print("-" * 60, flush=True)
+    print("  Proxies", flush=True)
+    print(f"  pool_size      : {len(PROXY_POOL)}  source={PROXY_SOURCE}", flush=True)
+    if PROXY_POOL:
+        sample = PROXY_POOL[0][0]
+        try:
+            u = urlparse(sample if "://" in sample else f"http://{sample}")
+            print(f"  sample_scheme  : {u.scheme}  host={u.hostname}", flush=True)
+        except Exception:
+            pass
+    print("-" * 60, flush=True)
+    print("  OAuth / CLI probe", flush=True)
+    print(f"  client_id      : {XAI_CLIENT_ID}", flush=True)
+    print(f"  callback       : {XAI_REDIRECT_URI}", flush=True)
+    print(f"  probe_url      : {CLI_RESPONSES_URL}", flush=True)
+    print(f"  probe_model    : {CLI_PROBE_MODEL}", flush=True)
+    print("-" * 60, flush=True)
+    print("  Results", flush=True)
+    print(f"  RESULTS_ROOT   : {RESULTS_ROOT}", flush=True)
+    print(f"  used_emails    : {USED_EMAILS_FILE}", flush=True)
+    try:
+        _load_used_emails()
+        print(f"  known_emails   : {len(_used_emails)}", flush=True)
+    except Exception as e:
+        print(f"  known_emails   : error {e}", flush=True)
+    # Pure helper smoke (no network)
+    assert farm_helpers.is_plausible_xai_otp("K35-1QR")
+    assert not farm_helpers.is_plausible_xai_otp("PER-100")
+    assert farm_helpers.normalize_proxy_url("1.2.3.4:8080") == "http://1.2.3.4:8080"
+    print("  helpers smoke  : OK", flush=True)
+    print("=" * 60, flush=True)
+    print("  Diagnose complete. Start farm with: python farm.py -y  or  ./run.sh", flush=True)
+    sys.exit(0)
 
 
 def _prompt_int(label: str, default: int, *, min_v: int = 1, max_v: int = 100000) -> int:
@@ -6954,6 +7279,9 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
 
 async def main():
     global MAIL_MODE
+    # Early flags that must not require IMAP / browser
+    if any(a in ("--diagnose", "--self-check", "diagnose") for a in sys.argv[1:]):
+        _run_diagnose_and_exit()
     # Clean orphan profile dirs from prior crashed runs + arm the Ctrl+C
     # backstop BEFORE any browser can launch.
     try:
@@ -6961,10 +7289,70 @@ async def main():
     except Exception as e:
         print(f"[cleanup] startup sweep failed: {e}", flush=True)
     _install_sigint_handler()
+    if AsyncCamoufox is None:
+        print("ERROR: camoufox not installed. Run: ./install.sh", flush=True)
+        sys.exit(1)
+    if MAIL_MODE == "google":
+        if not IMAP_USER or not IMAP_PASS:
+            print("ERROR: set GROK_IMAP_USER and GROK_IMAP_PASS in .env (or use temp mail)", flush=True)
+            sys.exit(1)
+    if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
+        print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
+        sys.exit(1)
+    if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
+        print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
+        sys.exit(1)
 
-    # CLI args FIRST — must run before domain/IMAP validation so
-    # `python farm.py -m tempmail -y` does not require GROK_EMAIL_DOMAIN.
-    # (Etteum always passes -m / -n / -c / -y.)
+    _load_used_emails()
+    known = len(_used_emails)
+
+    print("=" * 60, flush=True)
+    print("  Grok / xAI Standalone Farmer", flush=True)
+    print("=" * 60, flush=True)
+    print(f"  Mail mode  : {MAIL_MODE}", flush=True)
+    if MAIL_MODE == "tempmail":
+        print(f"  Temp mail  : generator.email (headless={TEMPMAIL_HEADLESS})", flush=True)
+        print(f"  OTP source : temp-mail inbox page (no IMAP)", flush=True)
+    else:
+        print(f"  Email mode : {EMAIL_MODE}", flush=True)
+        if EMAIL_MODE == "domain":
+            print(f"  Domain     : @{EMAIL_DOMAIN}", flush=True)
+        else:
+            print(f"  Gmail base : {GMAIL_BASE or IMAP_USER}", flush=True)
+        print(f"  IMAP       : {IMAP_USER} @ {IMAP_HOST}:{IMAP_PORT}", flush=True)
+    print(f"  Password   : {'*' * max(0, len(ACCOUNT_PASSWORD) - 2)}{ACCOUNT_PASSWORD[-2:]}", flush=True)
+    print(
+        f"  Headless   : want={HEADLESS} mode={_HEADLESS_MODE_RAW} "
+        f"cam={resolve_camoufox_headless(HEADLESS)!r} "
+        f"humanize={HUMANIZE}/{HUMANIZE_MAX_S}s xvfb={_xvfb_available()}",
+        flush=True,
+    )
+    print(f"  Activate   : {ACTIVATE_WEB}", flush=True)
+    print(
+        f"  Isolation  : {WORKER_ISOLATION} "
+        f"(own browser/Turnstile; spawn_delay={SPAWN_DELAY}s; "
+        f"ts_parallel={TURNSTILE_PARALLEL})",
+        flush=True,
+    )
+    print(
+        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES} "
+        f"probe_proxy={PROBE_USE_PROXY} signup_refresh={SIGNUP_PAGE_REFRESHES} "
+        f"ts_wait={TURNSTILE_MAX_WAIT_S}s",
+        flush=True,
+    )
+    print(
+        f"  Proxies    : {len(PROXY_POOL)} ({PROXY_SOURCE})"
+        if PROXY_POOL
+        else f"  Proxies    : direct ({PROXY_SOURCE})",
+        flush=True,
+    )
+    print(f"  Email len  : {EMAIL_LOCAL_LEN} (crypto secrets)", flush=True)
+    print(f"  Known mail : {known} (all batches + used_emails.txt)", flush=True)
+    print(f"  Results    : {RESULTS_ROOT}/batch_<id>/  (per run)", flush=True)
+    print("-" * 60, flush=True)
+    print("  Setting run (Enter = pakai default dari .env)", flush=True)
+
+    # CLI args override: python farm.py -m tempmail --count 10 --concurrent 2 --yes
     arg_count: int | None = None
     arg_conc: int | None = None
     arg_mail: str | None = None
@@ -6999,11 +7387,14 @@ async def main():
                 "  -n/--count        jumlah akun batch ini (default: tanya / .env)\n"
                 "  -c/--concurrent   browser paralel (default: tanya / .env)\n"
                 "  -y/--yes          non-interactive, pakai .env / flags saja\n"
+                "  --diagnose        print config + self-heal knobs + dependency check (no farm)\n"
                 "Each run writes to results/batch_<timestamp>/ (fresh files).\n"
                 "Emails stay unique across batches via results/used_emails.txt",
                 flush=True,
             )
             sys.exit(0)
+        if a in ("--diagnose", "--self-check", "diagnose"):
+            _run_diagnose_and_exit()
         i += 1
 
     # ── Mode selection: [1] temp mail, [2] google, [3] refresh tokens ─────
@@ -7040,60 +7431,6 @@ async def main():
                 break  # keep GROK_MAIL_MODE default (farm)
             print("  Masukkan 1, 2, atau 3.")
         print()
-
-    # Validate config only after MAIL_MODE is final.
-    # tempmail never needs GROK_EMAIL_DOMAIN / IMAP.
-    if MAIL_MODE == "google":
-        if not IMAP_USER or not IMAP_PASS:
-            print("ERROR: google mode needs GROK_IMAP_USER and GROK_IMAP_PASS (or use -m tempmail)", flush=True)
-            sys.exit(1)
-        if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
-            print("ERROR: set GROK_EMAIL_DOMAIN for google domain mode", flush=True)
-            sys.exit(1)
-        if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
-            print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
-            sys.exit(1)
-
-    _load_used_emails()
-    known = len(_used_emails)
-
-    print("=" * 60, flush=True)
-    print("  Grok / xAI Standalone Farmer", flush=True)
-    print("=" * 60, flush=True)
-    print(f"  Mail mode  : {MAIL_MODE}", flush=True)
-    if MAIL_MODE == "tempmail":
-        print(f"  Temp mail  : generator.email (headless={TEMPMAIL_HEADLESS})", flush=True)
-        print(f"  OTP source : temp-mail inbox page (no IMAP)", flush=True)
-    else:
-        print(f"  Email mode : {EMAIL_MODE}", flush=True)
-        if EMAIL_MODE == "domain":
-            print(f"  Domain     : @{EMAIL_DOMAIN}", flush=True)
-        else:
-            print(f"  Gmail base : {GMAIL_BASE or IMAP_USER}", flush=True)
-        print(f"  IMAP       : {IMAP_USER} @ {IMAP_HOST}:{IMAP_PORT}", flush=True)
-    print(f"  Password   : {'*' * max(0, len(ACCOUNT_PASSWORD) - 2)}{ACCOUNT_PASSWORD[-2:]}", flush=True)
-    print(f"  Headless   : {HEADLESS}", flush=True)
-    print(f"  Activate   : {ACTIVATE_WEB}", flush=True)
-    print(
-        f"  Isolation  : {WORKER_ISOLATION} "
-        f"(own browser/Turnstile; spawn_delay={SPAWN_DELAY}s; "
-        f"ts_parallel={TURNSTILE_PARALLEL})",
-        flush=True,
-    )
-    print(
-        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES}",
-        flush=True,
-    )
-    print(
-        f"  Proxies    : {len(PROXY_POOL)} ({PROXY_SOURCE})"
-        if PROXY_POOL
-        else f"  Proxies    : direct ({PROXY_SOURCE})",
-        flush=True,
-    )
-    print(f"  Email len  : {EMAIL_LOCAL_LEN} (crypto secrets)", flush=True)
-    print(f"  Known mail : {known} (all batches + used_emails.txt)", flush=True)
-    print(f"  Results    : {RESULTS_ROOT}/batch_<id>/  (per run)", flush=True)
-    print("-" * 60, flush=True)
 
     # Re-validate config now that MAIL_MODE is final.
     if MAIL_MODE == "google" and (not IMAP_USER or not IMAP_PASS):
@@ -7233,24 +7570,33 @@ async def main():
             f"in {int(time.time() - start)}s",
             flush=True,
         )
+        try:
+            finalize_batch_meta_helper(
+                BATCH_DIR / "batch_meta.json",
+                created=created,
+                failed=failed,
+                elapsed_s=int(time.time() - start),
+                interrupted=True,
+                extra={"mode": f"farm/{MAIL_MODE}", "max_accounts": target},
+            )
+            print(f"  Meta  : {BATCH_DIR / 'batch_meta.json'} (interrupted)", flush=True)
+        except Exception as e:
+            print(f"[farm] batch_meta finalize failed: {e}", flush=True)
         # Hard exit after cleanup — avoids Playwright pending-task teardown spam.
         os._exit(130)
 
-    # finalize batch meta
+    # finalize batch meta (always — success path)
     try:
-        meta_path = BATCH_DIR / "batch_meta.json"
-        meta = {}
-        if meta_path.is_file():
-            meta = json.loads(meta_path.read_text(encoding="utf-8"))
-        meta.update({
-            "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-            "created": created,
-            "failed": failed,
-            "elapsed_s": int(time.time() - start),
-        })
-        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
-    except Exception:
-        pass
+        finalize_batch_meta_helper(
+            BATCH_DIR / "batch_meta.json",
+            created=created,
+            failed=failed,
+            elapsed_s=int(time.time() - start),
+            interrupted=False,
+            extra={"mode": f"farm/{MAIL_MODE}", "max_accounts": target},
+        )
+    except Exception as e:
+        print(f"[farm] batch_meta finalize failed: {e}", flush=True)
 
     print("=" * 60, flush=True)
     print(f"  DONE: {created} created, {failed} failed in {int(time.time() - start)}s", flush=True)
