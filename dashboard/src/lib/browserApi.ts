@@ -48,6 +48,21 @@ export async function cancelBrowserSession(sessionId: string): Promise<boolean> 
   return res.success;
 }
 
+/** Remove finished (terminal) session cards from Browser Logs. */
+export async function clearEndedBrowserSessions(): Promise<{ cleared: number }> {
+  return fetchApi<{ success: boolean; cleared: number }>("/api/browser-sessions/clear-ended", {
+    method: "POST",
+  });
+}
+
+/** Cancel all live browser sessions and stop a running Grok farm job. */
+export async function stopAllBrowserSessions(): Promise<{ cancelled: number; farmCancelled?: boolean }> {
+  return fetchApi<{ success: boolean; cancelled: number; farmCancelled?: boolean }>(
+    "/api/browser-sessions/stop-all",
+    { method: "POST" },
+  );
+}
+
 /**
  * Open an SSE connection to the session's frame stream. Auto-reconnects on
  * transient errors (long batch sessions outlive a single connection). Returns

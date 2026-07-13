@@ -4,9 +4,14 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Card, CardContent } from "@/components/ui/card";
 import { BrowserSessionCard } from "@/components/auth/BrowserSessionCard";
-import { fetchBrowserSessions, BrowserSessionInfo } from "@/lib/browserApi";
+import {
+  fetchBrowserSessions,
+  BrowserSessionInfo,
+  clearEndedBrowserSessions,
+  stopAllBrowserSessions,
+} from "@/lib/browserApi";
 import { useWsEvent, useWsStatus } from "@/hooks/useWebSocket";
-import { ArrowLeft, ArrowRight, Radio, Monitor, Zap, Loader2 } from "lucide-react";
+import { ArrowLeft, ArrowRight, Radio, Monitor, Zap, Loader2, Square, Trash2 } from "lucide-react";
 
 interface Challenge {
   image_base64: string;
@@ -35,6 +40,7 @@ export default function BotLogs() {
   const [sessions, setSessions] = useState<BrowserSessionInfo[]>([]);
   const [challenges, setChallenges] = useState<Record<string, Challenge>>({});
   const [loading, setLoading] = useState(true);
+  const [bulkBusy, setBulkBusy] = useState(false);
 
   const load = useCallback(async () => {
     try {
@@ -124,6 +130,27 @@ export default function BotLogs() {
   const activeSessions = sessions.filter((s) => !s.terminal);
   const doneSessions = sessions.filter((s) => s.terminal);
 
+  async function handleStopAll() {
+    setBulkBusy(true);
+    try {
+      await stopAllBrowserSessions();
+      await load();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
+  async function handleClearEnded() {
+    setBulkBusy(true);
+    try {
+      await clearEndedBrowserSessions();
+      setChallenges({});
+      await load();
+    } finally {
+      setBulkBusy(false);
+    }
+  }
+
   return (
     <div className="space-y-6">
       {/* Page header — matches Automation / Dashboard */}
@@ -159,6 +186,29 @@ export default function BotLogs() {
             />
             WS {wsStatus}
           </Badge>
+          {activeSessions.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={bulkBusy}
+              onClick={() => void handleStopAll()}
+              className="border-[var(--error)]/40 text-[var(--error)]"
+            >
+              <Square className="mr-1.5 h-3.5 w-3.5" />
+              Stop all
+            </Button>
+          )}
+          {doneSessions.length > 0 && (
+            <Button
+              variant="outline"
+              size="sm"
+              disabled={bulkBusy}
+              onClick={() => void handleClearEnded()}
+            >
+              <Trash2 className="mr-1.5 h-3.5 w-3.5" />
+              Clear ended
+            </Button>
+          )}
           <Button variant="outline" size="sm" onClick={() => navigate("/automation")}>
             <ArrowLeft className="mr-1.5 h-3.5 w-3.5" />
             Automation
