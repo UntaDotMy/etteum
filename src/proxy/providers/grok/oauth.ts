@@ -654,17 +654,50 @@ export function parseGrokCreditsProtobuf(
 }
 
 /**
+ * Pick the best Grok OAuth quota snapshot.
+ *
+ * Free Build accounts always answer GetGrokCreditsConfig with a percent-scale
+ * 100-point pool (0% used → remaining=100). That is NOT the absolute free
+ * Build token budget (typically ~2e6 from x-ratelimit-*-tokens). Prefer paid
+ * billing, then absolute headers, then percent as last resort.
+ */
+export function selectGrokOAuthQuota(
+  paid: GrokOAuthQuota | null | undefined,
+  absolute: GrokOAuthQuota | null | undefined,
+  percent: GrokOAuthQuota | null | undefined,
+): GrokOAuthQuota | null {
+  if (paid && paid.limit > 0 && !paid.percentScale) return paid;
+  if (absolute && absolute.limit > 0 && !absolute.percentScale) {
+    // Prefer absolute numbers; keep percent reset window when absolute has none.
+    if (!absolute.resetAt && percent?.resetAt) {
+      return { ...absolute, resetAt: percent.resetAt };
+    }
+    return absolute;
+  }
+  if (percent) return percent;
+  // Absolute/paid with limit 0 (e.g. 402 or headers-missing liveness).
+  if (absolute) return absolute;
+  if (paid) return paid;
+  return null;
+}
+
+/**
  * Fetch real OAuth quota for a Grok Build account.
  *
  * 1. GET /v1/billing — absolute monthlyLimit/used when paid (limit > 0).
- * 2. Else POST GetGrokCreditsConfig — shared pool percent (limit=100 scale).
- * 3. Never invent a fake 100/100 placeholder.
+ * 2. Absolute free Build credits via rate-limit headers on a tiny probe.
+ * 3. Else POST GetGrokCreditsConfig — shared pool percent (limit=100 scale).
+ * 4. Never invent a fake 100/100 placeholder when every source fails.
  */
 export async function fetchOAuthBillingQuota(
   bearer: string,
   signal?: AbortSignal,
 ): Promise<GrokOAuthQuota | null> {
   const cliVersion = await getGrokCliVersion();
+
+  let paid: GrokOAuthQuota | null = null;
+  let absolute: GrokOAuthQuota | null = null;
+  let percent: GrokOAuthQuota | null = null;
 
   // 1) JSON billing (paid monthly pool).
   try {
@@ -679,10 +712,9 @@ export async function fetchOAuthBillingQuota(
     });
     if (response.ok) {
       const json = (await response.json()) as GrokBillingResponse;
-      const paid = parseGrokBillingJson(json);
-      if (paid) return paid;
+      paid = parseGrokBillingJson(json);
     } else if (response.status === 402) {
-      return {
+      paid = {
         limit: 0,
         remaining: 0,
         used: 0,
@@ -694,10 +726,21 @@ export async function fetchOAuthBillingQuota(
     }
   } catch (err: any) {
     if (err?.name === "AbortError") throw err;
-    // fall through to credits config
   }
 
-  // 2) Shared weekly pool percent (free / SuperGrok shared pool).
+  // Paid absolute pool wins immediately (no extra probe cost).
+  if (paid && paid.limit > 0 && !paid.percentScale) return paid;
+
+  // 2) Farm-compatible absolute free Build credits (x-ratelimit-*-tokens).
+  //    Must run BEFORE GetGrokCreditsConfig — that endpoint always returns a
+  //    percent-scale 100 and would hide real 2M token budgets forever.
+  try {
+    absolute = await probeOAuthChatCredits(bearer, signal);
+  } catch (err: any) {
+    if (err?.name === "AbortError") throw err;
+  }
+
+  // 3) Shared weekly pool percent (reset window / usage %).
   try {
     const response = await fetch(GROK_OAUTH.creditsConfigEndpoint, {
       method: "POST",
@@ -716,23 +759,13 @@ export async function fetchOAuthBillingQuota(
     });
     if (response.ok) {
       const buf = new Uint8Array(await response.arrayBuffer());
-      const pool = parseGrokCreditsProtobuf(buf);
-      if (pool) return pool;
+      percent = parseGrokCreditsProtobuf(buf);
     }
   } catch (err: any) {
     if (err?.name === "AbortError") throw err;
   }
 
-  // 3) Farm-compatible absolute free Build credits via rate-limit headers on a
-  //    tiny Responses probe (x-ratelimit-remaining-tokens / limit-tokens).
-  try {
-    const headerQuota = await probeOAuthChatCredits(bearer, signal);
-    if (headerQuota) return headerQuota;
-  } catch (err: any) {
-    if (err?.name === "AbortError") throw err;
-  }
-
-  return null;
+  return selectGrokOAuthQuota(paid, absolute, percent);
 }
 
 /**

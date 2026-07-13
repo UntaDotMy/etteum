@@ -5,6 +5,8 @@ import { describe, test, expect } from "bun:test";
 import {
   parseGrokBillingJson,
   parseGrokCreditsProtobuf,
+  selectGrokOAuthQuota,
+  type GrokOAuthQuota,
 } from "../../src/proxy/providers/grok/oauth";
 
 describe("parseGrokBillingJson", () => {
@@ -87,5 +89,66 @@ describe("parseGrokCreditsProtobuf", () => {
     expect(q!.used).toBe(25);
     expect(q!.remaining).toBe(75);
     expect(q!.limit).toBe(100);
+  });
+});
+
+describe("selectGrokOAuthQuota", () => {
+  const paid: GrokOAuthQuota = {
+    limit: 99900,
+    remaining: 80000,
+    used: 19900,
+    resetAt: null,
+    source: "cli-chat-proxy/billing",
+    percentScale: false,
+  };
+  const absolute: GrokOAuthQuota = {
+    limit: 2_000_000,
+    remaining: 1_900_000,
+    used: 100_000,
+    resetAt: null,
+    source: "cli-chat-proxy/ratelimit-headers",
+    percentScale: false,
+  };
+  const percent: GrokOAuthQuota = {
+    limit: 100,
+    remaining: 100,
+    used: 0,
+    resetAt: new Date("2026-07-15T00:00:00.000Z"),
+    source: "grok.com/GetGrokCreditsConfig",
+    percentScale: true,
+  };
+
+  test("paid absolute pool beats free absolute and percent", () => {
+    const q = selectGrokOAuthQuota(paid, absolute, percent);
+    expect(q?.source).toBe("cli-chat-proxy/billing");
+    expect(q?.limit).toBe(99900);
+  });
+
+  test("free absolute tokens beat percent-scale 100 (dashboard was stuck here)", () => {
+    const q = selectGrokOAuthQuota(null, absolute, percent);
+    expect(q?.source).toBe("cli-chat-proxy/ratelimit-headers");
+    expect(q?.limit).toBe(2_000_000);
+    expect(q?.remaining).toBe(1_900_000);
+    // Keep weekly reset window from percent when absolute has none.
+    expect(q?.resetAt?.toISOString()).toBe("2026-07-15T00:00:00.000Z");
+  });
+
+  test("percent-scale is last resort when absolute headers missing", () => {
+    const q = selectGrokOAuthQuota(null, null, percent);
+    expect(q?.percentScale).toBe(true);
+    expect(q?.limit).toBe(100);
+  });
+
+  test("absolute with limit 0 does not beat percent", () => {
+    const emptyAbsolute: GrokOAuthQuota = {
+      limit: 0,
+      remaining: 0,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/responses-probe",
+      percentScale: false,
+    };
+    const q = selectGrokOAuthQuota(null, emptyAbsolute, percent);
+    expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
   });
 });

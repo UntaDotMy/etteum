@@ -341,11 +341,23 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
         // Compute the safe remaining: never let warmup increase
         // quotaRemaining beyond what we've been tracking locally.
         const dbRemaining = Number(account.quotaRemaining);
+        const dbLimit = Number(account.quotaLimit);
         const upstreamRemaining = Number.isFinite(rawRemaining) ? Math.max(0, rawRemaining) : 0;
+
+        // Scale change (e.g. Grok percent-pool 100 → absolute free Build ~2e6
+        // tokens). Min-preserving against the old scale would pin remaining at
+        // 100 forever even though the real budget is millions.
+        const scaleChanged =
+          Number.isFinite(dbLimit) &&
+          dbLimit > 0 &&
+          rawLimit > 0 &&
+          (rawLimit / dbLimit >= 10 || dbLimit / rawLimit >= 10);
 
         if (health.kind === "exhausted") {
           // Provider says exhausted — always zero out.
           update.quotaRemaining = 0;
+        } else if (scaleChanged) {
+          update.quotaRemaining = upstreamRemaining;
         } else if (Number.isFinite(dbRemaining) && dbRemaining > 0) {
           // We have a local value — take the minimum. This prevents
           // the billing API from resetting quota to "full" when it

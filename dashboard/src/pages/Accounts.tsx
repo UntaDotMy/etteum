@@ -13,6 +13,7 @@ import {
 } from "@/components/ui/dialog";
 import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText, Square } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
+import { formatNumber } from "@/lib/utils";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
   completeCodexOAuthCallbackUrl,
@@ -1612,7 +1613,7 @@ export default function Accounts() {
                 <div className="flex justify-between text-xs">
                   <span className="text-[var(--muted-foreground)]">Credits</span>
                   <span className="text-[var(--foreground)]">
-                    {stat.credits.remaining.toFixed(1)} / {stat.credits.total.toFixed(1)} remaining
+                    {formatNumber(stat.credits.remaining)} / {formatNumber(stat.credits.total)} remaining
                   </span>
                 </div>
                 <Progress

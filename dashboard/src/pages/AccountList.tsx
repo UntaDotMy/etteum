@@ -141,7 +141,19 @@ function labelProvider(provider: string) {
 
 function formatCredit(value?: number | null) {
   const numeric = Number(value ?? 0);
-  return Number.isFinite(numeric) ? numeric.toFixed(1) : "0.0";
+  if (!Number.isFinite(numeric)) return "0";
+  // Free Build token budgets are millions — keep the cell readable.
+  const abs = Math.abs(numeric);
+  if (abs >= 1_000_000) {
+    const m = numeric / 1_000_000;
+    return `${Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)}M`;
+  }
+  if (abs >= 10_000) {
+    const k = numeric / 1_000;
+    return `${Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)}K`;
+  }
+  if (Number.isInteger(numeric)) return String(numeric);
+  return numeric.toFixed(1);
 }
 
 function formatDate(value?: string | null) {
