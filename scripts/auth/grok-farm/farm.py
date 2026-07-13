@@ -46,23 +46,6 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import parse_qs, urlencode, urlparse, unquote
 
-import farm_helpers
-from farm_helpers import (
-    claim_bits as _claim_bits_pure,
-    decode_access_jwt_claims as decode_access_jwt_claims_pure,
-    email_domain as email_domain_pure,
-    extract_xai_code as extract_xai_code_pure,
-    finalize_batch_meta as finalize_batch_meta_helper,
-    is_plausible_xai_otp as is_plausible_xai_otp_pure,
-    normalize_proxy_url as normalize_proxy_url_pure,
-    parse_proxy_entry as parse_proxy_entry_pure,
-    parse_proxy_for_playwright as parse_proxy_for_playwright_pure,
-    parse_rate_limit_credits as parse_rate_limit_credits_pure,
-    rate_limit_bits as rate_limit_bits_pure,
-    secure_chmod_file,
-    urlopen as urlopen_proxied,
-)
-
 # Dedicated pool for blocking I/O (disk, process kill, temp sweeps).
 # Keeps the asyncio event loop free so the HUD ticker never freezes.
 _IO_POOL = ThreadPoolExecutor(max_workers=8, thread_name_prefix="farm-io")
@@ -92,13 +75,11 @@ except ImportError:
             k, v = k.strip(), v.strip().strip('"').strip("'")
             os.environ.setdefault(k, v)
 
-# Camoufox is required for live farm; unit tests / --diagnose may skip it.
-AsyncCamoufox = None  # type: ignore
 try:
-    from camoufox.async_api import AsyncCamoufox as _AsyncCamoufox
-    AsyncCamoufox = _AsyncCamoufox
+    from camoufox.async_api import AsyncCamoufox
 except ImportError:
-    AsyncCamoufox = None  # type: ignore
+    print("ERROR: camoufox not installed. Run: ./install.sh", flush=True)
+    sys.exit(1)
 
 # ── Config from env ──────────────────────────────────────────────────────────
 def _env(key: str, default: str = "") -> str:
@@ -129,18 +110,6 @@ ACCOUNT_PASSWORD = _env("GROK_PASSWORD", "$Priyo000")
 MAX_ACCOUNTS = int(_env("GROK_MAX_ACCOUNTS", "5") or "5")
 CONCURRENT = int(_env("GROK_CONCURRENT", "1") or "1")
 HEADLESS = _env_bool("GROK_HEADLESS", False)  # headed recommended for Turnstile
-# How "invisible" browsers run when HEADLESS=true (or force mode):
-#   auto    = Linux+Xvfb → headless="virtual" (headed paint, no window); else True
-#   virtual = always request Camoufox virtual display (Linux/Xvfb; best Turnstile)
-#   true    = real headless=True (more CF risk)
-#   false   = never headless (ignore GROK_HEADLESS for launch)
-_HEADLESS_MODE_RAW = _env("GROK_HEADLESS_MODE", "auto").lower()
-if _HEADLESS_MODE_RAW not in ("auto", "virtual", "true", "false", "0", "1"):
-    _HEADLESS_MODE_RAW = "auto"
-# Camoufox humanize cursor — MUST stay on for headless/virtual (CF mouse scoring).
-# false only for debugging. Max duration seconds for humanize=float path.
-HUMANIZE = _env_bool("GROK_HUMANIZE", True)
-HUMANIZE_MAX_S = max(0.5, min(4.0, float(_env("GROK_HUMANIZE_MAX", "2.2") or "2.2")))
 # 0 = no stagger (workers start together). Isolation mode defaults toward 0.
 SPAWN_DELAY = float(_env("GROK_SPAWN_DELAY", "0") or "0")
 
@@ -178,24 +147,24 @@ if WORKER_ISOLATION:
     )
 else:
     TURNSTILE_PARALLEL = max(1, int(_ts_par_raw or "1") or 1)
+# Cap simultaneous Camoufox boots (not in-flight workers). At c=5 tempmail = up
+# to 10 browsers; without this, all launch+page-load at once → home-net choke.
+# Workers still run concurrent after boot (OTP wait, probe, etc.).
+LAUNCH_PARALLEL = max(1, min(20, int(_env("GROK_LAUNCH_PARALLEL", "2") or "2")))
+# When SPAWN_DELAY=0 and concurrent is high, auto-stagger starts (seconds between
+# worker slot starts). Set GROK_AUTO_STAGGER=false to force zero stagger.
+AUTO_STAGGER = _env_bool("GROK_AUTO_STAGGER", True)
+AUTO_SPAWN_DELAY_S = max(0.0, float(_env("GROK_AUTO_SPAWN_DELAY", "2.0") or "2.0"))
+# Temp-mail browser only: block images to cut bandwidth (OTP is text).
+TEMPMAIL_BLOCK_IMAGES = _env_bool("GROK_TEMPMAIL_BLOCK_IMAGES", True)
 # Self-heal: UI/transient failures (email form missing, CF stuck, activate fail)
 # re-spawn browser + new email instead of permanent fail. Domain 403 re-rolls
 # for tempmail are separate (MAX_DOMAIN_RETRIES).
 UI_RETRIES = max(1, min(8, int(_env("GROK_UI_RETRIES", "3") or "3")))
 UI_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_UI_RETRY_BACKOFF", "2") or "2"))
 # After activate, re-probe 403 a few times (IP rate-limit / entitlement lag).
-# Default 4: concurrent farms often need an extra entitlement soft-retry.
-PROBE_RETRIES = max(1, min(8, int(_env("GROK_PROBE_RETRIES", "4") or "4")))
+PROBE_RETRIES = max(1, min(5, int(_env("GROK_PROBE_RETRIES", "3") or "3")))
 PROBE_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_PROBE_RETRY_BACKOFF", "2.5") or "2.5"))
-# Route CLI probe + OAuth token exchange through the same proxy as the browser
-# (default on). SOCKS needs optional PySocks; else falls back to direct with warn.
-PROBE_USE_PROXY = _env_bool("GROK_PROBE_USE_PROXY", True)
-# Signup email field: soft page refreshes before raising (CF/chooser lag).
-SIGNUP_PAGE_REFRESHES = max(1, min(10, int(_env("GROK_SIGNUP_PAGE_REFRESHES", "5") or "5")))
-# Per-round wait for email input after each refresh.
-SIGNUP_EMAIL_WAIT_S = max(5.0, float(_env("GROK_SIGNUP_EMAIL_WAIT", "15") or "15"))
-# Turnstile max wait on complete-signup / managed CF (seconds).
-TURNSTILE_MAX_WAIT_S = max(15, int(_env("GROK_TURNSTILE_MAX_WAIT", "90") or "90"))
 
 # Results root: each run creates results/batch_<id>/ (unless legacy single-file paths set)
 RESULTS_ROOT = Path(_env("GROK_RESULTS_DIR", str(_ROOT / "results")))
@@ -288,12 +257,59 @@ LAST_NAMES = [
 
 def _normalize_proxy_url(raw: str) -> str | None:
     """Turn free-form proxy string into a URL Camoufox/Playwright accepts."""
-    return normalize_proxy_url_pure(raw)
+    s = (raw or "").strip()
+    if not s:
+        return None
+    # strip surrounding quotes
+    if (s.startswith('"') and s.endswith('"')) or (s.startswith("'") and s.endswith("'")):
+        s = s[1:-1].strip()
+    if not s:
+        return None
+
+    # Already has scheme
+    if "://" in s:
+        return s
+
+    parts = s.split(":")
+    # host:port:user:pass  (reseller format; pass may contain ':' or '@')
+    # Detect before user:pass@host so passwords with @ still work.
+    if len(parts) >= 4 and parts[1].isdigit() and "@" not in parts[0]:
+        host, port, user = parts[0], parts[1], parts[2]
+        password = ":".join(parts[3:])
+        if host and user:
+            return f"http://{user}:{password}@{host}:{port}"
+
+    # user:pass@host:port
+    if "@" in s:
+        return f"http://{s}"
+
+    # host:port
+    if len(parts) == 2 and parts[1].isdigit():
+        return f"http://{parts[0]}:{parts[1]}"
+    # bare host — reject (need port)
+    return None
 
 
 def _parse_proxy_entry(item: str) -> tuple[str, str] | None:
     """Parse one proxy entry → (url, optional_id) or None."""
-    return parse_proxy_entry_pure(item)
+    item = (item or "").strip()
+    if not item or item.startswith("#"):
+        return None
+    # inline comment: url  # note  (but keep user:pass#weird if scheme present carefully)
+    # Prefer optional id after last unquoted ' #' or trailing #id without space when URL has scheme
+    pid = ""
+    if " #" in item:
+        item, _, comment = item.partition(" #")
+        item = item.strip()
+        pid = comment.strip()
+    elif item.count("#") == 1 and "://" in item:
+        # http://host:port#myid
+        url_part, _, maybe_id = item.partition("#")
+        item, pid = url_part.strip(), maybe_id.strip()
+    url = _normalize_proxy_url(item)
+    if not url:
+        return None
+    return (url, pid)
 
 
 def _load_proxy_file(path: Path) -> list[tuple[str, str]]:
@@ -401,37 +417,19 @@ async def next_proxy():
 
 
 def _parse_proxy(url: str) -> dict:
-    return parse_proxy_for_playwright_pure(url)
-
-
-_SOCKS_PROBE_WARNED = False
-
-
-def _http_proxy_for_attempt(proxy_url: str | None) -> str | None:
-    """Proxy URL for non-browser HTTP (probe/token). None = direct.
-
-    Honours GROK_PROBE_USE_PROXY. SOCKS without PySocks → direct + one-line warn.
-    """
-    global _SOCKS_PROBE_WARNED
-    if not PROBE_USE_PROXY or not proxy_url:
-        return None
-    scheme = farm_helpers.proxy_scheme(proxy_url)
-    if scheme.startswith("socks"):
-        try:
-            import socks  # noqa: F401
-            from sockshandler import SocksiPyHandler  # noqa: F401
-            return proxy_url
-        except Exception:
-            if not _SOCKS_PROBE_WARNED:
-                _SOCKS_PROBE_WARNED = True
-                print(
-                    "[proxy] WARN: SOCKS proxy set but PySocks/sockshandler missing — "
-                    "probe/token use direct IP (browser still uses SOCKS). "
-                    "pip install PySocks  OR use http:// proxies.",
-                    flush=True,
-                )
-            return None
-    return proxy_url
+    if "://" not in url:
+        url = f"http://{url}"
+    u = urlparse(url)
+    scheme = (u.scheme or "http").lower()
+    server = f"{scheme}://{u.hostname}"
+    if u.port:
+        server += f":{u.port}"
+    out: dict[str, Any] = {"server": server}
+    if u.username:
+        out["username"] = unquote(u.username)
+    if u.password:
+        out["password"] = unquote(u.password)
+    return out
 
 
 # ── Logging / HUD ────────────────────────────────────────────────────────────
@@ -1384,12 +1382,50 @@ _claimed_otps_lock = threading.Lock()
 
 
 def _is_plausible_xai_otp(code: str) -> bool:
-    """Accept real xAI codes; reject CSS noise (PER-100, RGB-255, PX-16)."""
-    return is_plausible_xai_otp_pure(code)
+    """Accept real xAI codes; reject CSS noise (PER-100, RGB-255, PX-16).
+
+    xAI codes are XXX-XXX alnum — often mixed (Y34-FHY) but ALSO pure alpha (WGJ-HKA).
+    Do NOT require a digit.
+    """
+    code = (code or "").upper().strip()
+    if not re.fullmatch(r"[A-Z0-9]{3}-[A-Z0-9]{3}", code):
+        return False
+    left, right = code.split("-", 1)
+    # CSS-ish: all-alpha left + all-digit right (PER-100, EM-16) — reject
+    if re.fullmatch(r"[A-Z]+", left) and re.fullmatch(r"\d+", right):
+        return False
+    # all-digit both sides unlikely for xAI (and CSS-ish)
+    if re.fullmatch(r"\d+", left) and re.fullmatch(r"\d+", right):
+        return False
+    if code in {"PER-100", "RGB-255", "PX-16", "EM-16", "REM-16", "MS-300", "MS-200"}:
+        return False
+    return True
 
 
 def _extract_xai_code(subject: str, body: str) -> str | None:
-    return extract_xai_code_pure(subject, body)
+    # 1) Prefer subject line — authoritative for xAI
+    m = _XAI_SUBJ_CODE_RE.search(subject or "")
+    if m:
+        code = m.group(1).upper()
+        if _is_plausible_xai_otp(code):
+            return code
+    # 2) Any XXX-XXX in subject
+    for m in _XAI_CODE_RE.finditer(subject or ""):
+        code = m.group(1).upper()
+        if _is_plausible_xai_otp(code):
+            return code
+    # 3) Body plain-text only (strip style/script to avoid CSS PER-100 etc.)
+    plain = body or ""
+    plain = re.sub(r"<style[\s\S]*?</style>", " ", plain, flags=re.I)
+    plain = re.sub(r"<script[\s\S]*?</script>", " ", plain, flags=re.I)
+    plain = re.sub(r"<[^>]+>", " ", plain)
+    for m in _XAI_CODE_RE.finditer(plain):
+        code = m.group(1).upper()
+        if _is_plausible_xai_otp(code):
+            return code
+    # Fallback 6-digit (unlikely for xAI but keep)
+    m = re.search(r"\b(\d{6})\b", plain)
+    return m.group(1) if m else None
 
 
 def read_otp_from_imap_sync(target_email: str, timeout: int = 180, since_ts: float | None = None) -> str | None:
@@ -1609,6 +1645,29 @@ _CLEANUP_DONE = False
 _ATEXIT_REGISTERED = False
 # Serialize launch ownership snapshot so two browsers never claim the same temps
 _launch_lock: asyncio.Lock | None = None
+_launch_sem: asyncio.Semaphore | None = None
+
+
+def _get_launch_sem() -> asyncio.Semaphore:
+    """Limit simultaneous Camoufox process boots (network/CPU storm guard)."""
+    global _launch_sem
+    if _launch_sem is None:
+        _launch_sem = asyncio.Semaphore(LAUNCH_PARALLEL)
+    return _launch_sem
+
+
+def effective_spawn_delay(concurrent: int) -> float:
+    """Stagger worker *starts* under load so page-loads don't all hit the wire at once.
+
+    - If GROK_SPAWN_DELAY > 0 → use it.
+    - Else if AUTO_STAGGER and concurrent >= 3 → GROK_AUTO_SPAWN_DELAY (default 2s).
+    - Else 0.
+    """
+    if SPAWN_DELAY > 0:
+        return SPAWN_DELAY
+    if AUTO_STAGGER and concurrent >= 3 and AUTO_SPAWN_DELAY_S > 0:
+        return AUTO_SPAWN_DELAY_S
+    return 0.0
 
 
 def _driver_pid(manager) -> int | None:
@@ -2034,6 +2093,8 @@ def _is_recoverable_error(err: BaseException | str) -> bool:
         "otp timeout",
         "otp rejected",
         "fill_otp hung",
+        "tempmail",
+        "generator.email",
         "complete_signup stuck",
         "activate_grok_com failed",
         "page load error",
@@ -2115,43 +2176,90 @@ def blacklist_contains(domain: str) -> bool:
 
 def email_domain(email: str) -> str:
     """Extract domain from an email address (lowercased, no @)."""
-    return email_domain_pure(email)
+    if not email or "@" not in email:
+        return ""
+    return email.rsplit("@", 1)[-1].strip().lower().lstrip("@")
 
 
-def get_grok_cli_version(proxy_url: str | None = None) -> str:
-    """Resolve x-grok-client-version (CLI version gate). Cached process-wide."""
+def get_grok_cli_version() -> str:
+    """Resolve x-grok-client-version. Cached; never stall workers (≤2s fetch)."""
     global _CLI_VERSION_CACHE
     if _CLI_VERSION_CACHE:
         return _CLI_VERSION_CACHE
     try:
-        req = urllib.request.Request(CLI_VERSION_URL, method="GET")
-        with urlopen_proxied(req, timeout=10, proxy_url=proxy_url) as resp:
+        with urllib.request.urlopen(CLI_VERSION_URL, timeout=2) as resp:
             v = (resp.read().decode("utf-8", errors="replace") or "").strip()
         if re.match(r"^\d+\.\d+\.\d+$", v):
             _CLI_VERSION_CACHE = v
             return v
     except Exception:
         pass
+    _CLI_VERSION_CACHE = CLI_VERSION_FALLBACK
     return CLI_VERSION_FALLBACK
 
 
 def decode_access_jwt_claims(access_token: str) -> dict[str, Any]:
     """Decode OIDC access JWT payload (no verify) for diagnostics."""
-    return decode_access_jwt_claims_pure(access_token)
+    try:
+        parts = (access_token or "").split(".")
+        if len(parts) < 2:
+            return {}
+        payload_b64 = parts[1] + "=" * (-len(parts[1]) % 4)
+        return json.loads(base64.urlsafe_b64decode(payload_b64).decode("utf-8"))
+    except Exception:
+        return {}
 
 
 def _claim_bits(access_token: str) -> list[str]:
-    return _claim_bits_pure(access_token)
+    claims = decode_access_jwt_claims(access_token)
+    bits: list[str] = []
+    if claims.get("tier") is not None:
+        bits.append(f"tier={claims.get('tier')}")
+    if claims.get("scope"):
+        sc = str(claims.get("scope"))
+        bits.append(
+            "scopes=ok" if "grok-cli:access" in sc else f"scopes_missing_cli={sc[:40]}"
+        )
+    if claims.get("sub"):
+        bits.append(f"sub={str(claims.get('sub'))[:8]}…")
+    return bits
 
 
 def _parse_rate_limit_credits(headers) -> dict[str, Any]:
     """Extract free Build token quota from response headers (refer-compatible)."""
-    return parse_rate_limit_credits_pure(headers)
+    out: dict[str, Any] = {
+        "credits_remaining": None,
+        "credits_limit": None,
+        "req_remaining": None,
+        "model": None,
+    }
+    if headers is None:
+        return out
+    try:
+        rem = headers.get("x-ratelimit-remaining-tokens")
+        lim = headers.get("x-ratelimit-limit-tokens")
+        rrem = headers.get("x-ratelimit-remaining-requests")
+        if rem is not None and str(rem).strip() != "":
+            out["credits_remaining"] = float(rem)
+        if lim is not None and str(lim).strip() != "":
+            out["credits_limit"] = float(lim)
+        if rrem is not None and str(rrem).strip() != "":
+            out["req_remaining"] = float(rrem)
+    except Exception:
+        pass
+    return out
 
 
 def _rate_limit_bits(credits: dict[str, Any]) -> list[str]:
     """Format credits dict into probe detail bits."""
-    return rate_limit_bits_pure(credits)
+    bits: list[str] = []
+    if credits.get("credits_remaining") is not None:
+        bits.append(f"credits_remaining={int(credits['credits_remaining'])}")
+    if credits.get("credits_limit") is not None:
+        bits.append(f"credits_limit={int(credits['credits_limit'])}")
+    if credits.get("req_remaining") is not None:
+        bits.append(f"req_remaining={int(credits['req_remaining'])}")
+    return bits
 
 
 def _probe_one(
@@ -2162,7 +2270,6 @@ def _probe_one(
     label: str,
     claim_bits: list[str],
     content_extractor: Callable[[dict, str], str],
-    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """Single POST probe. Blocking. Returns (ok, status, detail, credits)."""
     empty_c: dict[str, Any] = {
@@ -2177,7 +2284,8 @@ def _probe_one(
         url, data=raw_body, headers=headers, method="POST",
     )
     try:
-        with urlopen_proxied(req, timeout=60, proxy_url=proxy_url) as resp:
+        # Keep probe snappy so HUD workers don't sit on "POST responses" for 60s
+        with urllib.request.urlopen(req, timeout=15) as resp:
             raw = resp.read().decode("utf-8", errors="replace")
             code = int(getattr(resp, "status", 200) or 200)
             ms = int((time.monotonic() - t0) * 1000)
@@ -2231,14 +2339,12 @@ def _probe_one(
 def probe_cli_chat(
     access_token: str,
     version: str | None = None,
-    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """CLI smoke: POST /v1/responses model=grok-4.5 only.
 
     Returns (ok, status, detail, credits) where credits has
     credits_remaining / credits_limit (free Build quota tokens).
 
-    proxy_url: optional same egress as browser (see GROK_PROBE_USE_PROXY).
     Blocking — call via ``await _run_io(probe_cli_chat, …)``.
     """
     empty_c: dict[str, Any] = {
@@ -2249,8 +2355,7 @@ def probe_cli_chat(
     }
     if not access_token:
         return False, 0, "missing access_token", empty_c
-    http_proxy = _http_proxy_for_attempt(proxy_url)
-    version = version or get_grok_cli_version(http_proxy)
+    version = version or get_grok_cli_version()
     claims = _claim_bits(access_token)
 
     def _extract_responses(parsed: dict, raw: str) -> str:
@@ -2288,7 +2393,6 @@ def probe_cli_chat(
         label=f"responses/{CLI_PROBE_MODEL}",
         claim_bits=claims,
         content_extractor=_extract_responses,
-        proxy_url=http_proxy,
     )
 
 
@@ -2298,7 +2402,6 @@ async def run_chat_probe_with_hud(
     access_token: str,
     *,
     context: str = "farm",
-    proxy_url: str | None = None,
 ) -> tuple[bool, int, str, dict[str, Any]]:
     """HUD-friendly grok-4.5 Responses probe. Returns (ok, status, detail, credits)."""
     at = (access_token or "").strip()
@@ -2319,31 +2422,24 @@ async def run_chat_probe_with_hud(
     )
     await asyncio.sleep(0)
 
-    emit_progress(
-        attempt,
-        "chat_probe",
-        f"[{context}] resolve x-grok-client-version…",
-        email_addr,
-    )
-    http_proxy = _http_proxy_for_attempt(proxy_url)
-    version = await _run_io(get_grok_cli_version, http_proxy)
+    # Version is local/cache-first (≤2s network); don't stall HUD on x.ai
+    version = await _run_io(get_grok_cli_version)
     await asyncio.sleep(0)
 
-    egress = "proxy" if http_proxy else ("direct" if not proxy_url else "direct(socks-fallback)")
     emit_progress(
         attempt,
         "chat_probe",
-        f"[{context}] POST responses model={CLI_PROBE_MODEL} cli={version} egress={egress}",
+        f"[{context}] POST {CLI_PROBE_MODEL} (≤15s) cli={version}",
         email_addr,
     )
     vlog(
         f"chat_probe: {CLI_RESPONSES_URL} model={CLI_PROBE_MODEL} "
         f"surface=grok-build token_len={len(at)} preview={at_preview} "
-        f"cli={version} domain={domain} egress={egress}",
+        f"cli={version} domain={domain}",
         attempt,
     )
     t_wait = time.monotonic()
-    result = await _run_io(probe_cli_chat, at, version, proxy_url)
+    result = await _run_io(probe_cli_chat, at, version)
     if not isinstance(result, tuple) or len(result) < 3:
         ok, status, detail, credits = False, 0, "bad probe result", empty_c
     elif len(result) == 3:
@@ -2414,69 +2510,11 @@ _STEALTH_OS_WEIGHTS: list[tuple[str, int]] = [
 ]
 
 
-def _xvfb_available() -> bool:
-    """True when Xvfb binary exists (Linux virtual display for Camoufox)."""
-    if sys.platform.startswith("win"):
-        return False
-    return bool(shutil.which("Xvfb"))
-
-
-def resolve_camoufox_headless(
-    want_headless: bool | None = None,
-) -> bool | str:
-    """Map user want-headless → Camoufox headless arg.
-
-    Research (Camoufox docs + 2026 Turnstile practice):
-      - True headless is often weaker vs CF Turnstile than headed.
-      - headless=\"virtual\" = headed paint inside Xvfb (Linux) — preferred
-        for server/farm when no physical display.
-      - Windows has no Xvfb → fall back to True or False.
-
-    GROK_HEADLESS_MODE: auto | virtual | true | false
-    """
-    if want_headless is None:
-        want_headless = HEADLESS
-    mode = _HEADLESS_MODE_RAW
-    if mode in ("false", "0"):
-        return False
-    if mode == "true" or mode == "1":
-        return True if want_headless else False
-    if mode == "virtual":
-        if not want_headless:
-            return False
-        if _xvfb_available():
-            return "virtual"
-        print(
-            "[stealth] WARN GROK_HEADLESS_MODE=virtual but Xvfb missing — "
-            "using headless=True (install xvfb on Linux for better Turnstile)",
-            flush=True,
-        )
-        return True
-    # auto
-    if not want_headless:
-        return False
-    if _xvfb_available():
-        return "virtual"
-    return True
-
-
-def _humanize_value(*, for_invisible: bool) -> bool | float:
-    """Camoufox humanize: always on unless GROK_HUMANIZE=false.
-
-    Pass a MAX duration (seconds) so cursor paths stay natural. Invisible
-    (headless/virtual) uses the full HUMANIZE_MAX_S band — CF scores mouse.
-    """
-    if not HUMANIZE:
-        return False
-    # Visible: slightly snappier; invisible: allow slower arcs (docs: ~1.5s typical)
-    lo = 0.9 if for_invisible else 0.7
-    hi = max(lo + 0.3, HUMANIZE_MAX_S if for_invisible else min(HUMANIZE_MAX_S, 1.8))
-    return round(random.uniform(lo, hi), 2)
-
-
 def _build_stealth_launch_kwargs(
-    headless: bool | str,
+    headless: bool,
     proxy_url: str | None,
+    *,
+    block_images: bool = False,
 ) -> dict[str, Any]:
     """Camoufox launch options: geoIP, randomized FP, anti-automation.
 
@@ -2486,17 +2524,16 @@ def _build_stealth_launch_kwargs(
     - block_webrtc: no real-IP leak via STUN.
     - disable_coop: required so Cloudflare Turnstile checkbox is clickable
       inside cross-origin iframes (Camoufox official Turnstile pattern).
-    - humanize: ALWAYS on for farm (bool/float max duration). Camoufox C++
-      HumanCursor path — do not pass mouse.move(..., steps=N) or it overrides.
-    - headless: False | True | \"virtual\" (Xvfb headed paint — best headless parity).
+    - humanize: random cursor max duration (looks less robotic than fixed 0.5).
     - os + screen: fresh BrowserForge fingerprint per browser instance.
+    - Camoufox itself strips Playwright automation markers / webdriver.
+    - block_images: save bandwidth (safe for tempmail OTP pages).
     """
     os_names = [n for n, _ in _STEALTH_OS_WEIGHTS]
     os_w = [w for _, w in _STEALTH_OS_WEIGHTS]
     os_pick = random.choices(os_names, weights=os_w, k=1)[0]
     max_w, max_h = random.choice(_STEALTH_SCREENS)
-    invisible = headless is True or headless == "virtual"
-    humanize = _humanize_value(for_invisible=invisible)
+    humanize = round(random.uniform(0.7, 1.8), 2)
 
     kwargs: dict[str, Any] = {
         "headless": headless,
@@ -2516,6 +2553,8 @@ def _build_stealth_launch_kwargs(
             "dom.event.clipboardevents.enabled": True,
         },
     }
+    if block_images:
+        kwargs["block_images"] = True
 
     try:
         from browserforge.fingerprints import Screen  # type: ignore
@@ -2534,10 +2573,8 @@ def _build_stealth_launch_kwargs(
 
 # ── Etteum Browser Logs frame relay (headless screenshots → stdout JSON) ────
 # When ETTEUM_FRAME_RELAY=true (set by etteum grokFarm.ts), emit periodic JPEG
-# frames as single-line JSON on stdout. Same idea as enowxai/camoufox_flow:
-# browser stays headless (no OS window) but screenshots stream to Browser Logs.
-#
-# Multi-worker: each entry is tagged with workerId so concurrency N → N cards.
+# frames as single-line JSON on stdout. Multi-worker entries use workerId so
+# concurrency N → N Browser Logs cards.
 # Shape: ETTEUM_JSON:{"type":"frame","workerId":1,"email":"...","base64":"..."}
 _FRAME_PAGES: dict[int, dict[str, Any]] = {}  # id(manager) -> {page, workerId, email}
 _frame_relay_task: asyncio.Task | None = None
@@ -2631,14 +2668,11 @@ def _register_frame_page(
 def _unregister_frame_page(manager: Any) -> None:
     if manager is None:
         return
-    entry = _FRAME_PAGES.pop(id(manager), None)
-    if entry and isinstance(entry, dict) and entry.get("workerId") is not None:
-        # Do not force terminal here — TS marks done/fail from progress/import.
-        pass
+    _FRAME_PAGES.pop(id(manager), None)
 
 
 def _frame_set_email(manager: Any, email: str) -> None:
-    """Update the email label for a registered preview page (after OTP assigns mailbox)."""
+    """Update the email label for a registered preview page."""
     if manager is None:
         return
     entry = _FRAME_PAGES.get(id(manager))
@@ -2650,6 +2684,8 @@ async def launch_browser(
     proxy_url: str | None,
     headless: bool | None = None,
     *,
+    block_images: bool = False,
+    purpose: str = "signup",
     preview: bool = True,
     worker_id: int | None = None,
     email: str = "",
@@ -2660,12 +2696,12 @@ async def launch_browser(
     Pass headless=True/False to force it — used by the temp-mail flow so the
     generator.email window can stay headless even when signup is headed.
 
-    When want-headless is True, resolve_camoufox_headless() prefers
-    headless="virtual" on Linux+Xvfb so Turnstile sees headed rendering.
+    Launch throttle (LAUNCH_PARALLEL):
+      - At most N Camoufox boots run at once (default 2) so c=5 does not open
+        10 browsers + page loads on the same uplink simultaneously.
+      - After boot, workers proceed fully concurrent (OTP wait, probe, …).
 
     Isolation (WORKER_ISOLATION=true, default):
-      - Camoufox process start runs OUTSIDE the global lock so workers do not
-        wait on each other for multi-second browser boot.
       - Profile ownership claim is a short critical section only (so cleanup
         never deletes a sibling worker's temp profile).
 
@@ -2673,115 +2709,66 @@ async def launch_browser(
     skips temp-mail browser streaming).
     """
     global _launch_lock
-    if AsyncCamoufox is None:
-        raise RuntimeError(
-            "camoufox not installed. Run: ./install.sh  (or pip install -r requirements.txt "
-            "&& python -m camoufox fetch)"
-        )
     if headless is None:
         headless = HEADLESS
-    cam_headless = resolve_camoufox_headless(bool(headless))
-    kwargs = _build_stealth_launch_kwargs(cam_headless, proxy_url)
+    kwargs = _build_stealth_launch_kwargs(
+        bool(headless), proxy_url, block_images=block_images
+    )
 
     if _launch_lock is None:
         _launch_lock = asyncio.Lock()
 
-    # Snapshot unowned profiles BEFORE launch (no long hold)
-    before_profiles = await _run_io(_snapshot_temp_profiles)
-    with _BROWSER_LOCK:
-        already_owned = set(_owned_profiles)
-
-    # Heavy work OUTSIDE lock — concurrent workers boot Camoufox in parallel
-    manager = AsyncCamoufox(**kwargs)
-    browser = await manager.__aenter__()
-    # Brief settle so playwright_* dirs exist; yield so HUD can paint
-    await asyncio.sleep(0.12)
-    after_profiles = await _run_io(_snapshot_temp_profiles)
-    candidates = (after_profiles - before_profiles) - already_owned
-
-    # Claim exclusive ownership under lock (short)
-    async with _launch_lock:
-        with _BROWSER_LOCK:
-            # Skip anything another worker already claimed while we booted
-            owned = candidates - set(_owned_profiles)
-        _track_browser(manager, profiles=owned)
-
-    page = await browser.new_page()
-    page.set_default_timeout(60000)
-    # Only Grok signup/OAuth pages stream to Browser Logs (not temp-mail).
-    _register_frame_page(
-        manager, page, preview=preview, worker_id=worker_id, email=email
-    )
-    # Log fingerprint axis once per launch (helps debug CF/geo mismatches)
-    try:
-        _os = kwargs.get("os", "?")
-        _hum = kwargs.get("humanize", "?")
-        _scr = kwargs.get("screen")
-        _scr_s = (
-            f"{getattr(_scr, 'max_width', '?')}x{getattr(_scr, 'max_height', '?')}"
-            if _scr is not None
-            else "auto"
-        )
+    # Bound concurrent boots — main home-net / disk choke under c>=3
+    async with _get_launch_sem():
         print(
-            f"[stealth] os={_os} humanize={_hum} screen≤{_scr_s} "
-            f"geoip=on webrtc=block coop=off "
-            f"want_headless={headless} cam_headless={cam_headless!r}",
+            f"[launch] {purpose} waiting slot… "
+            f"(max {LAUNCH_PARALLEL} simultaneous boots)",
             flush=True,
         )
-    except Exception:
-        pass
-    # Warm cursor once so first Turnstile click is not a cold teleport
-    try:
-        await _human_warmup_mouse(page)
-    except Exception:
-        pass
-    return manager, browser, page
+        # Snapshot unowned profiles BEFORE launch (no long hold)
+        before_profiles = await _run_io(_snapshot_temp_profiles)
+        with _BROWSER_LOCK:
+            already_owned = set(_owned_profiles)
 
+        t0 = time.monotonic()
+        manager = AsyncCamoufox(**kwargs)
+        browser = await manager.__aenter__()
+        # Brief settle so playwright_* dirs exist; yield so HUD can paint
+        await asyncio.sleep(0.12)
+        after_profiles = await _run_io(_snapshot_temp_profiles)
+        candidates = (after_profiles - before_profiles) - already_owned
 
-async def _human_warmup_mouse(page) -> None:
-    """Small idle move so Camoufox humanize path is exercised before CF."""
-    try:
-        dims = await page.evaluate(
-            "() => ({w: window.innerWidth || 1200, h: window.innerHeight || 800})"
+        # Claim exclusive ownership under lock (short)
+        async with _launch_lock:
+            with _BROWSER_LOCK:
+                owned = candidates - set(_owned_profiles)
+            _track_browser(manager, profiles=owned)
+
+        page = await browser.new_page()
+        page.set_default_timeout(60000)
+        # Only Grok signup/OAuth pages stream to Browser Logs (not temp-mail).
+        _register_frame_page(
+            manager, page, preview=preview, worker_id=worker_id, email=email
         )
-        w = int(dims.get("w") or 1200)
-        h = int(dims.get("h") or 800)
-    except Exception:
-        w, h = 1200, 800
-    x1 = random.randint(40, max(80, w // 4))
-    y1 = random.randint(40, max(80, h // 4))
-    x2 = random.randint(w // 3, max(w // 3 + 1, (2 * w) // 3))
-    y2 = random.randint(h // 4, max(h // 4 + 1, h // 2))
-    await _human_move(page, x1, y1)
-    await asyncio.sleep(random.uniform(0.15, 0.4))
-    await _human_move(page, x2, y2)
-
-
-async def _human_move(page, x: float, y: float) -> None:
-    """Move cursor via Camoufox humanize — do NOT pass steps= (overrides natural path)."""
-    try:
-        # No steps= → Camoufox C++ HumanCursor when humanize=True/float
-        await page.mouse.move(float(x), float(y))
-    except TypeError:
-        # Older playwright: steps required
-        await page.mouse.move(float(x), float(y), steps=random.randint(12, 28))
-    except Exception:
+        boot_ms = int((time.monotonic() - t0) * 1000)
         try:
-            await page.mouse.move(float(x), float(y), steps=18)
+            _os = kwargs.get("os", "?")
+            _hum = kwargs.get("humanize", "?")
+            _scr = kwargs.get("screen")
+            _scr_s = (
+                f"{getattr(_scr, 'max_width', '?')}x{getattr(_scr, 'max_height', '?')}"
+                if _scr is not None
+                else "auto"
+            )
+            print(
+                f"[stealth] {purpose} boot={boot_ms}ms os={_os} humanize={_hum}s "
+                f"screen≤{_scr_s} geoip=on webrtc=block coop=off "
+                f"headless={headless} block_images={block_images}",
+                flush=True,
+            )
         except Exception:
             pass
-
-
-async def _human_click_xy(page, x: float, y: float) -> None:
-    """Humanized move + click (Turnstile / Complete)."""
-    # Approach from a slight offset so path is not a single teleport
-    ox = float(x) + random.uniform(-40, -12)
-    oy = float(y) + random.uniform(-28, 12)
-    await _human_move(page, max(2.0, ox), max(2.0, oy))
-    await asyncio.sleep(random.uniform(0.08, 0.22))
-    await _human_move(page, float(x), float(y))
-    await asyncio.sleep(random.uniform(0.12, 0.4))
-    await page.mouse.click(float(x), float(y))
+        return manager, browser, page
 
 
 async def close_browser(manager) -> None:
@@ -2869,7 +2856,7 @@ async def dismiss_cookie_banner(page) -> None:
             btn = page.locator(sel).first
             if await btn.count() > 0 and await btn.is_visible():
                 await btn.click(timeout=2000)
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(0.25)
                 return
         except Exception:
             continue
@@ -2877,6 +2864,575 @@ async def dismiss_cookie_banner(page) -> None:
         await click_text_button(page, ["Accept All Cookies", "Reject All", "Allow All"])
     except Exception:
         pass
+
+
+# ── DOM brain: understand page state → act (self-heal without blind waits) ───
+# Stages are ordered by farm pipeline so heal knows "what to do next".
+PAGE_STAGES = (
+    "loading",
+    "cf_challenge",
+    "page_error",
+    "cookie",
+    "signup_chooser",
+    "signup_email",
+    "signup_otp",
+    "signup_profile",
+    "signin_chooser",
+    "signin_form",
+    "oauth_consent",
+    "account_home",
+    "grok_chat",
+    "unknown",
+)
+
+
+async def _page_aria_snapshot(page, *, timeout_ms: int = 2500) -> str:
+    """Playwright accessibility YAML (roles/names/states). Empty if unsupported."""
+    try:
+        fn = getattr(page, "aria_snapshot", None)
+        if callable(fn):
+            # Some builds accept timeout; others take no kwargs
+            try:
+                snap = await fn(timeout=timeout_ms)
+            except TypeError:
+                snap = await fn()
+            return (snap or "") if isinstance(snap, str) else str(snap or "")
+    except Exception:
+        pass
+    # Fallback: locator-rooted snapshot of main/body if page API missing
+    try:
+        loc = page.locator("body").first
+        fn2 = getattr(loc, "aria_snapshot", None)
+        if callable(fn2):
+            try:
+                snap = await fn2(timeout=timeout_ms)
+            except TypeError:
+                snap = await fn2()
+            return (snap or "") if isinstance(snap, str) else str(snap or "")
+    except Exception:
+        pass
+    return ""
+
+
+def parse_aria_snapshot_signals(aria: str) -> dict[str, Any]:
+    """Parse Playwright aria YAML for complete-form / stage hints (unit-tested)."""
+    text = aria or ""
+    low = text.lower()
+    out: dict[str, Any] = {
+        "hasAria": bool(text.strip()),
+        "completeBtn": False,
+        "completeDisabled": False,
+        "hasPassword": False,
+        "hasEmail": False,
+        "hasOtp": False,
+        "hasFirstName": False,
+        "signupChooser": False,
+        "signInChooser": False,
+        "headingComplete": False,
+    }
+    if not text.strip():
+        return out
+
+    # Button lines: - button "Complete sign up" [disabled]
+    if re.search(r'button\s+"[^"]*complete\s+sign\s*up[^"]*"', low):
+        out["completeBtn"] = True
+        if re.search(
+            r'button\s+"[^"]*complete\s+sign\s*up[^"]*"[^\n]*\[disabled',
+            low,
+        ):
+            out["completeDisabled"] = True
+    if re.search(r"\b(password|textbox\s+\"password\")\b", low):
+        out["hasPassword"] = True
+    if re.search(r'textbox\s+"[^"]*password', low) or "password" in low and "textbox" in low:
+        out["hasPassword"] = True
+    if re.search(r'textbox\s+"[^"]*email|email\b', low):
+        out["hasEmail"] = True
+    if re.search(r'one-time|verification code|textbox\s+"[^"]*code', low):
+        out["hasOtp"] = True
+    if re.search(r'first\s*name|given.?name', low):
+        out["hasFirstName"] = True
+    if re.search(r"complete your sign up|complete sign up", low):
+        out["headingComplete"] = True
+    if re.search(r"sign up with email|continue with email", low):
+        out["signupChooser"] = True
+    if re.search(r"(log\s*in|sign\s*in)\s+with\s+email", low):
+        out["signInChooser"] = True
+    return out
+
+
+def classify_signup_api_response(
+    url: str,
+    status: int,
+    method: str = "",
+) -> str:
+    """Classify network response for complete-signup truth.
+
+    Returns: 'ok' | 'err' | 'ignore'
+    Only mutating identity/signup calls count (not static accounts.x.ai assets).
+    """
+    u = (url or "").lower()
+    m = (method or "").upper()
+    code = int(status or 0)
+
+    # Never count assets / CF / analytics
+    if any(
+        x in u
+        for x in (
+            ".js",
+            ".css",
+            ".png",
+            ".svg",
+            ".woff",
+            ".ico",
+            "turnstile",
+            "cloudflare",
+            "challenges.",
+            "cdn.",
+            "google-analytics",
+            "googletagmanager",
+            "sentry",
+            "segment.",
+            "hotjar",
+            "favicon",
+        )
+    ):
+        return "ignore"
+
+    # Prefer POST/PUT/PATCH; GET page navigations are noise
+    if m and m not in ("POST", "PUT", "PATCH"):
+        return "ignore"
+    if not m:
+        # Unknown method: only allow clearly API-shaped paths
+        if not any(x in u for x in ("/api/", "graphql", "oauth2/token", "/v1/", "/v2/")):
+            return "ignore"
+
+    # Relevant identity / signup surfaces
+    relevant = any(
+        x in u
+        for x in (
+            "/api/",
+            "graphql",
+            "signup",
+            "sign-up",
+            "sign_up",
+            "register",
+            "create-user",
+            "create_user",
+            "password",
+            "identity",
+            "auth.x.ai",
+            "oauth2/token",
+            "accounts.x.ai/api",
+            "users",
+            "credentials",
+            "enrollment",
+        )
+    )
+    if not relevant:
+        return "ignore"
+
+    if 200 <= code < 300 or code in (302, 303, 307, 308):
+        return "ok"
+    if code >= 400:
+        return "err"
+    return "ignore"
+
+
+async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
+    """Single evaluate: URL, body signals, visible controls, loading flags.
+
+    Used by smart wait/click/heal so we don't hammer dead clicks while SPA loads.
+    aria=True merges accessibility snapshot (slower — use on complete/unknown only).
+    """
+    try:
+        st = await page.evaluate(
+            """() => {
+              const body = (document.body && document.body.innerText) || '';
+              const b = body.slice(0, 2500).toLowerCase();
+              const url = location.href || '';
+              const title = (document.title || '').toLowerCase();
+              const ready = document.readyState || '';
+              const spinners = document.querySelectorAll(
+                '[aria-busy="true"], .loading, .spinner, [class*="spinner" i], [class*="Loading"]'
+              ).length;
+              const has = (re) => re.test(b) || re.test(title);
+              const vis = (el) => {
+                if (!el) return false;
+                const r = el.getBoundingClientRect();
+                if (r.width < 2 || r.height < 2) return false;
+                const s = getComputedStyle(el);
+                return s.visibility !== 'hidden' && s.display !== 'none' && s.opacity !== '0';
+              };
+              const q = (sel) => {
+                try { return [...document.querySelectorAll(sel)].some(vis); } catch(e) { return false; }
+              };
+              const btns = [...document.querySelectorAll(
+                'button, a[role="button"], [role="button"], input[type="submit"]'
+              )].filter(vis).map(el => (el.innerText||el.textContent||el.value||'').trim())
+                .filter(t => t && t.length < 80).slice(0, 24);
+              const cf = has(/verify you are human|just a moment|hanya sebentar|checking your browser|performing security verification|security service to protect/)
+                || q("iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]");
+              const loadErr = has(/couldn't load|could not load|page isn't available|can't be reached|aw snap/);
+              const cookie = q('#onetrust-accept-btn-handler, #onetrust-banner-sdk, [id*="onetrust"]');
+              const emailIn = q('input[type="email"], input[name="email"], input[autocomplete="email"]');
+              const passIn = q('input[type="password"]');
+              const otpIn = q('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="1"]');
+              const firstIn = q('input[name*="first" i], input[autocomplete="given-name"]');
+              const chooserSignup = has(/sign up with email|sign up with google|continue with google/);
+              const chooserLogin = has(/log\\s*in with email|sign in with email|login with email/);
+              const complete = has(/complete your sign up|complete sign up/);
+              const verify = has(/verify your email|confirmation code/);
+              const consent = has(/\\ballow\\b|authorize this|grant access/) && (url.includes('oauth') || url.includes('consent'));
+              const account = /accounts\\.x\\.ai\\/account\\/?$/.test(url.replace(/\\/$/,''))
+                || url.includes('accounts.x.ai/account');
+              const grok = url.includes('grok.com') && !cf;
+              const chat = grok && (q('textarea, [contenteditable="true"]') || has(/ask grok|what do you want/));
+              let stage = 'unknown';
+              if (loadErr) stage = 'page_error';
+              else if (cf) stage = 'cf_challenge';
+              else if (cookie && !emailIn && !passIn && !otpIn) stage = 'cookie';
+              else if (ready !== 'complete' && spinners > 0 && !emailIn && !passIn) stage = 'loading';
+              else if (otpIn || verify) stage = 'signup_otp';
+              else if (complete || (firstIn && passIn)) stage = 'signup_profile';
+              else if (emailIn && !passIn && (url.includes('sign-up') || chooserSignup || has(/sign up/)))
+                stage = 'signup_email';
+              else if (chooserSignup && !emailIn) stage = 'signup_chooser';
+              else if (passIn && (url.includes('sign-in') || chooserLogin || has(/log in|sign in/)))
+                stage = 'signin_form';
+              else if (chooserLogin && !passIn) stage = 'signin_chooser';
+              else if (consent) stage = 'oauth_consent';
+              else if (account) stage = 'account_home';
+              else if (chat) stage = 'grok_chat';
+              else if (grok) stage = 'grok_chat';
+              else if (ready !== 'complete' || spinners > 0) stage = 'loading';
+              return {
+                url, title, ready, stage, spinners,
+                loading: ready !== 'complete' || spinners > 0,
+                cf, loadErr, cookie, emailIn, passIn, otpIn, firstIn,
+                chooserSignup, chooserLogin, complete, verify, consent, account, grok, chat,
+                buttons: btns,
+                bodySample: body.slice(0, 180).replace(/\\s+/g, ' '),
+              };
+            }"""
+        )
+        if isinstance(st, dict):
+            # Optional hybrid overlay (roles/disabled). Off by default — heal polls
+            # often; full a11y snapshot each tick is too slow.
+            if aria:
+                try:
+                    snap = await _page_aria_snapshot(page, timeout_ms=1200)
+                    sig = parse_aria_snapshot_signals(snap)
+                    st["aria"] = sig
+                    if sig.get("hasAria"):
+                        if sig.get("hasPassword"):
+                            st["passIn"] = True
+                        if sig.get("hasEmail"):
+                            st["emailIn"] = True
+                        if sig.get("hasOtp"):
+                            st["otpIn"] = True
+                        if sig.get("completeBtn") or sig.get("headingComplete"):
+                            st["complete"] = True
+                        if sig.get("completeDisabled"):
+                            st["completeDisabled"] = True
+                        if sig.get("signupChooser"):
+                            st["chooserSignup"] = True
+                        if sig.get("signInChooser"):
+                            st["chooserLogin"] = True
+                        stage = st.get("stage") or "unknown"
+                        if stage in ("unknown", "loading"):
+                            if sig.get("hasOtp"):
+                                st["stage"] = "signup_otp"
+                            elif sig.get("headingComplete") or (
+                                sig.get("completeBtn") and sig.get("hasPassword")
+                            ):
+                                st["stage"] = "signup_profile"
+                            elif sig.get("hasEmail") and not sig.get("hasPassword"):
+                                st["stage"] = "signup_email"
+                            elif sig.get("signupChooser"):
+                                st["stage"] = "signup_chooser"
+                            elif sig.get("signInChooser"):
+                                st["stage"] = "signin_chooser"
+                            elif sig.get("hasPassword") and not sig.get(
+                                "headingComplete"
+                            ):
+                                st["stage"] = "signin_form"
+                except Exception:
+                    pass
+            return st
+    except Exception as e:
+        return {
+            "stage": "unknown",
+            "url": "",
+            "loading": True,
+            "error": str(e)[:120],
+            "buttons": [],
+        }
+    return {"stage": "unknown", "url": "", "loading": True, "buttons": []}
+
+
+async def wait_dom_ready(
+    page,
+    attempt: int = 0,
+    *,
+    timeout_s: float = 12.0,
+    want_not_loading: bool = True,
+) -> dict[str, Any]:
+    """Poll until document complete / not spinning, or stage is actionable."""
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = await read_page_state(page)
+        stage = last.get("stage") or "unknown"
+        # Actionable stages — don't wait for "perfect" idle
+        if stage in (
+            "cf_challenge",
+            "signup_chooser",
+            "signup_email",
+            "signup_otp",
+            "signup_profile",
+            "signin_chooser",
+            "signin_form",
+            "oauth_consent",
+            "account_home",
+            "grok_chat",
+            "page_error",
+            "cookie",
+        ):
+            return last
+        if want_not_loading and not last.get("loading"):
+            return last
+        await asyncio.sleep(0.2)
+    return last or await read_page_state(page)
+
+
+async def smart_click(
+    page,
+    keywords: list[str],
+    exclude: list[str] | None = None,
+    *,
+    timeout_s: float = 6.0,
+    attempt: int = 0,
+) -> str | None:
+    """Wait until a matching button is visible+enabled, then click (force fallback)."""
+    exclude = exclude or []
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        await dismiss_cookie_banner(page)
+        st = await read_page_state(page)
+        if st.get("stage") == "cf_challenge":
+            try:
+                await handle_turnstile(
+                    page, attempt, max_wait=min(8.0, timeout_s),
+                    require_token=False, use_global_limit=False,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0.3)
+            continue
+        if st.get("stage") == "page_error":
+            await recover_page_load_error(page, attempt)
+            await asyncio.sleep(0.3)
+            continue
+        # Try role match with short wait for enabled
+        for kw in keywords:
+            for exact in (True, False):
+                try:
+                    pat = (
+                        re.compile(rf"^{re.escape(kw)}$", re.I)
+                        if exact
+                        else re.compile(re.escape(kw), re.I)
+                    )
+                    loc = page.get_by_role("button", name=pat)
+                    n = await loc.count()
+                    if n == 0:
+                        continue
+                    btn = loc.first
+                    if not await btn.is_visible():
+                        continue
+                    txt = (await btn.inner_text()).strip()
+                    if exclude and any(e.lower() in txt.lower() for e in exclude):
+                        continue
+                    try:
+                        await btn.click(timeout=2500)
+                    except Exception:
+                        await btn.click(timeout=2500, force=True)
+                    return txt or kw
+                except Exception:
+                    continue
+        # evaluate fallback once per loop
+        hit = await click_text_button(page, keywords, exclude=exclude)
+        if hit:
+            return hit
+        await asyncio.sleep(0.25)
+    return None
+
+
+async def heal_to_stage(
+    page,
+    attempt: int,
+    desired: str | set[str],
+    *,
+    email_addr: str = "",
+    password: str = "",
+    timeout_s: float = 20.0,
+) -> dict[str, Any]:
+    """Observe DOM → take the right action until desired stage or timeout.
+
+    This is the self-heal brain: no blind multi-second clicks on missing nodes.
+    """
+    want = {desired} if isinstance(desired, str) else set(desired)
+    deadline = time.monotonic() + timeout_s
+    last: dict[str, Any] = {}
+    n_actions = 0
+    while time.monotonic() < deadline:
+        last = await wait_dom_ready(page, attempt, timeout_s=2.5)
+        stage = last.get("stage") or "unknown"
+        if stage in want:
+            return last
+
+        n_actions += 1
+        if n_actions <= 6 or n_actions % 4 == 0:
+            vlog(
+                f"heal want={sorted(want)} have={stage} url={(last.get('url') or '')[:60]}",
+                attempt,
+            )
+            emit_progress(
+                attempt,
+                "ui_retry",
+                f"DOM {stage} → need {','.join(sorted(want))[:40]}",
+                email_addr,
+            )
+
+        # --- act by current stage ---
+        if stage == "cookie":
+            await dismiss_cookie_banner(page)
+            await asyncio.sleep(0.2)
+            continue
+        if stage == "cf_challenge":
+            try:
+                await handle_turnstile(
+                    page, attempt, max_wait=12, require_token=False, use_global_limit=False,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0.4)
+            continue
+        if stage == "page_error":
+            await recover_page_load_error(page, attempt)
+            await asyncio.sleep(0.5)
+            continue
+        if stage == "loading":
+            await asyncio.sleep(0.35)
+            continue
+
+        # Signup path
+        if "signup_email" in want or "signup_chooser" in want or "signup_otp" in want:
+            if stage == "signup_chooser":
+                await smart_click(
+                    page,
+                    ["Sign up with email", "Sign up with Email", "Continue with email"],
+                    exclude=["Google", "Apple", "Microsoft", " with X"],
+                    timeout_s=4.0,
+                    attempt=attempt,
+                )
+                await asyncio.sleep(0.4)
+                continue
+            if stage == "signup_email" and "signup_otp" in want and email_addr:
+                # Need submit path — fill if empty then sign up
+                try:
+                    await fill_input(
+                        page,
+                        [
+                            'input[type="email"]',
+                            'input[name="email"]',
+                            'input[autocomplete="email"]',
+                        ],
+                        email_addr,
+                    )
+                    await smart_click(
+                        page, ["Sign up"],
+                        exclude=["Google", "Apple", "email", "X"],
+                        timeout_s=3.0,
+                        attempt=attempt,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+                continue
+            if stage in ("unknown", "loading") and any(
+                x in want for x in ("signup_email", "signup_chooser", "signup_otp", "signup_profile")
+            ):
+                # Navigate toward signup if lost
+                url = last.get("url") or ""
+                if "sign-up" not in url:
+                    await _page_soft_refresh(
+                        page, attempt, reason="heal→signup", url=SIGNUP_URL,
+                        step="signup_open", email_addr=email_addr,
+                    )
+                else:
+                    await _page_soft_refresh(
+                        page, attempt, reason="heal reload signup", step="signup_open",
+                        email_addr=email_addr,
+                    )
+                continue
+
+        # Sign-in path
+        if "signin_form" in want or "signin_chooser" in want:
+            if stage == "signin_chooser":
+                await smart_click(
+                    page,
+                    ["Login with email", "Log in with email", "Sign in with email"],
+                    exclude=["Google", "Apple"],
+                    timeout_s=4.0,
+                    attempt=attempt,
+                )
+                await asyncio.sleep(0.4)
+                continue
+            if stage in ("unknown", "loading") and "sign-in" not in (last.get("url") or ""):
+                await _page_soft_refresh(
+                    page, attempt, reason="heal→sign-in", url=SIGNIN_URL,
+                    step="login", email_addr=email_addr,
+                )
+                continue
+
+        # Already past desired (e.g. want email but already on OTP)
+        if stage == "signup_otp" and "signup_email" in want:
+            return last  # further than wanted — caller handles
+        if stage == "signup_profile" and (
+            "signup_email" in want or "signup_otp" in want
+        ):
+            return last
+        if stage == "account_home":
+            return last
+
+        # Grok.com
+        if "grok_chat" in want:
+            if stage == "cf_challenge":
+                continue
+            url = last.get("url") or ""
+            if "grok.com" not in url:
+                await _page_soft_refresh(
+                    page, attempt, reason="heal→grok.com", url="https://grok.com/",
+                    step="activate", email_addr=email_addr,
+                )
+                continue
+            if stage in ("unknown", "loading"):
+                await _page_soft_refresh(
+                    page, attempt, reason="heal reload grok", step="activate",
+                    email_addr=email_addr,
+                )
+                continue
+
+        # Soft refresh as last resort every few loops
+        if n_actions % 5 == 0:
+            await _page_soft_refresh(
+                page, attempt, reason=f"heal stuck stage={stage}",
+                step="ui_retry", email_addr=email_addr,
+            )
+        else:
+            await asyncio.sleep(0.35)
+
+    return last or await read_page_state(page)
 
 
 async def click_text_button(page, keywords: list[str], exclude: list[str] | None = None) -> str | None:
@@ -2889,7 +3445,10 @@ async def click_text_button(page, keywords: list[str], exclude: list[str] | None
                 txt = (await loc.first.inner_text()).strip()
                 if exclude and any(e.lower() in txt.lower() for e in exclude):
                     continue
-                await loc.first.click()
+                try:
+                    await loc.first.click(timeout=3000)
+                except Exception:
+                    await loc.first.click(timeout=2000, force=True)
                 return txt
         except Exception:
             pass
@@ -2902,7 +3461,10 @@ async def click_text_button(page, keywords: list[str], exclude: list[str] | None
                 # Avoid social providers when looking for email actions
                 if exclude and any(e.lower() in txt.lower() for e in exclude):
                     continue
-                await loc.first.click()
+                try:
+                    await loc.first.click(timeout=3000)
+                except Exception:
+                    await loc.first.click(timeout=2000, force=True)
                 return txt
         except Exception:
             pass
@@ -2941,14 +3503,36 @@ async def click_text_button(page, keywords: list[str], exclude: list[str] | None
 
 
 async def fill_input(page, selectors: list[str], value: str) -> bool:
+    # Brief ready wait so we don't click through a loading overlay
+    try:
+        st = await read_page_state(page)
+        if st.get("loading") or st.get("stage") in ("cf_challenge", "cookie"):
+            await wait_dom_ready(page, timeout_s=3.0)
+            if st.get("stage") == "cookie" or (await read_page_state(page)).get("stage") == "cookie":
+                await dismiss_cookie_banner(page)
+            if (await read_page_state(page)).get("stage") == "cf_challenge":
+                try:
+                    await handle_turnstile(
+                        page, 0, max_wait=6, require_token=False, use_global_limit=False,
+                    )
+                except Exception:
+                    pass
+    except Exception:
+        pass
     for sel in selectors:
         try:
             el = page.locator(sel).first
             if await el.count() == 0:
                 continue
-            if not await el.is_visible():
-                continue
-            await el.click()
+            try:
+                await el.wait_for(state="visible", timeout=2500)
+            except Exception:
+                if not await el.is_visible():
+                    continue
+            try:
+                await el.click(timeout=2000)
+            except Exception:
+                await el.click(timeout=1500, force=True)
             await el.fill("")
             await el.fill(value)
             # React-friendly events
@@ -3049,7 +3633,9 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                         y = box["y"] + box["height"] / 2
                         await page.mouse.move(x - 40, y - 20, steps=8)
                         await asyncio.sleep(random.uniform(0.15, 0.4))
-                        await _human_click_xy(page, x, y)
+                        await page.mouse.move(x, y, steps=10)
+                        await asyncio.sleep(random.uniform(0.2, 0.5))
+                        await page.mouse.click(x, y)
                         vlog(f"Turnstile: clicked host text ({sel})", attempt)
                         return True
             except Exception:
@@ -3071,7 +3657,11 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                     continue
                 x = box["x"] + min(28, max(12, box["width"] * 0.12))
                 y = box["y"] + box["height"] / 2
-                await _human_click_xy(page, x, y)
+                await page.mouse.move(x - 50, y - 25, steps=8)
+                await asyncio.sleep(random.uniform(0.15, 0.4))
+                await page.mouse.move(x, y, steps=12)
+                await asyncio.sleep(random.uniform(0.25, 0.6))
+                await page.mouse.click(x, y)
                 vlog(f"Turnstile: clicked container {sel}", attempt)
                 return True
             except Exception:
@@ -3097,7 +3687,9 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                         continue
                     tx = box["x"] + min(20, box["width"] * 0.2)
                     ty = box["y"] + box["height"] / 2
-                    await _human_click_xy(page, tx, ty)
+                    await page.mouse.move(tx, ty, steps=12)
+                    await asyncio.sleep(random.uniform(0.2, 0.5))
+                    await page.mouse.click(tx, ty)
                     vlog(f"Turnstile: clicked frame {sel}", attempt)
                     return True
                 except Exception:
@@ -3161,7 +3753,11 @@ async def _click_turnstile_slot_above_complete(page, attempt: int) -> bool:
         y = box["y"] - 36
         if y < 8:
             return False
-        await _human_click_xy(page, x, y)
+        await page.mouse.move(x - 30, y - 10, steps=6)
+        await asyncio.sleep(random.uniform(0.1, 0.25))
+        await page.mouse.move(x, y, steps=8)
+        await asyncio.sleep(random.uniform(0.15, 0.35))
+        await page.mouse.click(x, y)
         vlog(f"Turnstile: clicked slot above Complete ({x:.0f},{y:.0f})", attempt)
         return True
     except Exception as e:
@@ -3278,10 +3874,427 @@ async def _on_complete_signup_form(page) -> bool:
         return False
 
 
+async def _read_complete_form_state(page) -> dict[str, Any]:
+    """DOM snapshot of Complete-sign-up + optional ARIA overlay (disabled/roles)."""
+    try:
+        st = await page.evaluate(
+            """() => {
+              const val = (sel) => {
+                const el = document.querySelector(sel);
+                return el && typeof el.value === 'string' ? el.value : '';
+              };
+              const vis = (sel) => {
+                try {
+                  const el = document.querySelector(sel);
+                  if (!el) return false;
+                  const r = el.getBoundingClientRect();
+                  return r.width > 2 && r.height > 2;
+                } catch(e) { return false; }
+              };
+              let tsLen = 0;
+              try {
+                const el = document.querySelector(
+                  '[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"]'
+                );
+                if (el && el.value) tsLen = el.value.length;
+                if (!tsLen) {
+                  document.querySelectorAll('input[type="hidden"]').forEach(i => {
+                    if ((i.name||'').includes('turnstile') && i.value)
+                      tsLen = Math.max(tsLen, i.value.length);
+                  });
+                }
+              } catch(e) {}
+              const body = (document.body?.innerText || '').slice(0, 1200).toLowerCase();
+              const onComplete = body.includes('complete your sign up')
+                || body.includes('complete sign up');
+              const err = body.includes('required') || body.includes('invalid')
+                || body.includes('try again') || body.includes('verification failed');
+              const hasPw = !!document.querySelector('input[type="password"]');
+              const hasCompleteBtn = [...document.querySelectorAll('button')].some(b =>
+                /complete\\s*sign\\s*up/i.test((b.innerText||'').trim())
+              );
+              const first = val('input[name="firstName"]')
+                || val('input[name="first_name"]')
+                || val('input[autocomplete="given-name"]')
+                || val('input[name="given_name"]');
+              const last = val('input[name="lastName"]')
+                || val('input[name="last_name"]')
+                || val('input[autocomplete="family-name"]')
+                || val('input[name="family_name"]');
+              const pw = val('input[type="password"]') || val('input[name="password"]');
+              const tsIframe = !!document.querySelector(
+                'iframe[src*="challenges.cloudflare"], iframe[src*="turnstile"], [data-sitekey]'
+              );
+              return {
+                onComplete, err, hasPw, hasCompleteBtn, first, last,
+                pwLen: (pw||'').length, tsLen, tsIframe,
+                url: location.href || '',
+              };
+            }"""
+        ) or {}
+        if not isinstance(st, dict):
+            st = {}
+        # ARIA overlay (disabled is more reliable than DOM alone)
+        try:
+            aria = await _page_aria_snapshot(page, timeout_ms=1500)
+            sig = parse_aria_snapshot_signals(aria)
+            st["aria"] = sig
+            if sig.get("completeBtn"):
+                st["hasCompleteBtn"] = True
+            if sig.get("headingComplete"):
+                st["onComplete"] = True
+            if sig.get("hasPassword"):
+                st["hasPw"] = True
+            if sig.get("completeDisabled"):
+                st["btnDisabledAria"] = True
+        except Exception:
+            pass
+        return st
+    except Exception as e:
+        return {"error": str(e)[:80], "onComplete": True, "tsLen": 0, "pwLen": 0}
+
+
+def classify_complete_success(
+    url: str,
+    stage: str,
+    st: dict[str, Any] | None,
+) -> bool:
+    """Pure success classifier for complete-signup (unit-tested).
+
+    Soft-reload of /sign-up can drop the complete form and land on email/chooser —
+    that must NOT count as success (log: sugarloaf went login after false leave).
+    """
+    url_l = (url or "").lower()
+    stage_s = (stage or "").strip()
+    st = st or {}
+
+    if "accounts.x.ai/account" in url_l or "grok.com" in url_l:
+        return True
+    # OAuth / CLI auth only — not bare substring "oauth" on unrelated paths
+    if any(
+        x in url_l
+        for x in (
+            "cli-auth",
+            "/oauth/",
+            "oauth2",
+            "authorize?",
+            "/authorize",
+            "callback",
+        )
+    ):
+        return True
+
+    # Still clearly on complete profile step
+    if st.get("onComplete") or st.get("hasCompleteBtn"):
+        return False
+    if st.get("hasPw") and "sign-up" in url_l:
+        return False
+
+    # Soft-refresh trap: early signup stages after reload ≠ complete success
+    if stage_s in (
+        "signup_email",
+        "signup_chooser",
+        "signup_otp",
+        "signup_profile",
+        "cookie",
+        "loading",
+        "page_error",
+        "cf_challenge",
+        "unknown",
+        "",
+    ):
+        return False
+    if stage_s in (
+        "account_home",
+        "grok_chat",
+        "oauth_consent",
+        "signin_form",
+        "signin_chooser",
+    ):
+        # signin after complete often means account created (email exists)
+        return True
+
+    if not st.get("hasPw") and not st.get("onComplete") and not st.get("hasCompleteBtn"):
+        if "sign-up" not in url_l:
+            return True
+    return False
+
+
+async def _complete_form_succeeded(page) -> bool:
+    """True if we left the complete-signup step (positive signals only)."""
+    try:
+        url = page.url or ""
+        st = await _read_complete_form_state(page)
+        try:
+            # aria=True once here helps when DOM stage is unknown after navigate
+            stage = str((await read_page_state(page, aria=True)).get("stage") or "")
+        except Exception:
+            stage = ""
+        return classify_complete_success(url, stage, st)
+    except Exception:
+        return False
+
+
+async def _wait_complete_button_ready(page, max_wait: float = 2.5) -> dict[str, Any]:
+    """Wait briefly for Complete button to enable after CF token lands."""
+    deadline = time.monotonic() + max_wait
+    last: dict[str, Any] = {}
+    while time.monotonic() < deadline:
+        last = await _complete_button_state(page)
+        if last.get("found") and not last.get("disabled") and not last.get("covered"):
+            return last
+        if last.get("found") and last.get("disabled"):
+            # Nudge password so React re-validates
+            try:
+                pw = page.locator('input[type="password"]').first
+                if await pw.count() > 0:
+                    await pw.focus()
+                    await pw.press("End")
+                    await pw.evaluate("el => el.dispatchEvent(new Event('input',{bubbles:true}))")
+            except Exception:
+                pass
+        if last.get("covered"):
+            await dismiss_cookie_banner(page)
+            try:
+                await page.keyboard.press("Escape")
+            except Exception:
+                pass
+        await asyncio.sleep(0.25)
+    return last
+
+
+async def _refill_complete_profile(
+    page, first: str, last: str, password: str, attempt: int
+) -> dict[str, Any]:
+    """Re-fill name+password (CF often remounts and wipes fields after solve)."""
+    await dismiss_cookie_banner(page)
+    await fill_input(
+        page,
+        [
+            'input[name="firstName"]',
+            'input[name="first_name"]',
+            'input[name="given_name"]',
+            'input[name*="first" i]',
+            'input[autocomplete="given-name"]',
+            'input[placeholder*="First" i]',
+        ],
+        first,
+    )
+    await fill_input(
+        page,
+        [
+            'input[name="lastName"]',
+            'input[name="last_name"]',
+            'input[name="family_name"]',
+            'input[name*="last" i]',
+            'input[autocomplete="family-name"]',
+            'input[placeholder*="Last" i]',
+        ],
+        last,
+    )
+    try:
+        name_inputs = await page.locator(
+            'input[name="name"], input[autocomplete="name"]'
+        ).all()
+        if name_inputs and not await page.locator('input[name*="first" i]').count():
+            await name_inputs[0].fill(f"{first} {last}")
+    except Exception:
+        pass
+    await _ensure_password_filled(page, password, attempt)
+    st = await _read_complete_form_state(page)
+    vlog(
+        f"complete refill first_len={len(st.get('first') or '')} "
+        f"last_len={len(st.get('last') or '')} pw_len={st.get('pwLen')} "
+        f"ts={st.get('tsLen')}",
+        attempt,
+    )
+    return st
+
+
+async def _complete_button_state(page) -> dict[str, Any]:
+    """Inspect Complete sign-up button (DOM + ARIA disabled/covered)."""
+    try:
+        st = await page.evaluate(
+            """() => {
+              const btns = [...document.querySelectorAll('button')];
+              const b = btns.find(x => /complete\\s*sign\\s*up/i.test(
+                (x.innerText||'').trim()));
+              if (!b) return {found: false};
+              const r = b.getBoundingClientRect();
+              const cs = getComputedStyle(b);
+              const mid = document.elementFromPoint(
+                r.left + r.width/2, r.top + r.height/2);
+              return {
+                found: true,
+                disabled: !!(b.disabled || b.getAttribute('aria-disabled') === 'true'),
+                text: (b.innerText||'').trim().slice(0, 40),
+                w: Math.round(r.width), h: Math.round(r.height),
+                opacity: cs.opacity,
+                pointerEvents: cs.pointerEvents,
+                covered: !!(mid && mid !== b && !b.contains(mid)),
+                coverTag: mid ? (mid.tagName + (mid.className ? '.' + String(mid.className).slice(0,40) : '')) : '',
+              };
+            }"""
+        ) or {"found": False}
+        if not isinstance(st, dict):
+            st = {"found": False}
+        # ARIA may surface disabled when DOM property lags React
+        try:
+            aria = await _page_aria_snapshot(page, timeout_ms=1000)
+            sig = parse_aria_snapshot_signals(aria)
+            if sig.get("completeBtn"):
+                st["found"] = True
+            if sig.get("completeDisabled"):
+                st["disabled"] = True
+                st["disabledAria"] = True
+        except Exception:
+            pass
+        return st
+    except Exception as e:
+        return {"found": False, "error": str(e)[:60]}
+
+
+async def _submit_complete_signup(page, attempt: int) -> bool:
+    """Submit Complete while token is live — multi-wave (do not stop at first click).
+
+    Log pattern: turnstile_ok + token_len~645 → click → still on form ts=0.
+    One role-click often fires CF consume without React form handlers.
+    """
+    await dismiss_cookie_banner(page)
+    bst = await _complete_button_state(page)
+    vlog(
+        f"complete btn found={bst.get('found')} disabled={bst.get('disabled')} "
+        f"covered={bst.get('covered')} cover={bst.get('coverTag')!r}",
+        attempt,
+    )
+    if bst.get("covered"):
+        await dismiss_cookie_banner(page)
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await asyncio.sleep(0.3)
+
+    waves_hit: list[str] = []
+
+    # Wave 1: Playwright role click (and force if disabled attr is stale)
+    try:
+        btn = page.get_by_role("button", name=re.compile(r"complete\s+sign\s*up", re.I))
+        if await btn.count() > 0:
+            await btn.first.scroll_into_view_if_needed(timeout=2000)
+            await asyncio.sleep(0.12)
+            if bst.get("disabled"):
+                # Nudge fields so React re-enables, then force click
+                try:
+                    pw = page.locator('input[type="password"]').first
+                    if await pw.count() > 0:
+                        await pw.click(timeout=1500)
+                        await pw.press("End")
+                except Exception:
+                    pass
+            try:
+                await btn.first.click(timeout=4000)
+            except Exception:
+                await btn.first.click(timeout=3000, force=True)
+            waves_hit.append("role")
+            vlog("complete: clicked role button", attempt)
+            await asyncio.sleep(0.35)
+            if await _complete_form_succeeded(page):
+                return True
+            if await turnstile_token_len(page) <= 20:
+                vlog(f"complete: token consumed after role click waves={waves_hit}", attempt)
+                return True  # click registered; caller re-solves if still on form
+    except Exception as e:
+        vlog(f"complete: role click warn {e}", attempt)
+
+    # Wave 2: Enter on password (native form submit)
+    if await turnstile_token_len(page) > 20:
+        try:
+            pw = page.locator('input[type="password"]').first
+            if await pw.count() > 0:
+                await pw.click(timeout=2000)
+                await pw.press("Enter")
+                waves_hit.append("enter")
+                vlog("complete: Enter on password", attempt)
+                await asyncio.sleep(0.4)
+                if await _complete_form_succeeded(page):
+                    return True
+                if await turnstile_token_len(page) <= 20:
+                    return True
+        except Exception as e:
+            vlog(f"complete: Enter warn {e}", attempt)
+
+    # Wave 3: smart_click text
+    if await turnstile_token_len(page) > 20:
+        hit = await smart_click(
+            page,
+            ["Complete sign up", "Complete Sign Up", "Create account"],
+            exclude=["Google", "Apple", "email"],
+            timeout_s=2.5,
+            attempt=attempt,
+        )
+        if hit:
+            waves_hit.append(f"smart:{hit}")
+            vlog(f"complete: smart_click {hit!r}", attempt)
+            await asyncio.sleep(0.35)
+            if await _complete_form_succeeded(page) or await turnstile_token_len(page) <= 20:
+                return True
+
+    # Wave 4: JS — pointer events + clear disabled + requestSubmit
+    if await turnstile_token_len(page) > 20 or not waves_hit:
+        try:
+            ok = await page.evaluate(
+                """() => {
+                  const btns = [...document.querySelectorAll('button')];
+                  const b = btns.find(x => /complete\\s*sign\\s*up/i.test(
+                    (x.innerText||'').trim()));
+                  if (b) {
+                    try { b.disabled = false; b.removeAttribute('disabled');
+                      b.setAttribute('aria-disabled', 'false'); } catch(e) {}
+                    const r = b.getBoundingClientRect();
+                    const opts = {bubbles: true, cancelable: true, view: window,
+                      clientX: r.left + r.width/2, clientY: r.top + r.height/2};
+                    for (const t of ['pointerdown','mousedown','pointerup','mouseup','click']) {
+                      try { b.dispatchEvent(new MouseEvent(t, opts)); } catch(e) {}
+                    }
+                    try { b.click(); } catch(e) {}
+                  }
+                  const form = b ? b.closest('form') : document.querySelector('form');
+                  if (form && typeof form.requestSubmit === 'function') {
+                    try { form.requestSubmit(b || undefined); return 'requestSubmit'; } catch(e) {}
+                    try { form.requestSubmit(); return 'requestSubmit2'; } catch(e) {}
+                  }
+                  if (form) { try { form.submit(); return 'form.submit'; } catch(e) {} }
+                  return b ? 'js-click' : '';
+                }"""
+            )
+            if ok:
+                waves_hit.append(f"js:{ok}")
+                vlog(f"complete: js submit {ok}", attempt)
+                await asyncio.sleep(0.35)
+                if await _complete_form_succeeded(page) or await turnstile_token_len(page) <= 20:
+                    return True
+        except Exception as e:
+            vlog(f"complete: js submit warn {e}", attempt)
+
+    # Wave 5: type=submit any
+    try:
+        sub = page.locator('button[type="submit"]').first
+        if await sub.count() > 0 and await sub.is_visible():
+            await sub.click(timeout=3000, force=True)
+            waves_hit.append("type=submit")
+            vlog("complete: clicked type=submit", attempt)
+    except Exception:
+        pass
+
+    vlog(f"complete: submit waves done {waves_hit}", attempt)
+    return bool(waves_hit)
+
+
 async def handle_turnstile(
     page,
     attempt: int,
-    max_wait: float | None = None,
+    max_wait: float = 35.0,
     *,
     require_token: bool = False,
     password: str | None = None,
@@ -3294,10 +4307,7 @@ async def handle_turnstile(
     never treat absence of iframe as success.
     use_global_limit=True: acquire TURNSTILE_PARALLEL semaphore (concurrent farm).
     allow_remount=False: click-only (old complete_signup style — no soft/hard remount).
-    max_wait=None: use GROK_TURNSTILE_MAX_WAIT (default 90s).
     """
-    if max_wait is None:
-        max_wait = float(TURNSTILE_MAX_WAIT_S)
     if use_global_limit:
         async with _get_turnstile_sem():
             return await _handle_turnstile_inner(
@@ -3316,56 +4326,6 @@ async def handle_turnstile(
         password=password,
         allow_remount=allow_remount,
     )
-
-
-async def capture_page_diagnostics(page) -> dict[str, Any]:
-    """Snapshot for failed.json when signup/CF stalls (debuggable without screenshots)."""
-    diag: dict[str, Any] = {}
-    try:
-        diag["url"] = (page.url or "")[:400]
-    except Exception as e:
-        diag["url_error"] = str(e)[:80]
-    try:
-        diag["title"] = ((await page.title()) or "")[:160]
-    except Exception:
-        pass
-    try:
-        body = ((await page.inner_text("body")) or "")[:500]
-        diag["body_preview"] = " ".join(body.split())
-    except Exception:
-        pass
-    try:
-        body_l = (diag.get("body_preview") or "").lower()
-        diag["cf_challenge"] = any(
-            n in body_l
-            for n in (
-                "verify you are human",
-                "just a moment",
-                "checking your browser",
-                "hanya sebentar",
-                "attention required",
-            )
-        )
-        diag["has_email_chooser"] = any(
-            n in body_l
-            for n in ("sign up with email", "continue with google", "sign up with google")
-        )
-    except Exception:
-        pass
-    try:
-        diag["turnstile_visible"] = bool(await turnstile_visible(page))
-        diag["turnstile_token_len"] = int(await turnstile_token_len(page) or 0)
-    except Exception:
-        pass
-    try:
-        diag["email_input_count"] = int(
-            await page.locator(
-                'input[type="email"], input[name="email"], input[autocomplete="email"]'
-            ).count()
-        )
-    except Exception:
-        pass
-    return diag
 
 
 async def _handle_turnstile_inner(
@@ -3705,11 +4665,7 @@ async def stop_cli_oauth_server() -> None:
     await _OAUTH_HUB.stop()
 
 
-def exchange_code_for_tokens(
-    code: str,
-    verifier: str,
-    proxy_url: str | None = None,
-) -> dict:
+def exchange_code_for_tokens(code: str, verifier: str) -> dict:
     form = urlencode(
         {
             "grant_type": "authorization_code",
@@ -3728,8 +4684,7 @@ def exchange_code_for_tokens(
         },
         method="POST",
     )
-    http_proxy = _http_proxy_for_attempt(proxy_url)
-    with urlopen_proxied(req, timeout=30, proxy_url=http_proxy) as resp:
+    with urllib.request.urlopen(req, timeout=30) as resp:
         data = json.loads(resp.read().decode("utf-8"))
     access = data.get("access_token") or ""
     refresh = data.get("refresh_token") or ""
@@ -4043,13 +4998,12 @@ async def fill_xai_otp_boxes(page, otp_chars: str, attempt: int) -> bool:
 
 
 # ── temp mail (generator.email via Camoufox/Playwright) ─────────────────────
-# Ported from refer/alibaba/farm.py (nodriver) → Camoufox (Playwright API).
-# The mail browser runs headless by default (TEMPMAIL_HEADLESS=True). Set
-# GROK_TEMPMAIL_HEADLESS=false to make it visible for debugging. One persistent
-# mail page per worker:
-#   - gen: open generator.email, read the address from #email_ch_text
-#   - read OTP: poll the inbox for the xAI verification mail, extract the code
-_tempmail_sessions: dict[int, Any] = {}
+# STRICT PER-WORKER isolation:
+#   _tempmail_sessions[attempt_num] = own Camoufox + page + inbox URL
+#   Worker A never reads/writes worker B's session.
+#   Signup browser (manager) is separate — never shared with mail browser.
+# Set GROK_TEMPMAIL_HEADLESS=false to watch the mail window.
+_tempmail_sessions: dict[int, dict[str, Any]] = {}
 
 
 def _find_otp_in_text(text: str) -> str | None:
@@ -4112,156 +5066,426 @@ def _find_otp_in_text(text: str) -> str | None:
     return None
 
 
-async def tempmail_gen_email(mail_page, attempt: int, max_rolls: int = 25) -> str:
-    """Open generator.email and return a non-blacklisted address.
+def _tempmail_inbox_urls(email_addr: str) -> list[str]:
+    """generator.email accepts several inbox URL shapes — try all (per-worker)."""
+    email_addr = (email_addr or "").strip()
+    if "@" not in email_addr:
+        return []
+    user, domain = email_addr.rsplit("@", 1)
+    user, domain = user.strip(), domain.strip()
+    # Order: most reliable first (refer uses domain/user; farm also saw full-email form)
+    return [
+        f"https://generator.email/{domain}/{user}",
+        f"https://generator.email/{email_addr}",
+        f"https://generator.email/{email_addr.replace('@', '%40')}",
+    ]
 
-    Initial visit: the home page (https://generator.email/). If the generated
-    address lands on a domain xAI already rejected, re-roll by navigating to
-    https://generator.email/email-generator — that endpoint forces a FRESH
-    random address each visit (the home page pins the address per session, so
-    re-navigating it returns the same one). Caps at max_rolls to avoid an
-    infinite loop.
+
+async def _tempmail_read_address(mail_page) -> str:
+    """DOM-aware read of the pinned generator.email address."""
+    try:
+        email = await mail_page.evaluate(
+            """() => {
+              const sels = [
+                '#email_ch_text', '#email_id', '#email',
+                '[id*="email" i]', '.email', 'input[readonly]'
+              ];
+              for (const s of sels) {
+                const el = document.querySelector(s);
+                if (!el) continue;
+                const t = (el.textContent || el.value || '').trim();
+                if (t && t.includes('@') && !t.includes('undefined')) return t;
+              }
+              // fallback: any @ in body that looks like an email
+              const m = (document.body?.innerText || '').match(
+                /[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\\.[A-Za-z]{2,}/
+              );
+              return m ? m[0] : '';
+            }"""
+        )
+        return (email or "").strip()
+    except Exception:
+        return ""
+
+
+async def tempmail_gen_email(mail_page, attempt: int, max_rolls: int = 25) -> str:
+    """Open generator.email and return a non-blacklisted address (this worker only).
+
+    Self-heal: soft-reload home if address never appears; re-roll via
+    /email-generator when domain is blacklisted.
     """
-    emit_progress(attempt, "tempmail_open", "Opening generator.email (visible)", "")
-    await mail_page.goto("https://generator.email/", wait_until="domcontentloaded", timeout=45000)
+    emit_progress(attempt, "tempmail_open", f"[w{attempt}] open generator.email", "")
+    try:
+        await mail_page.goto(
+            "https://generator.email/", wait_until="domcontentloaded", timeout=45000
+        )
+    except Exception as e:
+        print(f"[{attempt}] tempmail home goto fail: {e} — retry", flush=True)
+        await asyncio.sleep(1.0)
+        await mail_page.goto(
+            "https://generator.email/", wait_until="commit", timeout=45000
+        )
 
     rolls = 0
     email = ""
     while rolls < max_rolls:
         rolls += 1
         email = ""
-        deadline = asyncio.get_event_loop().time() + 20  # hard cap 20s per roll
-        while asyncio.get_event_loop().time() < deadline:
+        deadline = time.monotonic() + 18.0
+        soft_reloads = 0
+        while time.monotonic() < deadline:
+            # CF / blank page on generator.email
             try:
-                email = await mail_page.evaluate(
-                    'document.querySelector("#email_ch_text")?.textContent?.trim() || ""'
-                ) or ""
+                body = ((await mail_page.inner_text("body")) or "")[:400].lower()
             except Exception:
-                pass
-            if email and "@" in email:
+                body = ""
+            if any(
+                x in body
+                for x in (
+                    "just a moment",
+                    "verify you are human",
+                    "checking your browser",
+                    "hanya sebentar",
+                )
+            ):
+                try:
+                    await handle_turnstile(
+                        mail_page, attempt, max_wait=10,
+                        require_token=False, use_global_limit=False,
+                    )
+                except Exception:
+                    pass
+                await asyncio.sleep(0.5)
+                continue
+
+            email = await _tempmail_read_address(mail_page)
+            if email and "@" in email and "undefined" not in email.lower():
                 break
-            await asyncio.sleep(0.5)
+
+            # Soft-reload this worker's mail page only (no shared state)
+            if soft_reloads < 2 and time.monotonic() > deadline - 10:
+                soft_reloads += 1
+                emit_progress(
+                    attempt, "tempmail_open",
+                    f"[w{attempt}] no address — reload mail page",
+                    "",
+                )
+                try:
+                    await mail_page.reload(wait_until="domcontentloaded", timeout=20000)
+                except Exception:
+                    try:
+                        await mail_page.goto(
+                            "https://generator.email/",
+                            wait_until="domcontentloaded",
+                            timeout=30000,
+                        )
+                    except Exception:
+                        pass
+                await asyncio.sleep(0.8)
+                continue
+            await asyncio.sleep(0.35)
 
         if not email or "@" not in email:
             await screenshot(mail_page, attempt, "tempmail_no_address")
-            raise RuntimeError("tempmail: generator.email never returned an address")
+            raise RecoverableFarmError(
+                "tempmail: generator.email never returned an address (worker mail browser)",
+                delay_s=1.5,
+                tag="TempmailNoAddr",
+            )
 
         domain = email.rsplit("@", 1)[-1].strip().lower()
         if not blacklist_contains(domain):
             print(f"[{attempt}] tempmail address: {email}", flush=True)
             if rolls > 1:
-                print(f"[{attempt}] tempmail rolled {rolls}x to avoid blacklist", flush=True)
+                print(
+                    f"[{attempt}] tempmail rolled {rolls}x to avoid blacklist",
+                    flush=True,
+                )
+            # Cache inbox URLs on this worker's session for OTP poll
+            sess = _tempmail_sessions.get(attempt)
+            if isinstance(sess, dict):
+                sess["email"] = email
+                sess["inbox_urls"] = _tempmail_inbox_urls(email)
             return email
 
-        # domain is blacklisted -> re-roll a FRESH address via the generator
-        # endpoint (home page would just return the same pinned address).
-        print(f"[{attempt}] tempmail domain {domain!r} blacklisted, re-rolling...", flush=True)
-        await mail_page.goto(
-            "https://generator.email/email-generator",
-            wait_until="domcontentloaded", timeout=45000,
+        print(
+            f"[{attempt}] tempmail domain {domain!r} blacklisted, re-rolling...",
+            flush=True,
         )
-        await asyncio.sleep(0.5)
+        emit_progress(
+            attempt, "tempmail_open",
+            f"[w{attempt}] roll domain @{domain}",
+            email,
+        )
+        try:
+            await mail_page.goto(
+                "https://generator.email/email-generator",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+        except Exception:
+            await mail_page.goto(
+                "https://generator.email/",
+                wait_until="domcontentloaded",
+                timeout=45000,
+            )
+        await asyncio.sleep(0.45)
 
     await screenshot(mail_page, attempt, "tempmail_all_blacklisted")
-    raise RuntimeError(
-        f"tempmail: {rolls} rolls all landed on blacklisted domains "
-        f"(last={email!r}); generator.email may be recycling a small pool"
+    raise RecoverableFarmError(
+        f"tempmail: {rolls} rolls all blacklisted (last={email!r})",
+        delay_s=2.0,
+        tag="TempmailAllBlacklisted",
     )
 
 
 async def tempmail_read_otp(
     mail_page, email_addr: str, timeout_s: int, attempt: int
 ) -> str | None:
-    """Poll the generator.email inbox for the xAI verification code.
+    """Poll THIS worker's generator.email inbox for xAI OTP (isolated).
 
-    Ported from refer/alibaba read_otp(). generator.email serves the inbox at
-    https://generator.email/<domain>/<user> — re-navigate every ~5s to refresh,
-    click any mail row whose text looks like an xAI verification mail, then read
-    the code out of the opened message body.
+    Self-heal techniques (no waiting on other workers):
+      - dual inbox URL shapes (domain/user + full email)
+      - DOM change detection (skip re-parse of same body)
+      - click xAI / verify / confirmation rows with multiple selectors
+      - soft-reload inbox every few seconds if empty
+      - alternate inbox URL if one shape 404s
+      - per-worker HUD status with elapsed / remaining
     """
-    if "@" not in email_addr:
+    if "@" not in (email_addr or ""):
         return None
-    # Real generator.email inbox URL form (confirmed):
-    #   https://generator.email/<full-email-with-@>
-    inbox_url = f"https://generator.email/{email_addr}"
 
-    emit_progress(attempt, "tempmail_otp", f"Polling temp-mail inbox for xAI code", email_addr)
+    sess = _tempmail_sessions.get(attempt)
+    # Isolation guard: never use another worker's page
+    if isinstance(sess, dict) and sess.get("page") is not None:
+        if sess.get("page") is not mail_page:
+            print(
+                f"[{attempt}] WARN: tempmail page mismatch — using caller's page only",
+                flush=True,
+            )
+        urls = list(sess.get("inbox_urls") or []) or _tempmail_inbox_urls(email_addr)
+    else:
+        urls = _tempmail_inbox_urls(email_addr)
+    if not urls:
+        return None
+
+    url_i = 0
+    inbox_url = urls[url_i]
+    emit_progress(
+        attempt, "tempmail_otp",
+        f"[w{attempt}] poll inbox ≤{timeout_s}s",
+        email_addr,
+    )
     start = time.time()
     deadline = start + timeout_s
     last_nav = 0.0
+    last_body = ""
+    empty_streak = 0
+    heal_cycles = 0
 
-    # Make sure we're on the inbox page first.
-    try:
-        await mail_page.goto(inbox_url, wait_until="domcontentloaded", timeout=45000)
-        last_nav = time.time()
-    except Exception:
-        pass
+    async def _goto_inbox(url: str) -> bool:
+        try:
+            await mail_page.goto(url, wait_until="domcontentloaded", timeout=30000)
+            return True
+        except Exception as e:
+            print(f"[{attempt}] tempmail inbox goto warn: {e}", flush=True)
+            try:
+                await mail_page.goto(url, wait_until="commit", timeout=20000)
+                return True
+            except Exception:
+                return False
+
+    if not await _goto_inbox(inbox_url):
+        # try alternate URL immediately
+        if len(urls) > 1:
+            url_i = 1
+            inbox_url = urls[url_i]
+            await _goto_inbox(inbox_url)
+    last_nav = time.time()
 
     while time.time() < deadline:
-        # Re-navigate at most every 5s to force an inbox refresh.
-        if time.time() - last_nav > 5:
+        elapsed = int(time.time() - start)
+        left = max(0, int(deadline - time.time()))
+        # Per-worker status only (HUD keys by attempt)
+        if elapsed % 4 == 0:
+            emit_progress(
+                attempt,
+                "tempmail_otp",
+                f"[w{attempt}] inbox {elapsed}s · left {left}s · heal={heal_cycles}",
+                email_addr,
+            )
+
+        # CF on mail site (this worker's page only)
+        try:
+            b0 = ((await mail_page.inner_text("body")) or "")[:300].lower()
+        except Exception:
+            b0 = ""
+        if any(
+            x in b0
+            for x in ("just a moment", "verify you are human", "checking your browser")
+        ):
             try:
-                await mail_page.goto(inbox_url, wait_until="domcontentloaded", timeout=30000)
-                last_nav = time.time()
+                await handle_turnstile(
+                    mail_page, attempt, max_wait=10,
+                    require_token=False, use_global_limit=False,
+                )
             except Exception:
                 pass
-            await asyncio.sleep(0.5)
+            await asyncio.sleep(0.4)
 
-        # Click any mail row that looks like the xAI verification mail.
-        # xAI's mail subject contains "x.ai" / "xAI" / "verify" / "code".
+        # Re-navigate at most every 4s to force inbox refresh
+        if time.time() - last_nav > 4.0:
+            await _goto_inbox(inbox_url)
+            last_nav = time.time()
+            await asyncio.sleep(0.35)
+
+        # Click likely xAI verification rows (broad selectors)
         try:
-            await mail_page.evaluate(
+            clicked = await mail_page.evaluate(
                 """() => {
-                    const rows = document.querySelectorAll('tr, .e7m.row, .email-item, li.mail');
-                    for (const el of rows) {
-                        const t = (el.textContent || '').trim().toLowerCase();
-                        if (t && (t.includes('x.ai') || t.includes('xai') ||
-                                  t.includes('verify') || t.includes('verification') ||
-                                  t.includes('code') || t.includes('confirm'))) {
-                            el.click();
-                            return true;
-                        }
+                  const sels = [
+                    'tr', '.e7m.row', '.e7m', '.email-item', 'li.mail',
+                    '[class*="mail"]', '[class*="message"]', 'a[href*="message"]',
+                    '.list-group-item', 'div[onclick]'
+                  ];
+                  const nodes = [];
+                  for (const s of sels) {
+                    try { nodes.push(...document.querySelectorAll(s)); } catch(e) {}
+                  }
+                  const keys = ['x.ai','xai','verify','verification','confirm',
+                                'code','otp','security'];
+                  for (const el of nodes) {
+                    const t = (el.textContent || '').trim().toLowerCase();
+                    if (!t || t.length < 4 || t.length > 500) continue;
+                    if (keys.some(k => t.includes(k))) {
+                      try { el.click(); return true; } catch(e) {}
                     }
-                    return false;
+                  }
+                  // fallback: click first non-empty row
+                  for (const el of nodes) {
+                    const t = (el.textContent || '').trim();
+                    if (t.length > 8 && t.length < 300) {
+                      try { el.click(); return 'first'; } catch(e) {}
+                    }
+                  }
+                  return false;
                 }"""
             )
         except Exception:
-            pass
+            clicked = False
 
-        await asyncio.sleep(1.0)
+        await asyncio.sleep(0.45 if clicked else 0.3)
 
-        # Read the opened message body and look for a code.
+        # Read body — only parse when DOM text changed (faster + accurate)
         try:
             body_text = await mail_page.evaluate(
-                'document.body?.innerText || ""'
+                """() => {
+                  const main = document.querySelector(
+                    '#email_body, .email_body, .message, .mail-body, #message, iframe'
+                  );
+                  // prefer message pane if present
+                  const panes = document.querySelectorAll(
+                    '#email_body, .email_body, .message-body, .mail_message, #message'
+                  );
+                  let t = '';
+                  for (const p of panes) {
+                    const x = (p.innerText || p.textContent || '').trim();
+                    if (x.length > t.length) t = x;
+                  }
+                  if (!t) t = document.body?.innerText || '';
+                  return t;
+                }"""
             ) or ""
         except Exception:
             body_text = ""
 
-        if body_text:
+        if body_text and body_text != last_body:
+            last_body = body_text
             code = _find_otp_in_text(body_text)
             if code:
                 print(f"[{attempt}] tempmail OTP found: {code}", flush=True)
+                emit_progress(
+                    attempt, "tempmail_otp",
+                    f"[w{attempt}] OTP {code}",
+                    email_addr,
+                )
                 return code
+            empty_streak = 0
+        else:
+            empty_streak += 1
 
-        await asyncio.sleep(2.0)
+        # Self-heal empty inbox (this worker only)
+        if empty_streak >= 4:
+            empty_streak = 0
+            heal_cycles += 1
+            # Rotate inbox URL shape
+            if len(urls) > 1:
+                url_i = (url_i + 1) % len(urls)
+                inbox_url = urls[url_i]
+            emit_progress(
+                attempt, "tempmail_otp",
+                f"[w{attempt}] empty inbox — heal #{heal_cycles} url#{url_i + 1}",
+                email_addr,
+            )
+            print(
+                f"[{attempt}] tempmail heal: empty → reload {inbox_url[:60]}",
+                flush=True,
+            )
+            try:
+                await mail_page.reload(wait_until="domcontentloaded", timeout=20000)
+            except Exception:
+                await _goto_inbox(inbox_url)
+            last_nav = time.time()
+            last_body = ""
+            # Every 3rd heal: re-open generator home then inbox (session glitch)
+            if heal_cycles % 3 == 0:
+                try:
+                    await mail_page.goto(
+                        "https://generator.email/",
+                        wait_until="domcontentloaded",
+                        timeout=25000,
+                    )
+                    await asyncio.sleep(0.5)
+                except Exception:
+                    pass
+                await _goto_inbox(inbox_url)
+                last_nav = time.time()
+
+        await asyncio.sleep(0.4)
 
     print(f"[{attempt}] tempmail OTP timed out after {timeout_s}s", flush=True)
+    emit_progress(
+        attempt, "tempmail_otp",
+        f"[w{attempt}] OTP timeout {timeout_s}s",
+        email_addr,
+    )
+    try:
+        await screenshot(mail_page, attempt, "tempmail_otp_timeout")
+    except Exception:
+        pass
     return None
 
 
 async def tempmail_close(attempt: int) -> None:
-    """Close the temp-mail page for a worker (best-effort)."""
+    """Close ONLY this worker's temp-mail browser (never touches siblings)."""
     sess = _tempmail_sessions.pop(attempt, None)
     if sess is None:
         return
-    page, browser, manager = sess
+    # Support legacy tuple form and new dict form
+    if isinstance(sess, dict):
+        page = sess.get("page")
+        browser = sess.get("browser")
+        manager = sess.get("manager")
+    else:
+        page, browser, manager = sess[0], sess[1], sess[2]
     try:
-        await page.close()
+        if page is not None:
+            await page.close()
     except Exception:
         pass
     try:
-        await browser.close()
+        if browser is not None:
+            await browser.close()
     except Exception:
         pass
     if manager is not None:
@@ -4304,8 +5528,24 @@ async def wait_otp_imap_keepalive(
 
 
 async def wait_for_selector_any(page, selectors: list[str], timeout_ms: int = 15000) -> str | None:
+    """Poll selectors; also reacts to CF/cookie so we don't spin on a blocked DOM."""
     deadline = time.monotonic() + timeout_ms / 1000.0
     while time.monotonic() < deadline:
+        try:
+            st = await read_page_state(page)
+            if st.get("stage") == "cookie":
+                await dismiss_cookie_banner(page)
+            elif st.get("stage") == "cf_challenge":
+                try:
+                    await handle_turnstile(
+                        page, 0, max_wait=6, require_token=False, use_global_limit=False,
+                    )
+                except Exception:
+                    pass
+            elif st.get("stage") == "page_error":
+                await recover_page_load_error(page, 0)
+        except Exception:
+            pass
         for sel in selectors:
             try:
                 loc = page.locator(sel).first
@@ -4313,28 +5553,29 @@ async def wait_for_selector_any(page, selectors: list[str], timeout_ms: int = 15
                     return sel
             except Exception:
                 continue
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(0.2)
     return None
 
 
 async def _click_signup_with_email(page, attempt: int) -> bool:
-    """Click provider chooser → email path. Returns True if a click happened."""
-    clicked = await click_text_button(
+    """Click provider chooser → email path (DOM-aware)."""
+    st = await heal_to_stage(
+        page, attempt, {"signup_chooser", "signup_email", "signup_otp", "signup_profile"},
+        timeout_s=8.0,
+    )
+    if st.get("stage") in ("signup_email", "signup_otp", "signup_profile"):
+        return True  # already past chooser
+    clicked = await smart_click(
         page,
         ["Sign up with email", "Sign up with Email", "Continue with email"],
         exclude=["Google", "Apple", "Microsoft", " with X"],
+        timeout_s=5.0,
+        attempt=attempt,
     )
     if clicked:
         print(f"[{attempt}] Clicked: {clicked}", flush=True)
         return True
-    try:
-        await page.get_by_role(
-            "button", name=re.compile(r"sign up with email|continue with email", re.I)
-        ).click(timeout=5000)
-        print(f"[{attempt}] Clicked: Sign up with email (role)", flush=True)
-        return True
-    except Exception:
-        return False
+    return False
 
 
 _SIGNUP_EMAIL_SELS = [
@@ -4454,137 +5695,135 @@ async def _wait_signup_email_input(page, attempt: int, timeout_s: float = 12.0) 
 
 
 async def _ensure_signup_email_ready(
-    page, attempt: int, email_addr: str, *, page_refreshes: int | None = None,
+    page, attempt: int, email_addr: str, *, page_refreshes: int = 3,
 ) -> str:
-    """Find email input; on miss, refresh THIS page (same browser), not full farm restart.
+    """Find email input using DOM brain; soft-refresh only when stage is wrong.
 
-    page_refreshes: how many times to reload sign-up before giving up
-    (default GROK_SIGNUP_PAGE_REFRESHES).
+    page_refreshes: max full page reloads before escalating to browser re-spawn.
     """
-    if page_refreshes is None:
-        page_refreshes = SIGNUP_PAGE_REFRESHES
-    email_wait = float(SIGNUP_EMAIL_WAIT_S)
     for refresh_i in range(page_refreshes + 1):
         if refresh_i == 0:
             emit_progress(attempt, "signup_open", "Opening sign-up page", email_addr)
             await _goto_signup_page(page, attempt)
         else:
-            # Same browser — just refresh the signup page (user request)
             emit_progress(
                 attempt,
                 "signup_open",
-                f"No email field — refresh page {refresh_i}/{page_refreshes}",
+                f"DOM heal refresh {refresh_i}/{page_refreshes}",
                 email_addr,
             )
             print(
-                f"[{attempt}] signup: no email input → refresh page "
-                f"({refresh_i}/{page_refreshes}), same browser",
+                f"[{attempt}] signup: DOM still not signup_email → soft-refresh "
+                f"({refresh_i}/{page_refreshes})",
                 flush=True,
             )
             await _goto_signup_page(page, attempt)
 
-        try:
-            # Managed CF on accounts.x.ai — give Turnstile more time under concurrency
-            await handle_turnstile(
-                page, attempt, max_wait=min(25.0, float(TURNSTILE_MAX_WAIT_S)),
-            )
-        except Exception:
-            pass
-
-        emit_progress(attempt, "signup_email_btn", "Selecting Sign up with email", email_addr)
-        clicked = await _click_signup_with_email(page, attempt)
-        if not clicked:
-            print(
-                f"[{attempt}] No email signup button — assuming form present",
-                flush=True,
-            )
-        await asyncio.sleep(0.6)
-        await dismiss_cookie_banner(page)
-
-        emit_progress(attempt, "fill_email", "Filling registration email", email_addr)
-        # Per-refresh wait; outer loop covers longer total budget
-        email_sel = await _wait_signup_email_input(
-            page, attempt, timeout_s=email_wait,
+        # Understand + drive to email form (handles CF, cookie, chooser, loading)
+        st = await heal_to_stage(
+            page,
+            attempt,
+            {"signup_email", "signup_otp", "signup_profile"},
+            email_addr=email_addr,
+            timeout_s=14.0,
         )
+        stage = st.get("stage") or "unknown"
+        vlog(f"signup DOM stage={stage} buttons={st.get('buttons', [])[:6]}", attempt)
+
+        if stage in ("signup_otp", "signup_profile"):
+            # Already past email — return any visible input sel for no-op fill path
+            sel = await wait_for_selector_any(page, _SIGNUP_EMAIL_SELS, 1500)
+            if sel:
+                return sel
+            # Synthetic: no email field needed
+            return _SIGNUP_EMAIL_SELS[0]
+
+        if stage == "signup_email" or st.get("emailIn"):
+            emit_progress(attempt, "fill_email", "Filling registration email", email_addr)
+            email_sel = await _wait_signup_email_input(page, attempt, timeout_s=8.0)
+            if email_sel:
+                return email_sel
+
+        # Still wrong stage — chooser/CF residual
+        emit_progress(attempt, "signup_email_btn", "Selecting Sign up with email", email_addr)
+        await _click_signup_with_email(page, attempt)
+        email_sel = await _wait_signup_email_input(page, attempt, timeout_s=8.0)
         if email_sel:
             return email_sel
 
-        # Soft reload once mid-wait style: F5 if still nothing
-        if refresh_i < page_refreshes:
-            try:
-                print(f"[{attempt}] signup: page.reload() then re-check", flush=True)
-                await page.reload(wait_until="domcontentloaded", timeout=30000)
-                await asyncio.sleep(1.0)
-                await dismiss_cookie_banner(page)
-                try:
-                    await handle_turnstile(page, attempt, max_wait=12.0)
-                except Exception:
-                    pass
-                await _click_signup_with_email(page, attempt)
-                email_sel = await _wait_signup_email_input(
-                    page, attempt, timeout_s=max(8.0, email_wait * 0.6),
-                )
-                if email_sel:
-                    return email_sel
-            except Exception as e:
-                print(f"[{attempt}] signup reload warn: {e}", flush=True)
-
     await screenshot(page, attempt, "no_email_input")
-    diag = await capture_page_diagnostics(page)
     try:
+        st = await read_page_state(page)
         print(
-            f"[{attempt}] signup miss diag: url={diag.get('url')!r} "
-            f"cf={diag.get('cf_challenge')} email_inputs={diag.get('email_input_count')} "
-            f"body={diag.get('body_preview', '')[:180]!r}",
+            f"[{attempt}] signup give-up stage={st.get('stage')} "
+            f"body={st.get('bodySample')!r}",
             flush=True,
         )
     except Exception:
         pass
-    # Only then escalate to full browser re-spawn (outer self-heal)
-    err = RecoverableFarmError(
-        f"Could not find email input after {page_refreshes} page refresh(es) "
-        f"— will re-spawn browser | url={diag.get('url', '')[:120]} "
-        f"cf={diag.get('cf_challenge')} title={diag.get('title', '')[:60]}",
+    raise RecoverableFarmError(
+        f"Could not reach signup_email after {page_refreshes} DOM-heal refresh(es) "
+        f"— will re-spawn browser",
         delay_s=1.5,
         tag="NoEmailInput",
     )
-    err.diagnostics = diag  # type: ignore[attr-defined]
-    raise err
 
 
 async def do_signup(page, email_addr: str, password: str, attempt: int, mail_page=None) -> bool:
-    # Find email field with in-page refresh first (same browser) — not full restart.
+    # DOM-aware: reach signup_email (or already past it) before acting.
     email_sel = await _ensure_signup_email_ready(
-        page, attempt, email_addr, page_refreshes=SIGNUP_PAGE_REFRESHES,
+        page, attempt, email_addr, page_refreshes=3,
     )
-    filled = await fill_input(page, [email_sel], email_addr)
-    if not filled:
-        # One page refresh then re-fill before giving up the browser
-        print(f"[{attempt}] fill email failed — refresh page and retry fill", flush=True)
-        emit_progress(attempt, "fill_email", "Fill failed — refresh + retry", email_addr)
-        email_sel = await _ensure_signup_email_ready(
-            page, attempt, email_addr, page_refreshes=max(2, SIGNUP_PAGE_REFRESHES // 2),
-        )
-        filled = await fill_input(page, [email_sel], email_addr)
+    st0 = await read_page_state(page)
+    already_past_email = st0.get("stage") in ("signup_otp", "signup_profile", "account_home")
+
+    if not already_past_email:
+        filled = await fill_input(page, [email_sel] + _SIGNUP_EMAIL_SELS, email_addr)
         if not filled:
-            await screenshot(page, attempt, "email_fill_fail")
-            raise RecoverableFarmError(
-                "Failed to fill email after page refresh — will re-spawn browser",
-                delay_s=1.5,
-                tag="EmailFillFail",
+            print(f"[{attempt}] fill email failed — DOM-heal + retry fill", flush=True)
+            emit_progress(attempt, "fill_email", "Fill failed — heal + retry", email_addr)
+            await heal_to_stage(
+                page, attempt, {"signup_email"}, email_addr=email_addr, timeout_s=10.0,
             )
+            email_sel = await _wait_signup_email_input(page, attempt, timeout_s=8.0)
+            filled = bool(email_sel) and await fill_input(
+                page, [email_sel] + _SIGNUP_EMAIL_SELS, email_addr,
+            )
+            if not filled:
+                await screenshot(page, attempt, "email_fill_fail")
+                raise RecoverableFarmError(
+                    "Failed to fill email after DOM heal — will re-spawn browser",
+                    delay_s=1.5,
+                    tag="EmailFillFail",
+                )
 
-    await asyncio.sleep(0.4)
-    await handle_turnstile(page, attempt, max_wait=8)
+        await asyncio.sleep(0.3)
+        await handle_turnstile(page, attempt, max_wait=8)
 
-    emit_progress(attempt, "submit_email", "Clicking Sign up", email_addr)
+        emit_progress(attempt, "submit_email", "Clicking Sign up", email_addr)
+    else:
+        vlog(f"signup already past email (stage={st0.get('stage')})", attempt)
+        emit_progress(
+            attempt, "fill_email",
+            f"Skip email — already {st0.get('stage')}",
+            email_addr,
+        )
+
     otp_wait_started = time.time()
 
     async def _click_sign_up_submit() -> None:
+        hit = await smart_click(
+            page, ["Sign up"],
+            exclude=["Google", "Apple", "email", "X", "with"],
+            timeout_s=4.0,
+            attempt=attempt,
+        )
+        if hit:
+            return
         try:
             await page.locator('button[type="submit"]').filter(
                 has_text=re.compile(r"^sign up$", re.I)
-            ).click(timeout=5000)
+            ).click(timeout=4000)
         except Exception:
             await click_text_button(
                 page, ["Sign up"], exclude=["Google", "Apple", "email", "X"]
@@ -4601,11 +5840,22 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
             timeout_ms,
         )
 
-    await _click_sign_up_submit()
-    await asyncio.sleep(2.0)
+    if not already_past_email or (await read_page_state(page)).get("stage") not in (
+        "signup_otp", "signup_profile",
+    ):
+        await _click_sign_up_submit()
+        await asyncio.sleep(1.2)
 
-    # Wait for OTP UI — soft-refresh same page before full browser restart
-    code_sel = await _wait_otp_fields(18000)
+    # Wait for OTP UI — DOM heal + soft-refresh before full browser restart
+    st_otp = await heal_to_stage(
+        page, attempt, {"signup_otp", "signup_profile"},
+        email_addr=email_addr, timeout_s=10.0,
+    )
+    code_sel = None
+    if st_otp.get("stage") == "signup_otp" or st_otp.get("otpIn"):
+        code_sel = await _wait_otp_fields(8000)
+    if not code_sel:
+        code_sel = await _wait_otp_fields(12000)
     if not code_sel:
         await screenshot(page, attempt, "no_otp_input")
         await handle_turnstile(page, attempt, max_wait=12)
@@ -4668,13 +5918,18 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         )
     if not otp:
         await screenshot(page, attempt, "otp_timeout")
-        # Soft-refresh once then one short re-poll (mail may have landed late)
+        # Soft-heal on BOTH browsers (signup page + this worker's mail page)
         await _page_soft_refresh(
-            page, attempt, reason="OTP timeout — refresh page", step="wait_otp",
+            page, attempt, reason="OTP timeout — refresh signup page", step="wait_otp",
             email_addr=email_addr,
         )
-        extra = 45
+        extra = 60
         if MAIL_MODE == "tempmail" and mail_page is not None:
+            emit_progress(
+                attempt, "tempmail_otp",
+                f"[w{attempt}] extended poll +{extra}s after timeout",
+                email_addr,
+            )
             otp = await tempmail_read_otp(mail_page, email_addr, extra, attempt)
         else:
             otp = await wait_otp_imap_keepalive(
@@ -4682,7 +5937,8 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
             )
         if not otp:
             raise RecoverableFarmError(
-                f"OTP timeout after {OTP_TIMEOUT_S}s + soft-refresh re-poll",
+                f"OTP timeout after {OTP_TIMEOUT_S}s + mail self-heal "
+                f"(worker {attempt} isolated)",
                 delay_s=2.0,
                 tag="OtpTimeout",
             )
@@ -4887,246 +6143,354 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
 
         # Prefer React-safe fill (triggers turnstile mount after password input)
         await _ensure_password_filled(page, password, attempt)
-        await asyncio.sleep(1.2)  # allow CF widget to mount after password
+        await asyncio.sleep(0.8)  # allow CF widget to mount after password
 
-        # Complete sign-up — OLD concurrent-friendly flow (restored):
-        # wall-clock budget, 25s Turnstile slices, click-only (no serial lock /
-        # remount/reload). Matches morning batch that got multi-worker OK.
-        emit_progress(attempt, "complete_signup", "Turnstile + Complete sign up", email_addr)
+        # ── Complete sign-up (DOM-aware) ────────────────────────────────
+        # Research + logs: Turnstile often SOLVES (token_len~645) then form
+        # stays put because password was wiped / submit didn't hit React /
+        # we only checked "Complete your sign up" text. Soft-refresh AFTER
+        # a good token DESTROYS the token → long stuck loops. Fix:
+        #   1) read form state (fields + ts token)
+        #   2) solve CF only if token missing
+        #   3) light re-fill after CF (pw only if names already set)
+        #   4) multi-wave submit + strict success (no soft-reload trap)
+        #   5) never full-reload after token-burn; re-solve CF instead
+        emit_progress(attempt, "complete_signup", "Turnstile + Complete (DOM)", email_addr)
         completed = False
         complete_deadline = time.monotonic() + COMPLETE_SIGNUP_TIMEOUT_S
         round_i = 0
         soft_refreshed_complete = False
+        ever_had_token = False
+        submit_burns = 0  # token present → submit → ts=0 while still on form
         while time.monotonic() < complete_deadline and not completed:
             round_i += 1
             remaining = max(3.0, complete_deadline - time.monotonic())
-            # Mid-budget soft-refresh once if stuck (same browser, re-fill form)
-            if (
-                not soft_refreshed_complete
-                and round_i >= 3
-                and remaining < COMPLETE_SIGNUP_TIMEOUT_S * 0.45
-            ):
-                soft_refreshed_complete = True
-                await _page_soft_refresh(
-                    page, attempt,
-                    reason="complete stuck mid-way — reload + re-fill",
-                    step="complete_signup",
-                    email_addr=email_addr,
-                )
-            # Re-fill if React re-render wiped fields
-            try:
-                await fill_input(
-                    page,
-                    [
-                        'input[name="firstName"]',
-                        'input[name="first_name"]',
-                        'input[name*="first" i]',
-                        'input[autocomplete="given-name"]',
-                    ],
-                    first,
-                )
-                await fill_input(
-                    page,
-                    [
-                        'input[name="lastName"]',
-                        'input[name="last_name"]',
-                        'input[name*="last" i]',
-                        'input[autocomplete="family-name"]',
-                    ],
-                    last,
-                )
-                await _ensure_password_filled(page, password, attempt)
-            except Exception:
-                pass
-
-            # Complete form ALWAYS needs Turnstile — blank ≠ absent
-            # No global serial lock / no remount (old style — parallel OK)
-            slice_wait = min(25.0, remaining)
-            ok_ts = await handle_turnstile(
-                page,
-                attempt,
-                max_wait=slice_wait,
-                require_token=True,
-                allow_remount=False,
-            )
-            tok = await turnstile_token_len(page)
-            mounted = await _turnstile_mount_present(page)
-            print(
-                f"[{attempt}] complete round {round_i}: turnstile_ok={ok_ts} "
-                f"token_len={tok} mounted={mounted}",
-                flush=True,
-            )
-
-            # Do not spam Complete without token (except last ~8s of budget)
-            time_left = complete_deadline - time.monotonic()
-            if tok <= 20 and time_left > 8:
-                print(
-                    f"[{attempt}] no Turnstile token yet — wait (left {time_left:.0f}s)",
-                    flush=True,
-                )
-                await asyncio.sleep(2.0)
-                continue
-
-            await _click_complete_signup_button(page, attempt)
-            # Headless/virtual: navigation can lag (headed debug saw brief
-            # "couldn't load" then /account). Give CF more settle time.
-            if await _wait_left_complete_form(page, attempt, settle_s=6.5):
+            if await _complete_form_succeeded(page):
                 completed = True
                 break
-            print(f"[{attempt}] still on complete form after click", flush=True)
+
+            st = await _read_complete_form_state(page)
+            tok = int(st.get("tsLen") or 0)
+            pw_len = int(st.get("pwLen") or 0)
+            if tok > 20:
+                ever_had_token = True
+            emit_progress(
+                attempt,
+                "complete_signup",
+                f"r{round_i} ts={tok} pw={pw_len} "
+                f"{'err' if st.get('err') else 'ok'}",
+                email_addr,
+            )
+
+            # Step A: ensure profile fields filled
+            if pw_len < 4 or not (st.get("first") or "").strip() or not (st.get("last") or "").strip():
+                st = await _refill_complete_profile(
+                    page, first, last, password, attempt
+                )
+                tok = int(st.get("tsLen") or 0)
+                pw_len = int(st.get("pwLen") or 0)
+
+            # Step B: solve Turnstile only when token missing
+            if tok <= 20:
+                # Aggressive mount when blank: password blur remounts CF widget
+                if round_i >= 2 or not st.get("tsIframe"):
+                    await _force_turnstile_remount(
+                        page, attempt, password, hard=(round_i >= 3 and not ever_had_token),
+                    )
+                    st = await _refill_complete_profile(
+                        page, first, last, password, attempt
+                    )
+                # Short slices (12s) so we cycle strategies faster than 25s dead waits
+                slice_wait = min(12.0, remaining)
+                ok_ts = await handle_turnstile(
+                    page,
+                    attempt,
+                    max_wait=slice_wait,
+                    require_token=True,
+                    password=password,
+                    allow_remount=True,
+                )
+                tok = await turnstile_token_len(page)
+                print(
+                    f"[{attempt}] complete r{round_i}: turnstile_ok={ok_ts} "
+                    f"token_len={tok} mounted={await _turnstile_mount_present(page)}",
+                    flush=True,
+                )
+                # CF solve often remounts form → wipe password — re-fill carefully
+                # Full name re-type can remount CF and burn a fresh token; only
+                # refill what is empty, then re-check token immediately before submit.
+                st = await _read_complete_form_state(page)
+                need_full = (
+                    int(st.get("pwLen") or 0) < 4
+                    or not (st.get("first") or "").strip()
+                    or not (st.get("last") or "").strip()
+                )
+                if need_full:
+                    st = await _refill_complete_profile(
+                        page, first, last, password, attempt
+                    )
+                else:
+                    await _ensure_password_filled(page, password, attempt)
+                    st = await _read_complete_form_state(page)
+                tok = int(st.get("tsLen") or await turnstile_token_len(page) or 0)
+                pw_len = int(st.get("pwLen") or 0)
+                if tok > 20:
+                    ever_had_token = True
+                # Still zero after slice: click slot + frame again once, short wait
+                if tok <= 20:
+                    await try_click_turnstile(page, attempt)
+                    await _click_turnstile_slot_above_complete(page, attempt)
+                    await asyncio.sleep(1.5)
+                    tok = await turnstile_token_len(page)
+                    if tok > 20:
+                        ever_had_token = True
+            else:
+                print(
+                    f"[{attempt}] complete r{round_i}: reuse token_len={tok} "
+                    f"pw={pw_len} (no CF re-solve)",
+                    flush=True,
+                )
+                # Token still good — only touch password if empty (avoid CF remount)
+                if pw_len < 4:
+                    await _ensure_password_filled(page, password, attempt)
+                    st = await _read_complete_form_state(page)
+                    tok = int(st.get("tsLen") or await turnstile_token_len(page) or 0)
+                    pw_len = int(st.get("pwLen") or 0)
+
+            time_left = complete_deadline - time.monotonic()
+            if tok <= 20 and time_left > 10:
+                print(
+                    f"[{attempt}] no Turnstile token yet — remount cycle "
+                    f"(left {time_left:.0f}s burns={submit_burns})",
+                    flush=True,
+                )
+                # Don't idle 25s on ts=0 — remount; hard only if never solved
+                await _force_turnstile_remount(
+                    page, attempt, password,
+                    hard=(round_i >= 3 and not ever_had_token),
+                )
+                await _refill_complete_profile(page, first, last, password, attempt)
+                await asyncio.sleep(0.8)
+                continue
+            if pw_len < 4 and time_left > 8:
+                print(f"[{attempt}] password empty — re-fill", flush=True)
+                await _ensure_password_filled(page, password, attempt)
+                continue
+
+            # Step C: submit while token+password present (verify token still live)
+            tok = await turnstile_token_len(page)
+            if tok <= 20:
+                continue
+            # Wait for React to enable Complete after CF token lands
+            bst = await _wait_complete_button_ready(page, max_wait=2.5)
+            print(
+                f"[{attempt}] complete r{round_i}: submit ts={tok} pw={pw_len} "
+                f"btn_disabled={bst.get('disabled')} covered={bst.get('covered')} "
+                f"found={bst.get('found')}",
+                flush=True,
+            )
+            tok = await turnstile_token_len(page)
+            if tok <= 20:
+                print(f"[{attempt}] token vanished before submit — re-solve", flush=True)
+                continue
+
+            # Network truth: only mutating signup/identity APIs (not static assets)
+            api_hit = {"kind": "ignore", "url": "", "status": 0, "method": ""}
+
+            def _on_signup_resp(resp) -> None:
+                try:
+                    u = resp.url or ""
+                    code = int(resp.status or 0)
+                    method = ""
+                    try:
+                        method = (resp.request.method or "") if resp.request else ""
+                    except Exception:
+                        method = ""
+                    kind = classify_signup_api_response(u, code, method)
+                    if kind == "ignore":
+                        return
+                    # Prefer first non-ignore; upgrade ignore→err/ok, keep err if later ok race
+                    if api_hit["kind"] == "ignore" or (
+                        api_hit["kind"] == "err" and kind == "ok"
+                    ):
+                        api_hit["kind"] = kind
+                        api_hit["url"] = u[:120]
+                        api_hit["status"] = code
+                        api_hit["method"] = method
+                except Exception:
+                    pass
+
+            left_ok = False
+            try:
+                page.on("response", _on_signup_resp)
+            except Exception:
+                pass
+            try:
+                # expect_response + multi-wave submit (do not double-submit on timeout)
+                submitted = False
+                try:
+                    async with page.expect_response(
+                        lambda r: classify_signup_api_response(
+                            r.url,
+                            int(r.status or 0),
+                            (r.request.method if r.request else "") or "",
+                        )
+                        != "ignore",
+                        timeout=9000,
+                    ) as resp_info:
+                        await _submit_complete_signup(page, attempt)
+                        submitted = True
+                    try:
+                        resp = await resp_info.value
+                        method = ""
+                        try:
+                            method = (resp.request.method or "") if resp.request else ""
+                        except Exception:
+                            pass
+                        kind = classify_signup_api_response(
+                            resp.url, int(resp.status or 0), method
+                        )
+                        api_hit["kind"] = kind
+                        api_hit["url"] = (resp.url or "")[:120]
+                        api_hit["status"] = int(resp.status or 0)
+                        api_hit["method"] = method
+                    except Exception:
+                        pass
+                except Exception as exp_e:
+                    # Timeout: action inside with-block usually already ran
+                    if not submitted:
+                        await _submit_complete_signup(page, attempt)
+                        submitted = True
+                    vlog(
+                        f"complete: expect_response note {type(exp_e).__name__}: "
+                        f"{str(exp_e)[:80]}",
+                        attempt,
+                    )
+
+                for _ in range(16):
+                    await asyncio.sleep(0.4)
+                    if await _complete_form_succeeded(page):
+                        left_ok = True
+                        break
+                    # API ok alone is NOT enough while complete form still visible
+                    # (hellverg: noisy api_hit with form stuck). Require left form.
+                    if (
+                        api_hit["kind"] == "ok"
+                        and not await _on_complete_signup_form(page)
+                    ):
+                        left_ok = True
+                        break
+            finally:
+                try:
+                    page.remove_listener("response", _on_signup_resp)
+                except Exception:
+                    pass
+            if left_ok:
+                completed = True
+                print(
+                    f"[{attempt}] complete: left form (success) "
+                    f"api={api_hit['kind']} {api_hit['status']} "
+                    f"{api_hit['method']} {api_hit['url'][:60]}",
+                    flush=True,
+                )
+                break
+
+            st2 = await _read_complete_form_state(page)
+            tok2 = int(st2.get("tsLen") or 0)
+            body_snip = ""
+            try:
+                body_snip = (await page.inner_text("body"))[:180].replace("\n", " ")
+            except Exception:
+                pass
+            aria_dis = bool(
+                st2.get("btnDisabledAria")
+                or (st2.get("aria") or {}).get("completeDisabled")
+            )
+            print(
+                f"[{attempt}] still on complete after submit "
+                f"ts={tok2} pw={st2.get('pwLen')} err={st2.get('err')} "
+                f"api={api_hit['kind']}:{api_hit['status']}:{api_hit['method']} "
+                f"aria_disabled={aria_dis} "
+                f"btn={await _complete_button_state(page)} "
+                f"body={body_snip!r}",
+                flush=True,
+            )
+            # Token still live → multi-wave already ran; light pw nudge + one more
+            if tok2 > 20:
+                if int(st2.get("pwLen") or 0) < 4:
+                    await _ensure_password_filled(page, password, attempt)
+                await _wait_complete_button_ready(page, max_wait=1.5)
+                await _submit_complete_signup(page, attempt)
+                for _ in range(10):
+                    await asyncio.sleep(0.4)
+                    if await _complete_form_succeeded(page):
+                        completed = True
+                        break
+                if completed:
+                    break
+            else:
+                # Token burned, still on form = failed accept (server/React).
+                # Do NOT soft-reload (destroys session + false "left form").
+                # Re-solve CF next loop. Soft-refresh only if CF never mounted.
+                submit_burns += 1
+                print(
+                    f"[{attempt}] complete: token burn #{submit_burns} "
+                    f"api={api_hit['kind']}:{api_hit['status']} "
+                    f"(re-solve, no page reload)",
+                    flush=True,
+                )
+                # Fail-fast: 3 burns with CF that does solve → re-spawn, don't sit 120s
+                if submit_burns >= 3 and ever_had_token:
+                    await screenshot(page, attempt, "complete_token_burn")
+                    raise RecoverableFarmError(
+                        f"complete_signup token burned {submit_burns}x "
+                        f"(api={api_hit['kind']}:{api_hit['status']} "
+                        f"err={st2.get('err')} aria_disabled={aria_dis}) "
+                        f"— re-spawn browser",
+                        delay_s=2.0,
+                        tag="CompleteTokenBurn",
+                    )
+                if (
+                    not soft_refreshed_complete
+                    and not ever_had_token
+                    and round_i >= 3
+                    and not st2.get("tsIframe")
+                    and remaining < COMPLETE_SIGNUP_TIMEOUT_S * 0.35
+                ):
+                    soft_refreshed_complete = True
+                    await _page_soft_refresh(
+                        page, attempt,
+                        reason="complete: Turnstile never mounted — reload form",
+                        step="complete_signup",
+                        email_addr=email_addr,
+                    )
+                    # After reload, only continue if still on complete profile
+                    if not await _on_complete_signup_form(page):
+                        print(
+                            f"[{attempt}] complete: post-reload not on form "
+                            f"(stage trap) — fail closed",
+                            flush=True,
+                        )
+                        break
+                    await _refill_complete_profile(page, first, last, password, attempt)
 
         if not completed:
-            # Last chance: soft-refresh + one more short complete cycle
-            if not soft_refreshed_complete:
-                soft_refreshed_complete = True
-                await _page_soft_refresh(
-                    page, attempt,
-                    reason="complete timeout — final page refresh",
-                    step="complete_signup",
-                    email_addr=email_addr,
-                )
-                try:
-                    await fill_input(
-                        page,
-                        ['input[name*="first" i]', 'input[autocomplete="given-name"]'],
-                        first,
-                    )
-                    await fill_input(
-                        page,
-                        ['input[name*="last" i]', 'input[autocomplete="family-name"]'],
-                        last,
-                    )
-                    await _ensure_password_filled(page, password, attempt)
-                    await handle_turnstile(
-                        page, attempt, max_wait=20, require_token=True, allow_remount=False,
-                    )
-                    await _click_complete_signup_button(page, attempt)
-                    if await _wait_left_complete_form(page, attempt, settle_s=7.0):
-                        completed = True
-                except Exception as e:
-                    print(f"[{attempt}] complete final refresh warn: {e}", flush=True)
-            if not completed:
+            if await _complete_form_succeeded(page):
+                completed = True
+            else:
                 await screenshot(page, attempt, "complete_stuck")
+                stf = await _read_complete_form_state(page)
                 raise RecoverableFarmError(
                     f"complete_signup stuck >{COMPLETE_SIGNUP_TIMEOUT_S}s "
-                    "after page refresh (Turnstile unclear / form not advancing)",
+                    f"(ts={stf.get('tsLen')} pw={stf.get('pwLen')} "
+                    f"onComplete={stf.get('onComplete')} burns={submit_burns} "
+                    f"ever_ts={ever_had_token})",
                     delay_s=2.0,
                     tag="CompleteStuck",
                 )
 
     await screenshot(page, attempt, "after_signup")
     return True
-
-
-def _is_xai_account_page(url: str) -> bool:
-    """True only for /account page — not host 'accounts.x.ai' (substring trap)."""
-    try:
-        path = (urlparse(url or "").path or "").rstrip("/").lower()
-    except Exception:
-        path = ""
-    # path is /account or /account/...
-    return path == "/account" or path.startswith("/account/")
-
-
-async def _click_complete_signup_button(page, attempt: int) -> None:
-    """Prefer humanized mouse click on Complete (same path as Turnstile)."""
-    try:
-        btn = page.get_by_role(
-            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
-        ).first
-        if await btn.count() > 0:
-            box = await btn.bounding_box(timeout=4000)
-            if box:
-                x = box["x"] + box["width"] * random.uniform(0.35, 0.65)
-                y = box["y"] + box["height"] * random.uniform(0.35, 0.65)
-                await _human_click_xy(page, x, y)
-                vlog("Complete sign up: humanized click", attempt)
-                return
-    except Exception as e:
-        vlog(f"Complete human click warn: {e}", attempt)
-    try:
-        await page.get_by_role(
-            "button", name=re.compile(r"complete\s+sign\s*up", re.I)
-        ).click(timeout=5000)
-    except Exception:
-        await click_text_button(
-            page,
-            ["Complete sign up", "Complete Sign Up", "Create account", "Continue"],
-        )
-
-
-async def _wait_left_complete_form(
-    page, attempt: int, *, settle_s: float = 6.0,
-) -> bool:
-    """True when we left Complete form (account page, navigation, or form gone).
-
-    Headed proof: after Complete, brief 'couldn't load' then /account — need wait.
-    Never treat host 'accounts.x.ai' as success (see _is_xai_account_page).
-    """
-    deadline = time.monotonic() + max(2.5, settle_s)
-    while time.monotonic() < deadline:
-        try:
-            url = (page.url or "").lower()
-        except Exception:
-            url = ""
-        if _is_xai_account_page(url):
-            vlog(f"left complete → account url={url[:80]}", attempt)
-            return True
-        if "grok.com" in url and "sign" not in url and "accounts.x.ai" not in url:
-            return True
-        try:
-            body = ((await page.inner_text("body")) or "")[:600].lower()
-        except Exception:
-            body = ""
-        # Transient error page right after successful submit (seen headed)
-        if (
-            "couldn't load" in body
-            or "couldn’t load" in body
-            or "reload to try again" in body
-        ):
-            await asyncio.sleep(1.2)
-            try:
-                await page.wait_for_load_state("domcontentloaded", timeout=4000)
-            except Exception:
-                pass
-            continue
-        try:
-            still = await page.locator("text=Complete your sign up").count()
-        except Exception:
-            still = 0
-        if still == 0:
-            # Form title gone — only success if not still clearly on complete step
-            if "verify you are human" in body and "complete" in body:
-                await asyncio.sleep(0.8)
-                continue
-            # Welcome / Manage account / Your account → done
-            if any(
-                n in body
-                for n in (
-                    "welcome,",
-                    "manage your account",
-                    "your account",
-                    "sign-in methods",
-                    "subscription",
-                )
-            ):
-                vlog("left complete → account body text", attempt)
-                return True
-            # Still on sign-up path without complete title can be mid-nav
-            if "sign-up" in url or "sign_up" in url:
-                await asyncio.sleep(0.6)
-                continue
-            return True
-        await asyncio.sleep(0.45)
-    try:
-        if _is_xai_account_page((page.url or "").lower()):
-            return True
-        still = await page.locator("text=Complete your sign up").count()
-        return still == 0 and "complete your sign up" not in (
-            ((await page.inner_text("body")) or "")[:400].lower()
-        )
-    except Exception:
-        return False
 
 
 async def _password_field_value(page) -> str:
@@ -5482,8 +6846,7 @@ async def do_email_login(page, email_addr: str, password: str, attempt: int,
 
 
 async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
-                             *, fast: bool = True, skip_login: bool = False,
-                             proxy_url: str | None = None) -> dict:
+                             *, fast: bool = True, skip_login: bool = False) -> dict:
     """Grok CLI-style OIDC: local callback server + PKCE + browser login/Allow.
 
     Mirrors official Grok CLI / CLIProxyAPI:
@@ -5492,7 +6855,6 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
       - browser only drives login/Allow; code is captured by the server
       - no Turnstile on OAuth (only login/signup paths)
       - if stuck >20s without code → refresh authorize URL
-      - token exchange uses same proxy egress when GROK_PROBE_USE_PROXY=true
     """
     emit_progress(attempt, "oauth", "CLI OAuth PKCE (local callback)", email_addr)
     server_ok = await ensure_cli_oauth_server()
@@ -5749,7 +7111,7 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
         )
 
     emit_progress(attempt, "token_exchange", "Exchanging code (CLI token endpoint)", email_addr)
-    tokens = await _run_io(exchange_code_for_tokens, code, verifier, proxy_url)
+    tokens = await _run_io(exchange_code_for_tokens, code, verifier)
     if not tokens.get("email"):
         tokens["email"] = email_addr
     tokens["auth_mode"] = "oidc"
@@ -6010,7 +7372,10 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
     manager = None
     try:
         manager, browser, page = await launch_browser(
-            proxy_url, worker_id=attempt_num, email=email_addr
+            proxy_url,
+            purpose="signup",
+            worker_id=attempt_num,
+            email=email_addr,
         )
         _frame_set_email(manager, email_addr)
         _plog = "direct"
@@ -6052,7 +7417,6 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             attempt_num,
             fast=True,
             skip_login=bool(login_ok),
-            proxy_url=proxy_url,
         )
         access = str(tokens.get("access_token") or "")
         if not access:
@@ -6080,12 +7444,10 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
 
         # Gate: grok-4.5 Responses. Soft-retry probe (and re-activate once) on 403
         # before giving up — concurrent farms often hit brief entitlement lag.
-        # Probe uses same proxy as browser when GROK_PROBE_USE_PROXY=true.
         ok, status, detail, credits = False, 0, "", {}
         for probe_i in range(1, PROBE_RETRIES + 1):
             ok, status, detail, credits = await run_chat_probe_with_hud(
                 attempt_num, email_addr, access, context="farm",
-                proxy_url=proxy_url,
             )
             if ok:
                 break
@@ -6239,9 +7601,21 @@ async def _do_register(attempt_num: int) -> dict | None:
             try:
                 # preview=False: temp-mail browser is internal; do not stream frames
                 _mmgr, _mbrowser, mail_page = await launch_browser(
-                    None, headless=TEMPMAIL_HEADLESS, preview=False
+                    None,
+                    headless=TEMPMAIL_HEADLESS,
+                    block_images=TEMPMAIL_BLOCK_IMAGES,
+                    purpose="tempmail",
+                    preview=False,
                 )
-                _tempmail_sessions[attempt_num] = (mail_page, _mbrowser, _mmgr)
+                # Strict isolation: this attempt's mail browser only
+                _tempmail_sessions[attempt_num] = {
+                    "page": mail_page,
+                    "browser": _mbrowser,
+                    "manager": _mmgr,
+                    "email": "",
+                    "inbox_urls": [],
+                    "worker": attempt_num,
+                }
                 email_addr = await tempmail_gen_email(mail_page, attempt_num)
             except Exception as e:
                 if mail_page is not None or attempt_num in _tempmail_sessions:
@@ -6408,13 +7782,7 @@ async def _do_register(attempt_num: int) -> dict | None:
             )
             emit_failed(attempt_num, last_err_msg[:200], tag)
             try:
-                ctx = getattr(re_err, "diagnostics", None)
-                await save_failed_to_file(
-                    attempt_num,
-                    email_addr,
-                    last_err_msg[:400],
-                    context=ctx if isinstance(ctx, dict) else {"tag": tag},
-                )
+                await save_failed_to_file(attempt_num, email_addr, last_err_msg[:400])
             except Exception:
                 pass
             return None
@@ -6441,13 +7809,7 @@ async def _do_register(attempt_num: int) -> dict | None:
             print(f"[{attempt_num}] FAILED: {e}", flush=True)
             emit_failed(attempt_num, str(e)[:200], type(e).__name__)
             try:
-                ctx = getattr(e, "diagnostics", None)
-                await save_failed_to_file(
-                    attempt_num,
-                    email_addr,
-                    str(e)[:400],
-                    context=ctx if isinstance(ctx, dict) else {"exc": type(e).__name__},
-                )
+                await save_failed_to_file(attempt_num, email_addr, str(e)[:400])
             except Exception:
                 pass
             return None
@@ -6544,38 +7906,25 @@ def _save_result_sync(result: dict) -> None:
         access_token = tokens.get("access_token")
         if access_token:
             _append_line_sync(ACCESS_TOKEN_FILE, str(access_token))
-            secure_chmod_file(ACCESS_TOKEN_FILE)
         refresh_token = tokens.get("refresh_token")
         if refresh_token:
             _append_line_sync(REFRESH_TOKEN_FILE, str(refresh_token))
-            secure_chmod_file(REFRESH_TOKEN_FILE)
-        secure_chmod_file(RESULTS_JSON)
-        secure_chmod_file(RESULTS_TXT)
         email = (result.get("email") or "").lower()
         if email:
             # generate_email already reserved used_emails.txt; keep set in sync only
             _used_emails.add(email)
 
 
-def _save_failed_sync(
-    attempt: int,
-    email: str,
-    error: str,
-    context: dict | None = None,
-) -> None:
+def _save_failed_sync(attempt: int, email: str, error: str) -> None:
     global _failed_mem
     with _results_thread_lock:
         _load_results_memory_unlocked()
-        row: dict[str, Any] = {
+        _failed_mem.append({
             "attempt": attempt,
             "email": email,
             "error": error,
             "at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
-        }
-        if context:
-            # Additive diagnostics — never drop the error string
-            row["context"] = context
-        _failed_mem.append(row)
+        })
         _write_json_atomic(FAILED_JSON, _failed_mem)
 
 
@@ -6588,10 +7937,8 @@ def _save_refresh_success_sync(acct: dict, tokens: dict) -> None:
         rt = tokens.get("refresh_token")
         if at:
             _append_line_sync(ACCESS_TOKEN_FILE, str(at))
-            secure_chmod_file(ACCESS_TOKEN_FILE)
         if rt:
             _append_line_sync(REFRESH_TOKEN_FILE, str(rt))
-            secure_chmod_file(REFRESH_TOKEN_FILE)
         _accounts_mem.append({
             "email": acct["email"],
             "password": acct["password"],
@@ -6599,7 +7946,6 @@ def _save_refresh_success_sync(acct: dict, tokens: dict) -> None:
             "tokens": tokens,
         })
         _write_json_atomic(RESULTS_JSON, _accounts_mem)
-        secure_chmod_file(RESULTS_JSON)
 
 
 async def _ensure_write_worker() -> None:
@@ -6620,9 +7966,7 @@ async def _ensure_write_worker() -> None:
                 if kind == "result":
                     await _run_io(_save_result_sync, job[1])
                 elif kind == "failed":
-                    # job: ("failed", attempt, email, error[, context])
-                    ctx = job[4] if len(job) > 4 else None
-                    await _run_io(_save_failed_sync, job[1], job[2], job[3], ctx)
+                    await _run_io(_save_failed_sync, job[1], job[2], job[3])
                 elif kind == "refresh":
                     await _run_io(_save_refresh_success_sync, job[1], job[2])
                 elif kind == "fn":
@@ -6690,21 +8034,14 @@ async def save_result_to_file(result: dict, *, wait: bool = False) -> None:
     )
 
 
-async def save_failed_to_file(
-    attempt: int,
-    email: str,
-    error: str,
-    *,
-    wait: bool = False,
-    context: dict | None = None,
-) -> None:
+async def save_failed_to_file(attempt: int, email: str, error: str, *, wait: bool = False) -> None:
     """Queue a failed-row write without freezing the HUD."""
     await _ensure_write_worker()
     assert _write_q is not None
     if wait:
-        await _run_io(_save_failed_sync, attempt, email, error, context)
+        await _run_io(_save_failed_sync, attempt, email, error)
     else:
-        await _write_q.put(("failed", attempt, email, error, context))
+        await _write_q.put(("failed", attempt, email, error))
 
 
 async def save_refresh_success(acct: dict, tokens: dict, *, wait: bool = False) -> None:
@@ -6777,12 +8114,17 @@ async def _refresh_one_account(
         page = None
         try:
             # Light stagger on first try of each slot; retries skip long waits.
-            if SPAWN_DELAY > 0 and try_n == 1:
-                await asyncio.sleep(SPAWN_DELAY * ((idx - 1) % max(1, concurrent)))
+            sd = effective_spawn_delay(concurrent)
+            if sd > 0 and try_n == 1:
+                await asyncio.sleep(sd * ((idx - 1) % max(1, concurrent)))
             proxy_url, proxy_id = await next_proxy()
             manager, browser, page = await launch_browser(
-                proxy_url, worker_id=idx, email=email
+                proxy_url,
+                purpose="refresh",
+                worker_id=idx,
+                email=email,
             )
+            _frame_set_email(manager, email)
             _plog = "direct"
             if proxy_url:
                 try:
@@ -6819,7 +8161,6 @@ async def _refresh_one_account(
                     idx,
                     fast=True,
                     skip_login=bool(login_ok),
-                    proxy_url=proxy_url,
                 )
                 if ACTIVATE_WEB:
                     try:
@@ -6845,7 +8186,6 @@ async def _refresh_one_account(
             ok, status, detail, credits = await run_chat_probe_with_hud(
                 idx, email, str(tokens.get("access_token") or ""),
                 context="refresh",
-                proxy_url=proxy_url,
             )
             if not ok:
                 # NEVER blacklist on refresh. Blacklist is tempmail-farm only
@@ -7142,17 +8482,6 @@ async def refresh_tokens_main(concurrent: int) -> int:
             f"in {int(time.time() - start)}s",
             flush=True,
         )
-        try:
-            finalize_batch_meta_helper(
-                BATCH_DIR / "batch_meta.json",
-                created=refreshed,
-                failed=failed,
-                elapsed_s=int(time.time() - start),
-                interrupted=True,
-                extra={"mode": "refresh", "retried": retried},
-            )
-        except Exception as e:
-            print(f"[refresh] batch_meta finalize failed: {e}", flush=True)
         os._exit(130)
 
     print("=" * 60, flush=True)
@@ -7169,80 +8498,6 @@ async def refresh_tokens_main(concurrent: int) -> int:
         )
     print("=" * 60, flush=True)
     return refreshed
-
-
-def _run_diagnose_and_exit() -> None:
-    """Print config + dependency check without launching browsers (e2e debug aid)."""
-    print("=" * 60, flush=True)
-    print("  Grok Farm — diagnose / self-check", flush=True)
-    print("=" * 60, flush=True)
-    print(f"  ROOT           : {_ROOT}", flush=True)
-    print(f"  camoufox       : {'OK' if AsyncCamoufox is not None else 'MISSING — install.sh'}", flush=True)
-    try:
-        import dotenv  # noqa: F401
-        print("  python-dotenv  : OK", flush=True)
-    except ImportError:
-        print("  python-dotenv  : MISSING", flush=True)
-    try:
-        import socks  # noqa: F401
-        print("  PySocks        : OK (SOCKS probe egress available)", flush=True)
-    except ImportError:
-        print("  PySocks        : not installed (HTTP proxies OK; SOCKS probe → direct)", flush=True)
-
-    print("-" * 60, flush=True)
-    print("  Mail / identity", flush=True)
-    print(f"  MAIL_MODE      : {MAIL_MODE}", flush=True)
-    print(f"  EMAIL_MODE     : {EMAIL_MODE}", flush=True)
-    print(f"  EMAIL_DOMAIN   : {EMAIL_DOMAIN or '(unset)'}", flush=True)
-    print(f"  IMAP_USER      : {IMAP_USER or '(unset)'}", flush=True)
-    print(f"  IMAP set       : {'yes' if IMAP_USER and IMAP_PASS else 'no'}", flush=True)
-    print(f"  HEADLESS       : {HEADLESS}  mode={_HEADLESS_MODE_RAW} "
-          f"→ cam={resolve_camoufox_headless(HEADLESS)!r}", flush=True)
-    print(f"  HUMANIZE       : {HUMANIZE}  max={HUMANIZE_MAX_S}s  xvfb={_xvfb_available()}", flush=True)
-    print(f"  ACTIVATE_WEB   : {ACTIVATE_WEB}", flush=True)
-    print("-" * 60, flush=True)
-    print("  Self-heal / Turnstile / probe knobs", flush=True)
-    print(f"  UI_RETRIES     : {UI_RETRIES}  backoff={UI_RETRY_BACKOFF_S}s", flush=True)
-    print(f"  PROBE_RETRIES  : {PROBE_RETRIES}  backoff={PROBE_RETRY_BACKOFF_S}s", flush=True)
-    print(f"  PROBE_USE_PROXY: {PROBE_USE_PROXY}", flush=True)
-    print(f"  SIGNUP_REFRESH : {SIGNUP_PAGE_REFRESHES}  email_wait={SIGNUP_EMAIL_WAIT_S}s", flush=True)
-    print(f"  TURNSTILE_WAIT : {TURNSTILE_MAX_WAIT_S}s  parallel_cap={TURNSTILE_PARALLEL}", flush=True)
-    print(f"  WORKER_ISOLATE : {WORKER_ISOLATION}  spawn_delay={SPAWN_DELAY}s", flush=True)
-    print(f"  TIMEOUTS       : account={ACCOUNT_TIMEOUT_S}s otp={OTP_TIMEOUT_S}s "
-          f"complete={COMPLETE_SIGNUP_TIMEOUT_S}s confirm={CONFIRM_EMAIL_TIMEOUT_S}s", flush=True)
-    print("-" * 60, flush=True)
-    print("  Proxies", flush=True)
-    print(f"  pool_size      : {len(PROXY_POOL)}  source={PROXY_SOURCE}", flush=True)
-    if PROXY_POOL:
-        sample = PROXY_POOL[0][0]
-        try:
-            u = urlparse(sample if "://" in sample else f"http://{sample}")
-            print(f"  sample_scheme  : {u.scheme}  host={u.hostname}", flush=True)
-        except Exception:
-            pass
-    print("-" * 60, flush=True)
-    print("  OAuth / CLI probe", flush=True)
-    print(f"  client_id      : {XAI_CLIENT_ID}", flush=True)
-    print(f"  callback       : {XAI_REDIRECT_URI}", flush=True)
-    print(f"  probe_url      : {CLI_RESPONSES_URL}", flush=True)
-    print(f"  probe_model    : {CLI_PROBE_MODEL}", flush=True)
-    print("-" * 60, flush=True)
-    print("  Results", flush=True)
-    print(f"  RESULTS_ROOT   : {RESULTS_ROOT}", flush=True)
-    print(f"  used_emails    : {USED_EMAILS_FILE}", flush=True)
-    try:
-        _load_used_emails()
-        print(f"  known_emails   : {len(_used_emails)}", flush=True)
-    except Exception as e:
-        print(f"  known_emails   : error {e}", flush=True)
-    # Pure helper smoke (no network)
-    assert farm_helpers.is_plausible_xai_otp("K35-1QR")
-    assert not farm_helpers.is_plausible_xai_otp("PER-100")
-    assert farm_helpers.normalize_proxy_url("1.2.3.4:8080") == "http://1.2.3.4:8080"
-    print("  helpers smoke  : OK", flush=True)
-    print("=" * 60, flush=True)
-    print("  Diagnose complete. Start farm with: python farm.py -y  or  ./run.sh", flush=True)
-    sys.exit(0)
 
 
 def _prompt_int(label: str, default: int, *, min_v: int = 1, max_v: int = 100000) -> int:
@@ -7279,9 +8534,6 @@ def _prompt_yes_no(label: str, default: bool = True) -> bool:
 
 async def main():
     global MAIL_MODE
-    # Early flags that must not require IMAP / browser
-    if any(a in ("--diagnose", "--self-check", "diagnose") for a in sys.argv[1:]):
-        _run_diagnose_and_exit()
     # Clean orphan profile dirs from prior crashed runs + arm the Ctrl+C
     # backstop BEFORE any browser can launch.
     try:
@@ -7289,21 +8541,16 @@ async def main():
     except Exception as e:
         print(f"[cleanup] startup sweep failed: {e}", flush=True)
     _install_sigint_handler()
-    if AsyncCamoufox is None:
-        print("ERROR: camoufox not installed. Run: ./install.sh", flush=True)
+    if MAIL_MODE == "google":
+        if not IMAP_USER or not IMAP_PASS:
+            print("ERROR: set GROK_IMAP_USER and GROK_IMAP_PASS in .env (or use temp mail)", flush=True)
+            sys.exit(1)
+    if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
+        print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
         sys.exit(1)
-    # Mail / domain validation runs AFTER -m/--mail is known.
-    # Apply -m early so banner + checks match CLI (etteum always passes -m).
-    _early_args = sys.argv[1:]
-    for _i, _a in enumerate(_early_args):
-        if _a in ("-m", "--mail") and _i + 1 < len(_early_args):
-            _m = _early_args[_i + 1].strip().lower()
-            if _m in ("tempmail", "temp", "1"):
-                MAIL_MODE = "tempmail"
-            elif _m in ("google", "2"):
-                MAIL_MODE = "google"
-            # refresh handled later in full CLI parse
-            break
+    if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
+        print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
+        sys.exit(1)
 
     _load_used_emails()
     known = len(_used_emails)
@@ -7323,12 +8570,7 @@ async def main():
             print(f"  Gmail base : {GMAIL_BASE or IMAP_USER}", flush=True)
         print(f"  IMAP       : {IMAP_USER} @ {IMAP_HOST}:{IMAP_PORT}", flush=True)
     print(f"  Password   : {'*' * max(0, len(ACCOUNT_PASSWORD) - 2)}{ACCOUNT_PASSWORD[-2:]}", flush=True)
-    print(
-        f"  Headless   : want={HEADLESS} mode={_HEADLESS_MODE_RAW} "
-        f"cam={resolve_camoufox_headless(HEADLESS)!r} "
-        f"humanize={HUMANIZE}/{HUMANIZE_MAX_S}s xvfb={_xvfb_available()}",
-        flush=True,
-    )
+    print(f"  Headless   : {HEADLESS}", flush=True)
     print(f"  Activate   : {ACTIVATE_WEB}", flush=True)
     print(
         f"  Isolation  : {WORKER_ISOLATION} "
@@ -7337,9 +8579,13 @@ async def main():
         flush=True,
     )
     print(
-        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES} "
-        f"probe_proxy={PROBE_USE_PROXY} signup_refresh={SIGNUP_PAGE_REFRESHES} "
-        f"ts_wait={TURNSTILE_MAX_WAIT_S}s",
+        f"  Load guard : launch_parallel={LAUNCH_PARALLEL} "
+        f"auto_stagger={AUTO_STAGGER}/{AUTO_SPAWN_DELAY_S}s "
+        f"tempmail_block_images={TEMPMAIL_BLOCK_IMAGES}",
+        flush=True,
+    )
+    print(
+        f"  Self-heal  : ui_retries={UI_RETRIES} probe_retries={PROBE_RETRIES}",
         flush=True,
     )
     print(
@@ -7389,14 +8635,11 @@ async def main():
                 "  -n/--count        jumlah akun batch ini (default: tanya / .env)\n"
                 "  -c/--concurrent   browser paralel (default: tanya / .env)\n"
                 "  -y/--yes          non-interactive, pakai .env / flags saja\n"
-                "  --diagnose        print config + self-heal knobs + dependency check (no farm)\n"
                 "Each run writes to results/batch_<timestamp>/ (fresh files).\n"
                 "Emails stay unique across batches via results/used_emails.txt",
                 flush=True,
             )
             sys.exit(0)
-        if a in ("--diagnose", "--self-check", "diagnose"):
-            _run_diagnose_and_exit()
         i += 1
 
     # ── Mode selection: [1] temp mail, [2] google, [3] refresh tokens ─────
@@ -7434,21 +8677,10 @@ async def main():
             print("  Masukkan 1, 2, atau 3.")
         print()
 
-    # Re-validate config now that MAIL_MODE is final (CLI -m overrides .env).
-    # Tempmail does not need IMAP / catch-all domain / plus-trick settings.
-    if MAIL_MODE == "google":
-        if not IMAP_USER or not IMAP_PASS:
-            print(
-                "ERROR: google mode but GROK_IMAP_USER / GROK_IMAP_PASS missing in .env",
-                flush=True,
-            )
-            sys.exit(1)
-        if EMAIL_MODE == "domain" and not EMAIL_DOMAIN:
-            print("ERROR: set GROK_EMAIL_DOMAIN for domain mode", flush=True)
-            sys.exit(1)
-        if EMAIL_MODE == "plus_trick" and not (GMAIL_BASE or IMAP_USER):
-            print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
-            sys.exit(1)
+    # Re-validate config now that MAIL_MODE is final.
+    if MAIL_MODE == "google" and (not IMAP_USER or not IMAP_PASS):
+        print("ERROR: google mode but GROK_IMAP_USER / GROK_IMAP_PASS missing in .env", flush=True)
+        sys.exit(1)
 
     # ── Refresh mode: re-auth existing accounts, then exit (no farming) ────
     if RUN_MODE == "refresh":
@@ -7525,9 +8757,10 @@ async def main():
                     return
                 num = next_attempt
                 next_attempt += 1
-            # Stagger browser launch so concurrent workers don't all hit CF/IMAP at once
-            if SPAWN_DELAY > 0:
-                await asyncio.sleep(SPAWN_DELAY * ((num - 1) % max(1, concurrent)))
+            # Stagger worker *starts* so page-loads don't all hit the uplink at once
+            sd = effective_spawn_delay(concurrent)
+            if sd > 0:
+                await asyncio.sleep(sd * ((num - 1) % max(1, concurrent)))
             res = await register_one_account(num, semaphore)
             async with counter_lock:
                 if res:
@@ -7583,33 +8816,24 @@ async def main():
             f"in {int(time.time() - start)}s",
             flush=True,
         )
-        try:
-            finalize_batch_meta_helper(
-                BATCH_DIR / "batch_meta.json",
-                created=created,
-                failed=failed,
-                elapsed_s=int(time.time() - start),
-                interrupted=True,
-                extra={"mode": f"farm/{MAIL_MODE}", "max_accounts": target},
-            )
-            print(f"  Meta  : {BATCH_DIR / 'batch_meta.json'} (interrupted)", flush=True)
-        except Exception as e:
-            print(f"[farm] batch_meta finalize failed: {e}", flush=True)
         # Hard exit after cleanup — avoids Playwright pending-task teardown spam.
         os._exit(130)
 
-    # finalize batch meta (always — success path)
+    # finalize batch meta
     try:
-        finalize_batch_meta_helper(
-            BATCH_DIR / "batch_meta.json",
-            created=created,
-            failed=failed,
-            elapsed_s=int(time.time() - start),
-            interrupted=False,
-            extra={"mode": f"farm/{MAIL_MODE}", "max_accounts": target},
-        )
-    except Exception as e:
-        print(f"[farm] batch_meta finalize failed: {e}", flush=True)
+        meta_path = BATCH_DIR / "batch_meta.json"
+        meta = {}
+        if meta_path.is_file():
+            meta = json.loads(meta_path.read_text(encoding="utf-8"))
+        meta.update({
+            "finished_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "created": created,
+            "failed": failed,
+            "elapsed_s": int(time.time() - start),
+        })
+        meta_path.write_text(json.dumps(meta, indent=2) + "\n", encoding="utf-8")
+    except Exception:
+        pass
 
     print("=" * 60, flush=True)
     print(f"  DONE: {created} created, {failed} failed in {int(time.time() - start)}s", flush=True)
