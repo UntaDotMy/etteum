@@ -170,6 +170,12 @@ describe("toCanonicalModelName — strip provider aliases", () => {
     expect(toCanonicalModelName("glm-5.2")).toBe("glm-5.2");
     expect(toCanonicalModelName("gpt-5.6-sol")).toBe("gpt-5.6-sol");
   });
+  test("normalizes underscores to hyphens for catalog lookup only", () => {
+    // Provider may probe as gpt_5.2; catalog key is gpt-5.2. Live model id stays as-is.
+    expect(toCanonicalModelName("gpt_5.2")).toBe("gpt-5.2");
+    expect(toCanonicalModelName("claude_opus_4.8")).toBe("claude-opus-4.8");
+    expect(toCanonicalModelName("openrouter-gpt_5.2")).toBe("openrouter-gpt-5.2");
+  });
   test("handles empty/undefined", () => {
     expect(toCanonicalModelName("")).toBe("");
     expect(toCanonicalModelName(undefined as any)).toBe("");
@@ -191,5 +197,39 @@ describe("getPricingForModel — resolves via canonical name", () => {
   test("canonical name still resolves", async () => {
     const pricing = await getPricingForModel("glm-5.2");
     expect(pricing).not.toBeNull();
+  });
+  test("underscore provider id still resolves hyphen catalog price", async () => {
+    // Upstream may list the model as gpt_5.2; we keep that id, but price as gpt-5.2.
+    const a = await getPricingForModel("gpt_5.2");
+    const b = await getPricingForModel("gpt-5.2");
+    expect(a).not.toBeNull();
+    expect(b).not.toBeNull();
+    expect(a!.input).toBe(b!.input);
+    expect(a!.output).toBe(b!.output);
+  });
+  test("prefixed BYOK-style id resolves bare catalog price", async () => {
+    const pricing = await getPricingForModel("myrouter-gpt_5.2");
+    expect(pricing).not.toBeNull();
+    expect(pricing!.input).toBeGreaterThan(0);
+  });
+  test("effort suffixes high/xhigh inherit base model price (gpt-5.5)", async () => {
+    // Live id stays gpt-5.5-high / gpt-5.5-xhigh; catalog rates come from gpt-5.5.
+    const base = await getPricingForModel("gpt-5.5");
+    const high = await getPricingForModel("gpt-5.5-high");
+    const xhigh = await getPricingForModel("gpt-5.5-xhigh");
+    const underscored = await getPricingForModel("gpt_5.5_xhigh");
+    expect(base).not.toBeNull();
+    expect(high!.input).toBe(base!.input);
+    expect(high!.output).toBe(base!.output);
+    expect(xhigh!.input).toBe(base!.input);
+    expect(underscored!.input).toBe(base!.input);
+  });
+  test("codex effort variants inherit same official gpt-5.3-codex rate", async () => {
+    const base = await getPricingForModel("gpt-5.3-codex");
+    const xhigh = await getPricingForModel("gpt-5.3-codex-xhigh");
+    expect(base).not.toBeNull();
+    expect(xhigh!.input).toBe(base!.input);
+    expect(xhigh!.output).toBe(base!.output);
+    expect(base!.input).toBe(1.75);
   });
 });

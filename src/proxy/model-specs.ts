@@ -120,22 +120,18 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "gemini-3.5-flash":       { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
   "gemini-2.5-flash-lite":  { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
 
-  // ── Grok (first-party GrokProvider only — OAuth + SSO web) ──
+  // ── Grok (xAI) — docs.x.ai; proxy routes only grok-4.5* for OAuth, keep
+  // chat-API cousins for pricing lookup when BYOK/other surfaces use them. ──
   "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-4.20":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
-  "grok-4.20-fast":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
-  "grok-4.20-reasoning":    { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  "grok-4.20-super":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  "grok-4.20-heavy":        { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-4.3-beta":          { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
-  "grok-4.3-reasoning":     { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  "grok-4.3-heavy":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  "grok-auto":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
-  "grok-fast":              { contextWindow: 256_000,   maxOutput: 65_536,  thinking: false, vision: false },
-  "grok-reasoning":         { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
-  "grok-heavy":             { contextWindow: 256_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.3-reasoning":     { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
+  "grok-4.3-heavy":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.20":              { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-4.20-fast":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: false },
+  "grok-4.20-reasoning":    { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.20-heavy":        { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.20-super":        { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
 
   // ── OpenAI legacy / F13 catalog — developers.openai.com ──
   "gpt-4o-mini":            { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
@@ -171,24 +167,34 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
  */
 export function resolveModelSpec(canonicalName: string | undefined): ModelSpec | undefined {
   if (!canonicalName) return undefined;
+  // Providers may probe with underscores (gpt_5.2); catalog keys use hyphens.
+  let name = canonicalName.trim().replace(/_/g, "-");
   // Strip a trailing -thinking variant flag.
-  const noThinking = canonicalName.replace(/-thinking$/, "");
-  const isThinkingVariant = canonicalName !== noThinking;
-  // Direct hit.
-  let spec = MODEL_SPECS[noThinking];
-  // Fallback: strip a trailing date snapshot suffix (-YYYY-MM-DD or -YYYY-MM-DD-<tag>)
-  // so dated variants (qwen3.7-max-2026-06-08) inherit their base model's spec.
-  if (!spec) {
-    const dateless = noThinking.replace(/-\d{4}-\d{2}-\d{2}.*$/, "");
-    if (dateless !== noThinking) spec = MODEL_SPECS[dateless];
+  const noThinking = name.replace(/-thinking$/i, "");
+  const isThinkingVariant = name.toLowerCase() !== noThinking.toLowerCase();
+  // Effort knobs (gpt-5.5-xhigh → gpt-5.5) share the base model’s context/output.
+  // Do not strip -mini/-pro/-nano — those are different SKUs.
+  const noEffort = noThinking.replace(/-(?:xhigh|high|medium|low|minimal)$/i, "");
+
+  const candidates = [noThinking, noEffort];
+  for (const c of candidates) {
+    let spec = MODEL_SPECS[c];
+    if (!spec) {
+      const dateless = c.replace(/-\d{4}-\d{2}-\d{2}.*$/, "");
+      if (dateless !== c) spec = MODEL_SPECS[dateless];
+    }
+    if (spec) {
+      return {
+        contextWindow: spec.contextWindow,
+        maxOutput: spec.maxOutput,
+        thinking: isThinkingVariant || /-(?:xhigh|high|medium)$/i.test(noThinking)
+          ? true
+          : spec.thinking,
+        vision: spec.vision,
+      };
+    }
   }
-  if (!spec) return undefined;
-  return {
-    contextWindow: spec.contextWindow,
-    maxOutput: spec.maxOutput,
-    thinking: isThinkingVariant ? true : spec.thinking,
-    vision: spec.vision,
-  };
+  return undefined;
 }
 
 import type { ModelInfo } from "./providers/base";
