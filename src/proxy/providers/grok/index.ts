@@ -94,28 +94,34 @@ const now = () => Math.floor(Date.now() / 1000);
 
 const GROK_CREATED = 1_718_000_000;
 
-/** Catalog entries shown in /v1/models and the dashboard. owned_by is always
- *  "grok" (single provider — no parallel "xai" group). Keep in sync with
- *  MODEL_TO_MODE in protocol.ts and ownsModel() below so active-account
- *  filtering (`?active=1`) surfaces every model an active grok account can serve. */
+/**
+ * Catalog for /v1/models + dashboard — only grok-4.5 family.
+ * - grok-4.5           → upstream "grok-4.5", reasoning_effort low|medium|high
+ * - grok-4.5-reasoning → same upstream model; alias that defaults effort to high
+ *
+ * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
+ */
 const GROK_MODELS: ModelInfo[] = [
-  // OAuth / cli-chat-proxy (latest free-tier model)
   { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
-  // grok.com web app-chat modes (SSO)
-  { id: "grok-4.3", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true },
-  { id: "grok-4.3-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.3-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.20", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.20-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-4.20-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-4.20-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  // Convenience aliases → web app-chat modes
-  { id: "grok-auto", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: false, vision: false },
-  { id: "grok-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
-  { id: "grok-heavy", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 256_000, max_output: 65_536, thinking: true, vision: false },
 ];
+
+export type GrokReasoningEffort = "low" | "medium" | "high";
+
+/** Map client request + model slug → xAI reasoning_effort (default high). */
+export function resolveGrokReasoningEffort(request: ChatCompletionRequest): GrokReasoningEffort {
+  const model = (request.model || "").toLowerCase();
+  const raw =
+    request.reasoning_effort ??
+    (request as { reasoning?: { effort?: string } }).reasoning?.effort ??
+    request.thinking?.effort ??
+    (model === "grok-4.5-reasoning" ? "high" : "high");
+  const s = String(raw).toLowerCase().trim();
+  if (s === "low" || s === "medium" || s === "high") return s;
+  if (s === "min" || s === "minimal") return "low";
+  if (s === "max" || s === "xhigh" || s === "extra_high") return "high";
+  return "high";
+}
 
 // ---------------------------------------------------------------------------
 // Provider
@@ -127,12 +133,8 @@ export class GrokProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    // Claim any grok-4.x model and the generic grok-* aliases.
-    // We explicitly do NOT claim "grok-2" or "grok-beta" (legacy console models
-    // that may be served by other providers).
-    return m.startsWith("grok-4") || m.startsWith("grok-4.") ||
-           m === "grok-auto" || m === "grok-fast" ||
-           m === "grok-reasoning" || m === "grok-heavy";
+    // Strict: only the two catalog models. Older grok-4.3 / 4.20 / aliases → 404.
+    return m === "grok-4.5" || m === "grok-4.5-reasoning";
   }
 
   private resolveMode(model: string): GrokModeId {
@@ -332,23 +334,22 @@ export class GrokProvider extends BaseProvider {
     // Resolve the CLI version dynamically (rot-proof against CLI updates).
     const cliVersion = await getGrokCliVersion();
 
-    // Map the etteum model slug to the upstream model id. "grok-4.5" works on
-    // the free tier; the "grok-build" alias 402s on free accounts. The CLI's
-    // own debug log confirmed: grok-build → 402, grok-4.5 → 200.
-    const upstreamModel = request.model.startsWith("grok-4.5")
-      ? "grok-4.5"
-      : request.model;
+    // Upstream free Build model id is always "grok-4.5" (alias slugs strip).
+    // "grok-build" 402s on free accounts; confirmed by CLI debug + live probes.
+    const upstreamModel = "grok-4.5";
+    const effort = resolveGrokReasoningEffort(request);
 
     const body: Record<string, unknown> = {
       model: upstreamModel,
       messages: request.messages,
       stream: true,
+      // xAI: reasoning_effort low|medium|high (default high). Cannot disable.
+      reasoning_effort: effort,
     };
     if (request.temperature != null) body.temperature = request.temperature;
     if (request.max_tokens != null) body.max_tokens = request.max_tokens;
     if (request.top_p != null) body.top_p = request.top_p;
-    if (request.frequency_penalty != null) body.frequency_penalty = request.frequency_penalty;
-    if (request.presence_penalty != null) body.presence_penalty = request.presence_penalty;
+    // xAI docs: presence/frequency penalty + stop cannot be used with reasoning models.
     if (request.tools) body.tools = request.tools;
     if (request.tool_choice) body.tool_choice = request.tool_choice;
 
@@ -750,17 +751,23 @@ export class GrokProvider extends BaseProvider {
   // Helpers
   // -------------------------------------------------------------------------
 
-  /** Map an etteum grok model slug to the console.x.ai API model name. */
-  private mapConsoleModel(model: string): string {
-    const m = model.toLowerCase();
-    if (m.startsWith("grok-4.5")) return "grok-4.5";
-    if (m.startsWith("grok-4.3")) return "grok-4.3";
-    return "grok-4.5"; // default to latest
+  /** Map an etteum grok model slug to the console.x.ai / cli-chat model name. */
+  private mapConsoleModel(_model: string): string {
+    return "grok-4.5";
   }
 
   /** Classify an error into a ProviderResult failure. */
   private classifyError(err: any): ProviderResult {
     const msg = err?.message ?? String(err);
+    // Wrong / unsupported model is a CLIENT error — never ban or disable the account.
+    // Router treats isInvalidModelError / isNonAccountRequestError as non-account.
+    if (
+      /invalid_model|model_not_found|no such model|unknown model|model not supported|model is not supported|unsupported model|does not support model|model does not exist|model is not available|model not available/i.test(
+        msg,
+      )
+    ) {
+      return { success: false, error: `invalid_model: ${msg}` };
+    }
     // xAI "permission-denied" on chat is NOT an expired token — the access JWT
     // is valid (models/billing often still 200) but this principal/team has no
     // chat entitlement. Do not prefix with "expired:" or the router will
@@ -775,8 +782,13 @@ export class GrokProvider extends BaseProvider {
     if (/expired|unauthorized|\b401\b/i.test(msg)) {
       return { success: false, error: `expired: ${msg}` };
     }
-    if (/\b403\b/i.test(msg)) {
+    // Only treat 403 as hard-ban when the body says so — bare 403 is often
+    // entitlement lag / IP / temporary and must not permanently disable.
+    if (/\b403\b/i.test(msg) && /banned|suspended|restricted|disabled|revoked/i.test(msg)) {
       return { success: false, error: `forbidden: ${msg}`, banned: true };
+    }
+    if (/\b403\b/i.test(msg)) {
+      return { success: false, error: `error: ${msg}` };
     }
     if (/rate_limit|429|too many/i.test(msg)) {
       return { success: false, error: `rate_limited: ${msg}`, rateLimited: true };

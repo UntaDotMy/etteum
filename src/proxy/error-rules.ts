@@ -119,7 +119,23 @@ export function isNonAccountError(status: number | undefined, error: string | un
 function isInvalidModelErr(error?: string): boolean {
   if (!error) return false;
   const n = error.toLowerCase();
-  return n.includes("invalid_model_id") || n.includes("invalid model") || n.includes("model_not_found") || n.includes("no such model") || n.includes("model is not supported") || n.includes("model not supported");
+  return (
+    n.includes("invalid_model_id") ||
+    n.includes("invalid_model") ||
+    n.includes("invalid model") ||
+    n.includes("model_not_found") ||
+    n.includes("no such model") ||
+    n.includes("unknown model") ||
+    n.includes("model does not exist") ||
+    n.includes("model is not supported") ||
+    n.includes("model not supported") ||
+    n.includes("unsupported model") ||
+    n.includes("does not support model") ||
+    n.includes("does not support the model") ||
+    n.includes("model is not available") ||
+    n.includes("model not available") ||
+    n.includes("invalid_model:")
+  );
 }
 function isBadUpstreamErr(error?: string): boolean {
   if (!error) return false;

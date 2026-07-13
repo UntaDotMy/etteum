@@ -23,6 +23,14 @@ describe("error-rules classification", () => {
     expect(r?.kind).toBe("nonAccount");
   });
 
+  test("classifies unsupported model phrasing as nonAccount (must not disable account)", () => {
+    expect(classifyError(400, "model is not supported")?.kind).toBe("nonAccount");
+    expect(classifyError(400, "unsupported model: grok-4.3")?.kind).toBe("nonAccount");
+    expect(classifyError(undefined, "invalid_model: cli-chat-proxy error 400")?.kind).toBe(
+      "nonAccount",
+    );
+  });
+
   test("classifies 503 as transient with backoff", () => {
     const r = classifyError(503, "service unavailable");
     expect(r?.kind).toBe("transient");
