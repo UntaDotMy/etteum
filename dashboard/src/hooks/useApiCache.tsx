@@ -257,9 +257,23 @@ export function useApiCache<T>(
     };
   }, []);
 
-  // Manual mutation function
-  const mutate = useCallback(async (newData?: T) => {
+  type MutateArg = T | ((prev: T | null) => T | null | undefined);
+  const mutate = useCallback(async (newData?: MutateArg) => {
     if (!keyRef.current) return;
+
+    if (typeof newData === "function") {
+      const prev = (cache.get(keyRef.current)?.data as T | null) ?? null;
+      const updater = newData as (prev: T | null) => T | null | undefined;
+      const next = updater(prev);
+      if (next === undefined) return;
+      cache.set(keyRef.current, {
+        data: next,
+        timestamp: Date.now(),
+        isValidating: false,
+      });
+      setData(next);
+      return;
+    }
 
     if (newData !== undefined) {
       cache.set(keyRef.current, {

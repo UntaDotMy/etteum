@@ -331,6 +331,7 @@ export default function Accounts() {
         });
       }, 2000);
     }
+    // Soft refresh counts only once when a batch finishes (not every account_status).
     scheduleReload();
   });
 
@@ -338,7 +339,42 @@ export default function Accounts() {
     setWarmupProgress({});
   });
 
-  useWsEvent(["account_status"], scheduleReload);
+  // Patch row in place. Do not full-reload the Accounts page on every status tick
+  // (that felt like a page refresh during warmup).
+  useWsEvent(["account_status", "account_updated"], (msg) => {
+    const d = msg?.data ?? msg;
+    if (!d || typeof d.id !== "number") return;
+    setAccounts((prev) =>
+      prev.map((a) =>
+        a.id !== d.id
+          ? a
+          : {
+              ...a,
+              ...(typeof d.status === "string" ? { status: d.status } : null),
+              ...(d.error !== undefined ? { errorMessage: d.error } : null),
+              ...(d.errorMessage !== undefined ? { errorMessage: d.errorMessage } : null),
+              ...(typeof d.quotaLimit === "number" ? { quotaLimit: d.quotaLimit } : null),
+              ...(typeof d.quotaRemaining === "number" ? { quotaRemaining: d.quotaRemaining } : null),
+              ...(typeof d.enabled === "boolean" ? { enabled: d.enabled } : null),
+            },
+      ),
+    );
+    setByokProviders((prev) =>
+      prev.map((p) => ({
+        ...p,
+        keys: (p.keys || []).map((k) =>
+          k.id !== d.id
+            ? k
+            : {
+                ...k,
+                ...(typeof d.status === "string" ? { status: d.status } : null),
+                ...(d.error !== undefined ? { errorMessage: String(d.error) } : null),
+                ...(typeof d.enabled === "boolean" ? { enabled: d.enabled } : null),
+              },
+        ),
+      })),
+    );
+  });
 
   useWsEvent(["byok_created", "byok_updated", "byok_deleted"], async () => {
     const byokRes = await fetchByokProviders();

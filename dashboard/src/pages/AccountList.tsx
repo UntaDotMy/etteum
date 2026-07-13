@@ -8,6 +8,7 @@ import { ArrowLeft, Search, Trash2, RefreshCw, RotateCcw, ExternalLink, ArrowUpD
 import { formatDateTimeID } from "@/lib/utils";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
+import { useWsEvent } from "@/hooks/useWebSocket";
 import {
   bulkDeleteAccounts,
   deleteAccount,
@@ -364,16 +365,40 @@ export default function AccountList() {
   const [selectedIds, setSelectedIds] = useState<Set<number>>(new Set());
   const [bulkDeleting, setBulkDeleting] = useState(false);
 
-  // SWR cache for accounts - instant load, background revalidation
+  // Instant cache; warmup status is patched via WS (no full list refetch).
   const { data: accountsRes, mutate } = useApiCache<{ data: Account[] }>(
     "accounts",
     () => fetchAccounts() as Promise<{ data: Account[] }>,
     {
       staleTime: 5000,
-      wsEvents: ["account_status", "account_updated", "account_created", "account_deleted", "accounts_updated"],
+      wsEvents: ["account_created", "account_deleted", "accounts_updated", "accounts_deleted"],
     }
   );
   const accounts = useMemo(() => (accountsRes?.data || []).filter((a) => a.provider === provider), [accountsRes?.data, provider]);
+
+  useWsEvent(["account_status", "account_updated"], (msg) => {
+    const d = (msg as { data?: Record<string, unknown> })?.data ?? (msg as Record<string, unknown>);
+    if (!d || typeof d.id !== "number") return;
+    void mutate((prev) => {
+      if (!prev?.data?.length) return prev;
+      let hit = false;
+      const data = prev.data.map((a) => {
+        if (a.id !== d.id) return a;
+        hit = true;
+        return {
+          ...a,
+          ...(typeof d.status === "string" ? { status: d.status as Status } : null),
+          ...(d.error !== undefined ? { errorMessage: d.error as string | null } : null),
+          ...(d.errorMessage !== undefined ? { errorMessage: d.errorMessage as string | null } : null),
+          ...(typeof d.quotaLimit === "number" ? { quotaLimit: d.quotaLimit } : null),
+          ...(typeof d.quotaRemaining === "number" ? { quotaRemaining: d.quotaRemaining } : null),
+          ...(typeof d.enabled === "boolean" ? { enabled: d.enabled } : null),
+        };
+      });
+      if (!hit) return prev;
+      return { ...prev, data };
+    });
+  });
 
   function handleSort(key: SortKey) {
     if (sortKey === key) {
@@ -395,19 +420,33 @@ export default function AccountList() {
   function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
 
   async function handleWarmup(id: number) {
-    try { await warmupAccount(id); showSuccess(`WarmUp queued #${id}`); await mutate(); } catch (err) { showError(err); }
+    try {
+      await warmupAccount(id);
+      showSuccess(`WarmUp queued #${id}`);
+    } catch (err) {
+      showError(err);
+    }
   }
 
   async function handleWarmupAll() {
     try {
-      const res = await warmupAllAccounts({ providers: [provider!], statuses: ["active", "exhausted", "error"] }) as any;
+      const res = (await warmupAllAccounts({
+        providers: [provider!],
+        statuses: ["active", "exhausted", "error"],
+      })) as { message?: string };
       showSuccess(res.message || "WarmUp All queued.");
-      await mutate();
-    } catch (err) { showError(err); }
+    } catch (err) {
+      showError(err);
+    }
   }
 
   async function handleLogin(id: number) {
-    try { await loginAccount(id); showSuccess(`Login queued #${id}`); await mutate(); } catch (err) { showError(err); }
+    try {
+      await loginAccount(id);
+      showSuccess(`Login queued #${id}`);
+    } catch (err) {
+      showError(err);
+    }
   }
 
   const [revealedKey, setRevealedKey] = useState<{ id: number; key: string } | null>(null);
@@ -444,7 +483,6 @@ export default function AccountList() {
     if (ids.length === 0) return;
     await loginAccounts(ids);
     showSuccess(`Queued ${ids.length} error accounts for retry.`);
-    await mutate();
   }
 
   async function handleDelete(id: number) {
@@ -490,22 +528,55 @@ export default function AccountList() {
 
   async function handleToggle(id: number, currentEnabled: boolean) {
     const next = !currentEnabled;
+    // Optimistic local patch (stay put; no full list refetch).
+    void mutate((prev) => {
+      if (!prev?.data) return prev;
+      return {
+        ...prev,
+        data: prev.data.map((a) => (a.id === id ? { ...a, enabled: next } : a)),
+      };
+    });
     try {
       await toggleAccountEnabled(id, next);
       showSuccess(next ? `Aktifkan #${id}` : `Non-aktifkan #${id}`);
-      await mutate();
     } catch (err) {
+      void mutate((prev) => {
+        if (!prev?.data) return prev;
+        return {
+          ...prev,
+          data: prev.data.map((a) => (a.id === id ? { ...a, enabled: currentEnabled } : a)),
+        };
+      });
       showError(err);
     }
   }
 
   async function handleToggleAll(enabled: boolean) {
     if (!provider) return;
+    const before = accounts.map((a) => ({ id: a.id, enabled: a.enabled !== false }));
+    void mutate((prev) => {
+      if (!prev?.data) return prev;
+      return {
+        ...prev,
+        data: prev.data.map((a) =>
+          a.provider === provider ? { ...a, enabled } : a,
+        ),
+      };
+    });
     try {
       const res = await toggleAllAccounts(provider, enabled);
       showSuccess(enabled ? `Aktifkan ${res.count} akun ${labelProvider(provider)}` : `Non-aktifkan ${res.count} akun ${labelProvider(provider)}`);
-      await mutate();
     } catch (err) {
+      void mutate((prev) => {
+        if (!prev?.data) return prev;
+        const map = new Map(before.map((b) => [b.id, b.enabled]));
+        return {
+          ...prev,
+          data: prev.data.map((a) =>
+            map.has(a.id) ? { ...a, enabled: map.get(a.id) } : a,
+          ),
+        };
+      });
       showError(err);
     }
   }

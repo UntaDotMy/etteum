@@ -6,15 +6,22 @@ import { useApiCache } from "@/hooks/useApiCache";
 
 export default function Dashboard() {
   // SWR-style caching: instant load from cache, revalidate in background
+  // Do not revalidate on high-frequency account_status (warmup thrash).
+  // Coalesced request_log still keeps live request/token stats.
   const { data: stats } = useApiCache<any>(
     "dashboard-stats",
     () => fetchDashboardStats(undefined, "all"),
     {
       staleTime: 5000,
       wsEvents: [
-        "request_log", "request_error", "account_status",
-        "account_updated", "account_created", "account_deleted",
-        "accounts_updated", "accounts_bulk_created", "provider_toggled",
+        "request_log",
+        "request_error",
+        "account_created",
+        "account_deleted",
+        "accounts_updated",
+        "accounts_bulk_created",
+        "accounts_deleted",
+        "provider_toggled",
       ],
     }
   );
