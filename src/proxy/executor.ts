@@ -176,9 +176,19 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
 
 /** Infer an HTTP status from a ProviderResult (providers set rateLimited/quotaExhausted flags). */
 function inferStatus(result: ProviderResult): number | undefined {
+  // Exhaustion outranks bare rateLimited (Grok free-usage-exhausted arrives as 429).
+  if (result.quotaExhausted) return 402;
   if (result.rateLimited) return 429;
   if (result.error) {
     const e = result.error.toLowerCase();
+    if (
+      e.includes("free-usage-exhausted") ||
+      e.includes("quota_exhausted") ||
+      e.includes("spending-limit") ||
+      e.includes("payment required")
+    ) {
+      return 402;
+    }
     if (e.includes("(502)") || e.includes("bad gateway")) return 502;
     if (e.includes("(503)") || e.includes("service unavailable") || e.includes("server_is_overloaded")) return 503;
     if (e.includes("(504)") || e.includes("gateway timeout")) return 504;

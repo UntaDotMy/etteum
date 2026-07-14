@@ -248,12 +248,39 @@ export async function routeRequest(
         throw new Error(result.error || `Invalid model: ${compressedRequest.model}`);
       }
 
+      // Credit/quota exhaustion outranks bare rateLimited. Grok/xAI often
+      // returns HTTP 429 + free-usage-exhausted; providers should set
+      // quotaExhausted, but re-check the error text so a mis-flagged
+      // rateLimited never parks a dead account in a 60s cooldown loop.
+      const errText = result.error || "";
+      const looksExhausted =
+        result.quotaExhausted === true ||
+        /free-usage-exhausted|spending[-_]?limit|quota_exhausted|you've used all|you have used all|payment required|insufficient credit|out of credits|no remaining credits/i.test(
+          errText,
+        );
+
+      if (looksExhausted) {
+        allRateLimited = false;
+        if (providerName === "alibaba") {
+          // Alibaba: per-model exhaustion is already handled by the provider
+          // (setModelQuotaToZero called in chatCompletion). Just invalidate
+          // the pool cache so the next request picks a different account for
+          // this model.
+          pool.invalidate(providerName);
+          lastError = errText || "Quota exhausted for this model";
+          continue;
+        }
+        await pool.markExhausted(account.id);
+        lastError = errText || "Quota exhausted";
+        continue; // Try next account — exhausted accounts are excluded from selection
+      }
+
       // Handle rate limiting (429) — temporary, don't mark exhausted.
       // Honor the upstream reset time if the provider surfaced it (resetsAt /
       // retryAfterMs), so we cool the account for the real window instead of
       // immediately retrying and re-hitting the 429.
       if (result.rateLimited) {
-        lastError = result.error || "Rate limited";
+        lastError = errText || "Rate limited";
         attemptsMade++;
         const resetHint = result.resetsAt
           ? { resetsAt: result.resetsAt }
@@ -268,27 +295,6 @@ export async function routeRequest(
       }
       // A non-rate-limit failure means not ALL accounts were rate-limited.
       allRateLimited = false;
-
-      // Handle quota exhaustion (402 / 403 without PAYG).
-      //
-      // For Alibaba: mark the specific model as exhausted (remove from queryableModels)
-      // but keep the account active so other models can still be queried.
-      // For other providers: mark the entire account as exhausted.
-      if (result.quotaExhausted) {
-        if (providerName === "alibaba") {
-          // Alibaba: per-model exhaustion is already handled by the provider
-          // (setModelQuotaToZero called in chatCompletion). Just invalidate
-          // the pool cache so the next request picks a different account for
-          // this model.
-          pool.invalidate(providerName);
-          lastError = result.error || "Quota exhausted for this model";
-          continue;
-        } else {
-          await pool.markExhausted(account.id);
-        }
-        lastError = result.error || "Quota exhausted";
-        continue; // Try next account
-      }
 
       // Handle banned / restricted accounts (403 with code 11140 etc).
       // These accounts have valid credentials but are blocked by the upstream

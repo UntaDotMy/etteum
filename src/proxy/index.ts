@@ -511,6 +511,10 @@ function wrapStreamWithUsageFinalizer(
           quotaAfter = await pool.decrementFreeQuota(context.accountId, 1);
         } else if (!isQoder && context.quotaBefore > 0) {
           quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
+          // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+          if (quotaAfter <= 0) {
+            await pool.markExhaustedIfQuotaDepleted(context.accountId);
+          }
         }
 
         // USD cost from per-model pricing + the accumulated token breakdown.
@@ -691,6 +695,10 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
         quotaAfter = await pool.decrementFreeQuota(account.id, 1);
       } else if (!isQoder && quotaBefore > 0) {
         quotaAfter = await pool.decrementQuota(account.id, creditsUsed);
+        // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+        if (quotaAfter <= 0) {
+          await pool.markExhaustedIfQuotaDepleted(account.id);
+        }
       }
     }
 
