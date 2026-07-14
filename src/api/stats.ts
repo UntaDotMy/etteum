@@ -231,11 +231,11 @@ statsRouter.get("/providers", async (c) => {
       pendingAccounts: sql<number>`SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)`,
       disabledAccounts: sql<number>`SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END)`,
       totalAccounts: sql<number>`count(*)`,
-      // Only count quota from active+enabled accounts — error/exhausted/disabled
-      // accounts should not contribute to the "available credits" total.
+      // Package total = enabled accounts' limits (include exhausted so total
+      // does not shrink when accounts burn out). Remaining = enabled remaining.
       // Sentinel -1 (unlimited/unknown) is treated as 0 for aggregation.
-      activeQuotaLimit: sql<number>`COALESCE(SUM(CASE WHEN status = 'active' AND enabled = 1 THEN CASE WHEN quota_limit < 0 THEN 0 ELSE quota_limit END ELSE 0 END), 0)`,
-      activeQuotaRemaining: sql<number>`COALESCE(SUM(CASE WHEN status = 'active' AND enabled = 1 THEN CASE WHEN quota_remaining < 0 THEN 0 ELSE quota_remaining END ELSE 0 END), 0)`,
+      activeQuotaLimit: sql<number>`COALESCE(SUM(CASE WHEN enabled = 1 AND quota_limit > 0 THEN quota_limit ELSE 0 END), 0)`,
+      activeQuotaRemaining: sql<number>`COALESCE(SUM(CASE WHEN enabled = 1 AND quota_remaining > 0 THEN quota_remaining ELSE 0 END), 0)`,
       // Keep total quota (all accounts) for informational/debug purposes
       totalQuotaLimit: sql<number>`COALESCE(SUM(CASE WHEN quota_limit < 0 THEN 0 ELSE quota_limit END), 0)`,
       totalQuotaRemaining: sql<number>`COALESCE(SUM(CASE WHEN quota_remaining < 0 THEN 0 ELSE quota_remaining END), 0)`,

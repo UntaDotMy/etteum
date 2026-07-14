@@ -412,6 +412,26 @@ export default function AccountList() {
     });
   });
 
+  // Live remaining after each successful proxy request (stream finalizer debit).
+  useWsEvent("request_log", (msg) => {
+    const d = (msg as { data?: Record<string, unknown> })?.data ?? (msg as Record<string, unknown>);
+    const accountId = Number(d?.accountId);
+    if (!Number.isFinite(accountId) || accountId <= 0) return;
+    const after = d?.accountQuotaAfter;
+    if (typeof after !== "number" || !Number.isFinite(after)) return;
+    void mutate((prev) => {
+      if (!prev?.data?.length) return prev;
+      let hit = false;
+      const data = prev.data.map((a) => {
+        if (a.id !== accountId) return a;
+        hit = true;
+        return { ...a, quotaRemaining: Math.max(0, after) };
+      });
+      if (!hit) return prev;
+      return { ...prev, data };
+    });
+  });
+
   function handleSort(key: SortKey) {
     if (sortKey === key) {
       setSortDir(sortDir === "asc" ? "desc" : "asc");

@@ -282,6 +282,9 @@ class AccountPool {
       .returning({
         quotaRemaining: accounts.quotaRemaining,
         tokens: accounts.tokens,
+        provider: accounts.provider,
+        status: accounts.status,
+        quotaLimit: accounts.quotaLimit,
       });
 
     const remaining = Number(account?.quotaRemaining || 0);
@@ -290,6 +293,20 @@ class AccountPool {
     // quotaRemaining so the next healthCheck/warmup cannot re-inflate the
     // budget from a stale 2M import snapshot.
     await this.syncTokenCreditsRemaining(accountId, remaining, account?.tokens);
+
+    // Realtime dashboard: remaining must update without a full page refresh.
+    if (account) {
+      broadcast({
+        type: "account_status",
+        data: {
+          id: accountId,
+          provider: account.provider,
+          status: account.status,
+          quotaRemaining: remaining,
+          quotaLimit: Number(account.quotaLimit || 0),
+        },
+      });
+    }
 
     return remaining;
   }
@@ -641,7 +658,13 @@ class AccountPool {
       this.invalidate(account.provider as ProviderName);
       broadcast({
         type: "account_status",
-        data: { id: accountId, status: "exhausted", provider: account.provider },
+        data: {
+          id: accountId,
+          status: "exhausted",
+          provider: account.provider,
+          quotaRemaining: 0,
+          quotaLimit: Number(account.quotaLimit || 0),
+        },
       });
     }
   }
@@ -830,9 +853,8 @@ class AccountPool {
    * Get pool statistics.
    *
    * Per-provider breakdown includes full status detail (active, exhausted,
-   * error, pending, disabled) plus quota totals summed ONLY over active &
-   * enabled accounts — so error/exhausted/disabled accounts don't inflate
-   * the displayed total credits.
+   * error, pending, disabled). Package quotaLimit is summed over all enabled
+   * accounts (including exhausted); remaining is summed over enabled remaining.
    */
   async getStats(): Promise<{
     total: number;
@@ -872,10 +894,11 @@ class AccountPool {
           error: sql<number>`SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END)`,
           pending: sql<number>`SUM(CASE WHEN status = 'pending' THEN 1 ELSE 0 END)`,
           disabled: sql<number>`SUM(CASE WHEN enabled = 0 THEN 1 ELSE 0 END)`,
-          // Only count quota for active & enabled accounts — error/exhausted/
-          // disabled accounts should not contribute to available credits.
-          quotaLimit: sql<number>`COALESCE(SUM(CASE WHEN status = 'active' AND enabled = 1 THEN quota_limit ELSE 0 END), 0)`,
-          quotaRemaining: sql<number>`COALESCE(SUM(CASE WHEN status = 'active' AND enabled = 1 THEN quota_remaining ELSE 0 END), 0)`,
+          // Package total = sum of limits for all enabled accounts (including
+          // exhausted). Remaining = sum of remaining (exhausted contribute 0).
+          // Do not drop package capacity when an account flips to exhausted.
+          quotaLimit: sql<number>`COALESCE(SUM(CASE WHEN enabled = 1 AND quota_limit > 0 THEN quota_limit ELSE 0 END), 0)`,
+          quotaRemaining: sql<number>`COALESCE(SUM(CASE WHEN enabled = 1 AND quota_remaining > 0 THEN quota_remaining ELSE 0 END), 0)`,
         })
         .from(accounts)
         .groupBy(accounts.provider),
