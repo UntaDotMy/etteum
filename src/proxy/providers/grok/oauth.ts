@@ -872,9 +872,12 @@ export async function fetchModelsCatalog(
 }
 
 /**
- * Lightweight "is this token alive?" check for warmup. Calls GET /v1/models
- * (no token cost) and returns true on 200/304. Optionally refreshes the token
- * first if near-expiry.
+ * Lightweight "is this token alive?" check. Calls GET /v1/models (no token cost)
+ * and returns true on 200/304.
+ *
+ * Does NOT rotate refresh tokens. Callers that need a valid access JWT when the
+ * stored one is expired (warmup healthCheck, validateAccount) must refresh first
+ * via coordinatedRefresh / provider.refreshToken, then call this.
  */
 export async function validateOAuthToken(
   account: Account,
