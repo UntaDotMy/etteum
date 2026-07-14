@@ -378,6 +378,28 @@ export default function Accounts() {
     );
   });
 
+  // Stream/request finalizer already debits DB; push remaining into rows live
+  // from request_log (covers clients that only hear request events).
+  useWsEvent("request_log", (msg) => {
+    const d = msg?.data ?? msg;
+    const accountId = Number(d?.accountId);
+    if (!Number.isFinite(accountId) || accountId <= 0) return;
+    const after = d?.accountQuotaAfter;
+    if (typeof after !== "number" || !Number.isFinite(after)) return;
+    setAccounts((prev) =>
+      prev.map((a) =>
+        a.id !== accountId
+          ? a
+          : {
+              ...a,
+              quotaRemaining: Math.max(0, after),
+              // If debit hit 0 and server later marks exhausted, account_status
+              // will set status; optimistically zero remaining now.
+            },
+      ),
+    );
+  });
+
   useWsEvent(["byok_created", "byok_updated", "byok_deleted"], async () => {
     const byokRes = await fetchByokProviders();
     setByokProviders(byokRes.providers || []);
@@ -1255,11 +1277,21 @@ export default function Accounts() {
   const providerStats = useMemo(() => {
     return providers.map((provider) => {
       const rows = accounts.filter((a) => a.provider === provider);
-      // Only count quota from active+enabled accounts — error/exhausted/disabled
-      // accounts should not inflate the displayed total credits.
-      const activeRows = rows.filter((a) => a.status === "active" && a.enabled !== false);
-      const quotaLimit = activeRows.reduce((sum, a) => sum + (a.quotaLimit || 0), 0);
-      const quotaRemaining = activeRows.reduce((sum, a) => sum + (a.quotaRemaining || 0), 0);
+      // Enabled accounts only (skip user-disabled). Include exhausted/error in
+      // package total so total stays 156×2M when some flip exhausted — remaining
+      // drops, total package capacity does not shrink.
+      const creditRows = rows.filter((a) => a.enabled !== false);
+      const activeRows = creditRows.filter((a) => a.status === "active");
+      const positiveLimit = (n: number | undefined) => {
+        const v = Number(n || 0);
+        return Number.isFinite(v) && v > 0 ? v : 0;
+      };
+      const positiveRemaining = (n: number | undefined) => {
+        const v = Number(n || 0);
+        return Number.isFinite(v) && v > 0 ? v : 0;
+      };
+      const quotaLimit = creditRows.reduce((sum, a) => sum + positiveLimit(a.quotaLimit), 0);
+      const quotaRemaining = creditRows.reduce((sum, a) => sum + positiveRemaining(a.quotaRemaining), 0);
 
       // For alibaba, aggregate per-model quotas only from accounts that can query each model
       let modelQuotasSum: Record<string, { limit: number; remaining: number; count: number }> | undefined;
