@@ -110,30 +110,60 @@ export default function Settings() {
     }
   }
 
-  async function handleImportBackup(file: File | null) {
+  async function handleImportBackup(file: File | null, mode: "merge" | "replace" = "merge") {
     if (!file) return;
-    const ok = confirm(
-      "Import will REPLACE this PC's database and .env with the backup.\n\n" +
-        "A safety copy of the current data is saved under data/backups/pre-import-*.\n\n" +
-        "Continue?",
-    );
-    if (!ok) return;
+    if (mode === "replace") {
+      const ok = confirm(
+        "FULL REPLACE will overwrite this PC's database and .env with the backup.\n\n" +
+          "After import you MUST run: etteum restart\n" +
+          "(page reload alone is not enough — that was why accounts looked empty).\n\n" +
+          "Prefer “Import zip (merge)” to append accounts without wiping.\n\nContinue with full replace?",
+      );
+      if (!ok) return;
+    } else {
+      const ok = confirm(
+        "Merge import will APPEND accounts from the backup.\n\n" +
+          "• Same provider + email already here → update tokens (no duplicate row)\n" +
+          "• New accounts → added\n" +
+          "• Your existing accounts stay\n\n" +
+          "No full DB wipe. Continue?",
+      );
+      if (!ok) return;
+    }
     setImporting(true);
     setBackupMsg(null);
     try {
-      const res = await importBackupZip(file);
-      setBackupMsg(res.data.message);
+      const res = await importBackupZip(file, mode);
+      const d = res.data;
+      if (d.mode === "merge" || (d.inserted != null && d.updated != null)) {
+        setBackupMsg(
+          d.message +
+            (d.inserted != null
+              ? ` (added ${d.inserted}, updated ${d.updated}, skipped ${d.skipped ?? 0})`
+              : ""),
+        );
+      } else {
+        setBackupMsg(d.message);
+      }
       void refreshBackupStatus();
-      if (res.data.needsRestart) {
+      if (d.needsRestart) {
+        setBackupMsg(
+          (m) =>
+            (m || "") +
+            " → Run in terminal: etteum restart  (then refresh this page). Page reload alone will NOT load the new DB.",
+        );
+      } else {
+        // Merge is live — soft reload so account lists refresh.
         setTimeout(() => {
-          setBackupMsg((m) => (m || "") + " Reloading page…");
           window.location.reload();
-        }, 2500);
+        }, 1500);
       }
     } catch (e: any) {
       setBackupMsg(
         (e?.message || "Import failed") +
-          " If the DB is locked, run: etteum stop → bun scripts/backup.ts import <zip> --yes → etteum start",
+          (mode === "replace"
+            ? " If the DB is locked: etteum stop → bun scripts/backup.ts import <zip> --replace --yes → etteum start"
+            : ""),
       );
     } finally {
       setImporting(false);
@@ -393,8 +423,9 @@ export default function Settings() {
             <HardDrive className="w-5 h-5" /> Backup &amp; migrate
           </CardTitle>
           <CardDescription>
-            Export everything (accounts, tokens, settings, API keys, proxies, .env including ENCRYPTION_KEY)
-            and import on another PC for an identical install.
+            Export accounts + config, then import on another PC. Default import is{" "}
+            <strong>merge</strong> (append accounts, no duplicates). Full replace still
+            available but requires <code className="font-mono">etteum restart</code> after.
           </CardDescription>
         </CardHeader>
         <CardContent className="space-y-4">
@@ -430,13 +461,32 @@ export default function Settings() {
                 onChange={(e) => {
                   const f = e.target.files?.[0] || null;
                   e.target.value = "";
-                  void handleImportBackup(f);
+                  void handleImportBackup(f, "merge");
                 }}
               />
               <Button size="sm" variant="outline" asChild disabled={exporting || importing}>
                 <span>
                   {importing ? <Loader2 className="w-4 h-4 mr-2 animate-spin inline" /> : <Upload className="w-4 h-4 mr-2 inline" />}
-                  {importing ? "Importing…" : "Import zip"}
+                  {importing ? "Importing…" : "Import zip (merge)"}
+                </span>
+              </Button>
+            </label>
+            <label className="inline-flex">
+              <input
+                type="file"
+                accept=".zip,application/zip"
+                className="hidden"
+                disabled={exporting || importing}
+                onChange={(e) => {
+                  const f = e.target.files?.[0] || null;
+                  e.target.value = "";
+                  void handleImportBackup(f, "replace");
+                }}
+              />
+              <Button size="sm" variant="ghost" asChild disabled={exporting || importing}>
+                <span>
+                  {importing ? <Loader2 className="w-4 h-4 mr-2 animate-spin inline" /> : null}
+                  Full replace…
                 </span>
               </Button>
             </label>
@@ -445,10 +495,13 @@ export default function Settings() {
             </Button>
           </div>
           <p className="text-xs text-[var(--muted-foreground)]">
-            Essential export skips request history (your DB history can be multi‑GB). CLI:{" "}
+            Merge uses (provider + email) so re-importing the same pack updates tokens instead of
+            duplicating. Essential export skips request history. CLI:{" "}
             <code className="font-mono">etteum export</code>
             {" · "}
             <code className="font-mono">etteum import backup.zip</code>
+            {" (merge) · "}
+            <code className="font-mono">bun scripts/backup.ts import backup.zip --replace --yes</code>
           </p>
           {backupMsg && (
             <div className="rounded-md bg-[var(--secondary)]/50 border border-[var(--border)] p-3 text-sm text-[var(--foreground)]">

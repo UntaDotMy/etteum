@@ -387,22 +387,44 @@ function Invoke-Export([string]$outPath) {
 
 function Invoke-Import([string]$inPath) {
   if (-not $inPath) {
-    Write-Host "Usage: etteum import <backup-folder-or.zip>" -ForegroundColor Red
+    Write-Host "Usage: etteum import <backup-folder-or.zip> [--replace]" -ForegroundColor Red
+    Write-Host "  default: merge accounts (append, no duplicates)" -ForegroundColor DarkGray
+    Write-Host "  --replace: full DB overwrite (stops/starts server)" -ForegroundColor DarkGray
+    return
+  }
+  $doReplace = ($Arg1 -eq "--replace") -or ($Arg2 -eq "--replace") -or ($inPath -eq "--replace")
+  # If first arg is --replace, second is path
+  if ($inPath -eq "--replace") {
+    $inPath = $Arg2
+    $doReplace = $true
+  }
+  if (-not $inPath -or $inPath -eq "--replace") {
+    Write-Host "Usage: etteum import <backup-folder-or.zip> [--replace]" -ForegroundColor Red
     return
   }
   Push-Location $ProjectDir
   try {
-    Write-Host "Stopping server so the database is not locked..."
-    Invoke-Stop
-    Start-Sleep -Seconds 1
-    bun scripts/backup.ts import $inPath --yes
-    if ($LASTEXITCODE -ne 0) {
-      Write-Host "Import failed (exit $LASTEXITCODE)." -ForegroundColor Red
-      return
+    if ($doReplace) {
+      Write-Host "Full replace: stopping server so the database is not locked..."
+      Invoke-Stop
+      Start-Sleep -Seconds 1
+      bun scripts/backup.ts import $inPath --replace --yes
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "Import failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        return
+      }
+      Write-Host "Starting server..."
+      Start-Sleep -Seconds 1
+      Invoke-Start
+    } else {
+      Write-Host "Merge import (append accounts, skip/update duplicates)..."
+      bun scripts/backup.ts import $inPath --merge
+      if ($LASTEXITCODE -ne 0) {
+        Write-Host "Import failed (exit $LASTEXITCODE)." -ForegroundColor Red
+        return
+      }
+      Write-Host "Done. Refresh the dashboard — no restart required for merge."
     }
-    Write-Host "Starting server..."
-    Start-Sleep -Seconds 1
-    Invoke-Start
   } finally { Pop-Location }
 }
 
@@ -454,13 +476,15 @@ switch ($Command.ToLower()) {
     Write-Host "  port <api> <dash> Change ports"
     Write-Host "  update            Pull, install, build, restart"
     Write-Host "  export [path]     Backup DB + .env for another PC"
-    Write-Host "  import <path>     Restore backup (stops/starts server)"
+    Write-Host "  import <path>     Merge accounts from backup (default)"
+    Write-Host "  import <path> --replace  Full DB restore (stop/start)"
     Write-Host "  prune-logs        Shrink request_logs + VACUUM disk"
     Write-Host ""
     Write-Host "Common workflows:"
     Write-Host "  First time:       irm bun.sh/install.ps1 | iex; .\install.ps1; etteum start"
     Write-Host "  After update:     etteum update"
-    Write-Host "  Migrate PC:       etteum export; copy file; other PC: etteum import file"
+    Write-Host "  Migrate accounts: etteum export; copy zip; other PC: etteum import file"
+    Write-Host "  Full clone PC:    etteum import file --replace"
     Write-Host "  DB too big:       etteum prune-logs"
     Write-Host "  Something broke:  etteum doctor; etteum logs 50"
   }

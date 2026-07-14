@@ -910,27 +910,48 @@ export async function createAndDownloadBackup(
   return data;
 }
 
-/** Upload a .zip backup (multipart). */
-export async function importBackupZip(file: File): Promise<{
+/** Upload a .zip backup (multipart). mode=merge appends accounts; replace wipes DB. */
+export async function importBackupZip(
+  file: File,
+  mode: "merge" | "replace" = "merge",
+): Promise<{
   data: {
     ok: true;
-    preImportBackupDir: string;
-    counts: Record<string, number>;
+    mode?: "merge" | "replace";
+    preImportBackupDir?: string;
+    counts?: Record<string, number>;
+    inserted?: number;
+    updated?: number;
+    skipped?: number;
+    totalInPack?: number;
     needsRestart: boolean;
     message: string;
+    errors?: string[];
   };
 }> {
   const key = getApiKey();
   const form = new FormData();
   form.append("file", file);
-  const res = await fetch(`${API_BASE}/api/backup/import?confirm=1`, {
+  form.append("mode", mode);
+  const qs =
+    mode === "replace"
+      ? "mode=replace&confirm=1"
+      : "mode=merge";
+  const res = await fetch(`${API_BASE}/api/backup/import?${qs}`, {
     method: "POST",
     headers: { Authorization: `Bearer ${key}` },
     body: form,
   });
   if (!res.ok) {
     const text = await res.text().catch(() => "");
-    throw new Error(text || `Import failed (${res.status})`);
+    let msg = text || `Import failed (${res.status})`;
+    try {
+      const j = JSON.parse(text) as { error?: string; hint?: string };
+      if (j.error) msg = j.hint ? `${j.error} (${j.hint})` : j.error;
+    } catch {
+      /* raw text */
+    }
+    throw new Error(msg);
   }
   return res.json();
 }

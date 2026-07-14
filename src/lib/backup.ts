@@ -30,11 +30,14 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { config } from "../config";
 import { client as liveSqlite } from "../db/index";
+import { reencryptSecret } from "../utils/crypto";
 
 export const BACKUP_FORMAT = "etteum-backup" as const;
 export const BACKUP_VERSION = 1 as const;
 
 export type BackupMode = "essential" | "full";
+/** replace = full DB swap (needs server restart). merge = append accounts, no dups. */
+export type ImportMode = "merge" | "replace";
 
 export interface BackupManifest {
   format: typeof BACKUP_FORMAT;
@@ -72,6 +75,30 @@ export interface ImportResult {
   counts: Record<string, number>;
   needsRestart: boolean;
   message: string;
+  mode?: ImportMode;
+}
+
+export interface MergeImportResult {
+  ok: true;
+  mode: "merge";
+  inserted: number;
+  updated: number;
+  skipped: number;
+  totalInPack: number;
+  needsRestart: false;
+  message: string;
+  errors?: string[];
+}
+
+/** Parse ENCRYPTION_KEY from .env / pack env file text. */
+export function encryptionKeyFromEnvText(text: string): string {
+  const m = text.match(/^\s*ENCRYPTION_KEY\s*=\s*(.*)$/m);
+  return (m?.[1] || "").trim().replace(/^["']|["']$/g, "");
+}
+
+/** Stable identity for account dedup across packs. */
+export function accountIdentityKey(provider: string, email: string): string {
+  return `${provider}\0${email}`;
 }
 
 /** Tables dropped in essential mode (history only — not needed to run the same accounts). */
@@ -320,9 +347,223 @@ export async function resolveImportSource(inputPath: string): Promise<string> {
   );
 }
 
+type PackAccountRow = {
+  provider: string;
+  email: string;
+  password: string;
+  status: string | null;
+  enabled: number | null;
+  tokens: string | null;
+  quota_limit: number | null;
+  quota_remaining: number | null;
+  free_limit: number | null;
+  free_remaining: number | null;
+  last_login_at: number | null;
+  metadata: string | null;
+  priority: number | null;
+};
+
 /**
- * Apply a backup pack directory onto this install.
+ * Merge accounts from a backup pack into the live database (append, no duplicates).
+ *
+ * Dedup key: (provider, email) — unique index accounts_provider_email_idx.
+ * - New identity → INSERT
+ * - Existing identity → UPDATE tokens/status/quota (refresh), no second row
+ *
+ * Tokens are stored as plaintext JSON and copied as-is. Passwords are
+ * re-encrypted when the pack ENCRYPTION_KEY differs from this install.
+ *
+ * Does NOT replace the DB file — safe while the server is running (no restart).
+ */
+export function mergeAccountsFromPack(packDir: string): MergeImportResult {
+  const manifest = loadManifest(packDir);
+  const dbSrc = path.join(packDir, manifest.files.database || "poolprox3.db");
+  const envSrc = path.join(packDir, manifest.files.env || "env");
+  if (!existsSync(dbSrc)) throw new Error(`Backup missing ${manifest.files.database}`);
+  if (!existsSync(envSrc)) throw new Error(`Backup missing ${manifest.files.env}`);
+
+  const head = readFileSync(dbSrc).subarray(0, 16).toString("utf8");
+  if (!head.startsWith("SQLite format 3")) {
+    throw new Error("Backup database is not a valid SQLite file");
+  }
+
+  const sourceKey = encryptionKeyFromEnvText(readFileSync(envSrc, "utf8"));
+  const targetKey = process.env.ENCRYPTION_KEY || config.encryptionKey || "";
+  if (!targetKey || targetKey.length < 16) {
+    throw new Error(
+      "This install has no ENCRYPTION_KEY — set it in .env before merge import.",
+    );
+  }
+  if (!sourceKey || sourceKey.length < 16) {
+    throw new Error(
+      "Backup pack env is missing ENCRYPTION_KEY — cannot safely re-key passwords.",
+    );
+  }
+
+  const src = new Database(dbSrc, { readonly: true });
+  let packRows: PackAccountRow[] = [];
+  try {
+    packRows = src
+      .query(
+        `SELECT provider, email, password, status, enabled, tokens,
+                quota_limit, quota_remaining, free_limit, free_remaining,
+                last_login_at, metadata, priority
+         FROM accounts`,
+      )
+      .all() as PackAccountRow[];
+  } finally {
+    src.close();
+  }
+
+  // Existing identities on live DB
+  const existing = liveSqlite
+    .query(`SELECT id, provider, email FROM accounts`)
+    .all() as Array<{ id: number; provider: string; email: string }>;
+  const byKey = new Map<string, number>();
+  for (const row of existing) {
+    byKey.set(accountIdentityKey(row.provider, row.email), row.id);
+  }
+
+  const insertStmt = liveSqlite.prepare(
+    `INSERT INTO accounts (
+       provider, email, password, status, enabled, tokens,
+       quota_limit, quota_remaining, free_limit, free_remaining,
+       last_login_at, metadata, priority, created_at, updated_at
+     ) VALUES (
+       $provider, $email, $password, $status, $enabled, $tokens,
+       $quota_limit, $quota_remaining, $free_limit, $free_remaining,
+       $last_login_at, $metadata, $priority, $now, $now
+     )`,
+  );
+  const updateStmt = liveSqlite.prepare(
+    `UPDATE accounts SET
+       password = $password,
+       status = $status,
+       enabled = $enabled,
+       tokens = $tokens,
+       quota_limit = $quota_limit,
+       quota_remaining = $quota_remaining,
+       free_limit = $free_limit,
+       free_remaining = $free_remaining,
+       last_login_at = $last_login_at,
+       metadata = $metadata,
+       priority = $priority,
+       error_message = NULL,
+       updated_at = $now
+     WHERE id = $id`,
+  );
+
+  let inserted = 0;
+  let updated = 0;
+  let skipped = 0;
+  const errors: string[] = [];
+  const now = Math.floor(Date.now() / 1000);
+  // Within-pack dedup (same provider+email twice in export)
+  const seenInPack = new Set<string>();
+
+  const tx = liveSqlite.transaction(() => {
+    for (const row of packRows) {
+      const provider = String(row.provider || "").trim();
+      const email = String(row.email || "").trim();
+      if (!provider || !email) {
+        skipped++;
+        continue;
+      }
+      const key = accountIdentityKey(provider, email);
+      if (seenInPack.has(key)) {
+        skipped++;
+        continue;
+      }
+      seenInPack.add(key);
+
+      try {
+        const password = reencryptSecret(String(row.password || ""), sourceKey, targetKey);
+        const tokens =
+          row.tokens == null
+            ? null
+            : typeof row.tokens === "string"
+              ? row.tokens
+              : JSON.stringify(row.tokens);
+        const metadata =
+          row.metadata == null
+            ? null
+            : typeof row.metadata === "string"
+              ? row.metadata
+              : JSON.stringify(row.metadata);
+        const status = row.status || "active";
+        const enabled = row.enabled == null ? 1 : Number(row.enabled) ? 1 : 0;
+        const priority = row.priority == null ? 0 : Number(row.priority);
+
+        const existingId = byKey.get(key);
+        if (existingId != null) {
+          updateStmt.run({
+            $id: existingId,
+            $password: password,
+            $status: status,
+            $enabled: enabled,
+            $tokens: tokens,
+            $quota_limit: row.quota_limit,
+            $quota_remaining: row.quota_remaining,
+            $free_limit: row.free_limit,
+            $free_remaining: row.free_remaining,
+            $last_login_at: row.last_login_at,
+            $metadata: metadata,
+            $priority: priority,
+            $now: now,
+          });
+          updated++;
+        } else {
+          const info = insertStmt.run({
+            $provider: provider,
+            $email: email,
+            $password: password,
+            $status: status,
+            $enabled: enabled,
+            $tokens: tokens,
+            $quota_limit: row.quota_limit,
+            $quota_remaining: row.quota_remaining,
+            $free_limit: row.free_limit,
+            $free_remaining: row.free_remaining,
+            $last_login_at: row.last_login_at,
+            $metadata: metadata,
+            $priority: priority,
+            $now: now,
+          });
+          const newId = Number(info.lastInsertRowid);
+          byKey.set(key, newId);
+          inserted++;
+        }
+      } catch (e) {
+        skipped++;
+        if (errors.length < 30) {
+          errors.push(
+            `${provider}/${email}: ${e instanceof Error ? e.message : String(e)}`,
+          );
+        }
+      }
+    }
+  });
+  tx();
+
+  return {
+    ok: true,
+    mode: "merge",
+    inserted,
+    updated,
+    skipped,
+    totalInPack: packRows.length,
+    needsRestart: false,
+    message:
+      `Merged accounts from backup: ${inserted} added, ${updated} updated (already present), ` +
+      `${skipped} skipped. Live accounts kept; no full DB replace.`,
+    errors: errors.length > 0 ? errors : undefined,
+  };
+}
+
+/**
+ * Apply a backup pack directory onto this install (full replace of DB + .env).
  * Stops short of restarting — caller should restart the server.
+ * Prefer {@link mergeAccountsFromPack} when you only need to append accounts.
  */
 export function applyBackupDir(packDir: string): ImportResult {
   const manifest = loadManifest(packDir);
@@ -398,12 +639,14 @@ export function applyBackupDir(packDir: string): ImportResult {
   const counts = manifest.meta?.counts ?? countTables(dbPath);
   return {
     ok: true,
+    mode: "replace",
     preImportBackupDir: preDir,
     counts,
     needsRestart: true,
     message:
-      `Import complete (${manifest.mode}). Restart the server to reload .env and the database. ` +
-      `Previous files: ${preDir}`,
+      `Full replace complete (${manifest.mode}). You MUST fully restart the server process ` +
+      `(not just reload the page) so it opens the new database and ENCRYPTION_KEY. ` +
+      `Run: etteum restart. Previous files: ${preDir}`,
   };
 }
 

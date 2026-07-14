@@ -376,45 +376,127 @@ export async function exchangeCodexRefreshTokens(tokens: string[]) {
 }
 
 /**
+ * Stable Grok OAuth email label for (provider,email) uniqueness.
+ * Prefer full OIDC `sub` so the same user always maps to one row.
+ */
+export function grokOAuthEmailFromIdentity(opts: {
+  sub?: string | null;
+  email?: string | null;
+  tokenFallback?: string;
+}): string {
+  const realEmail = (opts.email || "").trim();
+  if (realEmail && realEmail.includes("@") && !realEmail.endsWith("@oauth") && !realEmail.endsWith("@token.local")) {
+    return realEmail;
+  }
+  const sub = (opts.sub || "").trim();
+  if (sub) return `grok-${sub}@oauth`;
+  const fb = (opts.tokenFallback || "").trim();
+  if (fb) return `grok-${fb.slice(-12)}@token.local`;
+  return `grok-${Date.now()}@token.local`;
+}
+
+/** Dedup + normalize a bulk paste of tokens (order-preserving). */
+export function uniqueTokenLines(tokens: string[]): string[] {
+  const seen = new Set<string>();
+  const out: string[] = [];
+  for (const t of tokens) {
+    const trimmed = t.trim();
+    if (!trimmed) continue;
+    if (seen.has(trimmed)) continue;
+    seen.add(trimmed);
+    out.push(trimmed);
+  }
+  return out;
+}
+
+/**
  * Bulk-import Grok accounts via refresh tokens (preferred) or access tokens.
  * Used by POST /api/accounts/instant-login (provider=grok).
  *
  * - Refresh tokens (durable): exchanged at auth.x.ai for a fresh access token.
  * - Access tokens (JWT, "eyJ..."): stored as-is with no refresh capability.
+ * - Duplicates: same token in the paste, same refresh_token already in DB, or
+ *   same OIDC sub → single account row (upsert), counted as `updated` / `skipped`.
  */
 export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
   success: number;
   failed: number;
+  updated?: number;
+  skipped?: number;
   errors?: string[];
 }> {
   let success = 0;
   let failed = 0;
+  let updated = 0;
+  let skipped = 0;
   const errors: string[] = [];
   const pushErr = (msg: string) => {
     if (errors.length < 50) errors.push(msg);
   };
+
+  const unique = uniqueTokenLines(tokens);
+  skipped += Math.max(0, tokens.filter((t) => t.trim()).length - unique.length);
+
+  // Preload existing Grok OAuth accounts for refresh_token / sub matching.
+  const existingGrok = await db
+    .select()
+    .from(accounts)
+    .where(eq(accounts.provider, "grok"));
+  const byRefresh = new Map<string, { id: number; email: string }>();
+  const bySub = new Map<string, { id: number; email: string }>();
+  for (const row of existingGrok) {
+    const tok = row.tokens as Record<string, unknown> | null;
+    if (!tok || typeof tok !== "object") continue;
+    const rt = typeof tok.refresh_token === "string" ? tok.refresh_token.trim() : "";
+    const sub = typeof tok.sub === "string" ? tok.sub.trim() : "";
+    if (rt) byRefresh.set(rt, { id: row.id, email: row.email });
+    if (sub) bySub.set(sub, { id: row.id, email: row.email });
+  }
+
   // Credit probe is one extra HTTP round-trip per token; for large pastes skip
   // it so import finishes (warmup / refresh-quota can fill credits later).
-  const probeCredits = tokens.length <= 25;
+  const probeCredits = unique.length <= 25;
 
-  await mapPool(tokens, 8, async (token) => {
-    const trimmed = token.trim();
-    if (!trimmed) { failed++; return; }
+  // Serialize sub→email assignment within the batch so concurrent workers
+  // don't create two rows for the same sub before either commits.
+  const batchSubs = new Set<string>();
+  const batchLock = { chain: Promise.resolve() };
+  function withBatchLock<T>(fn: () => Promise<T>): Promise<T> {
+    const run = batchLock.chain.then(fn, fn);
+    batchLock.chain = run.then(
+      () => undefined,
+      () => undefined,
+    );
+    return run;
+  }
+
+  await mapPool(unique, 8, async (token) => {
+    const trimmed = token;
 
     try {
-      let oauthTokens;
-      let email = "";
+      // Already stored under this exact refresh token → skip network + insert.
+      const knownRt = byRefresh.get(trimmed);
+      if (knownRt && !trimmed.startsWith("eyJ")) {
+        skipped++;
+        return;
+      }
 
+      let oauthTokens;
       if (trimmed.startsWith("eyJ")) {
         oauthTokens = bundleFromAccessToken(trimmed);
-        email = oauthTokens.sub
-          ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth`
-          : `grok-${trimmed.slice(-8)}@token.local`;
       } else {
         oauthTokens = await exchangeRefreshToken(trimmed);
-        email = oauthTokens.sub
-          ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth`
-          : `grok-${trimmed.slice(-8)}@token.local`;
+      }
+
+      // Prefer email of existing row matched by sub (stable identity).
+      const sub = (oauthTokens.sub || "").trim();
+      let email = grokOAuthEmailFromIdentity({
+        sub,
+        email: oauthTokens.email,
+        tokenFallback: trimmed,
+      });
+      if (sub && bySub.has(sub)) {
+        email = bySub.get(sub)!.email;
       }
 
       if (probeCredits) {
@@ -430,8 +512,35 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
         }
       }
 
-      await upsertGrokOAuthAccount(email, oauthTokens);
-      success++;
+      const result = await withBatchLock(async () => {
+        // Re-check sub after other workers may have inserted.
+        if (sub && bySub.has(sub)) {
+          email = bySub.get(sub)!.email;
+        } else if (sub && batchSubs.has(sub)) {
+          // Another concurrent worker is creating this sub — wait via lock is enough;
+          // fall through to upsert by email which is deterministic.
+          email = grokOAuthEmailFromIdentity({ sub, tokenFallback: trimmed });
+        }
+        if (sub) batchSubs.add(sub);
+        return upsertGrokOAuthAccount(email, oauthTokens);
+      });
+
+      if (result.created) {
+        success++;
+      } else {
+        updated++;
+        success++; // still a successful import outcome
+      }
+
+      // Keep in-memory indexes warm for the rest of the batch.
+      if (oauthTokens.refresh_token) {
+        byRefresh.set(oauthTokens.refresh_token.trim(), { id: result.id, email });
+      }
+      // Also index the pre-rotation token so a second paste of the old value hits skip.
+      if (!trimmed.startsWith("eyJ")) {
+        byRefresh.set(trimmed, { id: result.id, email });
+      }
+      if (sub) bySub.set(sub, { id: result.id, email });
     } catch (err) {
       pushErr(`token ...${trimmed.slice(-8)}: ${err instanceof Error ? err.message : String(err)}`);
       failed++;
@@ -443,7 +552,13 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
     broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
   }
 
-  return { success, failed, errors: errors.length > 0 ? errors : undefined };
+  return {
+    success,
+    failed,
+    updated,
+    skipped,
+    errors: errors.length > 0 ? errors : undefined,
+  };
 }
 
 /**
@@ -477,10 +592,13 @@ export async function importGrokFarmAccounts(
 
       const email =
         emailRaw ||
-        oauthTokens.email ||
-        (oauthTokens.sub ? `grok-${oauthTokens.sub.slice(0, 8)}@oauth` : `grok-${Date.now()}@farm`);
+        grokOAuthEmailFromIdentity({
+          sub: oauthTokens.sub,
+          email: oauthTokens.email,
+          tokenFallback: oauthTokens.refresh_token || oauthTokens.access_token,
+        });
 
-      const id = await upsertGrokOAuthAccount(email, oauthTokens, {
+      const { id } = await upsertGrokOAuthAccount(email, oauthTokens, {
         password: typeof rec.password === "string" ? rec.password : undefined,
         farmMeta: {
           source: "grok-farm",
@@ -508,10 +626,23 @@ async function upsertGrokOAuthAccount(
   email: string,
   oauthTokens: import("../../proxy/providers/grok/oauth").GrokOAuthTokens,
   opts?: { password?: string; farmMeta?: Record<string, unknown> },
-): Promise<number> {
-  const existing = await db.select().from(accounts)
+): Promise<{ id: number; created: boolean }> {
+  // Prefer full-sub email identity so truncated labels from older builds still
+  // collide on unique (provider,email) only when emails match; also match by sub
+  // in tokens when the stored email was the short form.
+  let existing = await db.select().from(accounts)
     .where(and(eq(accounts.provider, "grok"), eq(accounts.email, email)))
     .limit(1);
+
+  if (existing.length === 0 && oauthTokens.sub) {
+    const sub = oauthTokens.sub.trim();
+    const allGrok = await db.select().from(accounts).where(eq(accounts.provider, "grok"));
+    const bySub = allGrok.find((r) => {
+      const t = r.tokens as Record<string, unknown> | null;
+      return t && typeof t.sub === "string" && t.sub.trim() === sub;
+    });
+    if (bySub) existing = [bySub];
+  }
 
   const tokensBlob = {
     auth_method: "oauth" as const,
@@ -551,7 +682,7 @@ async function upsertGrokOAuthAccount(
         },
       })
       .where(eq(accounts.id, existing[0]!.id));
-    return existing[0]!.id;
+    return { id: existing[0]!.id, created: false };
   }
 
   const inserted = await db.insert(accounts).values({
@@ -569,7 +700,7 @@ async function upsertGrokOAuthAccount(
       ...(opts?.farmMeta || {}),
     },
   }).returning();
-  return inserted[0]!.id;
+  return { id: inserted[0]!.id, created: true };
 }
 
 export function registerActionRoutes(router: Hono): void {
