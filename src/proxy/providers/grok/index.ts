@@ -819,8 +819,18 @@ export class GrokProvider extends BaseProvider {
       }
       try {
         const fresh = await exchangeRefreshToken(oauthTokens.refresh_token);
-        const tokensStr = JSON.stringify(fresh);
-        return { success: true, tokens: tokensStr };
+        // Merge so farm credits / email survive rotation (refresh response is thin).
+        const merged: GrokOAuthTokens = {
+          ...oauthTokens,
+          ...fresh,
+          auth_method: "oauth",
+          access_token: fresh.access_token,
+          refresh_token: fresh.refresh_token || oauthTokens.refresh_token,
+          expires_at: fresh.expires_at,
+          oidc_client_id: fresh.oidc_client_id || oauthTokens.oidc_client_id,
+          sub: fresh.sub || oauthTokens.sub,
+        };
+        return { success: true, tokens: JSON.stringify(merged) };
       } catch (err) {
         return { success: false, error: err instanceof Error ? err.message : String(err) };
       }
@@ -937,22 +947,75 @@ export class GrokProvider extends BaseProvider {
    * - SSO accounts: validated via the grok.com rate-limits endpoint.
    */
   /**
-   * Override healthCheck so the BASE class's direct-refresh path (base.ts:195,
-   * which calls this.refreshToken WITHOUT the coordinator lock and WITHOUT
-   * persisting) can NEVER run for grok OAuth accounts. The base path would
-   * brick rotating refresh tokens. We validate + fetch quota ourselves,
-   * routing any needed refresh through validateOAuthToken → ensureFreshAccessToken
-   * (which never rotates; it returns false and lets the scheduler/router handle it).
+   * When access JWT is expired/near-expiry, rotate via the refresh coordinator
+   * (locked + persisted). Used by warmup healthCheck and validateAccount.
+   *
+   * ensureFreshAccessToken deliberately never rotates (avoids races on the
+   * request path). Warmup/import must still refresh expired access tokens —
+   * otherwise imported accounts with a valid refresh_token fail as
+   * "OAuth access token invalid or refresh failed".
+   */
+  private async refreshOAuthIfNeeded(
+    account: Account,
+  ): Promise<{ account: Account; refreshedTokens?: unknown; error?: string; unrecoverable?: boolean }> {
+    const bearer = await ensureFreshAccessToken(account);
+    if (bearer) return { account };
+
+    const oauth = getOAuthTokens(account);
+    if (!oauth?.refresh_token) {
+      return {
+        account,
+        error: "No refresh token to renew OAuth access",
+        unrecoverable: true,
+      };
+    }
+
+    const { coordinatedRefresh } = await import("../../../auth/refresh-coordinator");
+    const { pool } = await import("../../pool");
+    const refreshResult = await coordinatedRefresh(this, account);
+    if (!refreshResult.success || !refreshResult.tokens) {
+      return {
+        account,
+        error: refreshResult.error || "OAuth refresh failed",
+        unrecoverable: refreshResult.unrecoverable,
+      };
+    }
+    await pool.updateTokens(account.id, refreshResult.tokens);
+    return {
+      account: { ...account, tokens: refreshResult.tokens as Account["tokens"] },
+      refreshedTokens: refreshResult.tokens,
+    };
+  }
+
+  /**
+   * Override healthCheck so the BASE class's unlocked refreshToken path cannot
+   * race token rotation. We still refresh expired OAuth access tokens via
+   * coordinatedRefresh (safe for warmup after import/export).
    */
   override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
-    // OAuth path — safe validation (no rotation, free /v1/models probe).
+    // OAuth path — refresh if access expired, then free /v1/models probe.
     if (isOAuthAccount(account)) {
-      const { alive } = await validateOAuthToken(account);
+      const ready = await this.refreshOAuthIfNeeded(account);
+      if (ready.error) {
+        return {
+          kind: ready.unrecoverable ? "auth_error" : "session_expired",
+          success: false,
+          retryable: !ready.unrecoverable,
+          error: ready.error,
+        };
+      }
+      const working = ready.account;
+      const { alive } = await validateOAuthToken(working);
       if (!alive) {
-        return { kind: "missing_tokens", success: false, error: "OAuth access token invalid or refresh failed" };
+        return {
+          kind: "session_expired",
+          success: false,
+          error: "OAuth access token invalid after refresh",
+          ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+        };
       }
       // Prefer absolute free Build credits already stored by farm/import.
-      const oauth = getOAuthTokens(account);
+      const oauth = getOAuthTokens(working);
       if (
         oauth?.credits_limit != null &&
         oauth.credits_limit > 0 &&
@@ -968,14 +1031,16 @@ export class GrokProvider extends BaseProvider {
             resetAt: null,
             source: "stored-farm-credits",
           },
+          ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
         };
       }
       // Live quota: billing / GetGrokCreditsConfig / rate-limit headers (farm-compatible).
-      const quota = await this.fetchQuota(account, signal);
+      const quota = await this.fetchQuota(working, signal);
       return {
         kind: "healthy",
         success: true,
         quota: quota.success ? quota.quota : undefined,
+        ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
       };
     }
 
@@ -984,17 +1049,11 @@ export class GrokProvider extends BaseProvider {
   }
 
   async validateAccount(account: Account): Promise<boolean> {
-    // OAuth path — refresh proactively, then probe /v1/models (free).
+    // OAuth path — refresh if needed (coordinator), then probe /v1/models (free).
     if (isOAuthAccount(account)) {
-      const { alive } = await validateOAuthToken(account, async (fresh) => {
-        account.tokens = fresh as unknown as Account["tokens"];
-        try {
-          const { db } = await import("../../../db/index");
-          const { accounts } = await import("../../../db/schema");
-          const { eq } = await import("drizzle-orm");
-          await db.update(accounts).set({ tokens: fresh as unknown as Account["tokens"] }).where(eq(accounts.id, account.id));
-        } catch { /* best-effort */ }
-      });
+      const ready = await this.refreshOAuthIfNeeded(account);
+      if (ready.error) return false;
+      const { alive } = await validateOAuthToken(ready.account);
       return alive;
     }
 
