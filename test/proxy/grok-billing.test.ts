@@ -6,6 +6,7 @@ import {
   parseGrokBillingJson,
   parseGrokCreditsProtobuf,
   selectGrokOAuthQuota,
+  GROK_FREE_BUILD_TOKEN_LIMIT,
   type GrokOAuthQuota,
 } from "../../src/proxy/providers/grok/oauth";
 
@@ -133,13 +134,13 @@ describe("selectGrokOAuthQuota", () => {
     expect(q?.resetAt?.toISOString()).toBe("2026-07-15T00:00:00.000Z");
   });
 
-  test("percent-scale is last resort when absolute headers missing", () => {
+  test("percent-scale alone is NOT used as free Build token quota", () => {
+    // Returning 100 here was the root of dashboard "100" next to "2M".
     const q = selectGrokOAuthQuota(null, null, percent);
-    expect(q?.percentScale).toBe(true);
-    expect(q?.limit).toBe(100);
+    expect(q).toBeNull();
   });
 
-  test("absolute with limit 0 does not beat percent", () => {
+  test("headers-missing liveness does not fall through to percent 100", () => {
     const emptyAbsolute: GrokOAuthQuota = {
       limit: 0,
       remaining: 0,
@@ -149,6 +150,28 @@ describe("selectGrokOAuthQuota", () => {
       percentScale: false,
     };
     const q = selectGrokOAuthQuota(null, emptyAbsolute, percent);
-    expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
+    // Not free-usage-exhausted — return absolute as-is (caller filters limit 0)
+    // or null via fetch wrapper; never percent 100.
+    expect(q?.source).not.toBe("grok.com/GetGrokCreditsConfig");
+    expect(q?.percentScale).not.toBe(true);
+  });
+
+  test("free-usage-exhausted beats percent 100 even when limit was 0", () => {
+    // Live evidence: 429 free-usage-exhausted has no rate-limit headers.
+    // Old select() fell through to GetGrokCreditsConfig → 100/100 active.
+    const exhausted: GrokOAuthQuota = {
+      limit: 0,
+      remaining: 0,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/free-usage-exhausted",
+      percentScale: false,
+    };
+    const q = selectGrokOAuthQuota(null, exhausted, percent);
+    expect(q).not.toBeNull();
+    expect(q!.source).toBe("cli-chat-proxy/free-usage-exhausted");
+    expect(q!.remaining).toBe(0);
+    expect(q!.limit).toBe(GROK_FREE_BUILD_TOKEN_LIMIT);
+    expect(q!.percentScale).toBe(false);
   });
 });

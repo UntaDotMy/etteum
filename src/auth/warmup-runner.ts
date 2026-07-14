@@ -356,9 +356,35 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
           rawLimit > 0 &&
           (rawLimit / dbLimit >= 10 || dbLimit / rawLimit >= 10);
 
+        // Grok free Build: x-ratelimit-remaining-tokens often equals the full
+        // package (2M) even after real use (live-confirmed). That is NOT live
+        // remaining. Remaining is tracked by per-request debit; warmup must
+        // not re-inflate every healthy account to full package.
+        const isGrok = account.provider === "grok";
+        const untrustedFullRemaining =
+          isGrok &&
+          (quotaSource.includes("untrusted-full-remaining") ||
+            (rawLimit > 1000 &&
+              upstreamRemaining >= rawLimit &&
+              health.kind !== "exhausted"));
+
         if (health.kind === "exhausted") {
           // Provider says exhausted — always zero out.
           update.quotaRemaining = 0;
+        } else if (untrustedFullRemaining) {
+          // Only seed full package when we have no usable local absolute remaining
+          // (first import / wrong percent-scale 100). Otherwise keep local debit.
+          const hasLocalAbsolute =
+            Number.isFinite(dbRemaining) &&
+            dbRemaining > 0 &&
+            Number.isFinite(dbLimit) &&
+            dbLimit > 1000;
+          if (!hasLocalAbsolute) {
+            // First absolute seed (or migrate off percent 100) → start at package.
+            // Subsequent requests decrement; later warmups leave local remaining.
+            update.quotaRemaining = rawLimit;
+          }
+          // else: do not set quotaRemaining — preserve local tracked remaining
         } else if (scaleChanged) {
           update.quotaRemaining = upstreamRemaining;
         } else if (Number.isFinite(dbRemaining) && dbRemaining > 0) {
