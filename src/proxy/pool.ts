@@ -279,9 +279,66 @@ class AccountPool {
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
-      .returning({ quotaRemaining: accounts.quotaRemaining });
+      .returning({
+        quotaRemaining: accounts.quotaRemaining,
+        tokens: accounts.tokens,
+      });
 
-    return Number(account?.quotaRemaining || 0);
+    const remaining = Number(account?.quotaRemaining || 0);
+
+    // Keep tokens.credits_remaining (Grok OAuth farm blob) in lockstep with
+    // quotaRemaining so the next healthCheck/warmup cannot re-inflate the
+    // budget from a stale 2M import snapshot.
+    await this.syncTokenCreditsRemaining(accountId, remaining, account?.tokens);
+
+    return remaining;
+  }
+
+  /**
+   * When the account tokens blob stores absolute free-Build credits
+   * (`credits_remaining` / `credits_limit`), pin remaining to the live
+   * quotaRemaining after a debit. No-op when those fields are absent.
+   */
+  private async syncTokenCreditsRemaining(
+    accountId: number,
+    remaining: number,
+    tokens: unknown,
+  ): Promise<void> {
+    if (!tokens || typeof tokens !== "object" || Array.isArray(tokens)) return;
+    const t = tokens as Record<string, unknown>;
+    if (typeof t.credits_remaining !== "number" || !Number.isFinite(t.credits_remaining)) return;
+
+    const nextRemaining = Math.max(0, Math.floor(remaining));
+    if (Math.floor(t.credits_remaining) === nextRemaining) return;
+
+    await db
+      .update(accounts)
+      .set({
+        tokens: { ...t, credits_remaining: nextRemaining } as Account["tokens"],
+        updatedAt: new Date(),
+      })
+      .where(eq(accounts.id, accountId));
+  }
+
+  /**
+   * After a successful debit, flip the account to `exhausted` when a positive
+   * quotaLimit is fully spent so it is excluded from getActiveAccounts.
+   */
+  async markExhaustedIfQuotaDepleted(accountId: number): Promise<void> {
+    const [a] = await db
+      .select({
+        quotaLimit: accounts.quotaLimit,
+        quotaRemaining: accounts.quotaRemaining,
+        status: accounts.status,
+      })
+      .from(accounts)
+      .where(eq(accounts.id, accountId))
+      .limit(1);
+    if (!a) return;
+    if (a.status === "exhausted") return;
+    if (Number(a.quotaLimit) > 0 && Number(a.quotaRemaining) <= 0) {
+      await this.markExhausted(accountId);
+    }
   }
 
   /**

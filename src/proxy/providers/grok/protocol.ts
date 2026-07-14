@@ -380,10 +380,20 @@ export class StreamAdapter {
     const rawMessage = error.message ?? error.error ?? "Upstream stream error";
     const message = String(rawMessage);
     const code = error.code;
-    const text = message.toLowerCase();
-    const status = code === 8 || text.includes("too many requests") || text.includes("rate limit")
-      ? 429
-      : 502;
+    const text = `${message} ${code ?? ""}`.toLowerCase();
+    // Free-usage / spending-limit exhaustion often arrives as rate-limit-shaped
+    // frames; surface as 402 so callers mark the account exhausted, not cooled.
+    const exhausted =
+      text.includes("free-usage-exhausted") ||
+      text.includes("spending-limit") ||
+      text.includes("spending_limit") ||
+      text.includes("you've used all") ||
+      text.includes("payment required");
+    const status = exhausted
+      ? 402
+      : code === 8 || text.includes("too many requests") || text.includes("rate limit")
+        ? 429
+        : 502;
 
     return { message, status };
   }

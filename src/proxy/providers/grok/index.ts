@@ -65,6 +65,91 @@ export interface GrokTokens {
 }
 
 /**
+ * True when an upstream Grok/xAI error means the account's free/paid credits
+ * are gone (not a short transient throttle).
+ *
+ * Important: xAI often returns HTTP **429** with
+ * `code: "subscription:free-usage-exhausted"` when free Build credits are
+ * depleted. That is permanent for the billing window and must mark the
+ * account `exhausted` — not a 60s rate-limit cooldown that re-selects it.
+ */
+export function isGrokCreditExhaustedError(msg: string): boolean {
+  if (!msg) return false;
+  const n = msg.toLowerCase();
+  return (
+    n.includes("free-usage-exhausted") ||
+    n.includes("spending-limit") ||
+    n.includes("spending_limit") ||
+    n.includes("usage exhausted") ||
+    n.includes("quota_exhausted") ||
+    n.includes("quota exhausted") ||
+    n.includes("quota has been exhausted") ||
+    n.includes("insufficient credit") ||
+    n.includes("credits exhausted") ||
+    n.includes("credit exhausted") ||
+    n.includes("no remaining credits") ||
+    n.includes("out of credits") ||
+    n.includes("you've used all") ||
+    n.includes("you have used all") ||
+    n.includes("payment required") ||
+    /\b402\b/.test(n)
+  );
+}
+
+/**
+ * Classify a Grok upstream failure into a ProviderResult.
+ * Exhaustion checks run **before** the generic 429/rate-limit branch so
+ * free-usage-exhausted is never treated as a temporary throttle.
+ */
+export function classifyGrokUpstreamError(err: unknown): ProviderResult {
+  const msg = err instanceof Error ? err.message : String(err ?? "");
+  // Wrong / unsupported model is a CLIENT error — never ban or disable the account.
+  // Router treats isInvalidModelError / isNonAccountRequestError as non-account.
+  if (
+    /invalid_model|model_not_found|no such model|unknown model|model not supported|model is not supported|unsupported model|does not support model|model does not exist|model is not available|model not available/i.test(
+      msg,
+    )
+  ) {
+    return { success: false, error: `invalid_model: ${msg}` };
+  }
+  // Credit declined / free usage exhausted — mark account exhausted (router
+  // → pool.markExhausted). Must run before the bare "429" rate-limit match.
+  if (isGrokCreditExhaustedError(msg)) {
+    return {
+      success: false,
+      error: `quota_exhausted: ${msg}`,
+      quotaExhausted: true,
+    };
+  }
+  // xAI "permission-denied" on chat is NOT an expired token — the access JWT
+  // is valid (models/billing often still 200) but this principal/team has no
+  // chat entitlement. Do not prefix with "expired:" or the router will
+  // uselessly burn the refresh token trying to "fix" it.
+  if (/permission-denied|chat endpoint is denied/i.test(msg)) {
+    return {
+      success: false,
+      error: `forbidden: ${msg}`,
+      banned: true,
+    };
+  }
+  if (/expired|unauthorized|\b401\b/i.test(msg)) {
+    return { success: false, error: `expired: ${msg}` };
+  }
+  // Only treat 403 as hard-ban when the body says so — bare 403 is often
+  // entitlement lag / IP / temporary and must not permanently disable.
+  if (/\b403\b/i.test(msg) && /banned|suspended|restricted|disabled|revoked/i.test(msg)) {
+    return { success: false, error: `forbidden: ${msg}`, banned: true };
+  }
+  if (/\b403\b/i.test(msg)) {
+    return { success: false, error: `error: ${msg}` };
+  }
+  if (/rate_limit|429|too many/i.test(msg)) {
+    return { success: false, error: `rate_limited: ${msg}`, rateLimited: true };
+  }
+  return { success: false, error: `error: ${msg}` };
+}
+
+/**
  * Conservative prompt-token estimate when the upstream reports no usage
  * (i.e. the SSO web surface). Uses a char/4 heuristic summed across all
  * message content. Used only as a fallback — OAuth/Responses surface reports
@@ -102,11 +187,14 @@ const GROK_CREATED = 1_718_000_000;
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
  * Chat only — no image/video generation models in the Grok catalog.
  */
+// Free Build quota is absolute tokens (x-ratelimit-*-tokens, typically ~2e6).
+// creditRate 1 → creditsUsed = totalTokens so pool.decrementQuota tracks the
+// real remaining budget (the default 1/1000 left accounts almost full forever).
 const GROK_MODELS: ModelInfo[] = [
-  { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
-  { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true },
+  { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
-  { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false },
+  { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
 ];
 
 export type GrokReasoningEffort = "low" | "medium" | "high";
@@ -414,14 +502,16 @@ export class GrokProvider extends BaseProvider {
                 }
 
                 // Pass the OpenAI-format chunk straight through (re-tagged
-                // with our id/created/model for consistency).
-                const out = {
+                // with our id/created/model for consistency). MUST include
+                // `usage` so proxy stream finalizer can debit quota per request.
+                const out: Record<string, unknown> = {
                   id,
                   object: "chat.completion.chunk",
                   created,
                   model: request.model,
                   choices: chunk.choices ?? [],
                 };
+                if (usage) out.usage = usage;
                 controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
               } catch {
                 /* skip malformed chunk */
@@ -497,7 +587,9 @@ export class GrokProvider extends BaseProvider {
       throw new Error(`expired: HTTP ${response.status}`);
     }
     if (response.status === 429) {
-      throw new Error("rate_limited: HTTP 429");
+      // Include body so free-usage-exhausted can be classified as quotaExhausted.
+      const body = await response.text().catch(() => "");
+      throw new Error(`rate_limited: HTTP 429 ${body.slice(0, 200)}`);
     }
     if (!response.ok || !response.body) {
       const body = await response.text().catch(() => "");
@@ -572,10 +664,15 @@ export class GrokProvider extends BaseProvider {
                       // Citations are already rendered inline in the text token.
                       break;
                     case "error":
+                      // 402 = credit/quota exhausted (see protocol extractError);
+                      // 429 = true rate limit. Preserve prefix so classifyError
+                      // can distinguish without re-parsing the body.
                       throw new Error(
-                        evt.errorStatus === 429
-                          ? `rate_limited: ${evt.errorMessage}`
-                          : `error: ${evt.errorMessage}`
+                        evt.errorStatus === 402
+                          ? `quota_exhausted: ${evt.errorMessage}`
+                          : evt.errorStatus === 429
+                            ? `rate_limited: ${evt.errorMessage}`
+                            : `error: ${evt.errorMessage}`
                       );
                     case "done":
                       finished = true;
@@ -646,7 +743,9 @@ export class GrokProvider extends BaseProvider {
       throw new Error(`expired: HTTP ${response.status}`);
     }
     if (response.status === 429) {
-      throw new Error("rate_limited: HTTP 429");
+      // Include body so free-usage-exhausted can be classified as quotaExhausted.
+      const text = await response.text().catch(() => "");
+      throw new Error(`rate_limited: HTTP 429 ${text.slice(0, 200)}`);
     }
     if (!response.ok || !response.body) {
       const text = await response.text().catch(() => "");
@@ -764,42 +863,7 @@ export class GrokProvider extends BaseProvider {
 
   /** Classify an error into a ProviderResult failure. */
   private classifyError(err: any): ProviderResult {
-    const msg = err?.message ?? String(err);
-    // Wrong / unsupported model is a CLIENT error — never ban or disable the account.
-    // Router treats isInvalidModelError / isNonAccountRequestError as non-account.
-    if (
-      /invalid_model|model_not_found|no such model|unknown model|model not supported|model is not supported|unsupported model|does not support model|model does not exist|model is not available|model not available/i.test(
-        msg,
-      )
-    ) {
-      return { success: false, error: `invalid_model: ${msg}` };
-    }
-    // xAI "permission-denied" on chat is NOT an expired token — the access JWT
-    // is valid (models/billing often still 200) but this principal/team has no
-    // chat entitlement. Do not prefix with "expired:" or the router will
-    // uselessly burn the refresh token trying to "fix" it.
-    if (/permission-denied|chat endpoint is denied/i.test(msg)) {
-      return {
-        success: false,
-        error: `forbidden: ${msg}`,
-        banned: true,
-      };
-    }
-    if (/expired|unauthorized|\b401\b/i.test(msg)) {
-      return { success: false, error: `expired: ${msg}` };
-    }
-    // Only treat 403 as hard-ban when the body says so — bare 403 is often
-    // entitlement lag / IP / temporary and must not permanently disable.
-    if (/\b403\b/i.test(msg) && /banned|suspended|restricted|disabled|revoked/i.test(msg)) {
-      return { success: false, error: `forbidden: ${msg}`, banned: true };
-    }
-    if (/\b403\b/i.test(msg)) {
-      return { success: false, error: `error: ${msg}` };
-    }
-    if (/rate_limit|429|too many/i.test(msg)) {
-      return { success: false, error: `rate_limited: ${msg}`, rateLimited: true };
-    }
-    return { success: false, error: `error: ${msg}` };
+    return classifyGrokUpstreamError(err);
   }
 
   // -------------------------------------------------------------------------
@@ -1015,27 +1079,54 @@ export class GrokProvider extends BaseProvider {
         };
       }
       // Prefer absolute free Build credits already stored by farm/import.
+      // remaining <= 0 → exhausted so warmup cannot flip a spent account
+      // back to active just because the access JWT is still valid.
       const oauth = getOAuthTokens(working);
       if (
         oauth?.credits_limit != null &&
         oauth.credits_limit > 0 &&
         oauth.credits_remaining != null
       ) {
+        const limit = Math.floor(oauth.credits_limit);
+        const remaining = Math.floor(oauth.credits_remaining);
+        const quota = {
+          limit,
+          remaining,
+          used: Math.max(0, limit - remaining),
+          resetAt: null as Date | null,
+          source: "stored-farm-credits",
+        };
+        if (remaining <= 0) {
+          return {
+            kind: "exhausted",
+            success: true,
+            quota,
+            ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+          };
+        }
         return {
           kind: "healthy",
           success: true,
-          quota: {
-            limit: Math.floor(oauth.credits_limit),
-            remaining: Math.floor(oauth.credits_remaining),
-            used: Math.max(0, Math.floor(oauth.credits_limit - oauth.credits_remaining)),
-            resetAt: null,
-            source: "stored-farm-credits",
-          },
+          quota,
           ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
         };
       }
       // Live quota: billing / GetGrokCreditsConfig / rate-limit headers (farm-compatible).
       const quota = await this.fetchQuota(working, signal);
+      if (
+        quota.success &&
+        quota.quota &&
+        typeof quota.quota.limit === "number" &&
+        quota.quota.limit > 0 &&
+        quota.quota.remaining <= 0
+      ) {
+        return {
+          kind: "exhausted",
+          success: true,
+          quota: quota.quota,
+          ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+        };
+      }
       return {
         kind: "healthy",
         success: true,

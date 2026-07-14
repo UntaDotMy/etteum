@@ -60,33 +60,66 @@ export const ERROR_RULES: ErrorRule[] = [
     match: (_s, e) => isBadUpstreamErr(e),
     kind: "nonAccount",
   },
-  // 2. Rate limiting — rotate to another account + cooldown the throttled one.
+  // 2. Credit/quota exhaustion — MUST outrank bare 429/rate-limit.
+  //    Grok/xAI returns HTTP 429 + code "subscription:free-usage-exhausted"
+  //    when free Build credits are gone; that is exhaustion, not a short throttle.
+  {
+    id: "quota-exhausted",
+    match: (s, e) => {
+      if (s === 402) return true;
+      if (!e) return false;
+      const n = e.toLowerCase();
+      return (
+        n.includes("free-usage-exhausted") ||
+        n.includes("spending-limit") ||
+        n.includes("spending_limit") ||
+        n.includes("quota_exhausted") ||
+        n.includes("quota exhausted") ||
+        n.includes("usage exhausted") ||
+        (n.includes("quota") && n.includes("exceed")) ||
+        n.includes("you've used all") ||
+        n.includes("you have used all") ||
+        n.includes("payment required") ||
+        n.includes("insufficient credit") ||
+        n.includes("out of credits") ||
+        n.includes("no remaining credits")
+      );
+    },
+    kind: "permanent",
+    cooldownMs: 60_000,
+  },
+  // 3. Rate limiting — rotate to another account + cooldown the throttled one.
+  //    Skip when the body is actually free-usage / credit exhaustion (rule 2).
   {
     id: "rate-limit-429",
-    match: (s, e) => s === 429 || !!e?.toLowerCase().includes("rate limit") || !!e?.toLowerCase().includes("too many requests"),
+    match: (s, e) => {
+      const n = e?.toLowerCase() ?? "";
+      if (
+        n.includes("free-usage-exhausted") ||
+        n.includes("spending-limit") ||
+        n.includes("quota_exhausted") ||
+        n.includes("you've used all")
+      ) {
+        return false;
+      }
+      return s === 429 || n.includes("rate limit") || n.includes("too many requests") || n.includes("rate_limited");
+    },
     kind: "rateLimit",
     backoff: true,
   },
-  // 3. Auth-expired — refresh + retry (handled by the refresh coordinator).
+  // 4. Auth-expired — refresh + retry (handled by the refresh coordinator).
   {
     id: "auth-expired-401",
     match: (s, e) => s === 401 || !!e?.toLowerCase().includes("expired") || !!e?.toLowerCase().includes("unauthorized"),
     kind: "transient",
     cooldownMs: 0, // retry immediately after refresh
   },
-  // 4. Transient upstream/server errors — backoff + retry.
+  // 5. Transient upstream/server errors — backoff + retry.
   {
     id: "transient-5xx",
     match: (s, e) => isTransientErr(s, e),
     kind: "transient",
     backoff: true,
-  },
-  // 5. Quota exhausted — mark account exhausted (not a hard error).
-  {
-    id: "quota-exhausted",
-    match: (_s, e) => !!e?.toLowerCase().includes("quota") && !!e?.toLowerCase().includes("exceed"),
-    kind: "permanent",
-    cooldownMs: 60_000,
   },
   // 6. Banned/restricted — permanent account disable.
   {
