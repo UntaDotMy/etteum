@@ -46,7 +46,9 @@ import {
   validateOAuthToken,
   getGrokCliVersion,
   fetchOAuthBillingQuota,
+  isAbsoluteGrokOAuthQuota,
   type GrokOAuthTokens,
+  type GrokOAuthQuota,
 } from "./oauth";
 // ---------------------------------------------------------------------------
 // Token structure
@@ -927,7 +929,15 @@ export class GrokProvider extends BaseProvider {
 
   async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
-    quota?: { limit: number; remaining: number; used: number; resetAt: Date | null; source: string };
+    quota?: {
+      limit: number;
+      remaining: number;
+      used: number;
+      resetAt: Date | null;
+      source: string;
+      /** Present on OAuth live probes — absolute free Build / paid vs percent-scale. */
+      percentScale?: boolean;
+    };
     error?: string;
   }> {
     // OAuth path — real billing from cli-chat-proxy /v1/billing (paid monthly
@@ -949,6 +959,7 @@ export class GrokProvider extends BaseProvider {
               used: quota.used,
               resetAt: quota.resetAt,
               source: quota.source,
+              percentScale: quota.percentScale,
             },
           };
         }
@@ -1055,9 +1066,13 @@ export class GrokProvider extends BaseProvider {
    * Override healthCheck so the BASE class's unlocked refreshToken path cannot
    * race token rotation. We still refresh expired OAuth access tokens via
    * coordinatedRefresh (safe for warmup after import/export).
+   *
+   * Warmup MUST live-probe real free Build / billing credits. Never short-
+   * circuit on stored farm `credits_remaining` (that produced dashboard
+   * totals like 156 × 2M = 290M "full" remaining with zero exhausted accounts).
    */
   override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
-    // OAuth path — refresh if access expired, then free /v1/models probe.
+    // OAuth path — refresh if access expired, then LIVE credit probe.
     if (isOAuthAccount(account)) {
       const ready = await this.refreshOAuthIfNeeded(account);
       if (ready.error) {
@@ -1069,68 +1084,96 @@ export class GrokProvider extends BaseProvider {
         };
       }
       const working = ready.account;
+
+      // 1) Always live-probe credits (billing → rate-limit headers → percent).
+      //    This is the whole point of warmup for Grok — not just "key works".
+      const live = await this.fetchQuota(working, signal);
+
+      if (live.success && live.quota) {
+        const q = live.quota;
+        const oauth = getOAuthTokens(working);
+        const asGrokQuota: GrokOAuthQuota = {
+          limit: q.limit,
+          remaining: q.remaining,
+          used: q.used,
+          resetAt: q.resetAt,
+          source: q.source,
+          percentScale: q.percentScale === true,
+        };
+        // Persist absolute free-Build / paid numbers onto the token blob so
+        // request-path debit and the next probe start from the same source.
+        // Skip percent-scale (limit=100) so we do not overwrite a real ~2M budget.
+        const absolute = isAbsoluteGrokOAuthQuota(asGrokQuota);
+        const drained =
+          q.remaining <= 0 &&
+          (q.limit > 0 ||
+            q.source.includes("free-usage-exhausted") ||
+            q.source.includes("exhausted"));
+
+        const packageLimit =
+          q.limit > 0
+            ? Math.floor(q.limit)
+            : Math.floor(Number(oauth?.credits_limit) || Number(working.quotaLimit) || 0);
+
+        let tokensOut: unknown = ready.refreshedTokens;
+        if (oauth) {
+          const nextRemaining = drained ? 0 : Math.floor(Math.max(0, q.remaining));
+          if (absolute || drained) {
+            tokensOut = {
+              ...oauth,
+              ...(packageLimit > 0 ? { credits_limit: packageLimit } : {}),
+              credits_remaining: nextRemaining,
+            };
+          }
+        }
+
+        if (drained) {
+          return {
+            kind: "exhausted",
+            success: true,
+            quota: {
+              limit: packageLimit,
+              remaining: 0,
+              used: packageLimit > 0 ? packageLimit : q.used,
+              resetAt: q.resetAt,
+              source: q.source,
+            },
+            ...(tokensOut ? { tokens: tokensOut } : {}),
+          };
+        }
+
+        return {
+          kind: "healthy",
+          success: true,
+          quota: {
+            limit: q.limit,
+            remaining: q.remaining,
+            used: q.used,
+            resetAt: q.resetAt,
+            source: q.source,
+          },
+          ...(tokensOut ? { tokens: tokensOut } : {}),
+        };
+      }
+
+      // 2) Credit probe failed — fall back to token liveness only.
+      //    Do NOT invent full farm credits; omit quota so warmup keeps DB values.
       const { alive } = await validateOAuthToken(working);
       if (!alive) {
         return {
           kind: "session_expired",
           success: false,
-          error: "OAuth access token invalid after refresh",
-          ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-        };
-      }
-      // Prefer absolute free Build credits already stored by farm/import.
-      // remaining <= 0 → exhausted so warmup cannot flip a spent account
-      // back to active just because the access JWT is still valid.
-      const oauth = getOAuthTokens(working);
-      if (
-        oauth?.credits_limit != null &&
-        oauth.credits_limit > 0 &&
-        oauth.credits_remaining != null
-      ) {
-        const limit = Math.floor(oauth.credits_limit);
-        const remaining = Math.floor(oauth.credits_remaining);
-        const quota = {
-          limit,
-          remaining,
-          used: Math.max(0, limit - remaining),
-          resetAt: null as Date | null,
-          source: "stored-farm-credits",
-        };
-        if (remaining <= 0) {
-          return {
-            kind: "exhausted",
-            success: true,
-            quota,
-            ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-          };
-        }
-        return {
-          kind: "healthy",
-          success: true,
-          quota,
-          ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-        };
-      }
-      // Live quota: billing / GetGrokCreditsConfig / rate-limit headers (farm-compatible).
-      const quota = await this.fetchQuota(working, signal);
-      if (
-        quota.success &&
-        quota.quota &&
-        typeof quota.quota.limit === "number" &&
-        quota.quota.limit > 0 &&
-        quota.quota.remaining <= 0
-      ) {
-        return {
-          kind: "exhausted",
-          success: true,
-          quota: quota.quota,
+          error: live.error || "OAuth access token invalid after refresh",
           ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
         };
       }
       return {
         kind: "healthy",
         success: true,
-        quota: quota.success ? quota.quota : undefined,
+        // no quota → warmup will not overwrite remaining with a fake 2M
+        message: live.error
+          ? `token alive; live credit probe failed: ${live.error}`
+          : "token alive; live credit probe returned no quota",
         ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
       };
     }

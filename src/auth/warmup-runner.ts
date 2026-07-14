@@ -324,11 +324,14 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
     //   5. quotaLimit                        → always write the upstream
     //      limit (it's the package size, doesn't change with usage).
     const quotaSource = String(health.quota?.source || "");
+    // stored-farm-credits is a stale import snapshot — never authoritative for
+    // warmup writes (would re-inflate every Grok account to full ~2M).
     const isFallbackQuota =
       quotaSource === "tracked" ||
       quotaSource === "" ||
       quotaSource.includes("fallback") ||
-      quotaSource.includes("stale");
+      quotaSource.includes("stale") ||
+      quotaSource.includes("stored-farm");
 
     if (health.quota && !isFallbackQuota) {
       const rawLimit = Number(health.quota.limit);
