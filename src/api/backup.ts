@@ -4,7 +4,9 @@
  * GET  /api/backup/status
  * POST /api/backup/export   { mode?: "essential"|"full" } → creates pack, returns path (+ zip if possible)
  * GET  /api/backup/download?dir=...  → stream zip if exists, else 404 with path hint
- * POST /api/backup/import   multipart file (zip) or JSON { dir: "..." } with ?confirm=1
+ * POST /api/backup/import   multipart file (zip) or JSON { dir: "..." }
+ *        ?confirm=1 required for replace
+ *        ?mode=merge|replace  (default merge — append accounts, no duplicates)
  */
 import { Hono } from "hono";
 import { existsSync, readFileSync, statSync } from "node:fs";
@@ -12,12 +14,16 @@ import path from "node:path";
 import {
   applyBackupDir,
   createBackupDir,
+  mergeAccountsFromPack,
   resolveImportSource,
   zipBackupDir,
   type BackupMode,
+  type ImportMode,
 } from "../lib/backup";
 import { client as sqlite } from "../db/index";
 import { config } from "../config";
+import { pool } from "../proxy/pool";
+import { broadcast } from "../ws/index";
 
 export const backupRouter = new Hono();
 
@@ -115,24 +121,24 @@ backupRouter.get("/download", (c) => {
 /**
  * Import backup. Accepts:
  *   - multipart field "file" = .zip
- *   - JSON { path: "absolute or relative pack path or zip" }
- * Requires ?confirm=1
+ *   - JSON { path: "absolute or relative pack path or zip", mode?: "merge"|"replace" }
+ *
+ * Query:
+ *   mode=merge|replace  (default merge)
+ *   confirm=1           required only for replace (full DB wipe)
+ *
+ * merge  — append accounts by (provider,email); update if present; no restart
+ * replace — swap entire DB + .env; requires confirm + full process restart
  */
 backupRouter.post("/import", async (c) => {
-  const confirm = c.req.query("confirm");
-  if (confirm !== "1" && confirm !== "true") {
-    return c.json(
-      {
-        error:
-          "Import replaces this PC's database and .env. Re-send with ?confirm=1 to proceed.",
-      },
-      400,
-    );
-  }
+  const qMode = (c.req.query("mode") || "").toLowerCase();
+  let mode: ImportMode =
+    qMode === "replace" ? "replace" : qMode === "merge" ? "merge" : "merge";
 
   try {
     const ct = c.req.header("content-type") || "";
     let sourcePath: string;
+    let bodyMode: string | undefined;
 
     if (ct.includes("multipart/form-data")) {
       const body = await c.req.parseBody();
@@ -150,8 +156,14 @@ backupRouter.post("/import", async (c) => {
       );
       await Bun.write(dest, f);
       sourcePath = dest;
+      if (typeof body["mode"] === "string") bodyMode = body["mode"];
     } else {
-      const body = (await c.req.json().catch(() => ({}))) as { path?: string; dir?: string };
+      const body = (await c.req.json().catch(() => ({}))) as {
+        path?: string;
+        dir?: string;
+        mode?: string;
+      };
+      bodyMode = body.mode;
       const p = body.path || body.dir;
       if (!p) {
         return c.json(
@@ -162,14 +174,54 @@ backupRouter.post("/import", async (c) => {
       sourcePath = p;
     }
 
+    if (!qMode && bodyMode) {
+      const bm = bodyMode.toLowerCase();
+      if (bm === "replace" || bm === "merge") mode = bm;
+    }
+
+    if (mode === "replace") {
+      const confirm = c.req.query("confirm");
+      if (confirm !== "1" && confirm !== "true") {
+        return c.json(
+          {
+            error:
+              "Full replace overwrites this PC's database and .env. " +
+              "Re-send with ?mode=replace&confirm=1, or use mode=merge to append accounts only.",
+          },
+          400,
+        );
+      }
+    }
+
     const packDir = await resolveImportSource(sourcePath);
+
+    if (mode === "merge") {
+      const result = mergeAccountsFromPack(packDir);
+      // Live connection already holds the new rows — clear all provider caches.
+      pool.invalidate();
+      if (result.inserted + result.updated > 0) {
+        broadcast({
+          type: "accounts_updated",
+          data: {
+            source: "backup-merge",
+            inserted: result.inserted,
+            updated: result.updated,
+          },
+        });
+      }
+      return c.json({ data: result });
+    }
+
     const result = applyBackupDir(packDir);
     return c.json({ data: result });
   } catch (e) {
     return c.json(
       {
         error: e instanceof Error ? e.message : String(e),
-        hint: "If the DB is locked: etteum stop → import → etteum start",
+        hint:
+          mode === "replace"
+            ? "If the DB is locked: etteum stop → bun scripts/backup.ts import <zip> --yes → etteum start"
+            : "Merge import failed — check pack has manifest.json + poolprox3.db + env",
       },
       500,
     );

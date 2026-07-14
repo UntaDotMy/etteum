@@ -19,18 +19,28 @@ const IV_LEN = 12; // 96-bit IV (GCM standard)
 const TAG_LEN = 16;
 const MIN_PASSPHRASE_LEN = 16;
 
+function requirePassphrase(passphrase: string | undefined, label = "ENCRYPTION_KEY"): string {
+  if (!passphrase || passphrase.length < MIN_PASSPHRASE_LEN) {
+    throw new Error(
+      `${label} must be set to a sufficiently long passphrase (>= 16 chars). ` +
+        "Refusing to operate with a weak/missing encryption key.",
+    );
+  }
+  return passphrase;
+}
+
+/** Derive a 32-byte AES-256 key from a passphrase via SHA-256. */
+function keyFromPassphrase(passphrase: string): Buffer {
+  return createHash("sha256").update(passphrase, "utf8").digest();
+}
+
 /** Derive a 32-byte AES-256 key from the configured passphrase via SHA-256. */
 function getKey(): Buffer {
   // Read live from process.env first (test-resilient + supports key rotation
   // without restart), then fall back to the config-captured value.
-  const passphrase = process.env.ENCRYPTION_KEY || config.encryptionKey;
-  if (!passphrase || passphrase.length < MIN_PASSPHRASE_LEN) {
-    throw new Error(
-      "ENCRYPTION_KEY must be set to a sufficiently long passphrase (>= 16 chars). " +
-        "Refusing to operate with a weak/missing encryption key.",
-    );
-  }
-  return createHash("sha256").update(passphrase, "utf8").digest();
+  return keyFromPassphrase(
+    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+  );
 }
 
 /**
@@ -38,7 +48,17 @@ function getKey(): Buffer {
  * Output format: `g1:<base64(iv || tag || ciphertext)>`
  */
 export function encrypt(plaintext: string): string {
-  const key = getKey();
+  return encryptWithPassphrase(
+    plaintext,
+    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+  );
+}
+
+/**
+ * Encrypt with an explicit passphrase (e.g. re-key during backup merge import).
+ */
+export function encryptWithPassphrase(plaintext: string, passphrase: string): string {
+  const key = keyFromPassphrase(requirePassphrase(passphrase, "passphrase"));
   const iv = randomBytes(IV_LEN);
   const cipher = createCipheriv(GCM_ALGO, key, iv);
   const encrypted = Buffer.concat([
@@ -57,14 +77,44 @@ export function encrypt(plaintext: string): string {
  * XOR/base64 format (no prefix) for transparent backward compatibility.
  */
 export function decrypt(ciphertext: string): string {
-  if (ciphertext.startsWith(VERSION_PREFIX)) {
-    return decryptGcm(ciphertext.slice(VERSION_PREFIX.length));
-  }
-  return decryptLegacyXor(ciphertext);
+  return decryptWithPassphrase(
+    ciphertext,
+    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+  );
 }
 
-function decryptGcm(b64: string): string {
-  const key = getKey();
+/**
+ * Decrypt with an explicit passphrase (e.g. pack ENCRYPTION_KEY during merge).
+ */
+export function decryptWithPassphrase(ciphertext: string, passphrase: string): string {
+  const p = requirePassphrase(passphrase, "passphrase");
+  if (ciphertext.startsWith(VERSION_PREFIX)) {
+    return decryptGcmWithKey(ciphertext.slice(VERSION_PREFIX.length), keyFromPassphrase(p));
+  }
+  return decryptLegacyXorWithPassphrase(ciphertext, p);
+}
+
+/**
+ * Re-encrypt a stored password when moving rows between installs that may use
+ * different ENCRYPTION_KEYs. If keys match, returns ciphertext unchanged.
+ * On decrypt failure (corrupt/unknown format), returns the original ciphertext.
+ */
+export function reencryptSecret(
+  ciphertext: string,
+  sourcePassphrase: string,
+  targetPassphrase: string,
+): string {
+  if (!ciphertext) return ciphertext;
+  if (sourcePassphrase === targetPassphrase) return ciphertext;
+  try {
+    const plain = decryptWithPassphrase(ciphertext, sourcePassphrase);
+    return encryptWithPassphrase(plain, targetPassphrase);
+  } catch {
+    return ciphertext;
+  }
+}
+
+function decryptGcmWithKey(b64: string, key: Buffer): string {
   const packed = Buffer.from(b64, "base64");
   if (packed.length < IV_LEN + TAG_LEN) {
     throw new Error("decrypt: truncated AES-256-GCM payload");
@@ -82,8 +132,7 @@ function decryptGcm(b64: string): string {
  * Legacy XOR/base64 decoder — kept ONLY to read rows written by older builds.
  * New writes always go through {@link encrypt} (AES-256-GCM).
  */
-function decryptLegacyXor(ciphertext: string): string {
-  const passphrase = process.env.ENCRYPTION_KEY || config.encryptionKey;
+function decryptLegacyXorWithPassphrase(ciphertext: string, passphrase: string): string {
   // Guard: a missing/empty passphrase would make `key[i % 0]` a NaN index and
   // produce garbage rather than throwing. Refuse instead of returning noise.
   if (!passphrase) {
