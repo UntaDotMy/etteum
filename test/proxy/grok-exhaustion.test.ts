@@ -11,7 +11,14 @@ import {
   isGrokCreditExhaustedError,
   GrokProvider,
 } from "../../src/proxy/providers/grok/index";
+import {
+  isAbsoluteGrokOAuthQuota,
+  selectGrokOAuthQuota,
+  type GrokOAuthQuota,
+} from "../../src/proxy/providers/grok/oauth";
 import { classifyError } from "../../src/proxy/error-rules";
+import { mapHealthToAccountUpdate } from "../../src/auth/warmup-runner";
+import type { Account } from "../../src/db/schema";
 
 const FREE_USAGE_429 =
   'cli-chat-proxy error 429: {"code":"subscription:free-usage-exhausted","error":"You\'ve used all the included free usage"}';
@@ -89,5 +96,121 @@ describe("Grok free Build credit accounting", () => {
     expect(creditsUsed).toBe(628_623);
     // Old default rate 1/1000 would under-count by 1000×
     expect(creditsUsed).not.toBeCloseTo(totalTokens / 1000, 0);
+  });
+});
+
+describe("Grok warmup live credit probe policy", () => {
+  test("absolute free Build quota is preferred over percent-scale 100", () => {
+    const absolute: GrokOAuthQuota = {
+      limit: 2_000_000,
+      remaining: 1_250_000,
+      used: 750_000,
+      resetAt: null,
+      source: "cli-chat-proxy/ratelimit-headers",
+      percentScale: false,
+    };
+    const percent: GrokOAuthQuota = {
+      limit: 100,
+      remaining: 100,
+      used: 0,
+      resetAt: null,
+      source: "grok.com/GetGrokCreditsConfig",
+      percentScale: true,
+    };
+    expect(isAbsoluteGrokOAuthQuota(absolute)).toBe(true);
+    expect(isAbsoluteGrokOAuthQuota(percent)).toBe(false);
+    const picked = selectGrokOAuthQuota(null, absolute, percent);
+    expect(picked?.remaining).toBe(1_250_000);
+    expect(picked?.source).toBe("cli-chat-proxy/ratelimit-headers");
+  });
+
+  test("warmup writes live ratelimit remaining (not stored-farm full 2M)", () => {
+    const account = {
+      id: 1,
+      provider: "grok",
+      email: "t@oauth",
+      status: "active",
+      quotaLimit: 2_000_000,
+      // Stale "full" snapshot that inflated the dashboard to 290M
+      quotaRemaining: 2_000_000,
+      tokens: { auth_method: "oauth", credits_limit: 2_000_000, credits_remaining: 2_000_000 },
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "healthy",
+      success: true,
+      quota: {
+        limit: 2_000_000,
+        remaining: 1_100_000,
+        used: 900_000,
+        resetAt: null,
+        source: "cli-chat-proxy/ratelimit-headers",
+      },
+      tokens: {
+        auth_method: "oauth",
+        credits_limit: 2_000_000,
+        credits_remaining: 1_100_000,
+      },
+    });
+
+    expect(update.quotaLimit).toBe(2_000_000);
+    // min(db 2M, live 1.1M) → live
+    expect(update.quotaRemaining).toBe(1_100_000);
+    expect((update.tokens as any)?.credits_remaining).toBe(1_100_000);
+  });
+
+  test("stored-farm-credits is ignored as non-authoritative warmup source", () => {
+    const account = {
+      id: 2,
+      provider: "grok",
+      email: "t2@oauth",
+      status: "active",
+      quotaLimit: 2_000_000,
+      quotaRemaining: 500_000,
+      tokens: null,
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "healthy",
+      success: true,
+      quota: {
+        limit: 2_000_000,
+        remaining: 2_000_000,
+        used: 0,
+        resetAt: null,
+        source: "stored-farm-credits",
+      },
+    });
+
+    // Fallback source: must not re-inflate remaining to full 2M
+    expect(update.quotaRemaining).toBeUndefined();
+    expect(update.quotaLimit).toBeUndefined();
+  });
+
+  test("free-usage-exhausted health zeros remaining and marks exhausted", () => {
+    const account = {
+      id: 3,
+      provider: "grok",
+      email: "t3@oauth",
+      status: "active",
+      quotaLimit: 2_000_000,
+      quotaRemaining: 2_000_000,
+      tokens: null,
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "exhausted",
+      success: true,
+      quota: {
+        limit: 2_000_000,
+        remaining: 0,
+        used: 2_000_000,
+        resetAt: null,
+        source: "cli-chat-proxy/free-usage-exhausted",
+      },
+    });
+
+    expect(update.status).toBe("exhausted");
+    expect(update.quotaRemaining).toBe(0);
   });
 });

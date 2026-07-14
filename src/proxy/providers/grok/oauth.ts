@@ -765,12 +765,28 @@ export async function fetchOAuthBillingQuota(
     if (err?.name === "AbortError") throw err;
   }
 
-  return selectGrokOAuthQuota(paid, absolute, percent);
+  const selected = selectGrokOAuthQuota(paid, absolute, percent);
+  // A headers-missing liveness hit (limit=0 remaining=0) is NOT a usable
+  // credit snapshot — callers must not write 0/0 over a real free Build budget.
+  if (
+    selected &&
+    selected.limit <= 0 &&
+    selected.remaining <= 0 &&
+    !selected.source.includes("free-usage-exhausted") &&
+    !selected.source.includes("exhausted") &&
+    selected.source !== "cli-chat-proxy/billing"
+  ) {
+    return null;
+  }
+  return selected;
 }
 
 /**
  * Farm-compatible free Build credit probe: POST /v1/responses with max_output_tokens=16
  * and read absolute token quota from x-ratelimit-*-tokens response headers.
+ *
+ * Also treats free-usage-exhausted / 402 as remaining=0 so warmup can mark the
+ * account exhausted instead of leaving a stale full 2M snapshot.
  */
 export async function probeOAuthChatCredits(
   bearer: string,
@@ -815,6 +831,34 @@ export async function probeOAuthChatCredits(
     };
   }
 
+  // Headers missing — read body for credit-decline / free-usage exhaustion.
+  // (xAI often returns 429 + subscription:free-usage-exhausted without remaining headers.)
+  const text = await response.text().catch(() => "");
+  const lower = text.toLowerCase();
+  const exhausted =
+    response.status === 402 ||
+    lower.includes("free-usage-exhausted") ||
+    lower.includes("spending-limit") ||
+    lower.includes("spending_limit") ||
+    lower.includes("you've used all") ||
+    lower.includes("you have used all") ||
+    lower.includes("payment required");
+
+  if (exhausted) {
+    // Keep a positive limit when headers gave us one earlier; else 0 is fine —
+    // healthCheck / warmup map remaining=0 + kind=exhausted.
+    const limit = Number.isFinite(lim) && lim > 0 ? lim : 0;
+    return {
+      limit,
+      remaining: 0,
+      used: limit,
+      resetAt: null,
+      source: "cli-chat-proxy/free-usage-exhausted",
+      percentScale: false,
+      raw: { status: response.status, body: text.slice(0, 200) },
+    };
+  }
+
   // No rate-limit headers — still useful as a liveness signal when 200.
   if (response.ok) {
     return {
@@ -829,6 +873,14 @@ export async function probeOAuthChatCredits(
   }
 
   return null;
+}
+
+/**
+ * True when a live Grok OAuth quota snapshot is absolute free-Build / paid
+ * tokens (not the percent-scale 0–100 weekly pool placeholder).
+ */
+export function isAbsoluteGrokOAuthQuota(q: GrokOAuthQuota | null | undefined): boolean {
+  return !!q && !q.percentScale && typeof q.limit === "number" && q.limit > 0;
 }
 
 /**
