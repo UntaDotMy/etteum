@@ -7,7 +7,7 @@ Independent of poolprox3 — copy this folder to any VPS and run.
 
 1. Creates catch-all (or Gmail plus-trick) emails  
 2. Registers at `accounts.x.ai` (OTP via IMAP)  
-3. Completes profile + password + Turnstile  
+3. Completes profile + password + Turnstile (in-page DOM/context click)  
 4. Runs Grok CLI OAuth (PKCE) → `access_token` + `refresh_token`  
 5. Writes results into a **new batch folder** each run (JSON + TXT)
 
@@ -65,6 +65,25 @@ python farm.py -n 20 -c 2 -y
 | `GROK_PROXY_FILE` | `./proxies.txt` | list file (auto if file exists) |
 | `GROK_PROXY_SHUFFLE` | `false` | shuffle pool at start |
 | `GROK_PROXY_POOL` | (optional) | comma-separated URLs merged with file |
+
+### Turnstile
+
+Solved **in-page** (same Camoufox window): observe DOM phase → real click on the
+managed checkbox when `need_click` → wait for `cf-turnstile-response` token.
+No external captcha solver. Prefer headed mode (`GROK_HEADLESS=false`).
+
+### Temp-mail domain map (generator.email)
+
+When `GROK_MAIL_MODE=tempmail`, farm no longer re-rolls domains one-by-one only:
+
+1. Opens [generator.email](https://generator.email/)
+2. Builds a **domain map** from:
+   - live `#newselect` dropdown (`change_dropdown_list` / `clipboard_process`)
+   - `GET /search.php?key=…` (JSON domain list used by the site typeahead)
+3. Picks a domain **not** in `results/blacklist_domain.txt`
+4. Applies it via the site’s own JS (`clipboard_process`) + inbox URL `/{domain}/{user}`
+
+xAI domain rejects still append to the blacklist and the worker map-picks another domain.
 
 ### Proxy list file
 

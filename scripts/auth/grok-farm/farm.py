@@ -44,7 +44,7 @@ from datetime import datetime, timezone
 from email import message_from_bytes
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import parse_qs, urlencode, urlparse, unquote
+from urllib.parse import parse_qs, quote, urlencode, urlparse, unquote
 
 # Dedicated pool for blocking I/O (disk, process kill, temp sweeps).
 # Keeps the asyncio event loop free so the HUD ticker never freezes.
@@ -496,7 +496,11 @@ _STEP_META: dict[str, tuple[str, int]] = {
     "browser":          ("browser", 1),
     "tempmail_launch":  ("temp-mail", 1),
     "tempmail_open":    ("temp-mail", 1),
+    "tempmail_map":     ("temp-mail", 1),
+    "tempmail_pick":    ("temp-mail", 1),
+    "tempmail_apply":   ("temp-mail", 1),
     "tempmail_otp":     ("otp-mail", 4),
+    "tempmail_close":   ("temp-mail", 4),
     "refresh":          ("refresh", 0),
     "signup_open":      ("signup", 2),
     "signup_email_btn": ("signup", 2),
@@ -2622,6 +2626,7 @@ def _build_stealth_launch_kwargs(
     return kwargs
 
 
+
 # ── Etteum Browser Logs frame relay (headless screenshots → stdout JSON) ────
 # When ETTEUM_FRAME_RELAY=true (set by etteum grokFarm.ts), emit periodic JPEG
 # frames as single-line JSON on stdout. Multi-worker entries use workerId so
@@ -2748,6 +2753,7 @@ async def launch_browser(
     headless=None (default) → use the global HEADLESS flag (existing behavior).
     Pass headless=True/False to force it — used by the temp-mail flow so the
     generator.email window can stay headless even when signup is headed.
+    preview/worker_id/email: Etteum Browser Logs frame relay (preview=False for tempmail).
 
     Launch throttle (LAUNCH_PARALLEL):
       - At most N Camoufox boots run at once (default 2) so c=5 does not open
@@ -2757,9 +2763,6 @@ async def launch_browser(
     Isolation (WORKER_ISOLATION=true, default):
       - Profile ownership claim is a short critical section only (so cleanup
         never deletes a sibling worker's temp profile).
-
-    preview/worker_id/email: etteum Browser Logs frame relay (preview=False
-    skips temp-mail browser streaming). SPAWN worker path for new browsers.
     """
     global _launch_lock
     if headless is None:
@@ -4177,15 +4180,20 @@ async def fill_input(page, selectors: list[str], value: str) -> bool:
 
 
 async def turnstile_token_len(page) -> int:
+    """Length of real Turnstile response field in this page's DOM (no inject)."""
     try:
         return int(
             await page.evaluate(
                 """() => {
-                    const el = document.querySelector('[name="cf-turnstile-response"], [name="cf-turnstile-response"] input, textarea[name="cf-turnstile-response"]');
+                    const el = document.querySelector(
+                      '[name="cf-turnstile-response"], textarea[name="cf-turnstile-response"], input[name="cf-turnstile-response"]'
+                    );
                     if (el && el.value) return el.value.length;
-                    const inputs = document.querySelectorAll('input[type="hidden"]');
+                    const inputs = document.querySelectorAll('input[type="hidden"], textarea');
                     for (const i of inputs) {
-                        if ((i.name || '').includes('turnstile') && i.value) return i.value.length;
+                      const n = (i.name || '').toLowerCase();
+                      if ((n.includes('turnstile') || n.includes('cf-turnstile')) && i.value)
+                        return i.value.length;
                     }
                     return 0;
                 }"""
@@ -4197,13 +4205,13 @@ async def turnstile_token_len(page) -> int:
 
 
 async def read_turnstile_state(page) -> dict[str, Any]:
-    """Trace Turnstile checkbox: token, mount, iframe success, fail banner.
+    """DOM/context probe for in-page Turnstile (no external inject).
 
     phase:
-      solved     — hidden token present (safe to submit)
+      solved     — real cf-turnstile-response token present (safe to submit)
       failed     — CF "Verification failed"
-      loading    — looks checked / settling, token not in DOM yet (WAIT, don't re-click)
-      need_click — checkbox still needs a click
+      loading    — checked / settling, token not in DOM yet (WAIT, don't re-click)
+      need_click — checkbox still needs a real click
       absent     — no widget
     """
     st: dict[str, Any] = {
@@ -4222,6 +4230,7 @@ async def read_turnstile_state(page) -> dict[str, Any]:
         if tok > 20:
             st["solved"] = True
             st["phase"] = "solved"
+            st["success_ui"] = True
             return st
     except Exception:
         pass
@@ -4303,11 +4312,11 @@ async def wait_for_turnstile_solved(
     page,
     attempt: int,
     *,
-    timeout_s: float = 10.0,
+    timeout_s: float = 8.0,
     after: str = "click",
 ) -> dict[str, Any]:
-    """Wait 5–10s after click/mount; log phase so we know if checked vs stuck."""
-    deadline = time.monotonic() + max(3.0, timeout_s)
+    """Poll DOM until token / fail / timeout. Fast poll (0.25s)."""
+    deadline = time.monotonic() + max(1.5, timeout_s)
     last_phase = ""
     st: dict[str, Any] = {}
     t0 = time.monotonic()
@@ -4334,7 +4343,8 @@ async def wait_for_turnstile_solved(
         if st.get("failed"):
             print(f"[{attempt}] Turnstile FAILED during wait({after})", flush=True)
             return st
-        await asyncio.sleep(0.5)
+        # If checkbox looks checked, keep waiting for token (do not re-click)
+        await asyncio.sleep(0.25 if phase == "loading" else 0.3)
     st = await read_turnstile_state(page)
     print(
         f"[{attempt}] Turnstile wait({after}) done: phase={st.get('phase')} "
@@ -4356,94 +4366,112 @@ async def turnstile_visible(page) -> bool:
 
 
 async def try_click_turnstile(page, attempt: int) -> bool:
-    """Click Cloudflare Turnstile checkbox once — no humanize mouse path.
+    """One real, non-force click on the managed Turnstile checkbox.
 
-    Prefer element/frame click over page.mouse (user: no mouse animation after check).
+    Context-aware: only click visible targets. Prefer CF frame checkbox,
+    then host "Verify you are human", then left edge of iframe box.
+    No force=True — real hit testing so CF accepts the interaction.
     """
-    # Already solved — do nothing
     try:
-        if await turnstile_token_len(page) > 20:
+        st = await read_turnstile_state(page)
+        if st.get("solved") or int(st.get("token_len") or 0) > 20:
             return True
+        # Do not click while already settling (would reset checkbox)
+        if st.get("phase") == "loading" or st.get("success_ui"):
+            return False
     except Exception:
         pass
+
+    async def _real_click(loc, label: str, *, pos: dict | None = None) -> bool:
+        try:
+            if await loc.count() == 0:
+                return False
+            target = loc.first
+            try:
+                if not await target.is_visible(timeout=800):
+                    return False
+            except Exception:
+                return False
+            try:
+                await target.scroll_into_view_if_needed(timeout=1200)
+            except Exception:
+                pass
+            await asyncio.sleep(random.uniform(0.05, 0.12))
+            if pos:
+                await target.click(timeout=2000, position=pos)
+            else:
+                await target.click(timeout=2000)
+            print(f"[{attempt}] Turnstile: click {label}", flush=True)
+            return True
+        except Exception:
+            return False
+
     try:
-        # 1) Host-page label / accessible text
+        # 1) Inside CF challenge frame — real checkbox (most reliable)
+        for f in page.frames:
+            fu = (f.url or "").lower()
+            if "challenges.cloudflare.com" not in fu and "turnstile" not in fu:
+                continue
+            for sel in (
+                "label.cb-lb",
+                "label.cb-lb input",
+                'input[type="checkbox"]',
+                'label input[type="checkbox"]',
+                '[role="checkbox"]',
+            ):
+                try:
+                    loc = f.locator(sel)
+                    if await _real_click(loc, f"frame:{sel}"):
+                        return True
+                except Exception:
+                    continue
+            # Click left side of frame body (checkbox zone)
+            try:
+                body = f.locator("body")
+                if await _real_click(body, "frame:body", pos={"x": 22, "y": 28}):
+                    return True
+            except Exception:
+                pass
+
+        # 2) Host-page projected label
         for sel in (
             'text=Verify you are human',
             'label:has-text("Verify you are human")',
             '[aria-label*="Verify you are human" i]',
         ):
             try:
-                loc = page.locator(sel).first
-                if await loc.count() > 0 and await loc.is_visible():
-                    try:
-                        await loc.click(timeout=2500, force=True)
-                    except Exception:
-                        await loc.click(timeout=2000, force=True)
-                    vlog(f"Turnstile: clicked host text ({sel})", attempt)
+                loc = page.locator(sel)
+                if await _real_click(loc, f"host:{sel}"):
                     return True
             except Exception:
                 continue
 
-        # 2) Iframe / sitekey element — direct locator click (no mouse.move trail)
+        # 3) Iframe / widget box — left edge (checkbox)
         for sel in (
             'iframe[src*="challenges.cloudflare.com"]',
             'iframe[src*="turnstile"]',
             "[data-sitekey]",
-            'div:has(iframe[src*="challenges.cloudflare"])',
+            ".cf-turnstile",
         ):
             try:
                 loc = page.locator(sel).first
                 if await loc.count() == 0:
                     continue
                 try:
-                    await loc.click(timeout=2500, force=True, position={"x": 20, "y": 20})
-                    vlog(f"Turnstile: force-click {sel}", attempt)
-                    return True
-                except Exception:
-                    box = await loc.bounding_box(timeout=1500)
-                    if not box:
+                    if not await loc.is_visible(timeout=600):
                         continue
-                    # Single click only — no multi-point animation
-                    await page.mouse.click(
-                        box["x"] + min(28, max(12, box["width"] * 0.12)),
-                        box["y"] + box["height"] / 2,
-                    )
-                    vlog(f"Turnstile: clicked container {sel}", attempt)
-                    return True
-            except Exception:
-                continue
-
-        # 3) Inside CF frames — checkbox selectors
-        for f in page.frames:
-            if "challenges.cloudflare.com" not in (f.url or "") and "turnstile" not in (f.url or ""):
-                continue
-            for sel in (
-                'input[type="checkbox"]',
-                "label.cb-lb input",
-                'label input[type="checkbox"]',
-                '[role="checkbox"]',
-                "body",
-            ):
-                try:
-                    loc = f.locator(sel).first
-                    if await loc.count() == 0:
-                        continue
-                    try:
-                        await loc.click(timeout=2000)
-                    except Exception:
-                        box = await loc.bounding_box(timeout=1500)
-                        if box:
-                            await page.mouse.click(
-                                box["x"] + min(20, box["width"] * 0.2),
-                                box["y"] + box["height"] / 2,
-                            )
-                        else:
-                            continue
-                    vlog(f"Turnstile: clicked frame {sel}", attempt)
-                    return True
                 except Exception:
                     continue
+                box = await loc.bounding_box(timeout=1200)
+                if not box or box["width"] < 8:
+                    continue
+                x = box["x"] + min(26, max(14, box["width"] * 0.12))
+                y = box["y"] + box["height"] / 2
+                await page.mouse.click(x, y)
+                print(f"[{attempt}] Turnstile: click box {sel}", flush=True)
+                return True
+            except Exception:
+                continue
     except Exception as e:
         vlog(f"Turnstile click error: {e}", attempt)
     return False
@@ -4918,46 +4946,57 @@ async def _complete_button_state(page) -> dict[str, Any]:
 
 
 async def _submit_complete_signup(page, attempt: int) -> bool:
-    """After Turnstile token: one direct Complete click (refer-style).
+    """Click Complete when Turnstile token + password are ready (no force).
 
-    No multi-wave mouse/pointer animation — user: token ready → just click button.
+    Real button click only — Turnstile must already be solved in-page so the
+    checkbox does not shake. Strategies: role click → text → Enter on password.
     """
     await dismiss_cookie_banner(page)
-    # Prefer exact Complete sign up (refer)
+    clicked = False
+
+    # 1) Role locator — normal click (not force)
     try:
         btn = page.get_by_role(
             "button", name=re.compile(r"complete\s+sign\s*up", re.I)
         )
-        if await btn.count() > 0 and await btn.first.is_visible():
-            await btn.first.click(timeout=5000, force=True)
-            vlog("complete: clicked Complete sign up", attempt)
-            return True
+        if await btn.count() > 0:
+            try:
+                await btn.first.scroll_into_view_if_needed(timeout=1500)
+            except Exception:
+                pass
+            try:
+                if await btn.first.is_enabled(timeout=800):
+                    await btn.first.click(timeout=3000)
+                    clicked = True
+                    vlog("complete: role click Complete sign up", attempt)
+            except Exception as e:
+                vlog(f"complete role click: {e}", attempt)
     except Exception as e:
-        vlog(f"complete role click: {e}", attempt)
-    hit = await click_text_button(
-        page,
-        ["Complete sign up", "Complete Sign Up", "Create account"],
-        exclude=["Google", "Apple", "Deny", "Cancel"],
-    )
-    if hit:
-        vlog(f"complete: text click {hit!r}", attempt)
-        return True
-    try:
-        ok = await page.evaluate(
-            """() => {
-              const b = [...document.querySelectorAll('button')].find(x =>
-                /complete\\s*sign\\s*up/i.test((x.innerText||'').trim()));
-              if (!b) return false;
-              b.click();
-              return true;
-            }"""
+        vlog(f"complete role setup: {e}", attempt)
+
+    # 2) Text button helper
+    if not clicked:
+        hit = await click_text_button(
+            page,
+            ["Complete sign up", "Complete Sign Up", "Create account"],
+            exclude=["Google", "Apple", "Deny", "Cancel"],
         )
-        if ok:
-            vlog("complete: js click", attempt)
-            return True
-    except Exception:
-        pass
-    return False
+        if hit:
+            clicked = True
+            vlog(f"complete: text click {hit!r}", attempt)
+
+    # 3) Enter on password field (native form submit)
+    if not clicked:
+        try:
+            pw = page.locator('input[type="password"]').first
+            if await pw.count() > 0:
+                await pw.press("Enter")
+                vlog("complete: Enter on password", attempt)
+                clicked = True
+        except Exception:
+            pass
+
+    return clicked
 
 
 async def handle_turnstile(
@@ -4970,12 +5009,11 @@ async def handle_turnstile(
     use_global_limit: bool = False,
     allow_remount: bool = True,
 ) -> bool:
-    """Camoufox auto-pass → managed checkbox click → vision for interactive puzzles.
+    """In-page Turnstile only — DOM/context-aware click.
 
-    require_token=True: used on Complete sign-up — blank widget means NOT ready,
-    never treat absence of iframe as success.
-    use_global_limit=True: acquire TURNSTILE_PARALLEL semaphore (concurrent farm).
-    allow_remount=False: click-only (old complete_signup style — no soft/hard remount).
+    require_token=True: complete/login — blank widget means NOT ready.
+    use_global_limit=True: acquire TURNSTILE_PARALLEL semaphore.
+    allow_remount=False: click/wait only (no soft/hard remount).
     """
     if use_global_limit:
         async with _get_turnstile_sem():
@@ -5006,13 +5044,21 @@ async def _handle_turnstile_inner(
     password: str | None = None,
     allow_remount: bool = True,
 ) -> bool:
-    """Observe → wait → click once → wait 5–10s for check (no blind r1–r5 spam)."""
+    """Fast DOM loop: observe phase → click only if need_click → wait for token.
+
+    Context rules:
+      solved / token → return True
+      loading / success_ui → wait only (never re-click)
+      need_click → one real click, then wait
+      failed → soft remount (optional)
+      absent → wait for mount; only poke if require_token
+    """
     deadline = time.monotonic() + max_wait
     clicks = 0
     remounts = 0
-    # First look: Camoufox often auto-passes — wait before clicking
+    # Brief auto-pass window (Camoufox sometimes solves without click)
     st0 = await wait_for_turnstile_solved(
-        page, attempt, timeout_s=min(6.0, max_wait * 0.35), after="mount"
+        page, attempt, timeout_s=min(2.5, max(1.2, max_wait * 0.15)), after="mount"
     )
     if st0.get("solved"):
         return True
@@ -5020,30 +5066,33 @@ async def _handle_turnstile_inner(
     while time.monotonic() < deadline:
         st = await read_turnstile_state(page)
         phase = str(st.get("phase") or "absent")
+        left = max(0.0, deadline - time.monotonic())
         print(
             f"[{attempt}] Turnstile loop: phase={phase} token_len={st.get('token_len')} "
             f"success_ui={st.get('success_ui')} clicks={clicks} remounts={remounts} "
-            f"left={max(0.0, deadline - time.monotonic()):.0f}s",
+            f"left={left:.0f}s",
             flush=True,
         )
 
         if st.get("solved") or int(st.get("token_len") or 0) > 20:
-            vlog(f"Turnstile: token present (len={st.get('token_len')})", attempt)
+            print(
+                f"[{attempt}] Turnstile: solved token_len={st.get('token_len')}",
+                flush=True,
+            )
             return True
 
         # Loading / success_ui: DO NOT re-click (would reset checkbox)
         if phase == "loading" or (st.get("success_ui") and not st.get("solved")):
             stw = await wait_for_turnstile_solved(
                 page, attempt,
-                timeout_s=min(10.0, max(5.0, deadline - time.monotonic())),
+                timeout_s=min(7.0, max(3.0, left)),
                 after="settle",
             )
             if stw.get("solved"):
                 return True
-            # Still no token after settle — one soft remount max
-            if allow_remount and remounts < 2 and (deadline - time.monotonic()) > 8:
+            if allow_remount and remounts < 1 and left > 6:
                 await _force_turnstile_remount(
-                    page, attempt, password, hard=(remounts >= 1),
+                    page, attempt, password, hard=False,
                 )
                 remounts += 1
                 clicks = 0
@@ -5053,66 +5102,64 @@ async def _handle_turnstile_inner(
             continue
 
         if phase == "failed":
-            if allow_remount and remounts < 3:
+            if allow_remount and remounts < 2 and left > 5:
                 await _force_turnstile_remount(
                     page, attempt, password, hard=(remounts >= 1),
                 )
                 remounts += 1
                 clicks = 0
                 await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=5.0, after="remount",
+                    page, attempt, timeout_s=3.5, after="remount",
                 )
                 continue
-            if not allow_remount:
-                await try_click_turnstile(page, attempt)
-                await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=6.0, after="fail-click",
-                )
-                continue
-            vlog("Turnstile: Verification failed (remounts exhausted)", attempt)
+            print(f"[{attempt}] Turnstile: Verification failed", flush=True)
             return False
 
         if phase == "absent":
             if not require_token:
                 return True
-            # Widget not mounted yet
-            if clicks == 0:
-                await asyncio.sleep(2.0)
-            if clicks < 3:
+            # Wait for widget to mount before poking
+            await asyncio.sleep(0.6 if clicks == 0 else 0.4)
+            st_m = await read_turnstile_state(page)
+            if st_m.get("phase") in ("need_click", "loading", "solved"):
+                continue
+            if clicks < 2 and left > 3:
+                # Context: only slot-above-complete if that button exists
                 await _click_turnstile_slot_above_complete(page, attempt)
                 await try_click_turnstile(page, attempt)
                 clicks += 1
                 stw = await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=8.0, after=f"click#{clicks}",
+                    page, attempt, timeout_s=min(6.0, left), after=f"click#{clicks}",
                 )
                 if stw.get("solved"):
                     return True
-            elif allow_remount and remounts < 2 and (deadline - time.monotonic()) > 10:
+            elif allow_remount and remounts < 1 and left > 8:
                 await _force_turnstile_remount(
-                    page, attempt, password, hard=(remounts >= 1),
+                    page, attempt, password, hard=False,
                 )
                 remounts += 1
                 clicks = 0
             else:
-                await asyncio.sleep(1.0)
+                await asyncio.sleep(0.5)
             continue
 
-        # need_click: click once, then wait 8–10s for check (do not spam clicks)
-        if phase == "need_click" and clicks < 4:
-            await try_click_turnstile(page, attempt)
-            await _click_turnstile_slot_above_complete(page, attempt)
+        # need_click: one real click, wait for check — do not spam
+        if phase == "need_click" and clicks < 3:
+            hit = await try_click_turnstile(page, attempt)
+            if not hit:
+                # Fallback geometric slot only on complete form
+                await _click_turnstile_slot_above_complete(page, attempt)
             clicks += 1
             stw = await wait_for_turnstile_solved(
                 page, attempt,
-                timeout_s=min(10.0, max(6.0, deadline - time.monotonic())),
+                timeout_s=min(8.0, max(4.0, left)),
                 after=f"click#{clicks}",
             )
             if stw.get("solved"):
                 return True
-            if stw.get("phase") == "loading":
-                # Checked look — keep waiting, don't remount yet
+            if stw.get("phase") == "loading" or stw.get("success_ui"):
                 stw2 = await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=8.0, after="post-check",
+                    page, attempt, timeout_s=min(6.0, left), after="post-check",
                 )
                 if stw2.get("solved"):
                     return True
@@ -5817,11 +5864,234 @@ async def _tempmail_read_address(mail_page) -> str:
         return ""
 
 
+# generator.email domain map cache (process-local). Built from:
+#   1) #newselect dropdown on the home page (live DOM)
+#   2) /search.php?key=… JSON (same endpoint the site typeahead uses)
+_TEMPMAIL_DOMAIN_MAP: list[str] = []
+_TEMPMAIL_DOMAIN_MAP_TS = 0.0
+_TEMPMAIL_DOMAIN_MAP_LOCK = threading.Lock()
+# Keys used to expand the map via search.php (verified live: returns JSON array).
+_TEMPMAIL_SEARCH_KEYS = (
+    "com", "net", "org", "mail", "email", "xyz", "top", "click", "me", "id",
+    "co", "io", "site", "store", "shop", "fun", "pro", "vip", "live", "info",
+    "biz", "app", "dev", "tech", "world", "space", "online", "digital", "cloud",
+    "temp", "fake", "free", "g", "m", "s", "a", "e", "o", "i", "u", "n", "t",
+)
+
+
+def _tempmail_http_json_list(url: str, *, timeout: float = 12.0) -> list[str]:
+    """GET url; if body is a JSON string array, return lowercased domains."""
+    req = urllib.request.Request(
+        url,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+            ),
+            "Accept": "application/json,text/javascript,*/*",
+            "X-Requested-With": "XMLHttpRequest",
+            "Referer": "https://generator.email/",
+        },
+    )
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as resp:
+            body = resp.read().decode("utf-8", errors="replace")
+    except Exception:
+        return []
+    body = (body or "").strip()
+    if not body.startswith("["):
+        return []
+    try:
+        data = json.loads(body)
+    except Exception:
+        return []
+    out: list[str] = []
+    if isinstance(data, list):
+        for item in data:
+            if isinstance(item, str) and "." in item and "@" not in item:
+                d = item.strip().lower().lstrip("@")
+                if d and len(d) < 80:
+                    out.append(d)
+    return out
+
+
+def _tempmail_expand_domain_map_via_search(seed: list[str] | None = None) -> list[str]:
+    """Expand domain map using generator.email /search.php (typeahead backend)."""
+    found: set[str] = set(seed or [])
+    for key in _TEMPMAIL_SEARCH_KEYS:
+        url = f"https://generator.email/search.php?key={quote(key)}"
+        for d in _tempmail_http_json_list(url):
+            found.add(d)
+    return sorted(found)
+
+
+async def tempmail_map_domains(
+    mail_page=None,
+    *,
+    force: bool = False,
+    ttl_s: float = 600.0,
+) -> list[str]:
+    """Return available generator.email domains (mapped, not one-by-one trial).
+
+    Sources (live-verified 2026-07-14):
+      - Home DOM: #newselect p[onclick*=change_dropdown_list] / #domainName2
+      - API: GET /search.php?key=… → JSON array of domains
+    """
+    global _TEMPMAIL_DOMAIN_MAP, _TEMPMAIL_DOMAIN_MAP_TS
+    now = time.time()
+    with _TEMPMAIL_DOMAIN_MAP_LOCK:
+        if (
+            not force
+            and _TEMPMAIL_DOMAIN_MAP
+            and (now - _TEMPMAIL_DOMAIN_MAP_TS) < ttl_s
+        ):
+            return list(_TEMPMAIL_DOMAIN_MAP)
+
+    doms: set[str] = set()
+    if mail_page is not None:
+        try:
+            page_doms = await mail_page.evaluate(
+                """() => {
+                  const out = [];
+                  const push = (s) => {
+                    s = (s || '').trim().toLowerCase().replace(/^@/, '');
+                    if (s && s.includes('.') && !s.includes('@') && s.length < 80)
+                      out.push(s);
+                  };
+                  document.querySelectorAll(
+                    '#newselect p[onclick*="change_dropdown_list"], '
+                    + '#newselect .tt-suggestion p, '
+                    + 'p[onclick*="change_dropdown_list"]'
+                  ).forEach((p) => push(p.id || p.textContent));
+                  const dn = document.querySelector('#domainName2');
+                  if (dn) push(dn.value || dn.getAttribute('value'));
+                  return out;
+                }"""
+            )
+            if isinstance(page_doms, list):
+                for d in page_doms:
+                    if isinstance(d, str) and "." in d:
+                        doms.add(d.strip().lower().lstrip("@"))
+        except Exception as e:
+            print(f"[tempmail] domain DOM map warn: {e}", flush=True)
+
+    try:
+        expanded = await _run_io(_tempmail_expand_domain_map_via_search, list(doms))
+        if expanded:
+            doms.update(expanded)
+    except Exception as e:
+        print(f"[tempmail] domain search map warn: {e}", flush=True)
+
+    mapped = sorted(doms)
+    with _TEMPMAIL_DOMAIN_MAP_LOCK:
+        if mapped:
+            _TEMPMAIL_DOMAIN_MAP = mapped
+            _TEMPMAIL_DOMAIN_MAP_TS = time.time()
+            return list(_TEMPMAIL_DOMAIN_MAP)
+        if _TEMPMAIL_DOMAIN_MAP:
+            return list(_TEMPMAIL_DOMAIN_MAP)
+    return mapped
+
+
+def tempmail_pick_domain(
+    domain_map: list[str],
+    *,
+    exclude: set[str] | None = None,
+) -> str | None:
+    """Pick a non-blacklisted domain from the map (random among candidates)."""
+    exclude = exclude or set()
+    candidates: list[str] = []
+    for d in domain_map:
+        d = (d or "").strip().lower().lstrip("@")
+        if not d or d in exclude:
+            continue
+        if blacklist_contains(d):
+            continue
+        candidates.append(d)
+    if not candidates:
+        return None
+    return random.choice(candidates)
+
+
+async def tempmail_apply_domain(
+    mail_page,
+    domain: str,
+    *,
+    attempt: int = 0,
+    local_part: str | None = None,
+) -> str:
+    """Set domain on generator.email using the site's clipboard_process path.
+
+    Live site flow (page JS):
+      clipboard_process(userName, domain) → #email_ch_text + surl cookie
+      optional navigation to /{domain}/{user}
+    """
+    domain = (domain or "").strip().lower().lstrip("@")
+    if not domain:
+        return ""
+    email = await mail_page.evaluate(
+        """({ domain, localPart }) => {
+          const userEl = document.querySelector('#userName');
+          let user = (localPart || (userEl && userEl.value) || '').trim();
+          if (!user) {
+            user = Math.random().toString(36).slice(2, 10)
+              + Math.random().toString(36).slice(2, 6);
+          }
+          user = user.replace(/[^a-zA-Z0-9._-]/g, '').toLowerCase() || 'user';
+          try {
+            if (typeof clipboard_process === 'function') {
+              clipboard_process(user, domain);
+            } else if (typeof change_dropdown_list === 'function') {
+              if (userEl) userEl.value = user;
+              change_dropdown_list(domain);
+            } else {
+              const dn = document.querySelector('#domainName2');
+              if (dn) {
+                dn.value = domain;
+                dn.dispatchEvent(new Event('input', { bubbles: true }));
+                dn.dispatchEvent(new Event('change', { bubbles: true }));
+              }
+              if (userEl) userEl.value = user;
+              const shown = document.querySelector('#email_ch_text');
+              if (shown) shown.textContent = user + '@' + domain;
+            }
+          } catch (e) {}
+          const shown = (document.querySelector('#email_ch_text')?.textContent
+            || document.querySelector('#email_ch_text')?.innerText || '').trim();
+          if (shown && shown.includes('@')) return shown;
+          return user + '@' + domain;
+        }""",
+        {"domain": domain, "localPart": local_part or ""},
+    )
+    email = (email or "").strip()
+    if email and "@" in email:
+        user, dom = email.rsplit("@", 1)
+        user, dom = user.strip(), dom.strip()
+        if user and dom:
+            try:
+                await mail_page.goto(
+                    f"https://generator.email/{dom}/{user}",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
+                )
+            except Exception as e:
+                print(f"[{attempt}] tempmail apply domain goto warn: {e}", flush=True)
+            await asyncio.sleep(0.6)
+            got = await _tempmail_read_address(mail_page)
+            if got and "@" in got:
+                return got
+    return email
+
+
 async def tempmail_gen_email(mail_page, attempt: int, max_rolls: int = 25) -> str:
     """Open generator.email and return a non-blacklisted address (this worker only).
 
-    Self-heal: soft-reload home if address never appears; re-roll via
-    /email-generator when domain is blacklisted.
+    Domain strategy (map, not one-by-one blind re-roll):
+      1) Open home, clear CF if needed (via handle_turnstile)
+      2) Build domain map from #newselect + /search.php
+      3) Pick non-blacklisted domain from the map
+      4) Apply via clipboard_process / inbox URL
+      5) On blacklist hit, exclude domain and pick another from map
     """
     emit_progress(attempt, "tempmail_open", f"[w{attempt}] open generator.email", "")
     try:
@@ -5835,114 +6105,182 @@ async def tempmail_gen_email(mail_page, attempt: int, max_rolls: int = 25) -> st
             "https://generator.email/", wait_until="commit", timeout=45000
         )
 
-    rolls = 0
+    for _ in range(12):
+        try:
+            body = ((await mail_page.inner_text("body")) or "")[:400].lower()
+        except Exception:
+            body = ""
+        if any(
+            x in body
+            for x in (
+                "just a moment",
+                "verify you are human",
+                "checking your browser",
+                "hanya sebentar",
+            )
+        ):
+            emit_progress(
+                attempt,
+                "tempmail_open",
+                f"[w{attempt}] CF on generator.email — solving…",
+                "",
+            )
+            try:
+                await handle_turnstile(
+                    mail_page,
+                    attempt,
+                    max_wait=10,
+                    require_token=False,
+                    use_global_limit=False,
+                )
+            except Exception:
+                pass
+            await asyncio.sleep(0.5)
+            continue
+        break
+
+    emit_progress(
+        attempt,
+        "tempmail_map",
+        f"[w{attempt}] mapping domains (dropdown + search.php)…",
+        "",
+    )
+    domain_map = await tempmail_map_domains(mail_page, force=False)
+    print(
+        f"[{attempt}] tempmail domain map: {len(domain_map)} domains "
+        f"(blacklist-aware pick)",
+        flush=True,
+    )
+    emit_progress(
+        attempt,
+        "tempmail_map",
+        f"[w{attempt}] map ready: {len(domain_map)} domains",
+        "",
+    )
+
+    tried: set[str] = set()
     email = ""
+    rolls = 0
     while rolls < max_rolls:
         rolls += 1
-        email = ""
-        deadline = time.monotonic() + 18.0
-        soft_reloads = 0
-        while time.monotonic() < deadline:
-            # CF / blank page on generator.email
+        pick = tempmail_pick_domain(domain_map, exclude=tried) if domain_map else None
+        if pick:
+            tried.add(pick)
+            print(
+                f"[{attempt}] tempmail map-pick @{pick} "
+                f"(try {rolls}/{max_rolls}, map={len(domain_map)}, tried={len(tried)})",
+                flush=True,
+            )
+            emit_progress(
+                attempt,
+                "tempmail_pick",
+                f"[w{attempt}] pick @{pick} ({rolls}/{max_rolls})",
+                "",
+            )
+            emit_progress(
+                attempt,
+                "tempmail_apply",
+                f"[w{attempt}] apply domain @{pick}",
+                "",
+            )
+            email = await tempmail_apply_domain(mail_page, pick, attempt=attempt)
+        else:
+            print(
+                f"[{attempt}] tempmail map exhausted/empty — "
+                f"/email-generator + remap (roll {rolls}/{max_rolls})",
+                flush=True,
+            )
+            emit_progress(
+                attempt,
+                "tempmail_map",
+                f"[w{attempt}] map empty — regenerate + remap",
+                "",
+            )
             try:
-                body = ((await mail_page.inner_text("body")) or "")[:400].lower()
-            except Exception:
-                body = ""
-            if any(
-                x in body
-                for x in (
-                    "just a moment",
-                    "verify you are human",
-                    "checking your browser",
-                    "hanya sebentar",
+                await mail_page.goto(
+                    "https://generator.email/email-generator",
+                    wait_until="domcontentloaded",
+                    timeout=45000,
                 )
-            ):
+            except Exception:
                 try:
-                    await handle_turnstile(
-                        mail_page, attempt, max_wait=10,
-                        require_token=False, use_global_limit=False,
+                    await mail_page.goto(
+                        "https://generator.email/",
+                        wait_until="domcontentloaded",
+                        timeout=45000,
                     )
                 except Exception:
                     pass
-                await asyncio.sleep(0.5)
-                continue
-
+            await asyncio.sleep(0.8)
+            domain_map = await tempmail_map_domains(mail_page, force=True)
+            tried.clear()
             email = await _tempmail_read_address(mail_page)
-            if email and "@" in email and "undefined" not in email.lower():
-                break
-
-            # Soft-reload this worker's mail page only (no shared state)
-            if soft_reloads < 2 and time.monotonic() > deadline - 10:
-                soft_reloads += 1
-                emit_progress(
-                    attempt, "tempmail_open",
-                    f"[w{attempt}] no address — reload mail page",
-                    "",
-                )
-                try:
-                    await mail_page.reload(wait_until="domcontentloaded", timeout=20000)
-                except Exception:
-                    try:
-                        await mail_page.goto(
-                            "https://generator.email/",
-                            wait_until="domcontentloaded",
-                            timeout=30000,
-                        )
-                    except Exception:
-                        pass
-                await asyncio.sleep(0.8)
-                continue
-            await asyncio.sleep(0.35)
 
         if not email or "@" not in email:
-            await screenshot(mail_page, attempt, "tempmail_no_address")
-            raise RecoverableFarmError(
-                "tempmail: generator.email never returned an address (worker mail browser)",
-                delay_s=1.5,
-                tag="TempmailNoAddr",
+            emit_progress(
+                attempt,
+                "tempmail_apply",
+                f"[w{attempt}] waiting address settle…",
+                "",
             )
+            deadline = time.monotonic() + 8.0
+            while time.monotonic() < deadline:
+                email = await _tempmail_read_address(mail_page)
+                if email and "@" in email and "undefined" not in email.lower():
+                    break
+                await asyncio.sleep(0.4)
+
+        if not email or "@" not in email or "undefined" in email.lower():
+            print(
+                f"[{attempt}] tempmail no address after pick "
+                f"(roll {rolls}/{max_rolls})",
+                flush=True,
+            )
+            emit_progress(
+                attempt,
+                "tempmail_apply",
+                f"[w{attempt}] no address yet (roll {rolls})",
+                "",
+            )
+            continue
 
         domain = email.rsplit("@", 1)[-1].strip().lower()
-        if not blacklist_contains(domain):
-            print(f"[{attempt}] tempmail address: {email}", flush=True)
-            if rolls > 1:
-                print(
-                    f"[{attempt}] tempmail rolled {rolls}x to avoid blacklist",
-                    flush=True,
-                )
-            # Cache inbox URLs on this worker's session for OTP poll
-            sess = _tempmail_sessions.get(attempt)
-            if isinstance(sess, dict):
-                sess["email"] = email
-                sess["inbox_urls"] = _tempmail_inbox_urls(email)
-            return email
+        if blacklist_contains(domain):
+            print(
+                f"[{attempt}] tempmail domain {domain!r} blacklisted, "
+                f"map-pick another...",
+                flush=True,
+            )
+            emit_progress(
+                attempt,
+                "tempmail_pick",
+                f"[w{attempt}] skip blacklisted @{domain}",
+                email,
+            )
+            tried.add(domain)
+            continue
 
-        print(
-            f"[{attempt}] tempmail domain {domain!r} blacklisted, re-rolling...",
-            flush=True,
-        )
+        print(f"[{attempt}] tempmail address: {email}", flush=True)
+        if rolls > 1:
+            print(
+                f"[{attempt}] tempmail map-picked after {rolls} tries",
+                flush=True,
+            )
         emit_progress(
-            attempt, "tempmail_open",
-            f"[w{attempt}] roll domain @{domain}",
+            attempt,
+            "tempmail_open",
+            f"[w{attempt}] inbox ready {email}",
             email,
         )
-        try:
-            await mail_page.goto(
-                "https://generator.email/email-generator",
-                wait_until="domcontentloaded",
-                timeout=45000,
-            )
-        except Exception:
-            await mail_page.goto(
-                "https://generator.email/",
-                wait_until="domcontentloaded",
-                timeout=45000,
-            )
-        await asyncio.sleep(0.45)
+        sess = _tempmail_sessions.get(attempt)
+        if isinstance(sess, dict):
+            sess["email"] = email
+            sess["inbox_urls"] = _tempmail_inbox_urls(email)
+        return email
 
     await screenshot(mail_page, attempt, "tempmail_all_blacklisted")
     raise RecoverableFarmError(
-        f"tempmail: {rolls} rolls all blacklisted (last={email!r})",
+        f"tempmail: {rolls} map-picks all blacklisted/failed (last={email!r})",
         delay_s=2.0,
         tag="TempmailAllBlacklisted",
     )
@@ -6187,6 +6525,7 @@ async def tempmail_close(attempt: int) -> None:
         manager = sess.get("manager")
     else:
         page, browser, manager = sess[0], sess[1], sess[2]
+    print(f"[{attempt}] tempmail: closing mail browser (done with OTP)", flush=True)
     try:
         if page is not None:
             await page.close()
@@ -6563,6 +6902,28 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
     otp_wait_started = time.time()
 
     async def _click_sign_up_submit() -> None:
+        """Email filled (+ optional TS) → force Sign up, same rule as Complete ready."""
+        print(f"[{attempt}] signup: email ready → force Sign up click", flush=True)
+        # 1) role force
+        try:
+            btn = page.get_by_role("button", name=re.compile(r"^sign\s*up$", re.I))
+            if await btn.count() > 0:
+                try:
+                    await btn.first.scroll_into_view_if_needed(timeout=1500)
+                except Exception:
+                    pass
+                try:
+                    await btn.first.click(timeout=4000, force=True)
+                    return
+                except Exception:
+                    try:
+                        await btn.first.dispatch_event("click")
+                        return
+                    except Exception:
+                        pass
+        except Exception:
+            pass
+        # 2) smart_click / text
         hit = await smart_click(
             page, ["Sign up"],
             exclude=["Google", "Apple", "email", "X", "with"],
@@ -6574,11 +6935,44 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         try:
             await page.locator('button[type="submit"]').filter(
                 has_text=re.compile(r"^sign up$", re.I)
-            ).click(timeout=4000)
+            ).click(timeout=4000, force=True)
+            return
         except Exception:
-            await click_text_button(
-                page, ["Sign up"], exclude=["Google", "Apple", "email", "X"]
+            pass
+        await click_text_button(
+            page, ["Sign up"], exclude=["Google", "Apple", "email", "X"]
+        )
+        # 3) JS strip-disabled + click
+        try:
+            await page.evaluate(
+                """() => {
+                  const b = [...document.querySelectorAll(
+                    'button, [role="button"], input[type="submit"]'
+                  )].find(x => /^sign\\s*up$/i.test((x.innerText||x.value||'').trim()));
+                  if (!b) return false;
+                  try {
+                    b.removeAttribute('disabled');
+                    b.disabled = false;
+                    b.setAttribute('aria-disabled', 'false');
+                  } catch (e) {}
+                  try { b.click(); } catch (e) {}
+                  try {
+                    b.dispatchEvent(new MouseEvent('click', {bubbles:true, cancelable:true}));
+                  } catch (e) {}
+                  return true;
+                }"""
             )
+        except Exception:
+            pass
+        # 4) Enter on email field
+        try:
+            el = page.locator(
+                'input[type="email"], input[name="email"], input[autocomplete="email"]'
+            ).first
+            if await el.count() > 0:
+                await el.press("Enter")
+        except Exception:
+            pass
 
     async def _wait_otp_fields(timeout_ms: int = 15000) -> str | None:
         return await wait_for_selector_any(
@@ -6594,8 +6988,25 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
     if not already_past_email or (await read_page_state(page)).get("stage") not in (
         "signup_otp", "signup_profile",
     ):
-        await _click_sign_up_submit()
-        await asyncio.sleep(1.2)
+        # Burst Sign up if still on email form (same ready→click rule)
+        for _burst in range(2):
+            await _click_sign_up_submit()
+            await asyncio.sleep(0.9)
+            st_chk = await read_page_state(page)
+            if st_chk.get("stage") in ("signup_otp", "signup_profile", "account_home"):
+                break
+            if await page.locator(
+                'input[name="code"], input[autocomplete="one-time-code"], input[maxlength="1"]'
+            ).count() > 0:
+                break
+            # still on email — only re-click, don't re-solve unless token missing
+            tok_e = await turnstile_token_len(page)
+            if tok_e <= 20 and await _turnstile_mount_present(page):
+                await handle_turnstile(page, attempt, max_wait=8)
+            print(
+                f"[{attempt}] signup: still on email after Sign up — click again",
+                flush=True,
+            )
 
     # Wait for OTP UI — DOM heal + soft-refresh before full browser restart
     st_otp = await heal_to_stage(
@@ -6610,6 +7021,8 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
     if not code_sel:
         await screenshot(page, attempt, "no_otp_input")
         await handle_turnstile(page, attempt, max_wait=12)
+        await _click_sign_up_submit()
+        await asyncio.sleep(0.6)
         await _click_sign_up_submit()
         code_sel = await _wait_otp_fields(12000)
     if not code_sel:
@@ -6658,7 +7071,12 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         )
 
     if MAIL_MODE == "tempmail" and mail_page is not None:
-        emit_progress(attempt, "wait_otp", "Waiting for xAI code via temp mail", email_addr)
+        emit_progress(
+            attempt,
+            "tempmail_otp",
+            f"[w{attempt}] polling generator.email inbox for OTP…",
+            email_addr,
+        )
         otp = await tempmail_read_otp(
             mail_page, email_addr, OTP_TIMEOUT_S, attempt
         )
@@ -6693,6 +7111,25 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 delay_s=2.0,
                 tag="OtpTimeout",
             )
+
+    # Temp-mail browser is only needed until OTP is received — close it now
+    # so we don't keep a second Camoufox open through complete/login/oauth.
+    if MAIL_MODE == "tempmail":
+        try:
+            emit_progress(
+                attempt,
+                "tempmail_close",
+                f"[w{attempt}] OTP ok — closing temp-mail browser",
+                email_addr,
+            )
+            print(
+                f"[{attempt}] tempmail: OTP received — closing mail browser",
+                flush=True,
+            )
+            await tempmail_close(attempt)
+        except Exception as e:
+            print(f"[{attempt}] tempmail close-after-otp warn: {e}", flush=True)
+        mail_page = None
 
     # UI is multi-box "XXX-XXX". Never value='' clear / never type hyphen.
     otp_clean = otp.strip().upper()
@@ -6955,7 +7392,7 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     f"r{round_i} TS {ts0.get('phase')} tok={ts0.get('token_len')}",
                     email_addr,
                 )
-                # Only remount if failed or stuck need_click after r2+
+                # Remount only on CF fail or stuck need_click after several rounds
                 if ts0.get("phase") == "failed" or (
                     round_i >= 3 and ts0.get("phase") == "need_click" and not ever_had_token
                 ):
@@ -6966,8 +7403,8 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     st = await _refill_complete_profile(
                         page, first, last, password, attempt
                     )
-                # Longer slice so wait_for_turnstile (5–10s) can settle after click
-                slice_wait = min(20.0, remaining)
+                # In-page solve: observe → click once → wait for real token
+                slice_wait = min(18.0, remaining)
                 ok_ts = await handle_turnstile(
                     page,
                     attempt,
@@ -7005,12 +7442,19 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 pw_len = int(st.get("pwLen") or 0)
                 if tok > 20:
                     ever_had_token = True
-                # Still zero after slice: click slot + frame again once, short wait
+                # Still zero after handle_turnstile — one more context-aware click
                 if tok <= 20:
-                    await try_click_turnstile(page, attempt)
-                    await _click_turnstile_slot_above_complete(page, attempt)
-                    await asyncio.sleep(1.5)
-                    tok = await turnstile_token_len(page)
+                    ts_again = await read_turnstile_state(page)
+                    if ts_again.get("phase") == "need_click":
+                        await try_click_turnstile(page, attempt)
+                    elif ts_again.get("phase") in ("absent", "loading"):
+                        await wait_for_turnstile_solved(
+                            page, attempt, timeout_s=min(5.0, remaining), after="retry",
+                        )
+                    stw = await wait_for_turnstile_solved(
+                        page, attempt, timeout_s=min(6.0, remaining), after="reclick",
+                    )
+                    tok = int(stw.get("token_len") or await turnstile_token_len(page) or 0)
                     if tok > 20:
                         ever_had_token = True
             else:
@@ -7046,24 +7490,38 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 await _ensure_password_filled(page, password, attempt)
                 continue
 
-            # Step C: submit while token+password present (verify token still live)
-            tok = await turnstile_token_len(page)
+            # Step C: real token + pw ready → click Complete (do not re-solve TS).
+            # Only submit when in-page Turnstile actually solved (checkbox path).
+            tok = int(st.get("tsLen") or await turnstile_token_len(page) or 0)
             if tok <= 20:
                 continue
-            # Wait for React to enable Complete after CF token lands
-            bst = await _wait_complete_button_ready(page, max_wait=2.5)
+            # Context: if widget still shows need_click, wait — don't shake it
+            ts_ctx = await read_turnstile_state(page)
+            if ts_ctx.get("phase") == "need_click" and not ts_ctx.get("solved"):
+                continue
+            if pw_len < 4:
+                await _ensure_password_filled(page, password, attempt)
+                st = await _read_complete_form_state(page)
+                pw_len = int(st.get("pwLen") or 0)
+                tok = int(st.get("tsLen") or await turnstile_token_len(page) or 0)
+                if tok <= 20 or pw_len < 4:
+                    continue
+
+            bst = await _wait_complete_button_ready(page, max_wait=1.5)
             print(
-                f"[{attempt}] complete r{round_i}: submit ts={tok} pw={pw_len} "
+                f"[{attempt}] complete r{round_i}: READY ts={tok} pw={pw_len} "
+                f"→ click Complete "
                 f"btn_disabled={bst.get('disabled')} covered={bst.get('covered')} "
-                f"found={bst.get('found')}",
+                f"found={bst.get('found')} ts_phase={ts_ctx.get('phase')}",
                 flush=True,
             )
-            tok = await turnstile_token_len(page)
-            if tok <= 20:
-                print(f"[{attempt}] token vanished before submit — re-solve", flush=True)
-                continue
+            emit_progress(
+                attempt,
+                "complete_signup",
+                f"r{round_i} READY ts={tok} → click Complete",
+                email_addr,
+            )
 
-            # Network truth: only mutating signup/identity APIs (not static assets)
             api_hit = {"kind": "ignore", "url": "", "status": 0, "method": ""}
 
             def _on_signup_resp(resp) -> None:
@@ -7078,7 +7536,6 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     kind = classify_signup_api_response(u, code, method)
                     if kind == "ignore":
                         return
-                    # Prefer first non-ignore; upgrade ignore→err/ok, keep err if later ok race
                     if api_hit["kind"] == "ignore" or (
                         api_hit["kind"] == "err" and kind == "ok"
                     ):
@@ -7095,65 +7552,79 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
             except Exception:
                 pass
             try:
-                # expect_response + multi-wave submit (do not double-submit on timeout)
-                submitted = False
-                try:
-                    async with page.expect_response(
-                        lambda r: classify_signup_api_response(
-                            r.url,
-                            int(r.status or 0),
-                            (r.request.method if r.request else "") or "",
-                        )
-                        != "ignore",
-                        timeout=9000,
-                    ) as resp_info:
-                        await _submit_complete_signup(page, attempt)
-                        submitted = True
-                    try:
-                        resp = await resp_info.value
-                        method = ""
-                        try:
-                            method = (resp.request.method or "") if resp.request else ""
-                        except Exception:
-                            pass
-                        kind = classify_signup_api_response(
-                            resp.url, int(resp.status or 0), method
-                        )
-                        api_hit["kind"] = kind
-                        api_hit["url"] = (resp.url or "")[:120]
-                        api_hit["status"] = int(resp.status or 0)
-                        api_hit["method"] = method
-                    except Exception:
-                        pass
-                except Exception as exp_e:
-                    # Timeout: action inside with-block usually already ran
-                    if not submitted:
-                        await _submit_complete_signup(page, attempt)
-                        submitted = True
-                    vlog(
-                        f"complete: expect_response note {type(exp_e).__name__}: "
-                        f"{str(exp_e)[:80]}",
-                        attempt,
-                    )
-
-                for _ in range(16):
-                    await asyncio.sleep(0.4)
+                # Burst: normal Complete clicks (token already real in DOM)
+                for burst_i in range(2):
+                    await _submit_complete_signup(page, attempt)
+                    await asyncio.sleep(0.45 if burst_i == 0 else 0.7)
                     if await _complete_form_succeeded(page):
                         left_ok = True
                         break
-                    # API ok alone is NOT enough while complete form still visible
-                    # (hellverg: noisy api_hit with form stuck). Require left form.
-                    if (
-                        api_hit["kind"] == "ok"
-                        and not await _on_complete_signup_form(page)
-                    ):
+                    if not await _on_complete_signup_form(page):
                         left_ok = True
                         break
+                    # Still on form — try again immediately (token still live)
+                    tok_live = await turnstile_token_len(page)
+                    if tok_live <= 20:
+                        break
+                    if int(
+                        (await _read_complete_form_state(page)).get("pwLen") or 0
+                    ) < 4:
+                        await _ensure_password_filled(page, password, attempt)
+
+                if not left_ok:
+                    # One more wave with short API watch
+                    try:
+                        async with page.expect_response(
+                            lambda r: classify_signup_api_response(
+                                r.url,
+                                int(r.status or 0),
+                                (r.request.method if r.request else "") or "",
+                            )
+                            != "ignore",
+                            timeout=5000,
+                        ) as resp_info:
+                            await _submit_complete_signup(page, attempt)
+                        try:
+                            resp = await resp_info.value
+                            method = ""
+                            try:
+                                method = (
+                                    (resp.request.method or "") if resp.request else ""
+                                )
+                            except Exception:
+                                pass
+                            kind = classify_signup_api_response(
+                                resp.url, int(resp.status or 0), method
+                            )
+                            api_hit["kind"] = kind
+                            api_hit["url"] = (resp.url or "")[:120]
+                            api_hit["status"] = int(resp.status or 0)
+                            api_hit["method"] = method
+                        except Exception:
+                            pass
+                    except Exception:
+                        await _submit_complete_signup(page, attempt)
+
+                    for _ in range(12):
+                        await asyncio.sleep(0.35)
+                        if await _complete_form_succeeded(page):
+                            left_ok = True
+                            break
+                        if not await _on_complete_signup_form(page):
+                            left_ok = True
+                            break
+                        if (
+                            api_hit["kind"] == "ok"
+                            and not await _on_complete_signup_form(page)
+                        ):
+                            left_ok = True
+                            break
             finally:
                 try:
                     page.remove_listener("response", _on_signup_resp)
                 except Exception:
                     pass
+
             if left_ok:
                 completed = True
                 print(
@@ -7166,6 +7637,7 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
 
             st2 = await _read_complete_form_state(page)
             tok2 = int(st2.get("tsLen") or 0)
+            pw2 = int(st2.get("pwLen") or 0)
             body_snip = ""
             try:
                 body_snip = (await page.inner_text("body"))[:180].replace("\n", " ")
@@ -7176,72 +7648,89 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 or (st2.get("aria") or {}).get("completeDisabled")
             )
             print(
-                f"[{attempt}] still on complete after submit "
-                f"ts={tok2} pw={st2.get('pwLen')} err={st2.get('err')} "
+                f"[{attempt}] still on complete after force-click "
+                f"ts={tok2} pw={pw2} err={st2.get('err')} "
                 f"api={api_hit['kind']}:{api_hit['status']}:{api_hit['method']} "
                 f"aria_disabled={aria_dis} "
                 f"btn={await _complete_button_state(page)} "
                 f"body={body_snip!r}",
                 flush=True,
             )
-            # Token still live → multi-wave already ran; light pw nudge + one more
-            if tok2 > 20:
-                if int(st2.get("pwLen") or 0) < 4:
-                    await _ensure_password_filled(page, password, attempt)
-                await _wait_complete_button_ready(page, max_wait=1.5)
+
+            # Token STILL live → keep clicking, do NOT re-solve Turnstile
+            if tok2 > 20 and pw2 >= 4:
+                print(
+                    f"[{attempt}] complete: ts+pw still ok — click again "
+                    f"(no re-solve)",
+                    flush=True,
+                )
+                await _submit_complete_signup(page, attempt)
+                await asyncio.sleep(0.6)
                 await _submit_complete_signup(page, attempt)
                 for _ in range(10):
                     await asyncio.sleep(0.4)
-                    if await _complete_form_succeeded(page):
+                    if await _complete_form_succeeded(page) or not await _on_complete_signup_form(
+                        page
+                    ):
                         completed = True
                         break
                 if completed:
                     break
-            else:
-                # Token burned, still on form = failed accept (server/React).
-                # Do NOT soft-reload (destroys session + false "left form").
-                # Re-solve CF next loop. Soft-refresh only if CF never mounted.
+                # Cap spin: after several ready-but-stuck rounds, re-spawn
                 submit_burns += 1
-                print(
-                    f"[{attempt}] complete: token burn #{submit_burns} "
-                    f"api={api_hit['kind']}:{api_hit['status']} "
-                    f"(re-solve, no page reload)",
-                    flush=True,
-                )
-                # Fail-fast: 3 burns with CF that does solve → re-spawn, don't sit 120s
-                if submit_burns >= 3 and ever_had_token:
-                    await screenshot(page, attempt, "complete_token_burn")
+                if submit_burns >= 5:
+                    await screenshot(page, attempt, "complete_ready_stuck")
                     raise RecoverableFarmError(
-                        f"complete_signup token burned {submit_burns}x "
-                        f"(api={api_hit['kind']}:{api_hit['status']} "
-                        f"err={st2.get('err')} aria_disabled={aria_dis}) "
+                        f"complete_signup ready (ts={tok2} pw={pw2}) but form stuck "
+                        f"{submit_burns}x api={api_hit['kind']}:{api_hit['status']} "
                         f"— re-spawn browser",
                         delay_s=2.0,
-                        tag="CompleteTokenBurn",
+                        tag="CompleteReadyStuck",
                     )
-                if (
-                    not soft_refreshed_complete
-                    and not ever_had_token
-                    and round_i >= 3
-                    and not st2.get("tsIframe")
-                    and remaining < COMPLETE_SIGNUP_TIMEOUT_S * 0.35
-                ):
-                    soft_refreshed_complete = True
-                    await _page_soft_refresh(
-                        page, attempt,
-                        reason="complete: Turnstile never mounted — reload form",
-                        step="complete_signup",
-                        email_addr=email_addr,
+                await asyncio.sleep(0.5)
+                continue
+
+            # Token burned/missing → only then re-solve next loop (no page reload)
+            submit_burns += 1
+            print(
+                f"[{attempt}] complete: token burn #{submit_burns} "
+                f"api={api_hit['kind']}:{api_hit['status']} "
+                f"(re-solve, no page reload)",
+                flush=True,
+            )
+            if submit_burns >= 3 and ever_had_token:
+                await screenshot(page, attempt, "complete_token_burn")
+                raise RecoverableFarmError(
+                    f"complete_signup token burned {submit_burns}x "
+                    f"(api={api_hit['kind']}:{api_hit['status']} "
+                    f"err={st2.get('err')} aria_disabled={aria_dis}) "
+                    f"— re-spawn browser",
+                    delay_s=2.0,
+                    tag="CompleteTokenBurn",
+                )
+            if (
+                not soft_refreshed_complete
+                and not ever_had_token
+                and round_i >= 3
+                and not st2.get("tsIframe")
+                and remaining < COMPLETE_SIGNUP_TIMEOUT_S * 0.35
+            ):
+                soft_refreshed_complete = True
+                await _page_soft_refresh(
+                    page,
+                    attempt,
+                    reason="complete: Turnstile never mounted — reload form",
+                    step="complete_signup",
+                    email_addr=email_addr,
+                )
+                if not await _on_complete_signup_form(page):
+                    print(
+                        f"[{attempt}] complete: post-reload not on form "
+                        f"(stage trap) — fail closed",
+                        flush=True,
                     )
-                    # After reload, only continue if still on complete profile
-                    if not await _on_complete_signup_form(page):
-                        print(
-                            f"[{attempt}] complete: post-reload not on form "
-                            f"(stage trap) — fail closed",
-                            flush=True,
-                        )
-                        break
-                    await _refill_complete_profile(page, first, last, password, attempt)
+                    break
+                await _refill_complete_profile(page, first, last, password, attempt)
 
         if not completed:
             if await _complete_form_succeeded(page):
@@ -7543,53 +8032,138 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
                 continue
             pw_now = await _password_field_value(page)
 
-        # 3) Click Login only when password non-empty + token ok (or no mount)
+        # 3) READY: password filled + real Turnstile token → click Login
         tok_now = await turnstile_token_len(page)
         if not pw_now:
             continue
         if tok_now <= 20 and await _turnstile_mount_present(page):
             vlog(f"login: waiting for turnstile token (round {round_i+1})", attempt)
-            await asyncio.sleep(1.0)
+            await asyncio.sleep(0.6)
+            tok_now = await turnstile_token_len(page)
+            if tok_now <= 20 and await _turnstile_mount_present(page):
+                continue
+        # Context: do not click Login while checkbox still needs interaction
+        ts_login = await read_turnstile_state(page)
+        if ts_login.get("phase") == "need_click" and tok_now <= 20:
             continue
-        vlog(
-            f"login submit round {round_i+1} (pw_len={len(pw_now)}, ts={tok_now})",
-            attempt,
+        print(
+            f"[{attempt}] login READY pw={len(pw_now)} ts={tok_now} "
+            f"→ click Login (round {round_i+1}/{rounds})",
+            flush=True,
         )
-        try:
-            await page.get_by_role("button", name=re.compile(r"^(login|log in|sign in)$", re.I)).click(timeout=4000)
-        except Exception:
-            await click_text_button(page, ["Login", "Log in", "Sign in", "Continue"])
-        await asyncio.sleep(post_click_sleep)
+        emit_progress(
+            attempt,
+            "login",
+            f"READY ts={tok_now} → click Login",
+            email_addr,
+        )
 
-        # Logged in? Check DIRECTLY by URL — don't rely on fragile element counts.
-        # xAI lands on /account (or /oauth2/consent) the instant login works.
-        # Wait up to 8s for that navigation, polling every 0.5s, so we catch it
-        # FAST instead of burning a full extra round (~50s).
-        login_done = False
-        nav_deadline = time.monotonic() + 8.0
-        while time.monotonic() < nav_deadline:
+        async def _force_login_click() -> None:
+            # Normal click only (Turnstile already solved in-page)
             try:
-                u = (page.url or "").rstrip("/")
+                btn = page.get_by_role(
+                    "button",
+                    name=re.compile(r"^(login|log in|sign in)$", re.I),
+                )
+                if await btn.count() > 0:
+                    try:
+                        await btn.first.scroll_into_view_if_needed(timeout=1500)
+                    except Exception:
+                        pass
+                    try:
+                        await btn.first.click(timeout=3000)
+                        return
+                    except Exception:
+                        pass
             except Exception:
-                u = ""
-            if (u.endswith("accounts.x.ai/account")
+                pass
+            try:
+                await click_text_button(
+                    page, ["Login", "Log in", "Sign in", "Continue"]
+                )
+            except Exception:
+                pass
+            # JS click (no force strip unless needed)
+            try:
+                await page.evaluate(
+                    """() => {
+                      const re = /^(login|log\\s*in|sign\\s*in)$/i;
+                      const b = [...document.querySelectorAll(
+                        'button, [role="button"], input[type="submit"]'
+                      )].find(x => re.test((x.innerText||x.value||'').trim()));
+                      if (!b) return false;
+                      try {
+                        b.removeAttribute('disabled');
+                        b.disabled = false;
+                        b.setAttribute('aria-disabled', 'false');
+                      } catch (e) {}
+                      try { b.click(); } catch (e) {}
+                      try {
+                        b.dispatchEvent(new MouseEvent('click', {
+                          bubbles: true, cancelable: true
+                        }));
+                      } catch (e) {}
+                      return true;
+                    }"""
+                )
+            except Exception:
+                pass
+            # Enter on password
+            try:
+                pw_el = page.locator('input[type="password"]').first
+                if await pw_el.count() > 0:
+                    await pw_el.press("Enter")
+            except Exception:
+                pass
+
+        # Burst 2 clicks if still on form (token still live → keep going)
+        for burst in range(2):
+            await _force_login_click()
+            await asyncio.sleep(0.4 if burst == 0 else post_click_sleep)
+
+            login_done = False
+            nav_deadline = time.monotonic() + (5.0 if burst == 0 else 8.0)
+            while time.monotonic() < nav_deadline:
+                try:
+                    u = (page.url or "").rstrip("/")
+                except Exception:
+                    u = ""
+                if (
+                    u.endswith("accounts.x.ai/account")
                     or "/oauth2/consent" in u
                     or "127.0.0.1:56121" in u
-                    or "localhost:56121" in u):
-                login_done = True
-                break
-            # password field vanished = login form gone = success
-            if await page.locator('input[type="password"]').count() == 0 and "sign-in" in u:
-                login_done = True
-                break
-            await asyncio.sleep(0.5)
-        if login_done:
-            vlog("login: success detected (left login form)", attempt)
-            return True
+                    or "localhost:56121" in u
+                ):
+                    login_done = True
+                    break
+                if (
+                    await page.locator('input[type="password"]').count() == 0
+                    and "sign-in" in u
+                ):
+                    login_done = True
+                    break
+                await asyncio.sleep(0.4)
+            if login_done:
+                vlog("login: success detected (left login form)", attempt)
+                return True
+            # Still on form — re-fill pw if wiped, only re-click if token still ok
+            pw_now = await _password_field_value(page)
+            if not pw_now:
+                await _ensure_password_filled(page, password, attempt)
+            tok_now = await turnstile_token_len(page)
+            if tok_now <= 20 and await _turnstile_mount_present(page):
+                break  # need re-solve next round
+            print(
+                f"[{attempt}] login still on form after click "
+                f"(burst {burst+1}) ts={tok_now} — click again",
+                flush=True,
+            )
 
         # Auth error?
         try:
-            if await page.locator("text=/incorrect|invalid password|wrong password/i").count() > 0:
+            if await page.locator(
+                "text=/incorrect|invalid password|wrong password/i"
+            ).count() > 0:
                 vlog("login rejected (wrong password?)", attempt)
                 await _ensure_password_filled(page, password, attempt)
         except Exception:
@@ -8703,13 +9277,13 @@ async def _do_register(attempt_num: int) -> dict | None:
                 "",
             )
             try:
-                # preview=False: temp-mail browser is internal; do not stream frames
                 _mmgr, _mbrowser, mail_page = await launch_browser(
                     None,
                     headless=TEMPMAIL_HEADLESS,
                     block_images=TEMPMAIL_BLOCK_IMAGES,
                     purpose="tempmail",
                     preview=False,
+                    worker_id=attempt_num,
                 )
                 # Strict isolation: this attempt's mail browser only
                 _tempmail_sessions[attempt_num] = {
@@ -9775,12 +10349,14 @@ async def main():
         print("ERROR: set GROK_GMAIL_BASE or GROK_IMAP_USER for plus_trick", flush=True)
         sys.exit(1)
 
+
     _load_used_emails()
     known = len(_used_emails)
 
     print("=" * 60, flush=True)
     print("  Grok / xAI Standalone Farmer", flush=True)
     print("=" * 60, flush=True)
+    print("  Turnstile  : in-page DOM/context click", flush=True)
     print(f"  Mail mode  : {MAIL_MODE}", flush=True)
     if MAIL_MODE == "tempmail":
         print(f"  Temp mail  : generator.email (headless={TEMPMAIL_HEADLESS})", flush=True)
