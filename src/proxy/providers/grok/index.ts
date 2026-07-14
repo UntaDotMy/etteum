@@ -47,6 +47,8 @@ import {
   getGrokCliVersion,
   fetchOAuthBillingQuota,
   isAbsoluteGrokOAuthQuota,
+  isTrustedGrokAbsoluteRemaining,
+  normalizeGrokAbsoluteRemaining,
   type GrokOAuthTokens,
   type GrokOAuthQuota,
 } from "./oauth";
@@ -1091,8 +1093,28 @@ export class GrokProvider extends BaseProvider {
 
       if (live.success && live.quota) {
         const q = live.quota;
+        // Percent-scale 0–100 is a different weekly pool, not free Build tokens.
+        // Never treat it as the account credit balance (dashboard "100" vs "2M").
+        if (q.percentScale === true || (q.limit === 100 && q.source.includes("GetGrokCreditsConfig"))) {
+          const { alive } = await validateOAuthToken(working);
+          if (!alive) {
+            return {
+              kind: "session_expired",
+              success: false,
+              error: "OAuth access token invalid after refresh",
+              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+            };
+          }
+          return {
+            kind: "healthy",
+            success: true,
+            message: "token alive; skipped percent-scale credit (not free Build tokens)",
+            ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+          };
+        }
+
         const oauth = getOAuthTokens(working);
-        const asGrokQuota: GrokOAuthQuota = {
+        let asGrokQuota: GrokOAuthQuota = {
           limit: q.limit,
           remaining: q.remaining,
           used: q.used,
@@ -1100,31 +1122,50 @@ export class GrokProvider extends BaseProvider {
           source: q.source,
           percentScale: q.percentScale === true,
         };
-        // Persist absolute free-Build / paid numbers onto the token blob so
-        // request-path debit and the next probe start from the same source.
-        // Skip percent-scale (limit=100) so we do not overwrite a real ~2M budget.
+        // Free Build headers often report remaining==limit (full 2M) even after
+        // real use — mark untrusted so we don't overwrite local remaining.
+        if (!asGrokQuota.percentScale && asGrokQuota.limit > 0) {
+          asGrokQuota = normalizeGrokAbsoluteRemaining(asGrokQuota);
+        }
+
         const absolute = isAbsoluteGrokOAuthQuota(asGrokQuota);
         const drained =
-          q.remaining <= 0 &&
-          (q.limit > 0 ||
-            q.source.includes("free-usage-exhausted") ||
-            q.source.includes("exhausted"));
+          asGrokQuota.remaining <= 0 &&
+          (asGrokQuota.limit > 0 ||
+            asGrokQuota.source.includes("free-usage-exhausted") ||
+            asGrokQuota.source.includes("exhausted"));
+        const remainingTrusted =
+          drained ||
+          isTrustedGrokAbsoluteRemaining(asGrokQuota.limit, asGrokQuota.remaining);
 
         const packageLimit =
-          q.limit > 0
-            ? Math.floor(q.limit)
+          asGrokQuota.limit > 0
+            ? Math.floor(asGrokQuota.limit)
             : Math.floor(Number(oauth?.credits_limit) || Number(working.quotaLimit) || 0);
 
         let tokensOut: unknown = ready.refreshedTokens;
-        if (oauth) {
-          const nextRemaining = drained ? 0 : Math.floor(Math.max(0, q.remaining));
-          if (absolute || drained) {
-            tokensOut = {
-              ...oauth,
-              ...(packageLimit > 0 ? { credits_limit: packageLimit } : {}),
-              credits_remaining: nextRemaining,
-            };
+        if (oauth && (absolute || drained)) {
+          // Only pin credits_remaining when we have a trusted value (partial
+          // header burn, or exhausted 0). Never force full package over local debit.
+          const localRem = Number(
+            oauth.credits_remaining ?? working.quotaRemaining ?? NaN,
+          );
+          let nextRemaining: number | undefined;
+          if (drained) {
+            nextRemaining = 0;
+          } else if (remainingTrusted) {
+            nextRemaining = Math.floor(Math.max(0, asGrokQuota.remaining));
+            if (Number.isFinite(localRem) && localRem > 0) {
+              nextRemaining = Math.min(Math.floor(localRem), nextRemaining);
+            }
+          } else if (Number.isFinite(localRem) && localRem > 0 && localRem < packageLimit) {
+            nextRemaining = Math.floor(localRem);
           }
+          tokensOut = {
+            ...oauth,
+            ...(packageLimit > 0 ? { credits_limit: packageLimit } : {}),
+            ...(nextRemaining != null ? { credits_remaining: nextRemaining } : {}),
+          };
         }
 
         if (drained) {
@@ -1134,9 +1175,9 @@ export class GrokProvider extends BaseProvider {
             quota: {
               limit: packageLimit,
               remaining: 0,
-              used: packageLimit > 0 ? packageLimit : q.used,
-              resetAt: q.resetAt,
-              source: q.source,
+              used: packageLimit > 0 ? packageLimit : asGrokQuota.used,
+              resetAt: asGrokQuota.resetAt,
+              source: asGrokQuota.source,
             },
             ...(tokensOut ? { tokens: tokensOut } : {}),
           };
@@ -1146,11 +1187,11 @@ export class GrokProvider extends BaseProvider {
           kind: "healthy",
           success: true,
           quota: {
-            limit: q.limit,
-            remaining: q.remaining,
-            used: q.used,
-            resetAt: q.resetAt,
-            source: q.source,
+            limit: asGrokQuota.limit,
+            remaining: asGrokQuota.remaining,
+            used: asGrokQuota.used,
+            resetAt: asGrokQuota.resetAt,
+            source: asGrokQuota.source,
           },
           ...(tokensOut ? { tokens: tokensOut } : {}),
         };

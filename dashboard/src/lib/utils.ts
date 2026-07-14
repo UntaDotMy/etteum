@@ -6,8 +6,15 @@ export function cn(...inputs: ClassValue[]) {
 }
 
 export function formatNumber(num: number): string {
-  if (num >= 1_000_000) return (num / 1_000_000).toFixed(1) + "M";
-  if (num >= 1_000) return (num / 1_000).toFixed(1) + "K";
+  // Match AccountList formatCredit: exact millions show "2M" not "2.0M".
+  if (num >= 1_000_000) {
+    const m = num / 1_000_000;
+    return `${Number.isInteger(m) ? m.toFixed(0) : m.toFixed(1)}M`;
+  }
+  if (num >= 1_000) {
+    const k = num / 1_000;
+    return `${Number.isInteger(k) ? k.toFixed(0) : k.toFixed(1)}K`;
+  }
   return num.toString();
 }
 

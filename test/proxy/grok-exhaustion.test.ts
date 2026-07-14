@@ -13,6 +13,8 @@ import {
 } from "../../src/proxy/providers/grok/index";
 import {
   isAbsoluteGrokOAuthQuota,
+  isTrustedGrokAbsoluteRemaining,
+  normalizeGrokAbsoluteRemaining,
   selectGrokOAuthQuota,
   type GrokOAuthQuota,
 } from "../../src/proxy/providers/grok/oauth";
@@ -124,14 +126,13 @@ describe("Grok warmup live credit probe policy", () => {
     expect(picked?.source).toBe("cli-chat-proxy/ratelimit-headers");
   });
 
-  test("warmup writes live ratelimit remaining (not stored-farm full 2M)", () => {
+  test("warmup writes trusted partial header remaining (below package)", () => {
     const account = {
       id: 1,
       provider: "grok",
       email: "t@oauth",
       status: "active",
       quotaLimit: 2_000_000,
-      // Stale "full" snapshot that inflated the dashboard to 290M
       quotaRemaining: 2_000_000,
       tokens: { auth_method: "oauth", credits_limit: 2_000_000, credits_remaining: 2_000_000 },
     } as unknown as Account;
@@ -154,9 +155,53 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.quotaLimit).toBe(2_000_000);
-    // min(db 2M, live 1.1M) → live
+    // min(db 2M, live 1.1M) → live trusted burn
     expect(update.quotaRemaining).toBe(1_100_000);
     expect((update.tokens as any)?.credits_remaining).toBe(1_100_000);
+  });
+
+  test("untrusted full 2M headers do NOT overwrite local remaining", () => {
+    // Live evidence: healthy accounts return remaining-tokens==limit always.
+    // Local debit is the only logical remaining after requests.
+    expect(isTrustedGrokAbsoluteRemaining(2_000_000, 2_000_000)).toBe(false);
+    expect(isTrustedGrokAbsoluteRemaining(2_000_000, 1_500_000)).toBe(true);
+
+    const tagged = normalizeGrokAbsoluteRemaining({
+      limit: 2_000_000,
+      remaining: 2_000_000,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/ratelimit-headers",
+      percentScale: false,
+    });
+    expect(tagged.source).toContain("untrusted-full-remaining");
+
+    const account = {
+      id: 10,
+      provider: "grok",
+      email: "local@oauth",
+      status: "active",
+      quotaLimit: 2_000_000,
+      // Already spent locally via per-request debit
+      quotaRemaining: 1_250_000,
+      tokens: null,
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "healthy",
+      success: true,
+      quota: {
+        limit: 2_000_000,
+        remaining: 2_000_000,
+        used: 0,
+        resetAt: null,
+        source: "cli-chat-proxy/ratelimit-headers+untrusted-full-remaining",
+      },
+    });
+
+    expect(update.quotaLimit).toBe(2_000_000);
+    // Must NOT re-inflate to full 2M
+    expect(update.quotaRemaining).toBeUndefined();
   });
 
   test("stored-farm-credits is ignored as non-authoritative warmup source", () => {
@@ -211,6 +256,36 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.status).toBe("exhausted");
+    expect(update.quotaRemaining).toBe(0);
+    expect(update.quotaLimit).toBe(2_000_000);
+  });
+
+  test("scale change from wrong percent-100 to free-usage 2M/0", () => {
+    // Accounts that got stuck at 100/100 (percent pool written as tokens).
+    const account = {
+      id: 4,
+      provider: "grok",
+      email: "t4@oauth",
+      status: "active",
+      quotaLimit: 100,
+      quotaRemaining: 100,
+      tokens: null,
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "exhausted",
+      success: true,
+      quota: {
+        limit: 2_000_000,
+        remaining: 0,
+        used: 2_000_000,
+        resetAt: null,
+        source: "cli-chat-proxy/free-usage-exhausted",
+      },
+    });
+
+    expect(update.status).toBe("exhausted");
+    expect(update.quotaLimit).toBe(2_000_000);
     expect(update.quotaRemaining).toBe(0);
   });
 });

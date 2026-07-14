@@ -654,12 +654,74 @@ export function parseGrokCreditsProtobuf(
 }
 
 /**
- * Pick the best Grok OAuth quota snapshot.
+ * Free Build package size observed on cli-chat-proxy rate-limit headers
+ * (`x-ratelimit-limit-tokens`). Used when free-usage is exhausted and xAI
+ * returns 429 without headers so the dashboard still shows a real package
+ * (2M / 0) instead of the unrelated percent-scale 100.
+ */
+export const GROK_FREE_BUILD_TOKEN_LIMIT = 2_000_000;
+
+/** True when the absolute probe reported free Build subscription exhaustion. */
+export function isGrokFreeUsageExhaustedQuota(
+  q: GrokOAuthQuota | null | undefined,
+): boolean {
+  if (!q || q.percentScale) return false;
+  return (
+    q.source.includes("free-usage-exhausted") ||
+    (q.remaining <= 0 && q.source.includes("exhausted"))
+  );
+}
+
+/**
+ * Free Build `x-ratelimit-remaining-tokens` often equals the full package
+ * (2_000_000) even after heavy use — live probes confirmed this. That value
+ * is a package ceiling, NOT live remaining. Only trust remaining when it is
+ * strictly below the limit (real burn signal) or free-usage exhausted (0).
+ */
+export function isTrustedGrokAbsoluteRemaining(
+  limit: number,
+  remaining: number,
+): boolean {
+  if (!Number.isFinite(limit) || !Number.isFinite(remaining)) return false;
+  if (limit <= 0) return remaining <= 0;
+  return remaining < limit;
+}
+
+/**
+ * Tag / normalize an absolute free-Build snapshot so warmup will not re-inflate
+ * every healthy account to full package remaining.
+ */
+export function normalizeGrokAbsoluteRemaining(
+  q: GrokOAuthQuota,
+): GrokOAuthQuota {
+  if (q.percentScale) return q;
+  if (isGrokFreeUsageExhaustedQuota(q)) return q;
+  if (q.limit > 0 && !isTrustedGrokAbsoluteRemaining(q.limit, q.remaining)) {
+    return {
+      ...q,
+      // Keep remaining=limit for shape, but mark source untrusted so warmup
+      // preserves local debit tracking instead of writing full package.
+      source: q.source.includes("untrusted-full-remaining")
+        ? q.source
+        : `${q.source}+untrusted-full-remaining`,
+    };
+  }
+  return q;
+}
+
+/**
+ * Pick the best Grok OAuth quota snapshot for **token-budget accounting**.
  *
  * Free Build accounts always answer GetGrokCreditsConfig with a percent-scale
  * 100-point pool (0% used → remaining=100). That is NOT the absolute free
- * Build token budget (typically ~2e6 from x-ratelimit-*-tokens). Prefer paid
- * billing, then absolute headers, then percent as last resort.
+ * Build token budget (~2e6 from x-ratelimit-*-tokens). Mixing them on the
+ * dashboard is what produced "2M / 2.0M / 100" side by side.
+ *
+ * Priority:
+ *   1. Paid absolute billing (limit > 0)
+ *   2. free-usage-exhausted absolute (even with limit 0 / no headers)
+ *   3. Absolute free Build rate-limit headers (limit > 0)
+ *   4. Never percent-scale 100 as a token quota (return null)
  */
 export function selectGrokOAuthQuota(
   paid: GrokOAuthQuota | null | undefined,
@@ -667,17 +729,37 @@ export function selectGrokOAuthQuota(
   percent: GrokOAuthQuota | null | undefined,
 ): GrokOAuthQuota | null {
   if (paid && paid.limit > 0 && !paid.percentScale) return paid;
-  if (absolute && absolute.limit > 0 && !absolute.percentScale) {
-    // Prefer absolute numbers; keep percent reset window when absolute has none.
-    if (!absolute.resetAt && percent?.resetAt) {
-      return { ...absolute, resetAt: percent.resetAt };
-    }
-    return absolute;
+
+  // Live probe: free-usage-exhausted has NO rate-limit headers (limit often 0).
+  // Previously we fell through to percent 100/100 → dashboard showed "100"
+  // while the account was actually dead for chat. That must never happen again.
+  if (absolute && isGrokFreeUsageExhaustedQuota(absolute)) {
+    const limit =
+      absolute.limit > 0 ? Math.floor(absolute.limit) : GROK_FREE_BUILD_TOKEN_LIMIT;
+    return {
+      ...absolute,
+      limit,
+      remaining: 0,
+      used: limit,
+      percentScale: false,
+      resetAt: absolute.resetAt ?? percent?.resetAt ?? null,
+    };
   }
-  if (percent) return percent;
-  // Absolute/paid with limit 0 (e.g. 402 or headers-missing liveness).
-  if (absolute) return absolute;
-  if (paid) return paid;
+
+  if (absolute && absolute.limit > 0 && !absolute.percentScale) {
+    // Prefer absolute numbers; keep weekly reset window from percent when present.
+    let out = absolute;
+    if (!absolute.resetAt && percent?.resetAt) {
+      out = { ...absolute, resetAt: percent.resetAt };
+    }
+    // Mark full remaining as untrusted so warmup does not reset every account to 2M.
+    return normalizeGrokAbsoluteRemaining(out);
+  }
+
+  // Do NOT return percent-scale as free Build token quota.
+  // Callers that only got percent keep prior DB absolute values (or no write).
+  if (absolute && !absolute.percentScale) return absolute;
+  if (paid && !paid.percentScale) return paid;
   return null;
 }
 
@@ -845,9 +927,11 @@ export async function probeOAuthChatCredits(
     lower.includes("payment required");
 
   if (exhausted) {
-    // Keep a positive limit when headers gave us one earlier; else 0 is fine —
-    // healthCheck / warmup map remaining=0 + kind=exhausted.
-    const limit = Number.isFinite(lim) && lim > 0 ? lim : 0;
+    // Live: free-usage 429 has empty rate-limit headers. Use the known free
+    // Build package size so select/warmup write 2_000_000 / 0 (exhausted),
+    // never fall through to GetGrokCreditsConfig percent 100.
+    const limit =
+      Number.isFinite(lim) && lim > 0 ? lim : GROK_FREE_BUILD_TOKEN_LIMIT;
     return {
       limit,
       remaining: 0,
