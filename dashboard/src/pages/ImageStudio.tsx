@@ -23,6 +23,7 @@ import {
 import {
   assistPrompt,
   fetchAssistModels,
+  fetchActiveModels,
   generateImage,
   fetchChats,
   fetchChat,
@@ -37,6 +38,23 @@ import {
 } from "@/lib/api";
 
 type GenType = "image" | "video";
+
+type GenModelInfo = { id: string; provider: string };
+
+function isGenModel(id: string, kind: GenType): boolean {
+  const l = (id || "").toLowerCase();
+  if (!l) return false;
+  if (kind === "video") return l.includes("video");
+  // Image gen models (exclude chat-only slugs that happen to contain "image" in other products).
+  if (l.includes("video")) return false;
+  return (
+    l.includes("image") ||
+    l === "grok-image" ||
+    l.includes("dall-e") ||
+    l.includes("flux") ||
+    l.includes("imagen")
+  );
+}
 
 interface GenResult {
   id: number;
@@ -77,6 +95,7 @@ function labelProvider(provider: string) {
   if (provider === "kiro-pro") return "Kiro Pro";
   if (provider === "codebuddy") return "CodeBuddy";
   if (provider === "codebuddy-china") return "CodeBuddy CN";
+  if (provider === "grok") return "Grok";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
@@ -94,6 +113,8 @@ function timeAgo(ts: number) {
 export default function ImageStudio() {
   const [assistModels, setAssistModels] = useState<AssistModelInfo[]>([]);
   const [assistModel, setAssistModel] = useState<string>("auto");
+  const [genModels, setGenModels] = useState<GenModelInfo[]>([]);
+  const [genModel, setGenModel] = useState<string>("canva-image");
   const [genType, setGenType] = useState<GenType>("image");
   const [aspectRatio, setAspectRatio] = useState<string>("1:1");
   const [n, setN] = useState<number>(1);
@@ -153,6 +174,7 @@ export default function ImageStudio() {
       const res = await generateImage({
         prompt: r.prompt,
         type: r.type,
+        model: genModel || (r.type === "video" ? "canva-video" : "canva-image"),
         aspectRatio: r.aspectRatio,
         n: r.n,
         chatId,
@@ -189,6 +211,25 @@ export default function ImageStudio() {
         else if (res.data?.[0]) setAssistModel(res.data[0].id);
       })
       .catch((err) => setError(err instanceof Error ? err.message : String(err)));
+
+    fetchActiveModels()
+      .then((res) => {
+        const rows = (res.data || [])
+          .map((m) => ({
+            id: String(m.id || m.model || ""),
+            provider: String(m.provider || m.owned_by || "unknown"),
+          }))
+          .filter((m) => m.id && (isGenModel(m.id, "image") || isGenModel(m.id, "video")));
+        setGenModels(rows);
+        const preferred =
+          rows.find((m) => m.id === "grok-image") ||
+          rows.find((m) => m.id === "canva-image") ||
+          rows.find((m) => isGenModel(m.id, "image"));
+        if (preferred) setGenModel(preferred.id);
+      })
+      .catch(() => {
+        /* gen model list is optional — backend still defaults */
+      });
   }, []);
 
   useEffect(() => {
@@ -280,6 +321,18 @@ export default function ImageStudio() {
     return Array.from(map.entries());
   }, [assistModels]);
 
+  const genModelsForType = useMemo(
+    () => genModels.filter((m) => isGenModel(m.id, genType)),
+    [genModels, genType],
+  );
+
+  useEffect(() => {
+    if (genModelsForType.length === 0) return;
+    if (!genModelsForType.some((m) => m.id === genModel)) {
+      setGenModel(genModelsForType[0]!.id);
+    }
+  }, [genType, genModelsForType, genModel]);
+
   async function sendMessage(text: string) {
     const trimmed = text.trim();
     if (!trimmed || thinking) return;
@@ -328,7 +381,14 @@ export default function ImageStudio() {
     setGenerating(true);
     setError(null);
     try {
-      const res = await generateImage({ prompt, type: genType, aspectRatio, n, chatId });
+      const res = await generateImage({
+        prompt,
+        type: genType,
+        model: genModel || (genType === "video" ? "canva-video" : "canva-image"),
+        aspectRatio,
+        n,
+        chatId,
+      });
       const result: GenResult = {
         id: res.id ?? Date.now(),
         prompt: res.prompt,
@@ -427,6 +487,31 @@ export default function ImageStudio() {
                     ))}
                   </optgroup>
                 ))}
+              </select>
+              <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--muted-foreground)]" />
+            </div>
+
+            <div className="h-5 w-px bg-[var(--border)]" />
+
+            <ImageIcon className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
+            <div className="relative">
+              <select
+                value={genModel}
+                onChange={(e) => setGenModel(e.target.value)}
+                className="h-7 max-w-[150px] appearance-none truncate rounded border border-[var(--border)] bg-[var(--background)] pl-2 pr-6 text-[11px] text-[var(--foreground)] focus:border-[var(--primary)]/50 focus:outline-none"
+                title="Image / video generation model"
+              >
+                {genModelsForType.length === 0 ? (
+                  <option value={genType === "video" ? "canva-video" : "canva-image"}>
+                    {genType === "video" ? "canva-video" : "canva-image"}
+                  </option>
+                ) : (
+                  genModelsForType.map((m) => (
+                    <option key={m.id} value={m.id}>
+                      {m.id}
+                    </option>
+                  ))
+                )}
               </select>
               <ChevronDown className="pointer-events-none absolute right-1.5 top-1/2 h-3 w-3 -translate-y-1/2 text-[var(--muted-foreground)]" />
             </div>
