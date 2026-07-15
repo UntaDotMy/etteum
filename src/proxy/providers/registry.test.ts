@@ -31,6 +31,10 @@ describe("getProviderForModel — strict per-provider routing (no kiro catch-all
     expect(getProviderForModel("grok-4.5")).toBe("grok");
     expect(getProviderForModel("grok-4.5-reasoning")).toBe("grok");
     expect(getProviderForModel("composer-2.5")).toBe("grok");
+    expect(getProviderForModel("grok-composer-2.5-fast")).toBe("grok");
+    expect(getProviderForModel("composer-2.5-fast")).toBe("grok");
+    // Common typo alias (groq vs grok) still routes to Grok provider.
+    expect(getProviderForModel("groq-composer-2.5-fast")).toBe("grok");
     // Tool-based image gen (cli-chat-proxy /v1/responses + image_generation).
     expect(getProviderForModel("grok-image")).toBe("grok");
     // Removed legacy Imagine model ids stay unclaimed.

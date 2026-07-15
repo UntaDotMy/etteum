@@ -120,10 +120,13 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "grok-4.5":                     { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.50  },
   "grok-4.5-reasoning":           { input: 2.00,  output: 6.00,  cached: 0.20,  reasoning: 6.00,   cacheCreation: 2.50  },
   // Composer 2.5 — Cursor docs (cursor.com/docs/models/cursor-composer-2-5):
-  // standard $0.50/$2.50, cache read $0.20. Fast tier is $3/$15 (not separate id).
+  // standard $0.50/$2.50, cache read $0.20. Fast tier is $3/$15.
   // xAI docs do NOT list composer-2.5 on API pricing (Grok Build subscription
   // surface); rates used for cost UI when tokens are reported.
   "composer-2.5":                 { input: 0.50,  output: 2.50,  cached: 0.20,  reasoning: 2.50,   cacheCreation: 0.625 },
+  // Live cli-chat-proxy id: grok-composer-2.5-fast (Composer 2.5 Fast).
+  "grok-composer-2.5-fast":       { input: 3.00,  output: 15.00, cached: 0.20,  reasoning: 15.00,  cacheCreation: 3.75  },
+  "composer-2.5-fast":            { input: 3.00,  output: 15.00, cached: 0.20,  reasoning: 15.00,  cacheCreation: 3.75  },
   "grok-4.3":                     { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },
   "grok-4.3-reasoning":           { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },
   "grok-4.3-heavy":               { input: 1.25,  output: 2.50,  cached: 0.125, reasoning: 2.50,   cacheCreation: 1.5625 },

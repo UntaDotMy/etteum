@@ -56,6 +56,9 @@ export const MODEL_TO_MODE: Record<string, GrokModeId> = {
   "grok-4.5": "CONSOLE",
   "grok-4.5-reasoning": "CONSOLE",
   "composer-2.5": "CONSOLE",
+  "grok-composer-2.5-fast": "CONSOLE",
+  "composer-2.5-fast": "CONSOLE",
+  "groq-composer-2.5-fast": "CONSOLE",
 };
 
 // ---------------------------------------------------------------------------
