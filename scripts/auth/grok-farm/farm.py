@@ -9,9 +9,10 @@ Flow per account:
   4. Name + password + Turnstile → Complete sign up
   5. Login if needed → OAuth PKCE (Grok CLI) → tokens
   6. Activate on grok.com (web login / CF) — unlocks free Build chat for many accounts
-  7. Probe cli-chat-proxy /v1/responses model=grok-4.5 (must not 403)
+  7. Probe cli-chat-proxy /v1/responses model=grok-4.5
+     Soft-retries same session on 403/429/5xx/net before EXIT.
   8. Only then append result to JSON + TXT.
-     Chat 403: tempmail blacklists that generator domain + re-rolls;
+     Chat 403 after soft-retries: tempmail blacklists domain + re-rolls;
                google NEVER blacklists (fixed catch-all / Gmail domain).
 
 Config: copy .env.example → .env then edit.
@@ -26,6 +27,7 @@ import hashlib
 import imaplib
 import json
 import os
+import queue
 import random
 import re
 import secrets
@@ -64,6 +66,7 @@ try:
     from dotenv import load_dotenv
     # When Etteum hosts the farm (ETTEUM_FRAME_RELAY / ETTEUM_FARM_HOST), process
     # env already has the full config from the UI — do NOT let local .env clobber it.
+    # Standalone: allow .env to override ambient env for local CLI convenience.
     _hosted = bool(
         os.environ.get("ETTEUM_FRAME_RELAY") or os.environ.get("ETTEUM_FARM_HOST")
     )
@@ -151,24 +154,235 @@ if WORKER_ISOLATION:
     )
 else:
     TURNSTILE_PARALLEL = max(1, int(_ts_par_raw or "1") or 1)
+def recommended_launch_parallel(concurrent: int) -> int:
+    """Max simultaneous Camoufox boots for a given concurrency (pure).
+
+    c=8 → 3 boots at once (not 8); leaves headroom for CF/uplink.
+    Override anytime with GROK_LAUNCH_PARALLEL.
+    """
+    c = max(1, int(concurrent))
+    if c <= 2:
+        return c
+    if c <= 5:
+        return 2
+    if c <= 8:
+        return 3
+    return min(4, max(3, c // 3))
+
+
+def recommended_nav_parallel(concurrent: int, launch_parallel: int | None = None) -> int:
+    """Max simultaneous first navigations to shared auth/product hosts (pure)."""
+    c = max(1, int(concurrent))
+    lp = int(launch_parallel if launch_parallel is not None else max(1, c))
+    if c <= 2:
+        return c
+    # At most launch_parallel, typically ~c/3 so c=8 → 3
+    return max(1, min(lp, max(2, (c + 2) // 3)))
+
+
 # Cap simultaneous Camoufox boots (not in-flight workers). At c=5 tempmail = up
 # to 10 browsers; without this, all launch+page-load at once → home-net choke.
 # Workers still run concurrent after boot (OTP wait, probe, etc.).
-LAUNCH_PARALLEL = max(1, min(20, int(_env("GROK_LAUNCH_PARALLEL", "2") or "2")))
+# At high concurrent, default slightly higher so slots don't queue forever —
+# override with GROK_LAUNCH_PARALLEL.
+_launch_default = str(recommended_launch_parallel(CONCURRENT))
+LAUNCH_PARALLEL = max(1, min(20, int(_env("GROK_LAUNCH_PARALLEL", _launch_default) or _launch_default)))
 # When SPAWN_DELAY=0 and concurrent is high, auto-stagger starts (seconds between
 # worker slot starts). Set GROK_AUTO_STAGGER=false to force zero stagger.
 AUTO_STAGGER = _env_bool("GROK_AUTO_STAGGER", True)
-AUTO_SPAWN_DELAY_S = max(0.0, float(_env("GROK_AUTO_SPAWN_DELAY", "2.0") or "2.0"))
+# Higher concurrent → slightly longer auto stagger to avoid boot storms.
+_auto_spawn_default = "2.5" if CONCURRENT >= 6 else "2.0"
+AUTO_SPAWN_DELAY_S = max(0.0, float(_env("GROK_AUTO_SPAWN_DELAY", _auto_spawn_default) or _auto_spawn_default))
+# Shared-host first navigation cap (accounts.x.ai / grok.com) under high concurrent.
+_nav_parallel_default = str(recommended_nav_parallel(CONCURRENT, LAUNCH_PARALLEL))
+NAV_PARALLEL = max(1, min(20, int(_env("GROK_NAV_PARALLEL", _nav_parallel_default) or _nav_parallel_default)))
 # Temp-mail browser only: block images to cut bandwidth (OTP is text).
 TEMPMAIL_BLOCK_IMAGES = _env_bool("GROK_TEMPMAIL_BLOCK_IMAGES", True)
+# CPU saver is OFF by default (max speed). Opt-in only: GROK_CPU_SAVER=true
+# When on: longer DOM polls + lite page-state. Never changes Turnstile-critical
+# humanize / block_images (those break CF if mis-set).
+_cpu_saver_env = (_env("GROK_CPU_SAVER", "false") or "false").strip().lower()
+CPU_SAVER = _cpu_saver_env in ("1", "true", "yes", "on")
+# Lean Camoufox: fewer content processes + smaller memory caches (less RAM/CPU
+# per browser). Shared *Python* caches do not shrink Firefox — this does.
+LEAN_BROWSER = _env_bool("GROK_LEAN_BROWSER", True)
+# Signup browser image block — DEFAULT OFF. CF Turnstile often never issues a
+# token when images/media are blocked. Only set true if you accept CF risk.
+_block_img_env = (_env("GROK_BLOCK_IMAGES", "") or "").strip().lower()
+if _block_img_env in ("1", "true", "yes", "on"):
+    SIGNUP_BLOCK_IMAGES = True
+else:
+    SIGNUP_BLOCK_IMAGES = False  # empty / false / anything else → off
+# Camoufox humanize (seconds). CF needs real cursor motion — 0 breaks solves.
+# Empty → random 0.12–0.22 (CPU_SAVER) or 0.12–0.28. Floor 0.10 if env sets lower.
+_humanize_raw = (_env("GROK_HUMANIZE", "") or "").strip()
+if _humanize_raw == "":
+    HUMANIZE_S: float | None = None  # random band at launch
+else:
+    try:
+        HUMANIZE_S = max(0.10, float(_humanize_raw))  # never allow 0 (CF break)
+    except (TypeError, ValueError):
+        HUMANIZE_S = None
+# Base DOM poll seconds (settle/wait). Scaled up further by concurrent count.
+# Fast default poll; only slower if CPU_SAVER explicitly on.
+DOM_POLL_BASE_S = max(
+    0.06,
+    float(_env("GROK_DOM_POLL", "0.28" if CPU_SAVER else "0.12") or ("0.28" if CPU_SAVER else "0.12")),
+)
+# Short cache so back-to-back read_page_state on same page skip re-evaluate.
+PAGE_STATE_CACHE_S = max(
+    0.0,
+    float(_env("GROK_PAGE_STATE_CACHE", "0.15" if CPU_SAVER else "0.05") or ("0.15" if CPU_SAVER else "0.05")),
+)
+# Turnstile — speed first, success second (keep TP off + block_images off).
+# Fixed fast token poll (never use slow dom_poll_s).
+TS_POLL_S = max(0.10, min(0.35, float(_env("GROK_TS_POLL", "0.15") or "0.15")))
+# Max wait after click / on loading before remount or re-click (keep short).
+TS_LOADING_WAIT_S = max(3.0, float(_env("GROK_TS_LOADING_WAIT", "6") or "6"))
+# First-window after click: most tokens land here (fast path).
+TS_CLICK_WAIT_S = max(2.0, float(_env("GROK_TS_CLICK_WAIT", "3.5") or "3.5"))
+
+
+def dom_poll_s(base: float | None = None) -> float:
+    """Adaptive poll interval: more concurrent workers → slower DOM hammering.
+
+    At c=1–3: ~base. At c=10: ~base * ~2 (capped). Cuts page.evaluate CPU
+    which otherwise multiplies linearly with workers.
+    """
+    b = float(DOM_POLL_BASE_S if base is None else base)
+    c = max(1, int(CONCURRENT))
+    if c <= 3:
+        return b
+    # +12% per worker above 3, cap 2.8×
+    scale = min(2.8, 1.0 + 0.12 * (c - 3))
+    return min(0.75, b * scale)
+
+
+def stealth_humanize_s(configured: float | None = None) -> float:
+    """Camoufox humanize seconds — never 0 (breaks CF/Turnstile cursor path).
+
+    Pure helper for launch + unit tests. Floor 0.08; default band 0.10–0.20
+    (faster than refer 0.5/1.2 while still stealth-capable).
+    """
+    if configured is not None:
+        try:
+            return max(0.08, float(configured))
+        except (TypeError, ValueError):
+            pass
+    return round(random.uniform(0.10, 0.20), 2)
+
+
+def login_form_poll_s(*, fast: bool = True) -> float:
+    """Poll interval while waiting for password field / post-Login nav (pure)."""
+    return 0.22 if fast else 0.40
+
+
+def oauth_code_poll_s(*, has_callback_server: bool = True) -> float:
+    """Poll interval after OAuth Allow while waiting for code (pure)."""
+    return 0.12 if has_callback_server else 0.18
+
+
+def is_xai_account_home_url(url: str) -> bool:
+    """True only for accounts.x.ai **/account** path — never hostname substring.
+
+    Critical: ``'/account' in 'https://accounts.x.ai/sign-in'`` is True because
+    ``//accounts`` contains the substring ``/account``. Always parse path.
+    """
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    host = (p.hostname or "").lower()
+    if host not in ("accounts.x.ai", "www.accounts.x.ai"):
+        return False
+    path = (p.path or "/").rstrip("/") or "/"
+    return path == "/account" or path.startswith("/account/")
+
+
+def is_xai_sign_in_url(url: str) -> bool:
+    """True when URL path is xAI sign-in (still on login surface)."""
+    try:
+        p = urlparse(url or "")
+    except Exception:
+        return False
+    host = (p.hostname or "").lower()
+    if "accounts.x.ai" not in host and "auth.x.ai" not in host:
+        return False
+    path = (p.path or "").lower()
+    return (
+        "/sign-in" in path
+        or path.rstrip("/").endswith("/login")
+        or path == "/login"
+    )
+
+
+def classify_login_nav_success(
+    url: str,
+    *,
+    has_password_field: bool = False,
+) -> bool:
+    """Post-Login navigation success (pure) — unit-tested.
+
+    Success: account home, OAuth consent, localhost callback, or left auth
+    hosts without remaining password form. Never true for bare /sign-in
+    or about:blank (pre-navigation).
+    """
+    u = (url or "").strip()
+    ul = u.lower()
+    if not ul or ul.startswith("about:") or ul.startswith("chrome:") or ul.startswith("data:"):
+        return False
+    if is_xai_account_home_url(u):
+        return True
+    if "/oauth2/consent" in ul:
+        return True
+    if "127.0.0.1:56121" in ul or "localhost:56121" in ul:
+        return True
+    # extract_code_from_url is defined later; path/host check for callback is enough
+    if "/callback" in ul and ("127.0.0.1" in ul or "localhost" in ul):
+        return True
+    if has_password_field:
+        return False
+    if is_xai_sign_in_url(u):
+        return False
+    try:
+        parsed = urlparse(u)
+        path = (parsed.path or "").lower()
+        host = (parsed.hostname or "").lower()
+        scheme = (parsed.scheme or "").lower()
+    except Exception:
+        path, host, scheme = "", "", ""
+    if scheme not in ("http", "https"):
+        return False
+    if "/sign-up" in path:
+        return False
+    if "accounts.x.ai" in host or "auth.x.ai" in host:
+        # Still on xAI without password: only oauth paths count as progress
+        return "/oauth2/" in ul or "/oauth/" in ul
+    # Left auth hosts (e.g. grok.com) without password field
+    return bool(host)
+
+
+def oauth_skip_login_after(login_ok: bool, url: str) -> bool:
+    """Whether obtain_oidc_tokens may skip re-driving email login.
+
+    Never skip when still on /sign-in — even if a buggy caller set login_ok=True
+    (hostname '/account' trap historically false-greened sign-in URLs).
+    """
+    if not login_ok:
+        return False
+    if is_xai_sign_in_url(url):
+        return False
+    return classify_login_nav_success(url or "", has_password_field=False)
 # Self-heal: UI/transient failures (email form missing, CF stuck, activate fail)
 # re-spawn browser + new email instead of permanent fail. Domain 403 re-rolls
 # for tempmail are separate (MAX_DOMAIN_RETRIES).
 UI_RETRIES = max(1, min(8, int(_env("GROK_UI_RETRIES", "3") or "3")))
 UI_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_UI_RETRY_BACKOFF", "2") or "2"))
-# After activate, re-probe 403 a few times (IP rate-limit / entitlement lag).
+# After activate, soft-retry chat probe same session before EXIT/re-spawn.
+# Covers 403 (entitlement lag), 429 (capacity), 5xx, network — not only 403.
 PROBE_RETRIES = max(1, min(8, int(_env("GROK_PROBE_RETRIES", "5") or "5")))
-PROBE_RETRY_BACKOFF_S = max(0.5, float(_env("GROK_PROBE_RETRY_BACKOFF", "2.5") or "2.5"))
+# Base wait between soft-retries; actual wait = base * min(try, 2) → e.g. 1s, 2s, 2s…
+PROBE_RETRY_BACKOFF_S = max(0.3, float(_env("GROK_PROBE_RETRY_BACKOFF", "1.0") or "1.0"))
 
 # Results root: each run creates results/batch_<id>/ (unless legacy single-file paths set)
 RESULTS_ROOT = Path(_env("GROK_RESULTS_DIR", str(_ROOT / "results")))
@@ -177,7 +391,13 @@ USED_EMAILS_FILE = Path(_env("GROK_USED_EMAILS_FILE", str(RESULTS_ROOT / "used_e
 _LEGACY_JSON = _env("GROK_RESULTS_JSON")
 _LEGACY_TXT = _env("GROK_RESULTS_TXT")
 _LEGACY_FAILED = _env("GROK_FAILED_JSON")
-EMAIL_LOCAL_LEN = max(10, min(32, int(_env("GROK_EMAIL_LOCAL_LEN", "16") or "16")))
+EMAIL_LOCAL_LEN = max(6, min(32, int(_env("GROK_EMAIL_LOCAL_LEN", "16") or "16")))
+# human = first.last / name combos (looks real); crypto = random alnum (old style)
+EMAIL_STYLE = (_env("GROK_EMAIL_STYLE", "human") or "human").strip().lower()
+if EMAIL_STYLE not in ("human", "crypto", "random"):
+    EMAIL_STYLE = "human"
+if EMAIL_STYLE == "random":
+    EMAIL_STYLE = "crypto"
 
 # Set in init_batch() at run start
 BATCH_ID = ""
@@ -237,12 +457,21 @@ FIRST_NAMES = [
     "Parker", "Sage", "River", "Skyler", "Dakota", "Reese", "Finley", "Rowan",
     "Charlie", "Emerson", "Hayden", "Jamie", "Blake", "Drew", "Eden", "Kai",
     "Noah", "Liam", "Emma", "Olivia", "Mia", "Lucas", "Mason", "Sophia",
+    "Ethan", "Ava", "Isabella", "James", "Benjamin", "Charlotte", "Amelia",
+    "Henry", "Harper", "Evelyn", "Daniel", "Michael", "Emily", "Grace",
+    "Samuel", "Nathan", "Chloe", "Zoe", "Hannah", "Owen", "Jack", "Lily",
+    "Ryan", "Nina", "Leo", "Ella", "Mateo", "Sofia", "Adrian", "Clara",
+    "Dylan", "Maya", "Caleb", "Nora", "Isaac", "Luna", "Julian", "Ivy",
 ]
 LAST_NAMES = [
     "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
     "Davis", "Rodriguez", "Martinez", "Anderson", "Taylor", "Thomas", "Moore",
     "Jackson", "Martin", "Lee", "Thompson", "White", "Harris", "Clark", "Lewis",
     "Walker", "Hall", "Allen", "Young", "King", "Wright", "Scott", "Green",
+    "Baker", "Adams", "Nelson", "Hill", "Ramirez", "Campbell", "Mitchell",
+    "Roberts", "Carter", "Phillips", "Evans", "Turner", "Torres", "Parker",
+    "Collins", "Edwards", "Stewart", "Flores", "Morris", "Nguyen", "Murphy",
+    "Rivera", "Cook", "Rogers", "Morgan", "Peterson", "Cooper", "Reed",
 ]
 
 # ── Proxy pool ───────────────────────────────────────────────────────────────
@@ -521,31 +750,39 @@ _STEP_META: dict[str, tuple[str, int]] = {
     "retry":            ("retry", 7),
     "ui_retry":         ("retry", 1),
 }
-_SPINNER = "⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏"
-_PIPE_CHARS = "░▒▓█"
+# ANSI colors for HUD table (only when VT enabled). Width helpers strip these.
+_HUD_C = {
+    "reset": "\033[0m",
+    "dim": "\033[2m",
+    "bold": "\033[1m",
+    "green": "\033[32m",
+    "red": "\033[31m",
+    "yellow": "\033[33m",
+    "cyan": "\033[36m",
+    "blue": "\033[34m",
+    "mag": "\033[35m",
+    "white": "\033[37m",
+}
+_ANSI_RE = re.compile(r"\033\[[0-9;]*m")
 
 
 class FarmHUD:
-    """Live terminal progress panel (fixed-height, animated, informative).
+    """Stable multi-worker table HUD — no spinner thrash, no flash.
 
-    Design rules for no leftover / no spam:
-      - FIXED frame height every draw (cursor-up always lands on frame start)
-      - After cursor-up, erase to end of screen (\\033[J) so garbage below dies
-      - ALL stdout writes go through _io_lock (HUD frame + quiet print share it)
-      - Detail lines go to farm.log only while HUD is on (never console)
-      - Ticker animates spinner / pulse ~8 Hz; state updates are free
+    Design:
+      - Column table: # | STAGE | EMAIL | STEP | TOT | DETAIL
+      - One row per worker (scales with concurrent + terminal height)
+      - Paint only on state change or 1 Hz age tick (not 10 Hz animation)
+      - Fixed line count for current layout; cursor-up redraw; no full-screen flash
+      - Colors for status; detail still in farm.log
     """
 
-    # Layout (fixed height): title, bar, stats, credits, pipeline, sep,
-    #   5 workers × 2 lines, sep, 4 recent, out, bottom, footer  = 23
-    FRAME_HEIGHT = 23
-    # Max content width; actual paint uses min(WIDTH, terminal_cols-2) so wide
-    # terminals show full emails / messages instead of early "…" truncation.
+    # Max content width; paint uses min(WIDTH, terminal_cols-2).
     WIDTH = 140
-    WORKER_SLOTS = 5          # max concurrent rows shown (2 lines each)
-    RECENT_SLOTS = 4
-    REDRAW_MIN_S = 0.05       # ~20 Hz cap; ticker drives actual cadence
-    TICK_S = 0.10             # 10 Hz — smooth enough, less console thrash
+    RECENT_SLOTS = 3
+    REDRAW_MIN_S = 0.20       # throttle paints; state still marks dirty
+    TICK_S = 1.0              # age/ETA refresh only — no spinner loop
+    MAX_WORKER_ROWS = 32      # hard cap; terminal rows may lower further
 
     def __init__(self) -> None:
         self.enabled = UI_MODE == "hud"
@@ -577,11 +814,11 @@ class FarmHUD:
         self._last_sig: tuple | None = None
         self._last_draw_t = 0.0
         self._active = False
-        self._anim_i = 0
-        self._pulse = 0
-        self._dirty = True  # set when state changes; ticker paints
+        self._dirty = True  # set when state changes; ticker paints ages @1Hz
         self._paint_width = self.WIDTH
         self._painting = False  # re-entrancy guard
+        self._frame_height = 12
+        self._worker_rows = 4
 
     @staticmethod
     def fmt_credits(n: float | int | None) -> str:
@@ -707,13 +944,14 @@ class FarmHUD:
         self._started_draw = False
         self._last_sig = None
         self._last_draw_t = 0.0
-        self._anim_i = 0
-        self._pulse = 0
         self._dirty = True
         self._active = True
+        self._frame_height = 12
+        self._worker_rows = 4
         if self.enabled and self._ansi_ok:
             try:
                 with self._io_lock:
+                    # Hide cursor; alt-screen avoided (breaks some Windows hosts)
                     self._real_stdout.write("\033[?25l")
                     self._real_stdout.flush()
             except Exception:
@@ -746,21 +984,51 @@ class FarmHUD:
         return meta[0] if meta else (step or "?")[:10]
 
     @staticmethod
-    def _pipeline(step: str) -> str:
-        """Mini pipeline bar highlighting the current stage (0..10 = 11 dots)."""
-        meta = _STEP_META.get(step or "")
-        idx = meta[1] if meta else 0
-        n = 12  # includes activate + chat_probe as final stages
-        idx = max(0, min(int(idx), n - 1))
-        parts = []
-        for i in range(n):
-            if i < idx:
-                parts.append("●")
-            elif i == idx:
-                parts.append("◎")
-            else:
-                parts.append("○")
-        return "".join(parts)
+    def _vis_len(text: str) -> int:
+        return len(_ANSI_RE.sub("", text or ""))
+
+    def _c(self, name: str, text: str) -> str:
+        if not self._ansi_ok or not text:
+            return text
+        code = _HUD_C.get(name) or ""
+        if not code:
+            return text
+        return f"{code}{text}{_HUD_C['reset']}"
+
+    def _pad(self, text: str, width: int, *, align: str = "left") -> str:
+        """Pad/truncate by visible (ANSI-stripped) width so columns stay aligned."""
+        s = (text or "").replace("\n", " ").replace("\r", " ")
+        if width <= 0:
+            return ""
+        vis = self._vis_len(s)
+        if vis > width:
+            # Truncate raw then re-strip; keep simple for mixed ANSI
+            plain = _ANSI_RE.sub("", s)
+            plain = self._fit(plain, width)
+            return plain
+        pad = width - vis
+        if align == "right":
+            return (" " * pad) + s
+        if align == "center":
+            left = pad // 2
+            return (" " * left) + s + (" " * (pad - left))
+        return s + (" " * pad)
+
+    def _term_rows(self) -> int:
+        try:
+            return max(16, shutil.get_terminal_size(fallback=(100, 40)).lines)
+        except Exception:
+            return 40
+
+    def _worker_row_budget(self, n_workers: int, term_rows: int) -> int:
+        """How many worker rows fit without overflow (header+recent+footer fixed)."""
+        # title, stats, credits, sep, thead, sep, recent×N, out, bottom, footer ≈ 9+RECENT
+        fixed = 9 + self.RECENT_SLOTS
+        budget = max(3, term_rows - fixed - 1)
+        want = max(n_workers, 1)
+        # Prefer room for concurrent slots when idle so table doesn't jump wildly
+        prefer = max(want, min(max(1, CONCURRENT), budget))
+        return max(1, min(self.MAX_WORKER_ROWS, budget, max(prefer, want)))
 
     def set_progress(self, attempt: int, step: str, message: str = "", email: str = "") -> None:
         with self._slock:
@@ -789,9 +1057,9 @@ class FarmHUD:
             w["updated"] = now
             self._workers[attempt] = w
             self._dirty = True
-        # Log only — ticker paints HUD (~12 Hz). Calling render() here under
-        # concurrency 5 freezes the panel (5 workers × frequent steps).
+        # Log always; throttle paint via REDRAW_MIN_S (no 10 Hz force redraw).
         self.log_line(f"[{attempt}] {step:16} {message}" + (f"  <{email}>" if email else ""))
+        self.render(force=False)
 
     def record_credits(
         self,
@@ -848,8 +1116,7 @@ class FarmHUD:
             self._recent = self._recent[-8:]
             self._dirty = True
         self.log_line(f"[{attempt}] OK               {message}  <{email}>")
-        # Mark dirty; next ticker frame (~80ms) paints. Avoid force-render here
-        # so we never stall workers on stdout under concurrency.
+        self.render(force=False)
 
     def mark_fail(self, attempt: int, message: str, error: str = "") -> None:
         with self._slock:
@@ -882,6 +1149,7 @@ class FarmHUD:
             + (f" ({error})" if error else "")
             + (f"  <{email}>" if email else "")
         )
+        self.render(force=False)
 
     @staticmethod
     def _term_cols() -> int:
@@ -902,12 +1170,76 @@ class FarmHUD:
         return s[: width - len(ellipsis)] + ellipsis
 
     def _box(self, inner: str, width: int | None = None) -> str:
-        """Pad inner text; clamp so the terminal never wraps a frame line."""
+        """Pad inner text by visible width; clamp so the line never wraps."""
         width = width if width is not None else self._paint_width
         # content width inside borders: width - 1 after "│ "
         inner_w = max(0, width - 1)
-        s = self._fit(inner or "", inner_w)
-        return "│ " + s.ljust(inner_w) + "│"
+        body = self._pad(inner or "", inner_w)
+        return "│ " + body + "│"
+
+    def _box_raw(self, inner: str, width: int | None = None) -> str:
+        """Like _box but inner may already include ANSI (still padded visibly)."""
+        return self._box(inner, width)
+
+    def _col_widths(self, width: int) -> dict[str, int]:
+        """Column widths for the worker table (sum ≤ width-1 content)."""
+        # # | STAGE | EMAIL | STEP | TOT | DETAIL
+        w_id = 4
+        w_stage = 9
+        w_step = 5
+        w_tot = 5
+        # seps: "│ " prefix handled by _box; inside: col + spaces between
+        # format: "{id} {stage} {email} {step} {tot} {detail}"
+        gaps = 5  # spaces between 6 fields
+        fixed = w_id + w_stage + w_step + w_tot + gaps
+        rest = max(20, width - 1 - fixed)
+        w_email = max(14, min(42, rest // 2))
+        w_detail = max(10, rest - w_email)
+        return {
+            "id": w_id,
+            "stage": w_stage,
+            "email": w_email,
+            "step": w_step,
+            "tot": w_tot,
+            "detail": w_detail,
+        }
+
+    def _row_line(
+        self,
+        cols: dict[str, int],
+        *,
+        wid: str,
+        stage: str,
+        email: str,
+        step_s: str,
+        tot_s: str,
+        detail: str,
+        color_stage: str = "",
+        color_row: str = "",
+    ) -> str:
+        parts = [
+            self._pad(wid, cols["id"], align="right"),
+            self._pad(stage, cols["stage"]),
+            self._pad(email, cols["email"]),
+            self._pad(step_s, cols["step"], align="right"),
+            self._pad(tot_s, cols["tot"], align="right"),
+            self._pad(detail, cols["detail"]),
+        ]
+        line = " ".join(parts)
+        if color_row and self._ansi_ok:
+            line = self._c(color_row, _ANSI_RE.sub("", line))
+        elif color_stage and self._ansi_ok:
+            # recolor stage field only
+            plain_parts = [
+                self._pad(_ANSI_RE.sub("", wid), cols["id"], align="right"),
+                self._c(color_stage, self._pad(_ANSI_RE.sub("", stage), cols["stage"])),
+                self._pad(_ANSI_RE.sub("", email), cols["email"]),
+                self._pad(_ANSI_RE.sub("", step_s), cols["step"], align="right"),
+                self._pad(_ANSI_RE.sub("", tot_s), cols["tot"], align="right"),
+                self._pad(_ANSI_RE.sub("", detail), cols["detail"]),
+            ]
+            line = " ".join(plain_parts)
+        return line
 
     def _build_lines(self, width: int) -> list[str]:
         now = time.time()
@@ -929,94 +1261,131 @@ class FarmHUD:
         else:
             eta = "--:--"
 
-        spin = _SPINNER[self._anim_i % len(_SPINNER)]
-        # Wider bar on wide terminals
-        bar_w = min(36, max(12, width - 24))
+        # Static progress bar (no animated tip — avoids flicker)
+        bar_w = min(28, max(10, width - 36))
         filled = int(bar_w * min(done, self.total) / self.total) if self.total else 0
-        if filled < bar_w and running > 0:
-            tip = _PIPE_CHARS[self._pulse % len(_PIPE_CHARS)]
-            bar = "█" * filled + tip + "░" * (bar_w - filled - 1)
-        else:
-            bar = "█" * filled + "░" * (bar_w - filled)
+        bar = "█" * filled + "░" * (bar_w - filled)
 
         mode = self.mode_label or "run"
-        # Keep more of batch id on wide screens
-        bid_keep = min(28, max(12, width - 28))
+        bid_keep = min(28, max(10, width - 32))
         bid = (self.batch_id or "-")[-bid_keep:]
         title = f" Grok Farm · {mode} · {bid} "
         lines: list[str] = []
         lines.append("╭" + title.center(width, "─")[:width] + "╮")
-        lines.append(self._box(f"{bar}  {done:>4}/{self.total:<5} {pct:>3}% {spin}", width))
+
+        ok_s = self._c("green", f"✓{self.ok}") if self._ansi_ok else f"✓{self.ok}"
+        fail_s = self._c("red", f"✗{self.fail}") if self._ansi_ok else f"✗{self.fail}"
+        run_s = self._c("cyan", f"▶{running}") if self._ansi_ok else f"▶{running}"
         lines.append(self._box(
-            f"✓{self.ok:<5} ✗{self.fail:<5} ▶{running:<4}  "
-            f"rate {rate:5.1f}/m  ETA {eta}  t {et}",
+            f"{bar}  {done}/{self.total} {pct:>3}%   "
+            f"{ok_s}  {fail_s}  {run_s}   "
+            f"{rate:4.1f}/m  ETA {eta}  t {et}",
             width,
         ))
-        # Free Build token quota (from probe headers on successful accounts)
         last_r = self.fmt_credits(self.credits_last_remaining)
         last_l = self.fmt_credits(self.credits_last_limit)
         sum_l = self.fmt_credits(self.credits_sum_limit if self.credits_accounts else None)
-        n_cred = self.credits_accounts
         lines.append(self._box(
-            f"credits  last {last_r}/{last_l}  ·  Σ limit {sum_l}  ·  "
-            f"{n_cred} acct  (free Build tokens)",
+            f"credits  last {last_r}/{last_l}  ·  Σ {sum_l}  ·  "
+            f"{self.credits_accounts} acct",
             width,
         ))
-        lines.append(self._box("pipeline  start○…●login●oauth●activate●probe", width))
-        lines.append("│" + "─" * width + "│")
+        lines.append("├" + "─" * width + "┤")
+
+        cols = self._col_widths(width)
+        thead = self._row_line(
+            cols,
+            wid="#",
+            stage="STAGE",
+            email="EMAIL",
+            step_s="STEP",
+            tot_s="TOT",
+            detail="DETAIL",
+        )
+        lines.append(self._box(self._c("dim", thead) if self._ansi_ok else thead, width))
+        lines.append("├" + "─" * width + "┤")
 
         workers = sorted(self._workers.values(), key=lambda x: x["attempt"])
-        # Layout: "#NN " + email + "  " + spin + " " + step(9) + " " + "NNNs/NNNs!"
-        # Reserve ~22 chars for #/spin/step/time; rest goes to email.
-        reserved = 4 + 2 + 1 + 1 + 9 + 1 + 10  # #NN_  _spin_step_ times
-        em_w = max(18, min(56, width - reserved - 2))
-        # Detail line uses almost full width after indent + pipeline glyphs
-        msg_w = max(24, width - 8)
-        for i in range(self.WORKER_SLOTS):
-            if i < len(workers):
-                w = workers[i]
+        n_rows = self._worker_row_budget(len(workers), self._term_rows())
+        self._worker_rows = n_rows
+        # Overflow: reserve last row for "+N more" so table never clips silently
+        if len(workers) > n_rows:
+            show = workers[: max(0, n_rows - 1)]
+            overflow_n = len(workers) - len(show)
+        else:
+            show = workers
+            overflow_n = 0
+        for i in range(n_rows):
+            if overflow_n > 0 and i == n_rows - 1:
+                note = (
+                    f"… +{overflow_n} more workers "
+                    f"(resize terminal ↑ or lower concurrent)"
+                )
+                lines.append(self._box(
+                    self._c("yellow", note) if self._ansi_ok else note,
+                    width,
+                ))
+                continue
+            if i < len(show):
+                w = show[i]
                 age = int(now - w.get("step_t0", w.get("t0", now)))
                 total = int(now - w.get("t0", now))
-                em = _short_email(w.get("email") or "…", em_w)
+                em = _short_email(w.get("email") or "—", cols["email"])
                 step = w.get("step") or ""
                 label = self._step_label(step)
                 msg = (w.get("message") or "").replace("\n", " ").strip()
                 if w.get("email") and w.get("email") in msg:
                     msg = msg.replace(w.get("email") or "", "").strip(" -·")
-                msg = self._fit(msg, msg_w) if msg else "…"
-                pipe = self._pipeline(step)
-                stuck = "!" if age >= 30 else ("·" if age >= 15 else " ")
-                # Don't pad email with fixed width that wastes space on short emails
-                lines.append(self._box(
-                    f"#{w['attempt']:<3} {em}  {spin} {label:<9} "
-                    f"{age:>3}s/{total}s{stuck}",
-                    width,
-                ))
-                lines.append(self._box(f"     {pipe}  {msg}", width))
+                if not msg:
+                    msg = "—"
+                # Status color: stuck / active stage
+                color_stage = "cyan"
+                color_row = ""
+                if age >= 45:
+                    color_stage = "yellow"
+                    color_row = "yellow"
+                elif step in ("chat_probe", "activate", "oauth", "complete_signup"):
+                    color_stage = "mag"
+                elif step in ("cleanup", "ui_retry", "domain_rejected", "retry"):
+                    color_stage = "yellow"
+                row = self._row_line(
+                    cols,
+                    wid=str(w["attempt"]),
+                    stage=label,
+                    email=em,
+                    step_s=f"{age}s",
+                    tot_s=f"{total}s",
+                    detail=msg,
+                    color_stage=color_stage if not color_row else "",
+                    color_row=color_row,
+                )
+                lines.append(self._box(row, width))
             elif i == 0 and not workers:
-                lines.append(self._box(f"{spin} idle — waiting for next worker…", width))
-                lines.append(self._box("", width))
+                idle = self._c("dim", "idle — waiting for next worker") if self._ansi_ok else "idle — waiting for next worker"
+                lines.append(self._box(idle, width))
             else:
                 lines.append(self._box("", width))
-                lines.append(self._box("", width))
 
-        lines.append("│" + "─" * width + "│")
+        lines.append("├" + "─" * width + "┤")
         recent_items = list(self._recent[-self.RECENT_SLOTS:]) if self._recent else []
-        if not recent_items:
-            lines.append(self._box("recent  —", width))
-            for _ in range(self.RECENT_SLOTS - 1):
-                lines.append(self._box("", width))
-        else:
-            pad = self.RECENT_SLOTS - len(recent_items)
-            for _ in range(pad):
-                lines.append(self._box("", width))
-            for r in recent_items:
-                # Full recent line width (was hard-cut to width-2 then boxed again)
+        for j in range(self.RECENT_SLOTS):
+            if j < len(recent_items):
+                r = recent_items[j]
+                if r.startswith("✓") and self._ansi_ok:
+                    r = self._c("green", _ANSI_RE.sub("", r))
+                elif r.startswith("✗") and self._ansi_ok:
+                    r = self._c("red", _ANSI_RE.sub("", r))
                 lines.append(self._box(r, width))
+            elif j == 0:
+                lines.append(self._box(
+                    self._c("dim", "recent  —") if self._ansi_ok else "recent  —",
+                    width,
+                ))
+            else:
+                lines.append(self._box("", width))
 
         if self.batch_dir:
             bd = self.batch_dir
-            # Prefer showing the end of the path (batch folder name)
             max_bd = max(12, width - 6)
             if len(bd) > max_bd:
                 bd = "…" + bd[-(max_bd - 1) :]
@@ -1024,25 +1393,33 @@ class FarmHUD:
         else:
             lines.append(self._box("out  —", width))
         lines.append("╰" + "─" * width + "╯")
-        lines.append(self._fit("  detail → farm.log  ·  Ctrl+C safe", width + 2).ljust(width + 2))
-        while len(lines) < self.FRAME_HEIGHT:
-            lines.append(" " * (width + 2))
-        # Hard-cap every line — wrap is what stacks frames in Windows terminals
-        max_len = width + 2
-        return [
-            (ln[:max_len] if len(ln) > max_len else ln.ljust(max_len)[:max_len])
-            for ln in lines[: self.FRAME_HEIGHT]
-        ]
+        foot = self._c("dim", "detail → farm.log  ·  Ctrl+C safe") if self._ansi_ok else "detail → farm.log  ·  Ctrl+C safe"
+        lines.append(self._pad("  " + _ANSI_RE.sub("", foot) if not self._ansi_ok else "  " + foot, width + 2))
+
+        self._frame_height = len(lines)
+        # Hard-cap every line by visible width — wrap stacks frames on Windows
+        max_vis = width + 2
+        out_lines: list[str] = []
+        for ln in lines:
+            # Ensure visible length ≤ max_vis; pad with spaces (no mid-ANSI cut if short)
+            vis = self._vis_len(ln)
+            if vis > max_vis:
+                plain = self._fit(_ANSI_RE.sub("", ln), max_vis)
+                out_lines.append(plain)
+            elif vis < max_vis:
+                out_lines.append(ln + (" " * (max_vis - vis)))
+            else:
+                out_lines.append(ln)
+        return out_lines
 
     def render(self, force: bool = False) -> None:
-        """Paint one HUD frame (ticker only under load). No stack / no spam."""
+        """Paint one HUD frame. Dirty or 1 Hz tick only — no spinner redraw spam."""
         if not self.enabled:
             return
         if self._painting and not force:
             return
 
         cols = self._term_cols()
-        # Use almost the full terminal width (was capped at 72 → heavy truncation)
         paint_w = max(60, min(self.WIDTH, cols - 2))
 
         with self._slock:
@@ -1055,15 +1432,17 @@ class FarmHUD:
                 (
                     a,
                     w.get("step"),
-                    (w.get("message") or "")[:40],
+                    (w.get("message") or "")[:48],
                     int(now - w.get("step_t0", now)),
+                    int(now - w.get("t0", now)),
                 )
                 for a, w in sorted(self._workers.items())
             )
+            # No animation counter in sig — prevents 10 Hz flash
             sig = (
                 self.ok, self.fail, worker_sig, elapsed, self.total,
                 self.credits_accounts, self.credits_last_remaining,
-                self.credits_sum_limit, self._anim_i, paint_w,
+                self.credits_sum_limit, paint_w, self._worker_rows,
             )
             if sig == self._last_sig and not force and not self._dirty:
                 return
@@ -1074,35 +1453,42 @@ class FarmHUD:
             self._dirty = False
             self._paint_width = paint_w
             lines = self._build_lines(paint_w)
-            anim_i = self._anim_i
             ok, fail, total = self.ok, self.fail, self.total
             n_run = len(self._workers)
             prev_lines = self._drawn_lines
             started = self._started_draw
+            frame_h = len(lines)
 
         out = self._real_stdout
         self._painting = True
         try:
             with self._io_lock:
                 if not self._ansi_ok:
-                    spin = _SPINNER[anim_i % len(_SPINNER)]
                     out.write(
-                        f"\r  {spin} [{ok + fail}/{total}] ✓{ok} ✗{fail} "
-                        f"▶{n_run}  {elapsed}s" + (" " * 16)
+                        f"\r  [{ok + fail}/{total}] ✓{ok} ✗{fail} "
+                        f"▶{n_run}  {elapsed}s" + (" " * 20) + "\r"
                     )
                     out.flush()
                     return
                 parts: list[str] = []
                 if started and prev_lines > 0:
+                    # Move to top of previous frame; clear only if height shrinks
                     parts.append(f"\033[{prev_lines}A")
-                    parts.append("\033[J")  # erase leftovers below
+                    if frame_h < prev_lines:
+                        parts.append("\033[J")
                 for line in lines:
                     parts.append("\033[2K\r")
                     parts.append(line)
                     parts.append("\n")
+                # Clear any leftover lines if we shrank
+                if started and prev_lines > frame_h:
+                    for _ in range(prev_lines - frame_h):
+                        parts.append("\033[2K\n")
+                    if prev_lines > frame_h:
+                        parts.append(f"\033[{prev_lines - frame_h}A")
                 out.write("".join(parts))
                 out.flush()
-                self._drawn_lines = len(lines)
+                self._drawn_lines = frame_h
                 self._started_draw = True
         except Exception:
             self._started_draw = False
@@ -1111,22 +1497,22 @@ class FarmHUD:
             self._painting = False
 
     async def ticker(self) -> None:
-        """Sole regular HUD painter (~10 Hz)."""
+        """1 Hz age/ETA refresh + log flush. No spinner animation."""
         try:
             while True:
                 await asyncio.sleep(self.TICK_S)
                 if not self._active:
                     break
                 with self._slock:
-                    self._anim_i = (self._anim_i + 1) % len(_SPINNER)
-                    self._pulse = (self._pulse + 1) % len(_PIPE_CHARS)
+                    # Bump dirty so ages/ETA repaint once per second
+                    self._dirty = True
                     done = self.ok + self.fail >= self.total and not self._workers
                 if done:
                     self._flush_log(force=True)
                     self.render(force=True)
                     break
                 self._flush_log(force=False)
-                self.render(force=True)
+                self.render(force=False)
         except asyncio.CancelledError:
             return
 
@@ -1253,6 +1639,81 @@ def _crypto_local_part(length: int) -> str:
     return "".join(secrets.choice(_ALPHANUM) for _ in range(length))
 
 
+def _clean_name_token(s: str) -> str:
+    return re.sub(r"[^a-z]", "", (s or "").lower())
+
+
+def _human_local_part(max_len: int | None = None) -> str:
+    """Realistic mailbox local-part: name combos + small digits (not random soup).
+
+    Examples: jordan.lee, emma.smith27, l.garcia, noah_wright91, mia.j.brown
+    Uniqueness is still enforced by generate_email()'s used set.
+    """
+    cap = max(6, min(32, int(max_len or EMAIL_LOCAL_LEN or 20)))
+    first = _clean_name_token(random.choice(FIRST_NAMES)) or "alex"
+    last = _clean_name_token(random.choice(LAST_NAMES)) or "smith"
+    fi, li = first[0], last[0]
+    # Prefer 1–2 digit suffixes; sometimes 3; rarely 4 (looks less bot-like)
+    r = secrets.randbelow(100)
+    if r < 55:
+        digits = str(secrets.randbelow(90) + 10)  # 10–99
+    elif r < 85:
+        digits = str(secrets.randbelow(9) + 1)  # 1–9
+    elif r < 95:
+        digits = str(secrets.randbelow(900) + 100)  # 100–999
+    else:
+        digits = ""
+
+    patterns = [
+        f"{first}.{last}",
+        f"{first}.{last}{digits}" if digits else f"{first}.{last}",
+        f"{first}{last}",
+        f"{first}{last}{digits}" if digits else f"{first}{last}",
+        f"{first}_{last}",
+        f"{first}_{last}{digits}" if digits else f"{first}_{last}",
+        f"{fi}.{last}",
+        f"{fi}.{last}{digits}" if digits else f"{fi}.{last}",
+        f"{first}.{li}",
+        f"{first}.{li}{digits}" if digits else f"{first}.{li}",
+        f"{first}{li}{digits}" if digits else f"{first}{li}",
+        f"{fi}{last}{digits}" if digits else f"{fi}{last}",
+        f"{first}.{fi}.{last}" if len(first) > 2 else f"{first}.{last}",
+        f"{first}{digits}.{last}" if digits else f"{first}.{last}",
+        f"{last}.{first}",
+        f"{last}{digits}" if digits else f"{last}.{fi}",
+    ]
+    # Weight toward first.last / firstlast styles
+    weights = [
+        18, 16, 12, 10, 8, 6,
+        8, 5, 5, 4, 4, 4,
+        3, 3, 2, 2,
+    ]
+    local = random.choices(patterns, weights=weights, k=1)[0]
+    local = re.sub(r"[._-]{2,}", ".", local).strip("._-")
+    if len(local) < 5:
+        local = f"{first}{last}{secrets.randbelow(90) + 10}"
+    if len(local) > cap:
+        # Prefer keeping name start; trim from right
+        local = local[:cap].rstrip("._-")
+    # Final sanitize: only RFC-ish local chars we allow
+    local = re.sub(r"[^a-z0-9._-]", "", local)
+    if not local or local[0] in "._-" or local[-1] in "._-":
+        local = f"{first}{last}{secrets.randbelow(90) + 10}"[:cap]
+    return local
+
+
+def _make_local_part(*, for_plus_tag: bool = False) -> str:
+    """Local-part or plus-tag per GROK_EMAIL_STYLE."""
+    if EMAIL_STYLE == "crypto":
+        n = max(6, min(20, EMAIL_LOCAL_LEN)) if for_plus_tag else EMAIL_LOCAL_LEN
+        return _crypto_local_part(n)
+    # human: plus tags stay short (gmail +tag limit feel)
+    if for_plus_tag:
+        first = _clean_name_token(random.choice(FIRST_NAMES)) or "user"
+        return f"{first}{secrets.randbelow(9000) + 1000}"[:20]
+    return _human_local_part(EMAIL_LOCAL_LEN)
+
+
 def _emails_from_accounts_json(path: Path) -> set[str]:
     out: set[str] = set()
     if not path.is_file():
@@ -1362,14 +1823,17 @@ def init_batch(max_accounts: int, concurrent: int) -> str:
 
 
 async def generate_email() -> str:
-    """Crypto-random unique email; reserved in global set + used_emails.txt."""
+    """Unique email; human-looking local-part by default; reserved in used set."""
     async with _emails_lock:
-        for _ in range(200):
+        for attempt in range(250):
             if EMAIL_MODE == "domain":
                 if not EMAIL_DOMAIN:
                     raise RuntimeError("GROK_EMAIL_DOMAIN required for domain mode")
-                # secrets-based alnum (not random.choices) + global used set
-                name = _crypto_local_part(EMAIL_LOCAL_LEN)
+                # Prefer realistic names; after many collisions, fall back to crypto
+                if EMAIL_STYLE == "human" and attempt < 200:
+                    name = _make_local_part(for_plus_tag=False)
+                else:
+                    name = _crypto_local_part(EMAIL_LOCAL_LEN)
                 addr = f"{name}@{EMAIL_DOMAIN.lstrip('@')}"
             else:
                 base = GMAIL_BASE or IMAP_USER
@@ -1377,15 +1841,17 @@ async def generate_email() -> str:
                     raise RuntimeError("GROK_GMAIL_BASE / GROK_IMAP_USER required for plus_trick")
                 user, _, domain = base.partition("@")
                 user = user.split("+", 1)[0]
-                tag_len = max(10, min(20, EMAIL_LOCAL_LEN))
-                tag = _crypto_local_part(tag_len)
+                if EMAIL_STYLE == "human" and attempt < 200:
+                    tag = _make_local_part(for_plus_tag=True)
+                else:
+                    tag = _crypto_local_part(max(10, min(20, EMAIL_LOCAL_LEN)))
                 addr = f"{user}+{tag}@{domain}"
             key = addr.lower()
             if key not in _used_emails:
                 _used_emails.add(key)
                 _persist_used_email(key)  # reserve immediately so other processes / future batches skip
                 return addr
-    raise RuntimeError("Could not generate unique email after 200 attempts")
+    raise RuntimeError("Could not generate unique email after 250 attempts")
 
 
 def random_name() -> tuple[str, str]:
@@ -1402,6 +1868,35 @@ _XAI_SUBJ_CODE_RE = re.compile(
 # Claimed OTPs across concurrent IMAP threads — one code per worker, never share
 _claimed_otps_sync: set[str] = set()
 _claimed_otps_lock = threading.Lock()
+
+
+def imap_poll_interval_s(
+    concurrent: int | None = None,
+    *,
+    persistent: bool = True,
+    waiters: int = 1,
+) -> float:
+    """Seconds between shared IMAP inbox sweeps (pure).
+
+    Persistent hub + HEADER-only fetch is cheap → sub-2s polls feel smooth.
+    More waiters → slightly faster (mail is more likely arriving).
+    """
+    c = max(1, int(concurrent if concurrent is not None else CONCURRENT))
+    w = max(1, int(waiters))
+    if not persistent:
+        # Legacy reconnect-every-time: stay polite to Gmail
+        if c <= 2:
+            return 2.5
+        if c <= 5:
+            return 2.0
+        return 1.8
+    # Persistent connection: responsive without hammering
+    base = 1.35 if c <= 3 else 1.1 if c <= 6 else 0.95
+    if w >= 4:
+        base = max(0.75, base - 0.15)
+    if w >= 7:
+        base = max(0.65, base - 0.10)
+    return base
 
 
 def _is_plausible_xai_otp(code: str) -> bool:
@@ -1451,109 +1946,583 @@ def _extract_xai_code(subject: str, body: str) -> str | None:
     return m.group(1) if m else None
 
 
-def read_otp_from_imap_sync(target_email: str, timeout: int = 180, since_ts: float | None = None) -> str | None:
-    """Poll Gmail IMAP for xAI confirmation code addressed to target_email.
-
-    Codes arrive from noreply@x.ai with subject like "K35-1QR xAI confirmation code".
-    Catch-all domains forward into this inbox; match To/Delivered-To/body for the alias.
-    Concurrent workers: each OTP code is claimed once (no double-use of same mail).
-    """
-    print(f"[IMAP] Waiting for xAI OTP to {target_email}...", flush=True)
-    start = time.time()
-    since_ts = since_ts or (start - 30)
-    target_lower = target_email.lower()
-    target_local = target_lower.split("@")[0]
-    seen_uids: set[bytes] = set()
-
-    while time.time() - start < timeout:
+def _imap_msg_body_text(msg) -> str:
+    body = ""
+    if msg.is_multipart():
+        for part in msg.walk():
+            ct = part.get_content_type()
+            if ct == "text/plain":
+                try:
+                    body = part.get_payload(decode=True).decode("utf-8", "replace")
+                except Exception:
+                    body = ""
+                if body:
+                    break
+            if ct == "text/html" and not body:
+                try:
+                    body = part.get_payload(decode=True).decode("utf-8", "replace")
+                except Exception:
+                    body = ""
+    else:
         try:
-            mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT)
+            body = msg.get_payload(decode=True).decode("utf-8", "replace")
+        except Exception:
+            body = str(msg.get_payload() or "")
+    return body or ""
+
+
+def _imap_msg_matches_target(msg, body: str, target_lower: str, target_local: str) -> bool:
+    subject = msg.get("Subject", "") or ""
+    to_addr = " ".join(
+        filter(
+            None,
+            [
+                msg.get("To", ""),
+                msg.get("Delivered-To", ""),
+                msg.get("X-Original-To", ""),
+                msg.get("Cc", ""),
+            ],
+        )
+    ).lower()
+    header_hit = target_lower in to_addr or (
+        len(target_local) >= 4 and target_local in to_addr
+    )
+    body_l = (body or "").lower()
+    body_hit = target_lower in body_l or (
+        len(target_local) >= 8 and target_local in body_l
+    )
+    subj_is_xai = bool(
+        _XAI_SUBJ_CODE_RE.search(subject)
+        or re.search(r"xAI\s+confirmation", subject or "", re.I)
+    )
+    return bool(header_hit or (body_hit and subj_is_xai))
+
+
+def _imap_try_claim_code(code: str) -> bool:
+    """Claim OTP code once across all workers. True if this caller owns it."""
+    if not code:
+        return False
+    with _claimed_otps_lock:
+        if code in _claimed_otps_sync:
+            return False
+        _claimed_otps_sync.add(code)
+        # Cap set size so long farm runs don't grow forever
+        if len(_claimed_otps_sync) > 4000:
+            # drop arbitrary half (codes are one-shot)
+            for i, k in enumerate(list(_claimed_otps_sync)):
+                if i % 2 == 0:
+                    _claimed_otps_sync.discard(k)
+        return True
+
+
+class ImapOtpHub:
+    """Single-flight Gmail OTP hub — research-backed (RFC 2177 IDLE + UNSEEN).
+
+    Research (Gmail + IMAP best practice):
+      - Prefer **IDLE** over blind poll — server pushes EXISTS when mail arrives
+        (RFC 2177; Gmail supports IDLE; IMAPClient docs: idle()/idle_check)
+      - Between IDLE wakeups, **SEARCH UNSEEN / FROM x.ai** then small HEADER fetch
+        (not full-body re-scan of 50 messages every second)
+      - One persistent connection; renew IDLE periodically (docs: ~10 min max)
+      - Log every sweep so HUD/log never looks "frozen" with no progress lines
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._cv = threading.Condition(self._lock)
+        self._waiters: dict[str, list[dict[str, Any]]] = {}
+        self._thread: threading.Thread | None = None
+        self._stop = False
+        self._mail: Any = None  # persistent imaplib connection
+        self._kick = False  # force immediate sweep
+        self._idle_ok: bool | None = None  # None=unknown, True/False capability
+        # Observability for HUD
+        self.last_sweep_ms: float = 0.0
+        self.last_sweep_at: float = 0.0
+        self.last_hit_email: str = ""
+        self.last_hit_code: str = ""
+        self.sweep_count: int = 0
+        self.err_count: int = 0
+        self.reconnects: int = 0
+        self.last_mode: str = "init"  # idle | poll | search
+
+    def status(self) -> dict[str, Any]:
+        """Lightweight snapshot for HUD / keep-alive progress lines."""
+        with self._lock:
+            n_wait = sum(len(v) for v in self._waiters.values())
+            emails = list(self._waiters.keys())[:6]
+        age = (
+            round(time.time() - self.last_sweep_at, 1)
+            if self.last_sweep_at
+            else None
+        )
+        return {
+            "waiters": n_wait,
+            "emails": emails,
+            "last_sweep_ms": round(self.last_sweep_ms, 1),
+            "sweep_age_s": age,
+            "sweeps": self.sweep_count,
+            "reconnects": self.reconnects,
+            "errs": self.err_count,
+            "mode": self.last_mode,
+            "idle": self._idle_ok,
+            "last_hit": (
+                f"{self.last_hit_code}→{self.last_hit_email}"
+                if self.last_hit_code
+                else ""
+            ),
+            "connected": self._mail is not None,
+        }
+
+    def stop(self) -> None:
+        with self._cv:
+            self._stop = True
+            self._cv.notify_all()
+        self._disconnect()
+
+    def wait(
+        self,
+        target_email: str,
+        timeout: int = 180,
+        since_ts: float | None = None,
+    ) -> str | None:
+        email_l = (target_email or "").strip().lower()
+        if not email_l or "@" not in email_l:
+            return None
+        q: queue.Queue = queue.Queue(maxsize=1)
+        now = time.time()
+        deadline = now + max(5, int(timeout))
+        waiter = {
+            "q": q,
+            "deadline": deadline,
+            "since_ts": float(since_ts or (now - 45)),
+            "local": email_l.split("@")[0],
+            "started": now,
+        }
+        with self._cv:
+            self._waiters.setdefault(email_l, []).append(waiter)
+            n = sum(len(v) for v in self._waiters.values())
+            self._kick = True  # don't wait full interval before first look
+            self._ensure_thread_locked()
+            self._cv.notify()
+        print(
+            f"[IMAP] wait {email_l.split('@')[0]}… "
+            f"(hub waiters={n} timeout={timeout}s)",
+            flush=True,
+        )
+        try:
+            remaining = max(0.5, deadline - time.time())
+            code = q.get(timeout=remaining + 1.0)
+            return str(code) if code else None
+        except queue.Empty:
+            with self._cv:
+                lst = self._waiters.get(email_l) or []
+                self._waiters[email_l] = [w for w in lst if w is not waiter]
+                if not self._waiters.get(email_l):
+                    self._waiters.pop(email_l, None)
+            print(f"[IMAP] timeout {email_l.split('@')[0]}", flush=True)
+            return None
+
+    def _ensure_thread_locked(self) -> None:
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop = False
+        self._thread = threading.Thread(
+            target=self._loop, name="imap-otp-hub", daemon=True
+        )
+        self._thread.start()
+
+    def _deliver_locked(self, email_l: str, code: str) -> bool:
+        lst = self._waiters.get(email_l) or []
+        if not lst:
+            return False
+        w = lst.pop(0)
+        if not lst:
+            self._waiters.pop(email_l, None)
+        else:
+            self._waiters[email_l] = lst
+        try:
+            w["q"].put_nowait(code)
+        except Exception:
+            try:
+                w["q"].put(code, timeout=0.2)
+            except Exception:
+                return False
+        self.last_hit_email = email_l
+        self.last_hit_code = code
+        return True
+
+    def _prune_locked(self, now: float) -> None:
+        dead: list[str] = []
+        for email_l, lst in list(self._waiters.items()):
+            keep = [w for w in lst if float(w.get("deadline") or 0) > now]
+            if keep:
+                self._waiters[email_l] = keep
+            else:
+                dead.append(email_l)
+        for e in dead:
+            self._waiters.pop(e, None)
+
+    def _disconnect(self) -> None:
+        m = self._mail
+        self._mail = None
+        if m is None:
+            return
+        try:
+            m.logout()
+        except Exception:
+            try:
+                m.shutdown()
+            except Exception:
+                pass
+
+    def _connect(self) -> bool:
+        if not IMAP_USER or not IMAP_PASS:
+            return False
+        self._disconnect()
+        try:
+            mail = imaplib.IMAP4_SSL(IMAP_HOST, IMAP_PORT, timeout=25)
             mail.login(IMAP_USER, IMAP_PASS)
-            mail.select("INBOX")
-            status, messages = mail.search(None, '(FROM "x.ai")')
-            msg_ids = messages[0].split() if messages and messages[0] else []
-            if not msg_ids:
-                status, messages = mail.search(None, '(SUBJECT "confirmation code")')
-                msg_ids = messages[0].split() if messages and messages[0] else []
+            # writable: mark \\Seen after deliver (helps next sweeps)
+            typ, _ = mail.select("INBOX", readonly=False)
+            if typ != "OK":
+                try:
+                    mail.logout()
+                except Exception:
+                    pass
+                return False
+            self._mail = mail
+            self.reconnects += 1
+            return True
+        except Exception as e:
+            self.err_count += 1
+            print(f"[IMAP] connect fail: {e}", flush=True)
+            self._mail = None
+            return False
 
-            for mid in reversed(msg_ids[-40:]):
-                if mid in seen_uids:
-                    continue
-                status, data = mail.fetch(mid, "(RFC822)")
-                if not data or not data[0]:
-                    continue
-                msg = message_from_bytes(data[0][1])
-                subject = msg.get("Subject", "") or ""
-                to_addr = " ".join(
-                    filter(
-                        None,
-                        [
-                            msg.get("To", ""),
-                            msg.get("Delivered-To", ""),
-                            msg.get("X-Original-To", ""),
-                            msg.get("Cc", ""),
-                        ],
-                    )
-                ).lower()
+    def _ensure_conn(self) -> bool:
+        if self._mail is not None:
+            try:
+                typ, _ = self._mail.noop()
+                if typ == "OK":
+                    return True
+            except Exception:
+                self._mail = None
+        return self._connect()
 
-                body = ""
-                if msg.is_multipart():
-                    for part in msg.walk():
-                        ct = part.get_content_type()
-                        if ct == "text/plain":
-                            try:
-                                body = part.get_payload(decode=True).decode("utf-8", "replace")
-                            except Exception:
-                                body = ""
-                            if body:
-                                break
-                        if ct == "text/html" and not body:
-                            try:
-                                body = part.get_payload(decode=True).decode("utf-8", "replace")
-                            except Exception:
-                                body = ""
-                else:
+    def _idle_wait(self, timeout_s: float) -> bool:
+        """RFC 2177 IDLE — block until EXISTS/RECENT or timeout (Gmail OK).
+
+        Returns True if the server pushed a mailbox change (mail likely arrived).
+        On failure, disconnects so the next sweep reconnects cleanly.
+        Uses select() so we never leave the socket in a broken timeout state
+        (plain sock.settimeout + readline breaks imaplib's file object).
+        """
+        import select
+
+        mail = self._mail
+        if mail is None:
+            return False
+        tag = mail._new_tag()
+        try:
+            mail.send(tag + b" IDLE\r\n")
+            line = mail.readline()
+            if not line.startswith(b"+"):
+                self._idle_ok = False
+                print(f"[IMAP] IDLE rejected: {line[:80]!r}", flush=True)
+                return False
+            self._idle_ok = True
+            self.last_mode = "idle"
+            sock = mail.socket()
+            # select-based wait — do not use sock.settimeout(None) then timeout
+            # then read (that path broke DONE in our live probe).
+            deadline = time.time() + max(1.0, float(timeout_s))
+            got_push = False
+            while time.time() < deadline:
+                remain = max(0.05, deadline - time.time())
+                try:
+                    r, _, _ = select.select([sock], [], [], min(remain, 5.0))
+                except (ValueError, OSError) as e:
+                    print(f"[IMAP] IDLE select: {e}", flush=True)
+                    self._disconnect()
+                    return False
+                if not r:
+                    continue
+                # Drain untagged lines until quiet
+                sock.settimeout(0.4)
+                try:
+                    while True:
+                        chunk = mail.readline()
+                        if not chunk:
+                            break
+                        if (
+                            b"EXISTS" in chunk
+                            or b"RECENT" in chunk
+                            or b"FETCH" in chunk
+                            or b"EXPUNGE" in chunk
+                        ):
+                            got_push = True
+                except (TimeoutError, OSError, socket_timeout := Exception):
+                    pass
+                finally:
                     try:
-                        body = msg.get_payload(decode=True).decode("utf-8", "replace")
-                    except Exception:
-                        body = str(msg.get_payload() or "")
-
-                # Match recipient (catch-all alias, plus-trick, or body mention)
-                # Prefer header match; body match only if subject is clearly xAI confirmation
-                header_hit = target_lower in to_addr or target_local in to_addr
-                body_l = body.lower()
-                body_hit = target_lower in body_l or (
-                    len(target_local) >= 8 and target_local in body_l
-                )
-                subj_is_xai = bool(_XAI_SUBJ_CODE_RE.search(subject) or re.search(
-                    r"xAI\s+confirmation", subject or "", re.I
-                ))
-                if not header_hit and not (body_hit and subj_is_xai):
-                    seen_uids.add(mid)
-                    continue
-
-                code = _extract_xai_code(subject, body)
-                if code:
-                    # Concurrent: claim code once so two workers don't take same OTP
-                    with _claimed_otps_lock:
-                        if code in _claimed_otps_sync:
-                            seen_uids.add(mid)
-                            continue
-                        _claimed_otps_sync.add(code)
-                    print(f"[IMAP] Found OTP: {code} for {target_email} (subj={subject[:60]!r})", flush=True)
-                    try:
-                        mail.store(mid, "+FLAGS", "\\Seen")
+                        sock.settimeout(25)
                     except Exception:
                         pass
-                    mail.logout()
-                    return code
-                seen_uids.add(mid)
-            mail.logout()
+                if got_push:
+                    break
+            # Exit IDLE
+            try:
+                sock.settimeout(15)
+            except Exception:
+                pass
+            mail.send(b"DONE\r\n")
+            done_deadline = time.time() + 8
+            while time.time() < done_deadline:
+                try:
+                    line = mail.readline()
+                except Exception:
+                    self._disconnect()
+                    return got_push
+                if not line:
+                    break
+                if tag in line:
+                    break
+            return got_push
         except Exception as e:
-            print(f"[IMAP] Error: {e}", flush=True)
-        time.sleep(4)
-    print("[IMAP] Timeout waiting for OTP", flush=True)
-    return None
+            self.err_count += 1
+            print(f"[IMAP] IDLE fail: {e}", flush=True)
+            self._disconnect()
+            return False
+
+    def _loop(self) -> None:
+        while True:
+            with self._cv:
+                if self._stop:
+                    self._disconnect()
+                    return
+                self._prune_locked(time.time())
+                if not self._waiters:
+                    self._disconnect()
+                    self._cv.wait(timeout=45.0)
+                    if self._stop:
+                        return
+                    if not self._waiters:
+                        continue
+                    self._kick = True
+                n_wait = sum(len(v) for v in self._waiters.values())
+                targets = {e: list(ws) for e, ws in self._waiters.items()}
+                kick = self._kick
+                self._kick = False
+
+            t0 = time.monotonic()
+            print(
+                f"[IMAP] sweep start waiters={n_wait} "
+                f"aliases={','.join(e.split('@')[0] for e in list(targets)[:4])}",
+                flush=True,
+            )
+            try:
+                n_hit = self._sweep_once(targets)
+            except Exception as e:
+                self.err_count += 1
+                print(f"[IMAP] sweep error: {e}", flush=True)
+                self._disconnect()
+                n_hit = 0
+            self.last_sweep_ms = (time.monotonic() - t0) * 1000.0
+            self.last_sweep_at = time.time()
+            self.sweep_count += 1
+            print(
+                f"[IMAP] sweep#{self.sweep_count} "
+                f"{self.last_sweep_ms:.0f}ms waiters={n_wait} "
+                f"hits={n_hit} mode={self.last_mode} "
+                f"reconn={self.reconnects} err={self.err_count}",
+                flush=True,
+            )
+
+            # Wait for next mail: IDLE (push) when Gmail allows, else short poll.
+            # Research: IDLE is the supported alternative to multi-second blind poll.
+            interval = imap_poll_interval_s(waiters=n_wait, persistent=True)
+            if kick:
+                interval = min(interval, 0.4)
+
+            with self._cv:
+                still = bool(self._waiters) and not self._stop
+                if self._kick:
+                    continue
+            if not still:
+                continue
+
+            # Prefer IDLE for up to ~25s (or shorter interval), then re-SEARCH.
+            idle_timeout = max(interval, min(25.0, 8.0 + n_wait))
+            if kick:
+                idle_timeout = min(idle_timeout, 1.0)
+            pushed = False
+            if self._mail is not None and self._idle_ok is not False:
+                pushed = self._idle_wait(idle_timeout)
+                if pushed:
+                    self.last_mode = "idle-push"
+                    continue  # search immediately
+            else:
+                self.last_mode = "poll"
+                with self._cv:
+                    if self._stop or not self._waiters:
+                        continue
+                    if self._kick:
+                        continue
+                    self._cv.wait(timeout=interval)
+
+    @staticmethod
+    def _fetch_rfc822_bytes(data) -> bytes | None:
+        """Extract message bytes from imaplib FETCH response (all shapes)."""
+        if not data:
+            return None
+        for part in data:
+            if isinstance(part, tuple) and len(part) >= 2:
+                b = part[1]
+                if isinstance(b, (bytes, bytearray)) and len(b) > 20:
+                    return bytes(b)
+            elif isinstance(part, (bytes, bytearray)) and b"From:" in part:
+                return bytes(part)
+        return None
+
+    def _sweep_once(self, targets: dict[str, list[dict[str, Any]]]) -> int:
+        """SEARCH recent xAI mails (UNSEEN first) and deliver. Returns # hits.
+
+        Research-backed filters: UNSEEN reduces work; FROM/SUBJECT scopes to OTP.
+        Rescans a small recent tail every time so we never permanently skip a
+        mis-matched OTP (the watermark bug that left HUD spinning at 80s).
+        """
+        if not targets or not IMAP_USER or not IMAP_PASS:
+            return 0
+        if not self._ensure_conn():
+            return 0
+        mail = self._mail
+        assert mail is not None
+        self.last_mode = "search"
+
+        msg_ids: list[bytes] = []
+        try:
+            # 1) UNSEEN from x.ai — cheapest high-signal set (Gmail IMAP tips)
+            for crit in (
+                '(UNSEEN FROM "x.ai")',
+                '(UNSEEN SUBJECT "confirmation code")',
+                '(FROM "x.ai")',
+                '(SUBJECT "confirmation code")',
+            ):
+                typ, messages = mail.search(None, crit)
+                ids = messages[0].split() if messages and messages[0] else []
+                if ids:
+                    msg_ids = ids
+                    break
+        except Exception as e:
+            self.err_count += 1
+            print(f"[IMAP] search fail: {e}", flush=True)
+            self._disconnect()
+            return 0
+
+        # Newest first; cap tail for RAM/latency (c=5–8 burst fits in 40)
+        window = list(reversed(msg_ids[-40:])) if msg_ids else []
+        hits = 0
+        pending = dict(targets)
+
+        for mid in window:
+            if not pending:
+                break
+            try:
+                typ, data = mail.fetch(mid, "(RFC822.HEADER)")
+            except Exception as e:
+                self.err_count += 1
+                print(f"[IMAP] fetch fail: {e}", flush=True)
+                self._disconnect()
+                return hits
+            if typ != "OK":
+                continue
+            raw = self._fetch_rfc822_bytes(data)
+            if not raw:
+                try:
+                    typ, data = mail.fetch(mid, "(BODY.PEEK[HEADER])")
+                    raw = self._fetch_rfc822_bytes(data)
+                except Exception:
+                    raw = None
+            if not raw:
+                try:
+                    typ, data = mail.fetch(mid, "(RFC822)")
+                    raw = self._fetch_rfc822_bytes(data)
+                except Exception:
+                    raw = None
+            if not raw:
+                continue
+            try:
+                msg = message_from_bytes(raw)
+            except Exception:
+                continue
+            subject = msg.get("Subject", "") or ""
+            body = ""
+            code = _extract_xai_code(subject, "")
+            if not code:
+                body = _imap_msg_body_text(msg)
+                code = _extract_xai_code(subject, body)
+            if not code:
+                continue
+            if not _imap_try_claim_code(code):
+                continue
+            if not body:
+                try:
+                    body = _imap_msg_body_text(msg)
+                except Exception:
+                    body = ""
+
+            match_email: str | None = None
+            for email_l in list(pending.keys()):
+                local = email_l.split("@")[0]
+                if _imap_msg_matches_target(msg, body, email_l, local):
+                    match_email = email_l
+                    break
+            if not match_email:
+                with _claimed_otps_lock:
+                    _claimed_otps_sync.discard(code)
+                continue
+
+            with self._cv:
+                ok = self._deliver_locked(match_email, code)
+            if ok:
+                hits += 1
+                local = match_email.split("@")[0]
+                print(f"[IMAP] ✓ {code} → {local}@…", flush=True)
+                pending.pop(match_email, None)
+                try:
+                    mail.store(mid, "+FLAGS", "\\Seen")
+                except Exception:
+                    pass
+            else:
+                with _claimed_otps_lock:
+                    _claimed_otps_sync.discard(code)
+        return hits
+
+
+_IMAP_OTP_HUB = ImapOtpHub()
+
+
+def read_otp_from_imap_sync(
+    target_email: str, timeout: int = 180, since_ts: float | None = None
+) -> str | None:
+    """Wait for xAI OTP via shared IMAP hub (persistent, HEADER-first, c=8).
+
+    Codes arrive from noreply@x.ai with subject like \"K35-1QR xAI confirmation code\".
+    Catch-all domains forward into this inbox; hub matches routing headers.
+    """
+    if not IMAP_USER or not IMAP_PASS:
+        print("[IMAP] missing GROK_IMAP_USER/PASS", flush=True)
+        return None
+    return _IMAP_OTP_HUB.wait(target_email, timeout=timeout, since_ts=since_ts)
+
+
+def imap_hub_status() -> dict[str, Any]:
+    """HUD/keepalive helper — live hub stats without blocking."""
+    try:
+        return _IMAP_OTP_HUB.status()
+    except Exception as e:
+        return {"err": str(e)[:80]}
 
 
 # ── Vision CAPTCHA (interactive Turnstile puzzles) ───────────────────────────
@@ -1669,6 +2638,7 @@ _ATEXIT_REGISTERED = False
 # Serialize launch ownership snapshot so two browsers never claim the same temps
 _launch_lock: asyncio.Lock | None = None
 _launch_sem: asyncio.Semaphore | None = None
+_nav_sem: asyncio.Semaphore | None = None
 
 
 def _get_launch_sem() -> asyncio.Semaphore:
@@ -1677,6 +2647,14 @@ def _get_launch_sem() -> asyncio.Semaphore:
     if _launch_sem is None:
         _launch_sem = asyncio.Semaphore(LAUNCH_PARALLEL)
     return _launch_sem
+
+
+def _get_nav_sem() -> asyncio.Semaphore:
+    """Limit simultaneous first navigations to shared xAI/grok hosts."""
+    global _nav_sem
+    if _nav_sem is None:
+        _nav_sem = asyncio.Semaphore(NAV_PARALLEL)
+    return _nav_sem
 
 
 def effective_spawn_delay(concurrent: int) -> float:
@@ -1698,6 +2676,53 @@ def effective_spawn_delay(concurrent: int) -> float:
     return 0.0
 
 
+def first_wave_stagger_s(
+    slot_1based: int,
+    concurrent: int,
+    *,
+    spawn_delay: float | None = None,
+) -> float:
+    """Wall-clock sleep before starting account slot (pure).
+
+    First wave (slot <= concurrent): (slot-1)×delay so c workers don't all
+    boot at t=0. Refill (slot > concurrent): full single delay.
+    """
+    c = max(1, int(concurrent))
+    n = max(1, int(slot_1based))
+    sd = float(spawn_delay if spawn_delay is not None else effective_spawn_delay(c))
+    if sd <= 0:
+        return 0.0
+    if n <= c:
+        return sd * (n - 1)
+    return sd
+
+
+def shared_host_nav_stagger_s(
+    attempt_num: int,
+    concurrent: int,
+    *,
+    base_s: float | None = None,
+) -> float:
+    """Extra desync before first hit to shared auth hosts (pure).
+
+    Spawn stagger alone is not enough when c boots finish near the same
+    time under LAUNCH_PARALLEL — this spreads accounts.x.ai / grok.com gotos.
+    """
+    c = max(1, int(concurrent))
+    if c < 3:
+        return 0.0
+    if base_s is None:
+        b = min(0.75, max(0.20, effective_spawn_delay(c) * 0.35))
+    else:
+        try:
+            b = float(base_s)
+        except (TypeError, ValueError):
+            b = 0.0
+    if b <= 0:
+        return 0.0
+    return b * ((max(1, int(attempt_num)) - 1) % c)
+
+
 def post_exit_spawn_delay(base_s: float = 0.0, *, concurrent: int | None = None) -> float:
     """Cool-down after EXIT browsers before a NEW stack boots.
 
@@ -1712,6 +2737,60 @@ def post_exit_spawn_delay(base_s: float = 0.0, *, concurrent: int | None = None)
     except (TypeError, ValueError):
         base = 0.0
     return max(0.0, base, spawn)
+
+
+def may_kill_driver_pid(
+    pid: int | None,
+    tracked: set[int] | frozenset[int] | list[int],
+    *,
+    allow_untracked: bool = False,
+) -> bool:
+    """True if this PID may be killed (self-only unless session teardown)."""
+    if not pid:
+        return False
+    if allow_untracked:
+        return True
+    try:
+        return int(pid) in set(int(x) for x in tracked)
+    except (TypeError, ValueError):
+        return False
+
+
+def may_delete_profile(
+    path: str,
+    owned_by_others: set[str] | frozenset[str] | list[str],
+    *,
+    respect_others: bool = True,
+) -> bool:
+    """True if this temp profile path may be rmtree'd without cross-worker damage."""
+    if not path:
+        return False
+    ap = os.path.abspath(path)
+    if not respect_others:
+        return True
+    others = {os.path.abspath(p) for p in owned_by_others if p}
+    return ap not in others
+
+
+def claim_launch_profiles(
+    before: set[str] | frozenset[str] | list[str],
+    after: set[str] | frozenset[str] | list[str],
+    already_owned: set[str] | frozenset[str] | list[str],
+    currently_owned: set[str] | frozenset[str] | list[str] | None = None,
+) -> set[str]:
+    """Compute exclusive temp-profile claim from snapshot delta (pure).
+
+    Concurrent boots MUST run before→launch→after→claim under one lock so
+    ``after - before`` never includes a sibling's dirs. This pure helper is
+    the claim formula used after that exclusive window.
+    """
+    def _abs(xs: set[str] | frozenset[str] | list[str]) -> set[str]:
+        return {os.path.abspath(p) for p in xs if p}
+
+    b, a = _abs(before), _abs(after)
+    owned0 = _abs(already_owned)
+    owned1 = _abs(currently_owned or [])
+    return (a - b) - owned0 - owned1
 
 
 def _driver_pid(manager) -> int | None:
@@ -1801,9 +2880,17 @@ def _pid_alive(pid: int) -> bool:
 
 
 def startup_profile_sweep() -> int:
-    """Delete orphan Camoufox/Playwright temp dirs from prior crashed runs."""
+    """Delete orphan Camoufox/Playwright temp dirs from prior crashed runs.
+
+    Never deletes profiles still claimed by a live tracked browser
+    (safe if accidentally called mid-run).
+    """
     removed = 0
+    with _BROWSER_LOCK:
+        skip = set(_owned_profiles)
     for path in sorted(_snapshot_temp_profiles()):
+        if not may_delete_profile(path, skip, respect_others=True):
+            continue
         if _rmtree_retry(path, retries=2, delay=0.3):
             removed += 1
     if removed:
@@ -1824,6 +2911,15 @@ def _kill_pid_tree(pid: int, *, allow_untracked: bool = False) -> list[int]:
     if not pid:
         return []
     pid = int(pid)
+    with _BROWSER_LOCK:
+        tracked = set(_tracked_driver_pids)
+    if not may_kill_driver_pid(pid, tracked, allow_untracked=allow_untracked):
+        print(
+            f"[cleanup] refuse kill untracked pid={pid} "
+            f"(allow_untracked={allow_untracked})",
+            flush=True,
+        )
+        return []
     try:
         if sys.platform == "win32":
             # /T = only the tree rooted at THIS pid (not other node/camoufox)
@@ -1944,7 +3040,7 @@ def _remove_profile_dirs(
         if not p:
             continue
         ap = os.path.abspath(p)
-        if respect_others and ap in skip:
+        if not may_delete_profile(ap, skip, respect_others=respect_others):
             print(
                 f"[cleanup] skip profile still owned by another browser: {ap}",
                 flush=True,
@@ -2121,49 +3217,111 @@ class RecoverableFarmError(RuntimeError):
         super().__init__(message)
 
 
+# Permanent credential/auth failures — never self-heal loop these.
+_PERMANENT_ERROR_NEEDLES = (
+    "wrong password",
+    "invalid password",
+    "incorrect password",
+    "password is incorrect",
+    "invalid credentials",
+    "account locked",
+    "account suspended",
+    "too many failed login",
+)
+
+# Transient UI/browser/CF/OAuth — re-spawn NEW browser (+ new email).
+_RECOVERABLE_ERROR_NEEDLES = (
+    "could not find email input",
+    "failed to fill email",
+    "otp input never appeared",
+    "otp timeout",
+    "otp rejected",
+    "fill_otp hung",
+    "tempmail",
+    "generator.email",
+    "complete_signup stuck",
+    "complete_token",
+    "completeready",
+    "activate_grok_com failed",
+    "activatefail",
+    "activate_grok",
+    "page load error",
+    "couldn't load",
+    "could not load",
+    "connection closed",
+    "target closed",
+    "has been closed",  # Playwright: "Target page, context or browser has been closed"
+    "browser has been closed",
+    "context has been closed",
+    "page has been closed",
+    "browser/driver died",
+    "browsercrash",
+    "browser closed",
+    "timeout",
+    "navigation failed",
+    "net::",
+    "ns_error",
+    "execution context was destroyed",
+    "frame was detached",
+    "protocol error",
+    "oauth code not captured",
+    "oauth succeeded but access_token missing",
+    "token exchange",
+    "invalid_grant",
+    "http 400",
+    "bad request",
+    "chat probe failed",
+    "chatprobe",
+    "chat403",
+    "soft-retries",
+)
+
+
+def classify_error_recoverable(
+    err: BaseException | str,
+    *,
+    mail_mode: str | None = None,
+) -> tuple[bool, str]:
+    """Pure self-heal decision: (should_respawn, reason_tag).
+
+    - RecoverableFarmError → always respawn (caller honors UI_RETRIES bound)
+    - DomainRejectedError → not via this path (special tempmail/google branch)
+    - Permanent credential errors → False
+    - Known transient needles → True
+    Unit-tested; used by ``_is_recoverable_error``.
+    """
+    if isinstance(err, RecoverableFarmError):
+        return True, str(getattr(err, "tag", None) or "Recoverable")
+    if isinstance(err, DomainRejectedError):
+        # Always special-cased in _do_register (tempmail blacklist vs google re-roll).
+        # Never treat as generic Exception recover — caller uses DomainRejected branch.
+        return False, "DomainRejected"
+    if isinstance(err, asyncio.TimeoutError):
+        return True, "Timeout"
+    msg = str(err).lower()
+    if any(n in msg for n in _PERMANENT_ERROR_NEEDLES):
+        return False, "PermanentAuth"
+    if any(n in msg for n in _RECOVERABLE_ERROR_NEEDLES):
+        return True, "RecoverableMsg"
+    return False, "Unknown"
+
+
+def should_blacklist_on_domain_reject(mail_mode: str | None = None) -> bool:
+    """Only tempmail blacklists rejected domains; google never blacklists catch-all."""
+    return (mail_mode or MAIL_MODE or "google").lower() == "tempmail"
+
+
+def self_heal_should_retry(attempt: int, max_attempts: int, *, recoverable: bool) -> bool:
+    """True when another NEW-browser spawn is allowed (1-based attempt index)."""
+    if not recoverable:
+        return False
+    return 1 <= int(attempt) < int(max_attempts)
+
+
 def _is_recoverable_error(err: BaseException | str) -> bool:
     """True if this failure should re-spawn browser instead of permanent fail."""
-    if isinstance(err, RecoverableFarmError):
-        return True
-    if isinstance(err, DomainRejectedError):
-        return False
-    if isinstance(err, asyncio.TimeoutError):
-        return True
-    msg = str(err).lower()
-    needles = (
-        "could not find email input",
-        "failed to fill email",
-        "otp input never appeared",
-        "otp timeout",
-        "otp rejected",
-        "fill_otp hung",
-        "tempmail",
-        "generator.email",
-        "complete_signup stuck",
-        "activate_grok_com failed",
-        "page load error",
-        "couldn't load",
-        "connection closed",
-        "target closed",
-        "browser/driver died",
-        "browsercrash",
-        "timeout",
-        "navigation failed",
-        "net::",
-        "ns_error",
-        "execution context was destroyed",
-        "frame was detached",
-        "protocol error",
-        "oauth code not captured",
-        "oauth succeeded but access_token missing",
-        "token exchange",
-        "invalid_grant",
-        "http 400",
-        "bad request",
-        "activatefail",
-        "activate_grok",
-    )
-    return any(n in msg for n in needles)
+    ok, _tag = classify_error_recoverable(err)
+    return ok
 
 
 _BLACKLIST_LOCK = threading.Lock()
@@ -2232,19 +3390,25 @@ def email_domain(email: str) -> str:
 
 
 def get_grok_cli_version() -> str:
-    """Resolve x-grok-client-version. Cached; never stall workers (≤2s fetch)."""
+    """Resolve x-grok-client-version. Process-wide shared cache (all workers)."""
     global _CLI_VERSION_CACHE
     if _CLI_VERSION_CACHE:
         return _CLI_VERSION_CACHE
+    hit = shared_cache_get("grok_cli_version")
+    if isinstance(hit, str) and hit:
+        _CLI_VERSION_CACHE = hit
+        return hit
     try:
         with urllib.request.urlopen(CLI_VERSION_URL, timeout=2) as resp:
             v = (resp.read().decode("utf-8", errors="replace") or "").strip()
         if re.match(r"^\d+\.\d+\.\d+$", v):
             _CLI_VERSION_CACHE = v
+            shared_cache_set("grok_cli_version", v, ttl_s=86400.0)
             return v
     except Exception:
         pass
     _CLI_VERSION_CACHE = CLI_VERSION_FALLBACK
+    shared_cache_set("grok_cli_version", CLI_VERSION_FALLBACK, ttl_s=3600.0)
     return CLI_VERSION_FALLBACK
 
 
@@ -2540,6 +3704,75 @@ async def run_chat_probe_with_hud(
     return ok, status, detail, credits if isinstance(credits, dict) else empty_c
 
 
+def _probe_soft_retry_label(status: int, detail: str) -> str:
+    """Short HUD/log label for a failed probe attempt."""
+    d = (detail or "").lower()
+    if status == 403 or "permission-denied" in d:
+        return "403"
+    if status == 429 or "capacity" in d or "exhausted" in d:
+        return "429"
+    if status >= 500:
+        return str(status)
+    if status == 0 or "network error" in d or "timeout" in d:
+        return "net"
+    return str(status or "fail")
+
+
+def probe_soft_retry_wait(probe_i: int) -> float:
+    """Seconds to wait before soft-retry #probe_i (1-based, after a fail).
+
+    Growth is capped at 2× base so 5 retries stay fast (default base 1.0s →
+    1s + 2s + 2s + 2s max sleep ≈ 7s total vs old linear 2.5×i ≈ 25s).
+    """
+    i = max(1, int(probe_i or 1))
+    return float(PROBE_RETRY_BACKOFF_S) * float(min(i, 2))
+
+
+async def run_chat_probe_soft_retries(
+    attempt: int,
+    email_addr: str,
+    access_token: str,
+    *,
+    context: str = "farm",
+) -> tuple[bool, int, str, dict[str, Any]]:
+    """Same-session chat probe with soft-retries before EXIT / domain re-roll.
+
+    Owner for probe gate retries. Callers still decide permanent policy
+    (DomainRejected, RecoverableFarmError, refresh fail) when this returns ok=False.
+
+    Soft-retries every non-ok result (403 entitlement lag, 429 capacity, 5xx,
+    network) up to PROBE_RETRIES — never burns a full browser EXIT on first blip.
+    """
+    empty_c: dict[str, Any] = {
+        "credits_remaining": None,
+        "credits_limit": None,
+        "req_remaining": None,
+        "model": None,
+    }
+    ok, status, detail, credits = False, 0, "", empty_c
+    for probe_i in range(1, PROBE_RETRIES + 1):
+        ok, status, detail, credits = await run_chat_probe_with_hud(
+            attempt, email_addr, access_token, context=context,
+        )
+        if ok or probe_i >= PROBE_RETRIES:
+            break
+        label = _probe_soft_retry_label(status, detail or "")
+        wait = probe_soft_retry_wait(probe_i)
+        print(
+            f"[{attempt}] chat {label} soft-retry {probe_i}/{PROBE_RETRIES} "
+            f"(same session — no EXIT) after {wait:.1f}s",
+            flush=True,
+        )
+        emit_progress(
+            attempt,
+            "chat_probe",
+            f"{label} soft-retry {probe_i}/{PROBE_RETRIES}…",
+            email_addr,
+        )
+        await asyncio.sleep(wait)
+    return ok, status, detail, credits if isinstance(credits, dict) else empty_c
+
+
 # ── Browser helpers ──────────────────────────────────────────────────────────
 # Realistic screen caps for BrowserForge fingerprint generation (not fixed
 # window size — fixed windows are a fingerprint leak per Camoufox docs).
@@ -2560,6 +3793,59 @@ _STEALTH_OS_WEIGHTS: list[tuple[str, int]] = [
 ]
 
 
+# Prebuilt Screen objects (BrowserForge Screen() is not free at high concurrent).
+_SCREEN_POOL: list[Any] | None = None
+
+
+def _screen_pool() -> list[Any]:
+    global _SCREEN_POOL
+    if _SCREEN_POOL is not None:
+        return _SCREEN_POOL
+    pool: list[Any] = []
+    try:
+        from browserforge.fingerprints import Screen  # type: ignore
+
+        for w, h in _STEALTH_SCREENS:
+            try:
+                pool.append(Screen(max_width=w, max_height=h))
+            except Exception:
+                pass
+    except Exception:
+        pool = []
+    _SCREEN_POOL = pool
+    return _SCREEN_POOL
+
+
+# Process-wide TTL cache (CLI version, small HTTP helpers, etc.).
+# Does NOT replace browsers — only avoids repeat Python/network work.
+_SHARED_CACHE: dict[str, tuple[float, Any]] = {}
+_SHARED_CACHE_LOCK = threading.Lock()
+
+
+def shared_cache_get(key: str, default: Any = None) -> Any:
+    with _SHARED_CACHE_LOCK:
+        hit = _SHARED_CACHE.get(key)
+        if not hit:
+            return default
+        exp, val = hit
+        if exp and time.monotonic() > exp:
+            _SHARED_CACHE.pop(key, None)
+            return default
+        return val
+
+
+def shared_cache_set(key: str, value: Any, ttl_s: float = 3600.0) -> None:
+    exp = time.monotonic() + max(0.0, float(ttl_s)) if ttl_s else 0.0
+    with _SHARED_CACHE_LOCK:
+        _SHARED_CACHE[key] = (exp, value)
+        # Bound growth
+        if len(_SHARED_CACHE) > 256:
+            now = time.monotonic()
+            dead = [k for k, (e, _) in _SHARED_CACHE.items() if e and e < now]
+            for k in dead[:64]:
+                _SHARED_CACHE.pop(k, None)
+
+
 def _build_stealth_launch_kwargs(
     headless: bool,
     proxy_url: str | None,
@@ -2569,56 +3855,72 @@ def _build_stealth_launch_kwargs(
     """Camoufox launch options: geoIP, randomized FP, anti-automation.
 
     - geoip=True: timezone/locale/lat-lon match exit IP (proxy or direct).
-      Do NOT hardcode locale — that fights geoip and leaks "proxy IP in JP,
-      browser claims en-US only" style mismatches.
-    - block_webrtc: no real-IP leak via STUN.
-    - disable_coop: required so Cloudflare Turnstile checkbox is clickable
-      inside cross-origin iframes (Camoufox official Turnstile pattern).
-    - humanize: random cursor max duration (looks less robotic than fixed 0.5).
-    - os + screen: fresh BrowserForge fingerprint per browser instance.
-    - Camoufox itself strips Playwright automation markers / webdriver.
-    - block_images: save bandwidth (safe for tempmail OTP pages).
+    - disable_coop + forceScopeAccess: Turnstile clickable in CF iframes.
+    - humanize: short cursor path (never 0).
+    - LEAN_BROWSER: fewer processes + smaller memory caches (less RAM/CPU).
+    - block_images: tempmail only (signup off — breaks CF).
     """
     os_names = [n for n, _ in _STEALTH_OS_WEIGHTS]
     os_w = [w for _, w in _STEALTH_OS_WEIGHTS]
     os_pick = random.choices(os_names, weights=os_w, k=1)[0]
-    max_w, max_h = random.choice(_STEALTH_SCREENS)
-    # Low humanize — long mouse paths look like "animation" after Turnstile
-    # and slow every click. 0.15–0.35s is enough anti-bot without lag.
-    humanize = round(random.uniform(0.12, 0.35), 2)
+    # humanize: short = fast clicks. Floor 0.08 so CF still gets a path.
+    humanize = stealth_humanize_s(HUMANIZE_S)
+
+    prefs: dict[str, Any] = {
+        "dom.webdriver.enabled": False,
+        "media.peerconnection.enabled": False,
+        # OFF — tracking protection blocks challenges.cloudflare.com assets.
+        "privacy.trackingprotection.enabled": False,
+        "privacy.trackingprotection.pbmode.enabled": False,
+        "network.http.sendRefererHeader": 2,
+        "dom.event.clipboardevents.enabled": True,
+        "intl.accept_languages": "en-US,en",
+    }
+    if LEAN_BROWSER:
+        # Real RAM/CPU wins: one content process, smaller caches, less media.
+        prefs.update({
+            "dom.ipc.processCount": 1,
+            "dom.ipc.processCount.webIsolated": 1,
+            "fission.autostart": False,
+            "browser.cache.memory.enable": True,
+            "browser.cache.memory.capacity": 32768,  # KiB (~32MB) per process
+            "browser.sessionhistory.max_total_viewers": 0,
+            "browser.sessionhistory.max_entries": 5,
+            "media.autoplay.default": 5,  # block autoplay
+            "media.autoplay.enabled.user-gestures-needed": True,
+            "layers.acceleration.disabled": False,
+            "network.http.max-connections": 64,
+            "network.http.max-persistent-connections-per-server": 4,
+            "browser.tabs.remote.autostart": True,
+            "javascript.options.mem.high_water_mark": 32,
+        })
 
     kwargs: dict[str, Any] = {
         "headless": headless,
         "humanize": humanize,
         "os": os_pick,
         "geoip": True,
-        # Prefer English UI on accounts.x.ai — geoip alone often serves zh/ms
-        # chooser labels our English heal strings never match → reload loops.
         "locale": "en-US",
         "block_webrtc": True,
-        "disable_coop": True,  # Turnstile iframe clicks
-        # We intentionally set disable_coop; suppress Camoufox leak spam.
+        "disable_coop": True,
+        "config": {"forceScopeAccess": True},
         "i_know_what_im_doing": True,
-        "firefox_user_prefs": {
-            # Extra automation/noise hardening (Camoufox already spoofs webdriver).
-            "dom.webdriver.enabled": False,
-            "media.peerconnection.enabled": False,
-            "privacy.trackingprotection.enabled": True,
-            "network.http.sendRefererHeader": 2,
-            "dom.event.clipboardevents.enabled": True,
-            "intl.accept_languages": "en-US,en",
-        },
+        "firefox_user_prefs": prefs,
     }
     if block_images:
         kwargs["block_images"] = True
 
-    try:
-        from browserforge.fingerprints import Screen  # type: ignore
+    pool = _screen_pool()
+    if pool:
+        kwargs["screen"] = random.choice(pool)
+    else:
+        try:
+            from browserforge.fingerprints import Screen  # type: ignore
 
-        kwargs["screen"] = Screen(max_width=max_w, max_height=max_h)
-    except Exception:
-        # Screen constraint is optional — Camoufox still generates a random FP.
-        pass
+            max_w, max_h = random.choice(_STEALTH_SCREENS)
+            kwargs["screen"] = Screen(max_width=max_w, max_height=max_h)
+        except Exception:
+            pass
 
     if proxy_url:
         kwargs["proxy"] = _parse_proxy(proxy_url)
@@ -2761,45 +4063,62 @@ async def launch_browser(
       - After boot, workers proceed fully concurrent (OTP wait, probe, …).
 
     Isolation (WORKER_ISOLATION=true, default):
-      - Profile ownership claim is a short critical section only (so cleanup
-        never deletes a sibling worker's temp profile).
+      - before→launch→after→track is ONE exclusive critical section under
+        _launch_lock so snapshot deltas never attribute a sibling's
+        playwright_* paths (race when LAUNCH_PARALLEL>1).
+      - LAUNCH_PARALLEL still bounds how many waiters queue; boots serialize
+        only for the attribution window (safe under concurrent gather).
     """
     global _launch_lock
     if headless is None:
         headless = HEADLESS
+    # Image block: tempmail OK; signup only if GROK_BLOCK_IMAGES=true (risky for CF).
+    # Never force-block on activate/oauth — Turnstile must load fully.
+    if purpose in ("tempmail",):
+        use_block_images = bool(block_images) or TEMPMAIL_BLOCK_IMAGES
+    elif purpose in ("signup", "login", ""):
+        use_block_images = bool(block_images) or bool(SIGNUP_BLOCK_IMAGES)
+    else:
+        use_block_images = bool(block_images)  # activate/oauth: caller only
     kwargs = _build_stealth_launch_kwargs(
-        bool(headless), proxy_url, block_images=block_images
+        bool(headless), proxy_url, block_images=use_block_images
     )
 
     if _launch_lock is None:
         _launch_lock = asyncio.Lock()
 
-    # Bound concurrent boots — main home-net / disk choke under c>=3
+    # Bound waiters (network/CPU). Exclusive lock owns profile attribution.
     async with _get_launch_sem():
         print(
             f"[launch] {purpose} waiting slot… "
             f"(max {LAUNCH_PARALLEL} simultaneous boots)",
             flush=True,
         )
-        # Snapshot unowned profiles BEFORE launch (no long hold)
-        before_profiles = await _run_io(_snapshot_temp_profiles)
-        with _BROWSER_LOCK:
-            already_owned = set(_owned_profiles)
-
         t0 = time.monotonic()
-        manager = AsyncCamoufox(**kwargs)
-        browser = await manager.__aenter__()
-        # Brief settle so playwright_* dirs exist; yield so HUD can paint
-        await asyncio.sleep(0.12)
-        after_profiles = await _run_io(_snapshot_temp_profiles)
-        candidates = (after_profiles - before_profiles) - already_owned
-
-        # Claim exclusive ownership under lock (short)
+        # CRITICAL: entire before→launch→after→claim under one lock.
+        # Concurrent gather(launch×N) with only a short claim lock races:
+        # first claimer can own a sibling's playwright_* dirs and rmtree them.
         async with _launch_lock:
+            before_profiles = await _run_io(_snapshot_temp_profiles)
             with _BROWSER_LOCK:
-                owned = candidates - set(_owned_profiles)
+                already_owned = set(_owned_profiles)
+
+            manager = AsyncCamoufox(**kwargs)
+            browser = await manager.__aenter__()
+            # Settle so playwright_* dirs exist before after-snapshot
+            await asyncio.sleep(0.12)
+            after_profiles = await _run_io(_snapshot_temp_profiles)
+            with _BROWSER_LOCK:
+                currently = set(_owned_profiles)
+            owned = claim_launch_profiles(
+                before_profiles,
+                after_profiles,
+                already_owned,
+                currently,
+            )
             _track_browser(manager, profiles=owned)
 
+        # new_page outside claim lock — siblings can boot next attribution window
         page = await browser.new_page()
         page.set_default_timeout(60000)
         # Only Grok signup/OAuth pages stream to Browser Logs (not temp-mail).
@@ -2819,7 +4138,8 @@ async def launch_browser(
             print(
                 f"[stealth] {purpose} boot={boot_ms}ms os={_os} humanize={_hum}s "
                 f"screen≤{_scr_s} geoip=on webrtc=block coop=off "
-                f"headless={headless} block_images={block_images}",
+                f"headless={headless} block_images={block_images} "
+                f"profiles_claimed={len(owned)}",
                 flush=True,
             )
         except Exception:
@@ -3626,22 +4946,45 @@ def classify_signup_api_response(
     return "ignore"
 
 
-async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
+# Per-page short TTL cache: (mono_ts, lite_flag, state_dict) keyed by id(page)
+_page_state_cache: dict[int, tuple[float, bool, dict[str, Any]]] = {}
+
+
+async def read_page_state(
+    page,
+    *,
+    aria: bool = False,
+    lite: bool = False,
+    use_cache: bool = True,
+) -> dict[str, Any]:
     """Single evaluate: URL, body signals, visible controls, loading flags.
 
-    Used by smart wait/click/heal so we don't hammer dead clicks while SPA loads.
-    aria=True merges accessibility snapshot (slower — use on complete/unknown only).
+    aria=True merges accessibility snapshot (slower — complete/unknown only).
+    lite=True: cheaper settle/wait polls (skip button scan) — big CPU win at c>5.
+    use_cache: short TTL reuse for same page (PAGE_STATE_CACHE_S).
     """
+    # Under CPU_SAVER, default to lite unless caller wants full/aria
+    if CPU_SAVER and not aria and not lite:
+        lite = True
+    pid = id(page)
+    now = time.monotonic()
+    if use_cache and PAGE_STATE_CACHE_S > 0 and not aria:
+        hit = _page_state_cache.get(pid)
+        if hit is not None:
+            ts, was_lite, cached = hit
+            if (now - ts) <= PAGE_STATE_CACHE_S and (not was_lite or lite):
+                return cached
     try:
         st = await page.evaluate(
-            """() => {
+            """(lite) => {
               const body = (document.body && document.body.innerText) || '';
-              const b = body.slice(0, 2500).toLowerCase();
+              const bodyCap = lite ? 900 : 2500;
+              const b = body.slice(0, bodyCap).toLowerCase();
               const url = location.href || '';
               const title = (document.title || '').toLowerCase();
               const htmlLang = (document.documentElement && document.documentElement.lang) || '';
               const ready = document.readyState || '';
-              const spinners = document.querySelectorAll(
+              const spinners = lite ? 0 : document.querySelectorAll(
                 '[aria-busy="true"], .loading, .spinner, [class*="spinner" i], [class*="Loading"]'
               ).length;
               const has = (re) => re.test(b) || re.test(title);
@@ -3655,43 +4998,58 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
               const q = (sel) => {
                 try { return [...document.querySelectorAll(sel)].some(vis); } catch(e) { return false; }
               };
-              const btns = [...document.querySelectorAll(
-                'button, a[role="button"], [role="button"], input[type="submit"]'
-              )].filter(vis).map(el => (el.innerText||el.textContent||el.value||'').trim())
-                .filter(t => t && t.length < 80).slice(0, 24);
-              const btnJoin = btns.join(' | ').toLowerCase();
+              let btns = [];
+              let btnJoin = '';
               const hasBtn = (re) => re.test(btnJoin);
+              if (!lite) {
+                btns = [...document.querySelectorAll(
+                  'button, a[role="button"], [role="button"], input[type="submit"]'
+                )].filter(vis).map(el => (el.innerText||el.textContent||el.value||'').trim())
+                  .filter(t => t && t.length < 80).slice(0, 16);
+                btnJoin = btns.join(' | ').toLowerCase();
+              }
               const cf = has(/verify you are human|just a moment|hanya sebentar|checking your browser|performing security verification|security service to protect/)
                 || q("iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]");
               const loadErr = has(/couldn't load|could not load|page isn't available|can't be reached|aw snap/);
               const cookie = q('#onetrust-accept-btn-handler, #onetrust-banner-sdk, [id*="onetrust"]')
-                || has(/cookie|kuki|çerez|куки|ملف تعريف الارتباط|குக்கீ/)
-                   && hasBtn(/accept|reject|terima|tolak|acept|aceitar|accepter|akzept|接受|拒绝|拒絕|수락|거부|อนุญาต|ปฏิเสธ|chấp nhận|ஏற்று|நிராகரி|قبول|رفض|zaakcept|прийнят|принять/i);
+                || (has(/cookie|kuki|çerez|куки/) && (lite
+                    ? has(/accept|reject|terima|tolak|acept|accepter/)
+                    : hasBtn(/accept|reject|terima|tolak|acept|aceitar|accepter|akzept|接受|拒绝|拒絕|수락|거부|อนุญาต|ปฏิเสธ|chấp nhận|ஏற்று|நிராகரி|قبول|رفض|zaakcept|прийнят|принять/i)));
               const emailIn = q('input[type="email"], input[name="email"], input[autocomplete="email"]');
               const passIn = q('input[type="password"]');
               const otpIn = q('input[name="code"], input[autocomplete="one-time-code"], input[maxlength="1"]');
               const firstIn = q('input[name*="first" i], input[autocomplete="given-name"]');
-              // Multi-locale provider chooser (geoip UI ≠ English)
-              const chooserSignup = hasBtn(/sign up with email|continue with email/i)
+              const chooserSignup = lite
+                ? (has(/sign up with email|continue with email|daftar dengan/i) && !emailIn)
+                : (hasBtn(/sign up with email|continue with email/i)
                 || hasBtn(/使用邮箱|使用電子郵|使用电子邮件|用邮箱/)
                 || hasBtn(/daftar dengan (e-?mel|email)/i)
                 || hasBtn(/s'inscrire|registrarse|cadastrar|メールで登録|이메일로|e-posta ile kaydol|зарегистрироваться|đăng ký bằng|สมัครด้วย|registrati con|aanmelden met e-mail|zarejestruj/i)
                 || hasBtn(/google|apple/) && hasBtn(/sign up|daftar|注册|註冊|登録|가입|registr|cadastr|inscri|สมัคร|đăng ký|kaydol|регистр/i)
-                && !emailIn;
-              const chooserLogin = hasBtn(/log\\s*in with email|sign in with email|login with email/i)
+                && !emailIn);
+              const chooserLogin = lite
+                ? (has(/log\\s*in with email|sign in with email|login with email|masuk dengan email/i) && !passIn)
+                : (hasBtn(/log\\s*in with email|sign in with email|login with email/i)
                 || hasBtn(/使用邮箱登录|使用邮箱登入|使用電子郵件登入/)
-                || hasBtn(/masuk dengan email|log masuk dengan|entrar com|se connecter|iniciar sesión|メールでログイン|이메일로 로그인|e-posta ile giriş|войти.*email|đăng nhập bằng|เข้าสู่ระบบด้วย|accedi con|inloggen met/i);
+                || hasBtn(/masuk dengan email|log masuk dengan|entrar com|se connecter|iniciar sesión|メールでログイン|이메일로 로그인|e-posta ile giriş|войти.*email|đăng nhập bằng|เข้าสู่ระบบด้วย|accedi con|inloggen met/i));
               const complete = has(/complete your sign up|complete sign up/)
                 || has(/完成注册|完成註冊|selesaikan pendaftaran|registrierung abschließen|terminer l'inscription|completar registro|concluir cadastro|登録を完了|가입 완료|hoàn tất đăng ký|kaydı tamamla|завершить регистрацию/);
               const verify = has(/verify your email|confirmation code/)
                 || has(/验证.*邮件|驗證|verifikasi|sahkan|確認コード|인증 코드|código de confirmación|code de confirmation/);
               const consent = (has(/\\ballow\\b|authorize this|grant access/)
-                || has(/允许|允許|benarkan|izinkan|permitir|autoriser|zulassen|許可|허용|อนุญาت|cho phép|سماح|izin ver|разрешить/))
+                || has(/允许|允許|benarkan|izinkan|permitir|autoriser|zulassen|許可|허용|อนุญาต|cho phép|سماح|izin ver|разрешить/))
                 && (url.includes('oauth') || url.includes('consent') || url.includes('authorize'));
+              // Post-Allow SPA often keeps consent URL but body becomes copy-code UI
+              const userCode = has(/enter this code|finish signing in|copy the code|automatically detect|please don't refresh|do not refresh this page|successful completion/);
               const account = /accounts\\.x\\.ai\\/account\\/?$/.test(url.replace(/\\/$/,''))
                 || url.includes('accounts.x.ai/account');
               const grok = url.includes('grok.com') && !cf;
-              const chat = grok && (q('textarea, [contenteditable="true"]') || has(/ask grok|what do you want/));
+              // Product chat only — bare grok.com URL is NOT grok_chat (skeptic: blank black page)
+              const chat = grok && (
+                q('textarea, [contenteditable="true"]')
+                || q('input[placeholder*="Ask" i], [data-testid*="chat" i], [data-testid*="composer" i], [data-testid*="prompt" i]')
+                || has(/ask grok|what do you want|message grok|how can i help/)
+              );
               let stage = 'unknown';
               if (loadErr) stage = 'page_error';
               else if (cf) stage = 'cf_challenge';
@@ -3705,36 +5063,42 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
               else if (passIn && (url.includes('sign-in') || chooserLogin || has(/log in|sign in|masuk|登录|登入|ログイン|로그인/)))
                 stage = 'signin_form';
               else if (chooserLogin && !passIn) stage = 'signin_chooser';
+              else if (userCode) stage = 'oauth_user_code';
               else if (consent) stage = 'oauth_consent';
               else if (account) stage = 'account_home';
               else if (chat) stage = 'grok_chat';
-              else if (grok) stage = 'grok_chat';
+              else if (grok) stage = 'grok_landing';
               else if (ready !== 'complete' || spinners > 0) stage = 'loading';
               return {
                 url, title, ready, stage, spinners, htmlLang,
                 loading: ready !== 'complete' || spinners > 0,
                 cf, loadErr, cookie, emailIn, passIn, otpIn, firstIn,
-                chooserSignup, chooserLogin, complete, verify, consent, account, grok, chat,
+                chooserSignup, chooserLogin, complete, verify, consent, userCode,
+                account, grok, chat,
                 buttons: btns,
                 bodySample: body.slice(0, 180).replace(/\\s+/g, ' '),
+                lite: !!lite,
               };
-            }"""
+            }""",
+            lite,
         )
         if isinstance(st, dict):
-            # Detect UI language from sample (geoip pages often not English)
-            try:
-                st["uiLang"] = detect_ui_language(
-                    body=str(st.get("bodySample") or ""),
-                    html_lang=str(st.get("htmlLang") or ""),
-                    buttons=list(st.get("buttons") or []),
-                )
-            except Exception:
-                st["uiLang"] = "en"
-            # Optional hybrid overlay (roles/disabled). Off by default — heal polls
-            # often; full a11y snapshot each tick is too slow.
+            if not lite:
+                try:
+                    st["uiLang"] = detect_ui_language(
+                        body=str(st.get("bodySample") or ""),
+                        html_lang=str(st.get("htmlLang") or ""),
+                        buttons=list(st.get("buttons") or []),
+                    )
+                except Exception:
+                    st["uiLang"] = "en"
+            else:
+                st["uiLang"] = st.get("uiLang") or "en"
             if aria:
                 try:
-                    snap = await _page_aria_snapshot(page, timeout_ms=1200)
+                    snap = await _page_aria_snapshot(
+                        page, timeout_ms=900 if CPU_SAVER else 1200
+                    )
                     sig = parse_aria_snapshot_signals(snap)
                     st["aria"] = sig
                     if sig.get("hasAria"):
@@ -3772,6 +5136,13 @@ async def read_page_state(page, *, aria: bool = False) -> dict[str, Any]:
                                 st["stage"] = "signin_form"
                 except Exception:
                     pass
+            if use_cache and PAGE_STATE_CACHE_S > 0 and not aria:
+                _page_state_cache[pid] = (time.monotonic(), bool(lite), st)
+                if len(_page_state_cache) > 64:
+                    cutoff = time.monotonic() - max(2.0, PAGE_STATE_CACHE_S * 4)
+                    for k in list(_page_state_cache.keys()):
+                        if _page_state_cache[k][0] < cutoff:
+                            _page_state_cache.pop(k, None)
             return st
     except Exception as e:
         return {
@@ -3794,8 +5165,9 @@ async def wait_dom_ready(
     """Poll until document complete / not spinning, or stage is actionable."""
     deadline = time.monotonic() + timeout_s
     last: dict[str, Any] = {}
+    interval = dom_poll_s()
     while time.monotonic() < deadline:
-        last = await read_page_state(page)
+        last = await read_page_state(page, lite=True)
         stage = last.get("stage") or "unknown"
         # Actionable stages — don't wait for "perfect" idle
         if stage in (
@@ -3807,16 +5179,78 @@ async def wait_dom_ready(
             "signin_chooser",
             "signin_form",
             "oauth_consent",
+            "oauth_user_code",
             "account_home",
             "grok_chat",
+            "grok_landing",
             "page_error",
             "cookie",
         ):
             return last
         if want_not_loading and not last.get("loading"):
             return last
-        await asyncio.sleep(0.2)
-    return last or await read_page_state(page)
+        await asyncio.sleep(interval)
+    return last or await read_page_state(page, lite=True)
+
+
+async def settle_page(
+    page,
+    attempt: int = 0,
+    *,
+    timeout_s: float = 3.0,
+    want_stages: set[str] | frozenset[str] | None = None,
+    leave_stages: set[str] | frozenset[str] | None = None,
+    poll_s: float | None = None,
+) -> dict[str, Any]:
+    """Context-aware settle after a click/nav — prefer over blind sleep.
+
+    Returns as soon as:
+      - stage is in want_stages, or
+      - stage left leave_stages (and not loading), or
+      - actionable stage / not loading (when no want/leave set), or
+      - timeout (returns last state).
+
+    Poll interval scales with CONCURRENT (dom_poll_s) to cut CPU at c>5.
+    """
+    want = set(want_stages) if want_stages else None
+    leave = set(leave_stages) if leave_stages else None
+    deadline = time.monotonic() + max(0.2, float(timeout_s))
+    interval = dom_poll_s() if poll_s is None else max(0.08, float(poll_s))
+    last: dict[str, Any] = {}
+    actionable = (
+        "cf_challenge",
+        "signup_chooser",
+        "signup_email",
+        "signup_otp",
+        "signup_profile",
+        "signin_chooser",
+        "signin_form",
+        "oauth_consent",
+        "oauth_user_code",
+        "account_home",
+        "grok_chat",
+        "grok_landing",
+        "page_error",
+        "cookie",
+    )
+    while time.monotonic() < deadline:
+        try:
+            last = await read_page_state(page, lite=True)
+        except Exception as e:
+            last = {"stage": "unknown", "loading": True, "error": str(e)[:80]}
+        stage = str(last.get("stage") or "unknown")
+        loading = bool(last.get("loading"))
+        if want and stage in want:
+            return last
+        if leave and stage not in leave and not loading:
+            return last
+        if not want and not leave:
+            if stage in actionable:
+                return last
+            if not loading and stage not in ("unknown", "loading"):
+                return last
+        await asyncio.sleep(interval)
+    return last or {"stage": "unknown", "loading": True}
 
 
 async def smart_click(
@@ -4263,16 +5697,18 @@ async def read_turnstile_state(page) -> dict[str, Any]:
                     """() => {
                       const html = document.body ? document.body.innerHTML : '';
                       const text = document.body ? (document.body.innerText || '') : '';
+                      // Strict success only — loose SVG/short-body caused false
+                      // "loading" and blocked re-clicks while tok still 0.
                       if (/aria-checked=["']true["']/i.test(html)) return true;
                       if (/data-state=["']checked["']/i.test(html)) return true;
-                      if (/\\bsuccess\\b|\\bpassed\\b|\\bverified\\b/i.test(html)) return true;
+                      if (/data-state=["']success["']/i.test(html)) return true;
                       const cb = document.querySelector(
                         'input[type="checkbox"], [role="checkbox"]'
                       );
                       if (cb && (cb.checked || cb.getAttribute('aria-checked') === 'true'))
                         return true;
-                      // Solved managed widget often has short body + svg check
-                      if (document.querySelector('svg') && text.length < 30
+                      // Marked success class without checkbox text
+                      if (/\\bcb-success\\b|\\bsuccess-circle\\b/i.test(html)
                           && !/verify you are human/i.test(text))
                         return true;
                       return false;
@@ -4302,7 +5738,11 @@ async def read_turnstile_state(page) -> dict[str, Any]:
     elif success_ui:
         st["phase"] = "loading"  # checked look, wait for token field
     elif st["mounted"] or st["label"] or st["iframe_n"] > 0:
-        st["phase"] = "need_click" if (st["label"] or st["iframe_n"] > 0) else "loading"
+        # Prefer need_click whenever a widget is visible — "loading" without
+        # success_ui was stranding us waiting forever with tok=0.
+        st["phase"] = "need_click" if (
+            st["label"] or st["iframe_n"] > 0 or st["mounted"]
+        ) else "loading"
     else:
         st["phase"] = "absent"
     return st
@@ -4315,11 +5755,12 @@ async def wait_for_turnstile_solved(
     timeout_s: float = 8.0,
     after: str = "click",
 ) -> dict[str, Any]:
-    """Poll DOM until token / fail / timeout. Fast poll (0.25s)."""
+    """Poll DOM until token / fail / timeout. Fixed fast poll (TS_POLL_S)."""
     deadline = time.monotonic() + max(1.5, timeout_s)
     last_phase = ""
     st: dict[str, Any] = {}
     t0 = time.monotonic()
+    poll = float(TS_POLL_S)
     while time.monotonic() < deadline:
         st = await read_turnstile_state(page)
         phase = str(st.get("phase") or "")
@@ -4343,8 +5784,8 @@ async def wait_for_turnstile_solved(
         if st.get("failed"):
             print(f"[{attempt}] Turnstile FAILED during wait({after})", flush=True)
             return st
-        # If checkbox looks checked, keep waiting for token (do not re-click)
-        await asyncio.sleep(0.25 if phase == "loading" else 0.3)
+        # Fixed interval — do NOT use dom_poll_s (too slow at c=8, misses tokens)
+        await asyncio.sleep(poll)
     st = await read_turnstile_state(page)
     print(
         f"[{attempt}] Turnstile wait({after}) done: phase={st.get('phase')} "
@@ -4366,11 +5807,9 @@ async def turnstile_visible(page) -> bool:
 
 
 async def try_click_turnstile(page, attempt: int) -> bool:
-    """One real, non-force click on the managed Turnstile checkbox.
+    """Fast real click on managed Turnstile checkbox (minimal pre-delay).
 
-    Context-aware: only click visible targets. Prefer CF frame checkbox,
-    then host "Verify you are human", then left edge of iframe box.
-    No force=True — real hit testing so CF accepts the interaction.
+    Prefer CF frame checkbox → host label → iframe box. No force=True.
     """
     try:
         st = await read_turnstile_state(page)
@@ -4388,19 +5827,18 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                 return False
             target = loc.first
             try:
-                if not await target.is_visible(timeout=800):
+                if not await target.is_visible(timeout=400):
                     return False
             except Exception:
                 return False
             try:
-                await target.scroll_into_view_if_needed(timeout=1200)
+                await target.scroll_into_view_if_needed(timeout=600)
             except Exception:
                 pass
-            await asyncio.sleep(random.uniform(0.05, 0.12))
             if pos:
-                await target.click(timeout=2000, position=pos)
+                await target.click(timeout=1500, position=pos)
             else:
-                await target.click(timeout=2000)
+                await target.click(timeout=1500)
             print(f"[{attempt}] Turnstile: click {label}", flush=True)
             return True
         except Exception:
@@ -4418,6 +5856,7 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                 'input[type="checkbox"]',
                 'label input[type="checkbox"]',
                 '[role="checkbox"]',
+                ".ctp-checkbox-label",
             ):
                 try:
                     loc = f.locator(sel)
@@ -4425,10 +5864,9 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                         return True
                 except Exception:
                     continue
-            # Click left side of frame body (checkbox zone)
             try:
                 body = f.locator("body")
-                if await _real_click(body, "frame:body", pos={"x": 22, "y": 28}):
+                if await _real_click(body, "frame:body", pos={"x": 24, "y": 28}):
                     return True
             except Exception:
                 pass
@@ -4446,7 +5884,7 @@ async def try_click_turnstile(page, attempt: int) -> bool:
             except Exception:
                 continue
 
-        # 3) Iframe / widget box — left edge (checkbox)
+        # 3) Iframe box — left edge (fast mouse path, few steps)
         for sel in (
             'iframe[src*="challenges.cloudflare.com"]',
             'iframe[src*="turnstile"]',
@@ -4458,15 +5896,19 @@ async def try_click_turnstile(page, attempt: int) -> bool:
                 if await loc.count() == 0:
                     continue
                 try:
-                    if not await loc.is_visible(timeout=600):
+                    if not await loc.is_visible(timeout=350):
                         continue
                 except Exception:
                     continue
-                box = await loc.bounding_box(timeout=1200)
+                box = await loc.bounding_box(timeout=700)
                 if not box or box["width"] < 8:
                     continue
                 x = box["x"] + min(26, max(14, box["width"] * 0.12))
                 y = box["y"] + box["height"] / 2
+                try:
+                    await page.mouse.move(x, y, steps=random.randint(2, 5))
+                except Exception:
+                    pass
                 await page.mouse.click(x, y)
                 print(f"[{attempt}] Turnstile: click box {sel}", flush=True)
                 return True
@@ -4639,8 +6081,12 @@ async def _force_turnstile_remount(
                     )
         except Exception:
             pass
-    # Give CF time to re-fetch challenge (concurrent IP needs breathing room)
-    await asyncio.sleep(2.5 if hard else 2.0)
+    # Short settle after reset — click loop will wait for mount/token
+    await asyncio.sleep(0.45 if hard else 0.3)
+    await settle_page(
+        page, 0, timeout_s=1.8 if hard else 1.2,
+        want_stages=frozenset({"cf_challenge", "signup_profile", "signin_form"}),
+    )
 
 
 async def _on_complete_signup_form(page) -> bool:
@@ -4811,16 +6257,257 @@ def classify_complete_success(
     return False
 
 
+# ── Pure page/activate/OAuth classifiers (unit-tested; no browser I/O) ──────
+
+_CF_CHALLENGE_NEEDLES = (
+    "verify you are human",
+    "performing security verification",
+    "checking your browser",
+    "just a moment",
+    "hanya sebentar",
+    "enable javascript and cookies",
+    "security service to protect against malicious bots",
+)
+
+_OAUTH_USER_CODE_NEEDLES = (
+    "enter this code",
+    "finish signing in",
+    "copy the code",
+    "don't refresh this page",
+    "do not refresh this page",
+    "please don't refresh",
+    "automatically detect",
+    "successful completion",
+)
+
+
+def classify_cf_challenge(
+    title: str = "",
+    body: str = "",
+    *,
+    has_cf_dom: bool = False,
+) -> bool:
+    """True when title/body/DOM signals a Cloudflare managed challenge."""
+    if has_cf_dom:
+        return True
+    t = (title or "").lower()
+    b = (body or "").lower()
+    return any(n in t or n in b for n in _CF_CHALLENGE_NEEDLES)
+
+
+_PRODUCT_CHAT_BODY_NEEDLES = (
+    "ask grok",
+    "what do you want",
+    "message grok",
+    "how can i help",
+    "how can we help",
+    "chat with grok",
+)
+
+
+def classify_grok_past_cf(
+    url: str = "",
+    title: str = "",
+    body: str = "",
+    *,
+    has_cf_dom: bool = False,
+    has_chat: bool = False,
+    has_signin: bool = False,
+    body_len: int | None = None,
+) -> bool:
+    """True when on grok.com past CF with non-blank surface (not product-success).
+
+    Blank / near-empty pages (black CF residue, empty SPA shell) are NOT past-CF-ready.
+    """
+    url_l = (url or "").lower()
+    if "grok.com" not in url_l:
+        return False
+    if "accounts.x.ai" in url_l or "auth.x.ai" in url_l:
+        return False
+    if classify_cf_challenge(title, body, has_cf_dom=has_cf_dom):
+        return False
+    if has_chat or has_signin:
+        return True
+    b = body or ""
+    n = body_len if body_len is not None else len(b.strip())
+    if n < 40:
+        return False
+    if "cloudflare" in b.lower():
+        return False
+    return True
+
+
+def classify_grok_page_ready(
+    url: str = "",
+    title: str = "",
+    body: str = "",
+    *,
+    has_ui: bool = False,
+    has_cf_dom: bool = False,
+) -> bool:
+    """True when grok.com shows product chat UI (composer), not bare URL.
+
+    has_ui must mean real chat/composer DOM — never bare grok.com hostname.
+    Body-only path requires product chat needles (not just the word 'grok').
+    """
+    url_l = (url or "").lower()
+    if "grok.com" not in url_l:
+        return False
+    if "accounts.x.ai" in url_l or "auth.x.ai" in url_l:
+        return False
+    if classify_cf_challenge(title, body, has_cf_dom=has_cf_dom):
+        return False
+    if has_ui:
+        return True
+    body_l = (body or "").lower()
+    if "cloudflare" in body_l:
+        return False
+    return any(n in body_l for n in _PRODUCT_CHAT_BODY_NEEDLES)
+
+
+def classify_activate_outcome(
+    url: str,
+    *,
+    has_chat: bool = False,
+    has_signin: bool = False,
+    still_cf: bool = False,
+) -> tuple[bool, str]:
+    """Activate hard-fail classifier. Returns (ok, reason).
+
+    ok=True only with positive product chat signal on grok.com.
+    Blank / marketing-only grok.com without chat is hard-fail (no_product_ui).
+    """
+    url_l = (url or "").lower()
+    if "accounts.x.ai" in url_l or "auth.x.ai" in url_l:
+        return False, "still_on_auth"
+    if "grok.com" not in url_l:
+        return False, "unexpected_url"
+    if still_cf and not has_chat:
+        return False, "still_cf"
+    if has_signin and not has_chat:
+        return False, "still_signin"
+    if not has_chat:
+        return False, "no_product_ui"
+    return True, "ok"
+
+
+def classify_oauth_post_allow(
+    url: str = "",
+    body: str = "",
+    *,
+    code_ready: bool = False,
+    has_allow_btn: bool = False,
+) -> str:
+    """Classify progress after OAuth Allow (DOM/URL/code — not click-only).
+
+    Returns one of:
+      code_ready | redirected | user_code | left_consent | stuck_consent | unknown
+    """
+    if code_ready:
+        return "code_ready"
+    url_l = (url or "").lower()
+    body_l = (body or "").lower()
+    if extract_code_from_url(url or ""):
+        return "redirected"
+    if ("127.0.0.1" in url_l or "localhost" in url_l) and "code=" in url_l:
+        return "redirected"
+    if any(n in body_l for n in _OAUTH_USER_CODE_NEEDLES):
+        return "user_code"
+    on_consent = "/oauth2/consent" in url_l
+    if on_consent and has_allow_btn:
+        return "stuck_consent"
+    if on_consent:
+        # SPA often keeps consent URL while body becomes user-code / loading
+        if "deny" in body_l and "allow" in body_l:
+            return "stuck_consent"
+        return "unknown"
+    if "sign-in" in url_l or "/login" in url_l:
+        return "unknown"
+    return "left_consent"
+
+
+def extract_oauth_code_from_text(text: str) -> str | None:
+    """Extract OAuth authorization code from page text / code UI (pure)."""
+    if not text:
+        return None
+    m = re.search(r"(?:[?&#\s]|^)code=([A-Za-z0-9._~+/-]{16,256})", text)
+    if m:
+        return m.group(1).rstrip(".,;:'\")}]")
+    m = re.search(
+        r"(?:authorization\s*code|auth\s*code|\bcode)\s*[:=]\s*['\"]?"
+        r"([A-Za-z0-9._~+/-]{16,256})",
+        text,
+        re.I,
+    )
+    if m:
+        return m.group(1).rstrip(".,;:'\")}]")
+    for line in text.splitlines():
+        s = line.strip().strip("'\"`")
+        if 20 <= len(s) <= 256 and re.fullmatch(r"[A-Za-z0-9._~+/-]+", s):
+            if s.lower().startswith("http"):
+                continue
+            # Skip pure words without digit/mixed entropy
+            if re.fullmatch(r"[A-Za-z]+", s):
+                continue
+            return s
+    return None
+
+
+async def scrape_oauth_code_from_page(page) -> str | None:
+    """DOM scrape for OAuth code (callback URL, code/pre, labeled text)."""
+    try:
+        data = await page.evaluate(
+            """() => {
+              const body = (document.body && document.body.innerText) || '';
+              const href = location.href || '';
+              const nodes = [...document.querySelectorAll(
+                'code, pre, kbd, [data-code], [data-testid*="code" i], '
+                + 'input[readonly], input[type="text"], input[type="password"]'
+              )];
+              const codes = nodes.map(el =>
+                (el.value || el.innerText || el.textContent || '').trim()
+              ).filter(t => t && t.length >= 12 && t.length <= 256).slice(0, 12);
+              return { href, body: body.slice(0, 4000), codes };
+            }"""
+        )
+    except Exception:
+        return None
+    if not isinstance(data, dict):
+        return None
+    href = str(data.get("href") or "")
+    c = extract_code_from_url(href) or extract_oauth_code_from_text(href)
+    if c:
+        return c
+    for chunk in data.get("codes") or []:
+        s = str(chunk or "").strip()
+        got = extract_oauth_code_from_text(s)
+        if got:
+            return got
+        if 16 <= len(s) <= 256 and re.fullmatch(r"[A-Za-z0-9._~+/-]+", s):
+            if not re.fullmatch(r"[A-Za-z]+", s):
+                return s
+    return extract_oauth_code_from_text(str(data.get("body") or ""))
+
+
 async def _complete_form_succeeded(page) -> bool:
     """True if we left the complete-signup step (positive signals only)."""
     try:
         url = page.url or ""
         st = await _read_complete_form_state(page)
+        # Cheap path first (no a11y snapshot). aria only if stage is murky.
         try:
-            # aria=True once here helps when DOM stage is unknown after navigate
-            stage = str((await read_page_state(page, aria=True)).get("stage") or "")
+            pst = await read_page_state(page, lite=True, aria=False, use_cache=False)
+            stage = str(pst.get("stage") or "")
         except Exception:
             stage = ""
+        if stage in ("unknown", "loading", ""):
+            try:
+                stage = str(
+                    (await read_page_state(page, aria=True, lite=False, use_cache=False)
+                     ).get("stage") or ""
+                )
+            except Exception:
+                pass
         return classify_complete_success(url, stage, st)
     except Exception:
         return False
@@ -5056,23 +6743,28 @@ async def _handle_turnstile_inner(
     deadline = time.monotonic() + max_wait
     clicks = 0
     remounts = 0
-    # Brief auto-pass window (Camoufox sometimes solves without click)
+    # Short auto-pass only (most interactive widgets still need a click)
     st0 = await wait_for_turnstile_solved(
-        page, attempt, timeout_s=min(2.5, max(1.2, max_wait * 0.15)), after="mount"
+        page, attempt, timeout_s=min(1.2, max(0.6, max_wait * 0.06)), after="mount"
     )
     if st0.get("solved"):
         return True
 
+    last_log_phase = ""
+    loop_i = 0
     while time.monotonic() < deadline:
         st = await read_turnstile_state(page)
         phase = str(st.get("phase") or "absent")
         left = max(0.0, deadline - time.monotonic())
-        print(
-            f"[{attempt}] Turnstile loop: phase={phase} token_len={st.get('token_len')} "
-            f"success_ui={st.get('success_ui')} clicks={clicks} remounts={remounts} "
-            f"left={left:.0f}s",
-            flush=True,
-        )
+        loop_i += 1
+        if phase != last_log_phase or loop_i % 5 == 0:
+            print(
+                f"[{attempt}] Turnstile loop: phase={phase} token_len={st.get('token_len')} "
+                f"success_ui={st.get('success_ui')} clicks={clicks} remounts={remounts} "
+                f"left={left:.0f}s",
+                flush=True,
+            )
+            last_log_phase = phase
 
         if st.get("solved") or int(st.get("token_len") or 0) > 20:
             print(
@@ -5081,18 +6773,19 @@ async def _handle_turnstile_inner(
             )
             return True
 
-        # Loading / success_ui: DO NOT re-click (would reset checkbox)
+        # Loading / success_ui: wait briefly for token (do not re-click / do not sit 14s)
         if phase == "loading" or (st.get("success_ui") and not st.get("solved")):
             stw = await wait_for_turnstile_solved(
                 page, attempt,
-                timeout_s=min(7.0, max(3.0, left)),
+                timeout_s=min(float(TS_LOADING_WAIT_S), max(2.5, left * 0.4)),
                 after="settle",
             )
             if stw.get("solved"):
                 return True
-            if allow_remount and remounts < 1 and left > 6:
+            # Token never landed — soft remount once, then hard
+            if allow_remount and remounts < 2 and left > 5:
                 await _force_turnstile_remount(
-                    page, attempt, password, hard=False,
+                    page, attempt, password, hard=(remounts >= 1),
                 )
                 remounts += 1
                 clicks = 0
@@ -5102,14 +6795,14 @@ async def _handle_turnstile_inner(
             continue
 
         if phase == "failed":
-            if allow_remount and remounts < 2 and left > 5:
+            if allow_remount and remounts < 2 and left > 4:
                 await _force_turnstile_remount(
                     page, attempt, password, hard=(remounts >= 1),
                 )
                 remounts += 1
                 clicks = 0
                 await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=3.5, after="remount",
+                    page, attempt, timeout_s=min(2.5, left), after="remount",
                 )
                 continue
             print(f"[{attempt}] Turnstile: Verification failed", flush=True)
@@ -5118,62 +6811,65 @@ async def _handle_turnstile_inner(
         if phase == "absent":
             if not require_token:
                 return True
-            # Wait for widget to mount before poking
-            await asyncio.sleep(0.6 if clicks == 0 else 0.4)
+            await asyncio.sleep(0.25 if clicks == 0 else 0.2)
             st_m = await read_turnstile_state(page)
             if st_m.get("phase") in ("need_click", "loading", "solved"):
                 continue
-            if clicks < 2 and left > 3:
-                # Context: only slot-above-complete if that button exists
+            if clicks < 3 and left > 2:
                 await _click_turnstile_slot_above_complete(page, attempt)
                 await try_click_turnstile(page, attempt)
                 clicks += 1
                 stw = await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=min(6.0, left), after=f"click#{clicks}",
+                    page, attempt,
+                    timeout_s=min(float(TS_CLICK_WAIT_S), left),
+                    after=f"click#{clicks}",
                 )
                 if stw.get("solved"):
                     return True
-            elif allow_remount and remounts < 1 and left > 8:
+            elif allow_remount and remounts < 2 and left > 5:
                 await _force_turnstile_remount(
                     page, attempt, password, hard=False,
                 )
                 remounts += 1
                 clicks = 0
             else:
-                await asyncio.sleep(0.5)
+                await asyncio.sleep(0.25)
             continue
 
-        # need_click: one real click, wait for check — do not spam
-        if phase == "need_click" and clicks < 3:
+        # need_click: click ASAP, short token wait, one short extend if loading
+        if phase == "need_click" and clicks < 4:
             hit = await try_click_turnstile(page, attempt)
             if not hit:
-                # Fallback geometric slot only on complete form
                 await _click_turnstile_slot_above_complete(page, attempt)
             clicks += 1
+            # Fast path: most tokens land in ~1–3.5s
             stw = await wait_for_turnstile_solved(
                 page, attempt,
-                timeout_s=min(8.0, max(4.0, left)),
+                timeout_s=min(float(TS_CLICK_WAIT_S), max(2.0, left)),
                 after=f"click#{clicks}",
             )
             if stw.get("solved"):
                 return True
-            if stw.get("phase") == "loading" or stw.get("success_ui"):
+            # Only extend if CF shows settling UI (not blank need_click again)
+            if (stw.get("phase") == "loading" or stw.get("success_ui")) and left > 1.5:
                 stw2 = await wait_for_turnstile_solved(
-                    page, attempt, timeout_s=min(6.0, left), after="post-check",
+                    page, attempt,
+                    timeout_s=min(float(TS_LOADING_WAIT_S) * 0.7, left),
+                    after="post-check",
                 )
                 if stw2.get("solved"):
                     return True
             continue
 
-        # Exhausted clicks — optional vision, then remount
-        if allow_remount and remounts < 3 and (deadline - time.monotonic()) > 10:
+        # Exhausted clicks — quick remount retry
+        if allow_remount and remounts < 2 and (deadline - time.monotonic()) > 6:
             await _force_turnstile_remount(
                 page, attempt, password, hard=(remounts >= 1),
             )
             remounts += 1
             clicks = 0
             await wait_for_turnstile_solved(
-                page, attempt, timeout_s=6.0, after="remount",
+                page, attempt, timeout_s=min(3.0, left), after="remount",
             )
             continue
 
@@ -6543,35 +8239,67 @@ async def tempmail_close(attempt: int) -> None:
 async def wait_otp_imap_keepalive(
     page, email_addr: str, timeout_s: int, since_ts: float, attempt: int
 ) -> str | None:
-    """Poll IMAP in a thread while gently keeping the browser page awake.
+    """Hub IMAP wait + light page keep-alive; HUD shows hub waiters/sweep age.
 
-    Long idle during OTP wait can leave Camoufox/React inputs sticky (~flaky fill).
+    Keep-alive is intentionally sparse (every ~6s) so c=8 workers don't thrash
+    the event loop / Camoufox while the hub does the real work.
     """
     loop = asyncio.get_event_loop()
+    local = (email_addr or "").split("@")[0]
     fut = loop.run_in_executor(
         None,
         lambda: read_otp_from_imap_sync(email_addr, timeout_s, since_ts),
     )
     tick = 0
+    t0 = time.monotonic()
     while not fut.done():
         tick += 1
+        elapsed = int(time.monotonic() - t0)
+        left = max(0, int(timeout_s) - elapsed)
         try:
-            # Light keep-alive: title read + cookie dismiss; no navigation
-            await page.evaluate("() => document.title")
-            if tick % 3 == 0:
-                try:
-                    await dismiss_cookie_banner(page)
-                except Exception:
-                    pass
-            # Confirm OTP field still present
-            if tick % 4 == 0 and not await _otp_inputs_ready(page):
-                print(f"[{attempt}] WARN: OTP inputs missing during IMAP wait", flush=True)
-        except Exception as e:
-            print(f"[{attempt}] page keep-alive warn: {e}", flush=True)
-        try:
-            await asyncio.wait({fut}, timeout=3.5)
+            st = imap_hub_status()
+            w = int(st.get("waiters") or 0)
+            age = st.get("sweep_age_s")
+            ms = st.get("last_sweep_ms")
+            hit = st.get("last_hit") or ""
+            mode = st.get("mode") or "?"
+            conn = "up" if st.get("connected") else "…"
+            detail = (
+                f"IMAP {conn}/{mode} · {local}@… · w={w} · "
+                f"{elapsed}s left {left}s"
+            )
+            if ms is not None and age is not None:
+                detail += f" · sweep {ms:.0f}ms/{age}s"
+            if hit:
+                detail += f" · hit {hit}"
+            emit_progress(attempt, "wait_otp", detail[:92], email_addr)
         except Exception:
-            await asyncio.sleep(3.5)
+            emit_progress(
+                attempt,
+                "wait_otp",
+                f"IMAP · {local}@… · {elapsed}s",
+                email_addr,
+            )
+        # Sparse keep-alive only (tick 1, then every 2nd ~6s cycle)
+        if tick == 1 or tick % 2 == 0:
+            try:
+                await page.evaluate("() => document.title")
+                if tick % 4 == 0:
+                    try:
+                        await dismiss_cookie_banner(page)
+                    except Exception:
+                        pass
+                if tick % 4 == 0 and not await _otp_inputs_ready(page):
+                    print(
+                        f"[{attempt}] WARN: OTP inputs missing during IMAP wait",
+                        flush=True,
+                    )
+            except Exception as e:
+                print(f"[{attempt}] page keep-alive warn: {e}", flush=True)
+        try:
+            await asyncio.wait({fut}, timeout=3.0)
+        except Exception:
+            await asyncio.sleep(3.0)
     return fut.result()
 
 
@@ -6705,16 +8433,37 @@ async def _page_soft_refresh(
                     await page.goto(cur, wait_until="domcontentloaded", timeout=45000)
     except Exception as e:
         print(f"[{attempt}] soft-refresh warn: {e}", flush=True)
-    await asyncio.sleep(1.0)
+    # Page-aware settle instead of fixed 1s sleep
+    await settle_page(page, attempt, timeout_s=2.5)
     await recover_page_load_error(page, attempt)
     await dismiss_cookie_banner(page)
 
 
+async def _shared_host_nav_begin(attempt: int, host_label: str = "xai") -> None:
+    """Desync then acquire NAV_PARALLEL slot before shared-host document load."""
+    stagger = shared_host_nav_stagger_s(attempt, CONCURRENT)
+    if stagger > 0:
+        vlog(f"shared-host nav stagger {stagger:.2f}s ({host_label})", attempt)
+        await asyncio.sleep(stagger)
+    await _get_nav_sem().acquire()
+
+
+def _shared_host_nav_end() -> None:
+    try:
+        _get_nav_sem().release()
+    except Exception:
+        pass
+
+
 async def _goto_signup_page(page, attempt: int) -> None:
     """Navigate (or hard-refresh) to accounts.x.ai/sign-up."""
-    await _page_soft_refresh(
-        page, attempt, reason="open sign-up", url=SIGNUP_URL, step="signup_open",
-    )
+    await _shared_host_nav_begin(attempt, "sign-up")
+    try:
+        await _page_soft_refresh(
+            page, attempt, reason="open sign-up", url=SIGNUP_URL, step="signup_open",
+        )
+    finally:
+        _shared_host_nav_end()
 
 
 async def _wait_signup_email_input(page, attempt: int, timeout_s: float = 12.0) -> str | None:
@@ -6991,8 +8740,13 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         # Burst Sign up if still on email form (same ready→click rule)
         for _burst in range(2):
             await _click_sign_up_submit()
-            await asyncio.sleep(0.9)
-            st_chk = await read_page_state(page)
+            st_chk = await settle_page(
+                page, attempt, timeout_s=2.5,
+                want_stages=frozenset({
+                    "signup_otp", "signup_profile", "account_home", "cf_challenge",
+                }),
+                leave_stages=frozenset({"signup_email", "signup_chooser", "loading"}),
+            )
             if st_chk.get("stage") in ("signup_otp", "signup_profile", "account_home"):
                 break
             if await page.locator(
@@ -7178,7 +8932,6 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
         )
     # NOTE: do NOT re-read DOM and hard-fail here. xAI React OTP often drops
     # visible input.value after accept while internal form state keeps the code.
-    await asyncio.sleep(0.3)
 
     emit_progress(attempt, "confirm_email", "Confirming email", email_addr)
     try:
@@ -7197,7 +8950,12 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
             )
 
     await _click_confirm()
-    await asyncio.sleep(1.5)
+    # Leave OTP/verify when profile or next stage appears
+    await settle_page(
+        page, attempt, timeout_s=3.0,
+        leave_stages=frozenset({"signup_otp", "loading", "unknown"}),
+        want_stages=frozenset({"signup_profile", "signin_form", "account_home"}),
+    )
 
     # Fail-fast with one soft-refresh if still stuck on Verify
     confirm_deadline = time.monotonic() + CONFIRM_EMAIL_TIMEOUT_S
@@ -7220,7 +8978,10 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     )
                     await _try_fill_otp()
                     await _click_confirm()
-                    await asyncio.sleep(1.2)
+                    await settle_page(
+                        page, attempt, timeout_s=2.5,
+                        leave_stages=frozenset({"signup_otp", "loading"}),
+                    )
                     continue
                 raise RecoverableFarmError(
                     "OTP rejected by form after page refresh",
@@ -7233,7 +8994,10 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 ).click(timeout=2500)
             except Exception:
                 pass
-            await asyncio.sleep(1.5)
+            await settle_page(
+                page, attempt, timeout_s=1.5,
+                leave_stages=frozenset({"signup_otp", "loading"}),
+            )
         else:
             await screenshot(page, attempt, "confirm_stuck")
             if not soft_refreshed_confirm:
@@ -7244,7 +9008,10 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                 )
                 await _try_fill_otp()
                 await _click_confirm()
-                await asyncio.sleep(2.0)
+                await settle_page(
+                    page, attempt, timeout_s=3.0,
+                    leave_stages=frozenset({"signup_otp", "loading"}),
+                )
                 if await page.locator("text=Verify your email").count() == 0:
                     pass  # recovered
                 else:
@@ -7331,7 +9098,11 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
 
         # Prefer React-safe fill (triggers turnstile mount after password input)
         await _ensure_password_filled(page, password, attempt)
-        await asyncio.sleep(0.8)  # allow CF widget to mount after password
+        # Wait for CF mount / complete form ready instead of fixed 0.8s
+        await settle_page(
+            page, attempt, timeout_s=1.5,
+            want_stages=frozenset({"signup_profile", "cf_challenge"}),
+        )
 
         # ── Complete sign-up (DOM-aware) ────────────────────────────────
         # Research + logs: Turnstile often SOLVES (token_len~645) then form
@@ -7362,6 +9133,7 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
             pw_len = int(st.get("pwLen") or 0)
             if tok > 20:
                 ever_had_token = True
+            # Under high concurrent, skip every-other HUD update (stdout lock cost)
             emit_progress(
                 attempt,
                 "complete_signup",
@@ -7403,8 +9175,8 @@ async def do_signup(page, email_addr: str, password: str, attempt: int, mail_pag
                     st = await _refill_complete_profile(
                         page, first, last, password, attempt
                     )
-                # In-page solve: observe → click once → wait for real token
-                slice_wait = min(18.0, remaining)
+                # Fast path: click ASAP + short token waits (handle_turnstile)
+                slice_wait = min(18.0, max(12.0, remaining))
                 ok_ts = await handle_turnstile(
                     page,
                     attempt,
@@ -7763,19 +9535,22 @@ async def _password_field_value(page) -> str:
         return ""
 
 
-async def _wait_password_ready(page, attempt: int, max_wait: float = 8.0) -> None:
-    """After password fill, wait briefly for Turnstile mount (do not block on eye-icon SVG)."""
+async def _wait_password_ready(page, attempt: int, max_wait: float = 4.0) -> None:
+    """After password fill, wait briefly for Turnstile mount (do not block on eye-icon SVG).
+
+    Short bound — handle_turnstile owns the real solve wait; this only detects mount.
+    """
     deadline = time.monotonic() + max_wait
     while time.monotonic() < deadline:
         if await turnstile_token_len(page) > 20:
             return
         if await turnstile_visible(page):
-            await asyncio.sleep(0.4)
+            await asyncio.sleep(0.2)
             return
         if await _turnstile_mount_present(page):
-            await asyncio.sleep(0.8)  # give iframe a moment to init
+            await asyncio.sleep(0.35)  # iframe init — not full solve
             return
-        await asyncio.sleep(0.35)
+        await asyncio.sleep(login_form_poll_s(fast=True))
     # not fatal — handle_turnstile will keep trying
 
 
@@ -7821,16 +9596,16 @@ async def _ensure_password_filled(page, password: str, attempt: int) -> bool:
                         await loc.evaluate("el => el.blur()")
                     except Exception:
                         pass
-                    await _wait_password_ready(page, attempt, max_wait=10.0)
+                    await _wait_password_ready(page, attempt, max_wait=3.5)
                     return True
         except Exception:
             pass
         val = await _password_field_value(page)
         if val:
-            await _wait_password_ready(page, attempt, max_wait=8.0)
+            await _wait_password_ready(page, attempt, max_wait=3.0)
             return True
         print(f"[{attempt}] password empty after fill (try {try_i+1})", flush=True)
-        await asyncio.sleep(0.4)
+        await asyncio.sleep(0.25)
     return bool(await _password_field_value(page))
 
 
@@ -7853,13 +9628,13 @@ async def recover_page_load_error(page, attempt: int) -> bool:
             await btn.first.click(timeout=3000)
         else:
             await page.reload(wait_until="domcontentloaded", timeout=45000)
-        await asyncio.sleep(2.0)
+        await settle_page(page, attempt, timeout_s=3.0)
         return True
     except Exception as e:
         print(f"[{attempt}] reload failed: {e}", flush=True)
         try:
             await page.reload(wait_until="domcontentloaded", timeout=45000)
-            await asyncio.sleep(2.0)
+            await settle_page(page, attempt, timeout_s=3.0)
             return True
         except Exception:
             return False
@@ -7933,7 +9708,10 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
     if await page.locator("text=/Log( ?in|in) with email|Sign in with email/i").count() > 0:
         if await page.locator('input[type="email"], input[type="password"]').count() == 0:
             await click_login_with_email(page)
-            await asyncio.sleep(1.0)
+            await settle_page(
+                page, attempt, timeout_s=1.5,
+                want_stages=frozenset({"signin_form", "cf_challenge", "cookie"}),
+            )
 
     # Step: email (same farmed address — re-auth, not "ganti email")
     if await page.locator('input[type="email"], input[name="email"]').count() > 0:
@@ -7942,37 +9720,43 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
             ['input[type="email"]', 'input[name="email"]', 'input[autocomplete="email"]'],
             email_addr,
         )
-        await asyncio.sleep(0.3)
+        await asyncio.sleep(0.12)
         # Next only when password not yet visible — wait out loading spinner
         if await page.locator('input[type="password"]').count() == 0:
             try:
                 await page.get_by_role("button", name=re.compile(r"^next$", re.I)).click(timeout=4000)
             except Exception:
                 await click_text_button(page, ["Next", "Continue"], exclude=["Google", "Apple"])
-            # Wait for password field (not just fixed sleep — Next can hang on network)
-            for _ in range(20):
+            # Wait for password field (state poll — not fixed multi-second sleep)
+            poll = login_form_poll_s(fast=True)
+            for _ in range(28):
                 await recover_page_load_error(page, attempt)
                 if await page.locator('input[type="password"]').count() > 0:
                     break
-                await asyncio.sleep(0.5)
-            await asyncio.sleep(0.4)
+                await asyncio.sleep(poll)
+            # Tiny settle only if password just appeared
+            if await page.locator('input[type="password"]').count() > 0:
+                await asyncio.sleep(0.12)
 
     # Step: password first (before turnstile)
     if not await _ensure_password_filled(page, password, attempt):
         vlog("WARN: could not fill password before turnstile", attempt)
 
     for round_i in range(rounds):
-        # EARLY EXIT: if we're already on /account, login succeeded — stop
-        # immediately, don't grind through more Turnstile rounds. This is the
-        # big speedup: xAI lands on /account as soon as the login click works,
-        # but the old code kept solving Turnstile + re-clicking for the full
-        # round count.
+        # EARLY EXIT: path-aware success only (never '//accounts' substring trap)
         try:
-            cur = (page.url or "")
+            cur = page.url or ""
         except Exception:
             cur = ""
-        if cur.rstrip("/").endswith("accounts.x.ai/account"):
-            vlog("login: already on /account — login succeeded, skipping remaining rounds", attempt)
+        try:
+            has_pw_early = await page.locator('input[type="password"]').count() > 0
+        except Exception:
+            has_pw_early = True
+        if classify_login_nav_success(cur, has_password_field=has_pw_early):
+            vlog(
+                f"login: already past sign-in url={cur[:70]} — skip remaining rounds",
+                attempt,
+            )
             return True
         await recover_page_load_error(page, attempt)
 
@@ -7981,7 +9765,10 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
             "text=/Login with email|Log in with email|Sign in with email/i"
         ).count() > 0:
             await click_login_with_email(page)
-            await asyncio.sleep(1.0)
+            await settle_page(
+                page, attempt, timeout_s=1.2,
+                want_stages=frozenset({"signin_form", "cf_challenge"}),
+            )
             continue
 
         # 1) Solve / confirm turnstile if present (throttle + remount on fail)
@@ -8117,34 +9904,31 @@ async def drive_email_password_login(page, email_addr: str, password: str, attem
                 pass
 
         # Burst 2 clicks if still on form (token still live → keep going)
+        nav_poll = login_form_poll_s(fast=post_click_sleep < 1.0)
         for burst in range(2):
             await _force_login_click()
-            await asyncio.sleep(0.4 if burst == 0 else post_click_sleep)
+            await asyncio.sleep(0.25 if burst == 0 else max(0.35, min(post_click_sleep, 1.2)))
 
             login_done = False
-            nav_deadline = time.monotonic() + (5.0 if burst == 0 else 8.0)
+            nav_deadline = time.monotonic() + (4.0 if burst == 0 else 6.5)
             while time.monotonic() < nav_deadline:
                 try:
-                    u = (page.url or "").rstrip("/")
+                    u = page.url or ""
                 except Exception:
                     u = ""
-                if (
-                    u.endswith("accounts.x.ai/account")
-                    or "/oauth2/consent" in u
-                    or "127.0.0.1:56121" in u
-                    or "localhost:56121" in u
-                ):
+                try:
+                    has_pw = await page.locator('input[type="password"]').count() > 0
+                except Exception:
+                    has_pw = False
+                if classify_login_nav_success(u, has_password_field=has_pw):
                     login_done = True
                     break
-                if (
-                    await page.locator('input[type="password"]').count() == 0
-                    and "sign-in" in u
-                ):
-                    login_done = True
-                    break
-                await asyncio.sleep(0.4)
+                await asyncio.sleep(nav_poll)
             if login_done:
-                vlog("login: success detected (left login form)", attempt)
+                vlog(
+                    f"login: success detected url={(page.url or '')[:80]}",
+                    attempt,
+                )
                 return True
             # Still on form — re-fill pw if wiped, only re-click if token still ok
             pw_now = await _password_field_value(page)
@@ -8185,12 +9969,14 @@ async def do_email_login(page, email_addr: str, password: str, attempt: int,
     except Exception:
         cur = ""
 
-    # Already on account after complete signup — skip full login (big speedup).
-    if cur.rstrip("/").endswith("accounts.x.ai/account"):
+    # Already past sign-in (path-aware account home / consent / callback).
+    if classify_login_nav_success(cur, has_password_field=False) and not is_xai_sign_in_url(cur):
+        vlog(f"Already past sign-in ({(cur or '')[:60]}) — skip login", attempt)
+        emit_progress(attempt, "login", "Already past sign-in — skip", email_addr)
+        return True
+    if is_xai_account_home_url(cur):
         vlog("Already on /account — skip post-signup login", attempt)
         emit_progress(attempt, "login", "Already on /account — skip", email_addr)
-        return True
-    if "/oauth2/consent" in cur or "127.0.0.1:56121" in cur:
         return True
 
     # If still on complete signup, try finishing there first
@@ -8213,21 +9999,34 @@ async def do_email_login(page, email_addr: str, password: str, attempt: int,
         pass
 
     if "sign-in" not in cur and await page.locator('input[type="password"]').count() == 0:
-        await page.goto(SIGNIN_URL, wait_until="domcontentloaded", timeout=45000)
-        await asyncio.sleep(1.0)
+        # Shared-host gate (accounts.x.ai) — same NAV_PARALLEL as sign-up/oauth
+        await _shared_host_nav_begin(attempt, "sign-in")
+        try:
+            await page.goto(SIGNIN_URL, wait_until="domcontentloaded", timeout=45000)
+            await settle_page(
+                page, attempt, timeout_s=1.8,
+                want_stages=frozenset({
+                    "signin_chooser", "signin_form", "cf_challenge", "cookie",
+                }),
+            )
+        finally:
+            _shared_host_nav_end()
 
     await dismiss_cookie_banner(page)
     await recover_page_load_error(page, attempt)
     # Prefer email path on provider chooser ("Login with email" on OAuth)
     await click_login_with_email(page)
-    await asyncio.sleep(0.6)
+    await settle_page(
+        page, attempt, timeout_s=1.4,
+        want_stages=frozenset({"signin_form", "cf_challenge", "account_home"}),
+    )
     # fast: 1 primary Turnstile cycle (refer-ish patience without 5×22s).
     # Second round only if first submit didn't leave the form.
     ok = await drive_email_password_login(
         page, email_addr, password, attempt,
         rounds=2 if fast else 5,
-        ts_max_wait=15.0 if fast else 22.0,
-        post_click_sleep=1.0 if fast else 2.5,
+        ts_max_wait=14.0 if fast else 22.0,
+        post_click_sleep=0.45 if fast else 1.2,
         use_global_limit=False,
     )
     await screenshot(page, attempt, "after_login")
@@ -8485,10 +10284,14 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
             pass
 
     await page.route("**/*", _handle_route)
+    await _shared_host_nav_begin(attempt, "oauth-authorize")
     try:
-        await page.goto(auth_url, wait_until="domcontentloaded", timeout=45000)
-    except Exception:
-        await page.goto(auth_url, wait_until="commit", timeout=45000)
+        try:
+            await page.goto(auth_url, wait_until="domcontentloaded", timeout=45000)
+        except Exception:
+            await page.goto(auth_url, wait_until="commit", timeout=45000)
+    finally:
+        _shared_host_nav_end()
 
     OAUTH_STUCK_REFRESH_S = 25.0
     deadline = time.monotonic() + (90.0 if fast else 130.0)
@@ -8528,7 +10331,13 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
         last_refresh_t = time.monotonic()
         last_progress_t = last_refresh_t
         refresh_count += 1
-        await asyncio.sleep(0.4)
+        await settle_page(
+            page, attempt, timeout_s=1.2,
+            want_stages=frozenset({
+                "oauth_consent", "signin_form", "signin_chooser",
+                "cf_challenge", "account_home",
+            }),
+        )
 
     while time.monotonic() < deadline and not _code_ready():
         # Poll URL + server future
@@ -8590,23 +10399,77 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
                     f"Clicked {clicked_allow} → CLI callback",
                     email_addr,
                 )
-                spin_deadline = time.monotonic() + 18.0
+                # Progress must be proven by code/URL/DOM — not click alone
+                # (evidence: Allow can leave SPA on consent URL with user-code UI)
+                # Server path is usually <1s; bound 12s (was 20) — fail/refresh, don't hang
+                spin_deadline = time.monotonic() + (12.0 if server_ok else 18.0)
+                post_cls = "unknown"
+                spin_i = 0
+                code_poll = oauth_code_poll_s(has_callback_server=server_ok)
                 while time.monotonic() < spin_deadline:
                     if _code_ready():
+                        post_cls = "code_ready"
                         break
                     try:
                         for p in page.context.pages:
                             c2 = extract_code_from_url(p.url or "")
                             if c2:
                                 auth_code["code"] = c2
+                                post_cls = "redirected"
                                 break
                     except Exception:
                         pass
-                    await asyncio.sleep(0.12)
+                    if _code_ready():
+                        break
+                    spin_i += 1
+                    # DOM scrape every 3rd tick (heavy evaluate) — URL/future every tick
+                    if spin_i % 3 == 1:
+                        try:
+                            body_snip = ""
+                            try:
+                                body_snip = await page.evaluate(
+                                    "() => (document.body && document.body.innerText || '').slice(0, 1200)"
+                                )
+                            except Exception:
+                                body_snip = ""
+                            has_allow = False
+                            try:
+                                has_allow = await page.get_by_role(
+                                    "button", name=re.compile(r"^allow$", re.I)
+                                ).count() > 0
+                            except Exception:
+                                has_allow = False
+                            post_cls = classify_oauth_post_allow(
+                                page.url or "",
+                                str(body_snip or ""),
+                                code_ready=bool(_code_ready()),
+                                has_allow_btn=bool(has_allow),
+                            )
+                            if post_cls in ("user_code", "stuck_consent", "unknown", "left_consent"):
+                                scraped = await scrape_oauth_code_from_page(page)
+                                if scraped:
+                                    auth_code["code"] = scraped
+                                    print(
+                                        f"[{attempt}] OAuth code scraped from DOM "
+                                        f"(post_allow={post_cls})",
+                                        flush=True,
+                                    )
+                                    break
+                        except Exception:
+                            pass
+                    await asyncio.sleep(code_poll)
                 if _code_ready():
                     break
+                print(
+                    f"[{attempt}] OAuth Allow progress={post_cls} "
+                    f"(no code yet, try={consent_attempts})",
+                    flush=True,
+                )
+                # Re-click only when state proves still stuck on Allow
+                if post_cls == "stuck_consent" and consent_attempts < 3:
+                    continue
                 if consent_attempts >= 2 and time.monotonic() - last_refresh_t > 12:
-                    await _goto_authorize(reason="Allow clicked, no callback yet")
+                    await _goto_authorize(reason=f"Allow no code ({post_cls})")
                 continue
             if consent_attempts >= 3 and time.monotonic() - last_refresh_t >= 15:
                 await _goto_authorize(reason=f"consent no Allow x{consent_attempts}")
@@ -8621,7 +10484,7 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
             await _goto_authorize(reason=f"stuck {stuck_for:.0f}s no code")
             continue
 
-        if cur.rstrip("/").endswith("accounts.x.ai/account") or cur.rstrip("/") == "https://accounts.x.ai/account":
+        if is_xai_account_home_url(cur):
             await _goto_authorize(reason="on /account, force redirect")
             continue
 
@@ -8652,13 +10515,43 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
         # On authorize/consent-ish xAI pages: try Allow only if labels match
         if on_xai and not on_signin:
             await dismiss_cookie_banner(page)
+            # Post-Allow user-code SPA may still be on xAI without /consent in URL
+            try:
+                body_snip = await page.evaluate(
+                    "() => (document.body && document.body.innerText || '').slice(0, 800)"
+                )
+            except Exception:
+                body_snip = ""
+            if classify_oauth_post_allow(
+                cur, str(body_snip or ""), code_ready=False, has_allow_btn=False
+            ) == "user_code":
+                scraped = await scrape_oauth_code_from_page(page)
+                if scraped:
+                    auth_code["code"] = scraped
+                    print(f"[{attempt}] OAuth code scraped (user_code stage)", flush=True)
+                    break
             clicked_allow = await click_oauth_consent_allow(page, attempt)
             if clicked_allow:
                 last_progress_t = time.monotonic()
                 emit_progress(attempt, "oauth", f"Clicked {clicked_allow} → CLI callback", email_addr)
-                spin_deadline = time.monotonic() + 15.0
+                spin_deadline = time.monotonic() + 16.0
                 while time.monotonic() < spin_deadline:
                     if _code_ready():
+                        break
+                    try:
+                        for p in page.context.pages:
+                            c2 = extract_code_from_url(p.url or "")
+                            if c2:
+                                auth_code["code"] = c2
+                                break
+                    except Exception:
+                        pass
+                    if _code_ready():
+                        break
+                    scraped = await scrape_oauth_code_from_page(page)
+                    if scraped:
+                        auth_code["code"] = scraped
+                        print(f"[{attempt}] OAuth code scraped after Allow", flush=True)
                         break
                     await asyncio.sleep(0.12)
                 if _code_ready():
@@ -8746,99 +10639,141 @@ async def activate_grok_com(
     Many free CLI 403s happen when OAuth tokens exist but the account never
     opened the web product. First real session on grok.com often attaches
     free Build / chat entitlement. Not guaranteed — still server-side gated.
+
+    Waits are DOM/page-state driven (classify_* + settle_page / wait_for_url).
+    Hard-fails with explicit reason + screenshot — never open-ended hang.
     """
     emit_progress(attempt, "activate", "Activating on grok.com (web + CF)", email_addr)
 
+    async def _signals() -> dict[str, Any]:
+        """DOM signals for activate — never treat bare grok hostname as product UI."""
+        try:
+            st = await read_page_state(page, lite=True, use_cache=False)
+        except Exception:
+            st = {}
+        url = str(st.get("url") or getattr(page, "url", "") or "")
+        title = str(st.get("title") or "")
+        body = str(st.get("bodySample") or "")
+        stage = str(st.get("stage") or "")
+        has_cf_dom = bool(st.get("cf") or stage == "cf_challenge")
+        # chat flag from page state only when stage is true product chat (not landing)
+        has_chat = bool(st.get("chat") and stage == "grok_chat")
+        has_signin = False
+        try:
+            extra = await page.evaluate(
+                """() => {
+                  const body = (document.body && document.body.innerText || '').slice(0, 1600);
+                  const hasChat = !!(document.querySelector(
+                    'textarea, [contenteditable="true"], '
+                    + 'input[placeholder*="Ask" i], [data-testid*="chat" i], '
+                    + '[data-testid*="composer" i], [data-testid*="prompt" i]'
+                  ));
+                  const hasCf = !!(document.querySelector(
+                    "iframe[src*='challenges.cloudflare'], iframe[src*='turnstile'], [data-sitekey]"
+                  ));
+                  const hasSignin = [...document.querySelectorAll('button, a')].some(el => {
+                    const t = (el.innerText || el.textContent || '').trim();
+                    return /^(sign in|log in|login)$/i.test(t);
+                  });
+                  return {
+                    body, hasChat, hasCf, hasSignin,
+                    title: (document.title || ''),
+                    bodyLen: (document.body && document.body.innerText || '').trim().length,
+                  };
+                }"""
+            )
+            if isinstance(extra, dict):
+                body = str(extra.get("body") or body)
+                title = str(extra.get("title") or title)
+                has_chat = has_chat or bool(extra.get("hasChat"))
+                has_cf_dom = has_cf_dom or bool(extra.get("hasCf"))
+                has_signin = bool(extra.get("hasSignin"))
+                body_len = int(extra.get("bodyLen") or len((body or "").strip()))
+            else:
+                body_len = len((body or "").strip())
+        except Exception:
+            body_len = len((body or "").strip())
+        return {
+            "url": url,
+            "title": title,
+            "body": body,
+            "stage": stage,
+            "has_chat": has_chat,
+            "has_signin": has_signin,
+            "has_cf_dom": has_cf_dom,
+            "body_len": body_len,
+        }
+
     async def _cf_managed_challenge_visible() -> bool:
         try:
-            title = (await page.title() or "").lower()
-            body = ""
-            try:
-                body = (await page.inner_text("body"))[:1200].lower()
-            except Exception:
-                body = ""
-            needles = (
-                "verify you are human",
-                "performing security verification",
-                "checking your browser",
-                "just a moment",
-                "hanya sebentar",
-                "enable javascript and cookies",
-                "security service to protect against malicious bots",
+            s = await _signals()
+            return classify_cf_challenge(
+                s["title"], s["body"], has_cf_dom=bool(s["has_cf_dom"])
             )
-            if any(n in title or n in body for n in needles):
-                return True
-            if await page.locator(
-                "text=Verify you are human, "
-                "iframe[src*='challenges.cloudflare'], "
-                "iframe[src*='turnstile'], "
-                "[data-sitekey]"
-            ).count() > 0:
-                return True
-            return False
         except Exception:
             return False
 
-    async def _page_ready() -> bool:
+    async def _past_cf() -> bool:
+        """CF cleared + non-blank surface (may still need login; not product success)."""
         try:
-            title = (await page.title() or "").lower()
-            body = ""
-            try:
-                body = (await page.inner_text("body"))[:1200].lower()
-            except Exception:
-                body = ""
-            just_a_moment = any(
-                n in title or n in body
-                for n in (
-                    "just a moment",
-                    "hanya sebentar",
-                    "checking your browser",
-                    "enable javascript and cookies",
-                    "verify you are human",
-                    "performing security verification",
-                )
+            s = await _signals()
+            return classify_grok_past_cf(
+                s["url"],
+                s["title"],
+                s["body"],
+                has_cf_dom=bool(s["has_cf_dom"]),
+                has_chat=bool(s["has_chat"]),
+                has_signin=bool(s["has_signin"]),
+                body_len=int(s.get("body_len") or 0),
             )
-            has_ui = (
-                await page.locator(
-                    'textarea, '
-                    '[contenteditable="true"], '
-                    'input[placeholder*="Ask" i], '
-                    'button:has-text("Sign in"), '
-                    'button:has-text("Log in"), '
-                    '[data-testid], '
-                    'nav, '
-                    'main'
-                ).count()
-                > 0
-            )
-            url_ok = "grok.com" in (page.url or "")
-            return bool(
-                url_ok
-                and not just_a_moment
-                and (has_ui or ("grok" in body and "cloudflare" not in body))
+        except Exception:
+            return False
+
+    async def _product_ready() -> bool:
+        """Real chat/composer present on grok.com (usable product state)."""
+        try:
+            s = await _signals()
+            return classify_grok_page_ready(
+                s["url"],
+                s["title"],
+                s["body"],
+                has_ui=bool(s["has_chat"]),
+                has_cf_dom=bool(s["has_cf_dom"]),
             )
         except Exception:
             return False
 
     async def _goto_grok() -> None:
+        await _shared_host_nav_begin(attempt, "grok.com")
         try:
-            await page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=60000)
-        except Exception:
             try:
-                await page.goto("https://grok.com/", wait_until="commit", timeout=60000)
+                await page.goto("https://grok.com/", wait_until="domcontentloaded", timeout=60000)
             except Exception:
-                pass
+                try:
+                    await page.goto("https://grok.com/", wait_until="commit", timeout=60000)
+                except Exception:
+                    pass
+            await settle_page(
+                page, attempt, timeout_s=2.5,
+                want_stages=frozenset({
+                    "grok_chat", "grok_landing", "cf_challenge", "cookie",
+                    "signin_form", "signin_chooser",
+                }),
+            )
+        finally:
+            _shared_host_nav_end()
 
-    async def _solve_cf_if_needed(round_label: str, *, max_wait: float = 25.0) -> bool:
-        """Shorter CF wait — concurrent c>3 must not sit 60s×3 on activate."""
-        if await _page_ready():
+    async def _solve_cf_if_needed(round_label: str, *, max_wait: float = 45.0) -> bool:
+        """CF patience aligned with refer; exit when past CF (not blank), not merely URL."""
+        if await _past_cf():
             return True
         emit_progress(
             attempt, "activate",
             f"grok.com CF ({round_label})…",
             email_addr,
         )
-        if await _cf_managed_challenge_visible():
+        cf_visible = await _cf_managed_challenge_visible()
+        if cf_visible:
             print(f"[{attempt}] activate CF challenge ({round_label})", flush=True)
             try:
                 await try_click_turnstile(page, attempt)
@@ -8848,7 +10783,7 @@ async def activate_grok_com(
                 ok = await handle_turnstile(
                     page,
                     attempt,
-                    max_wait=min(22.0, max_wait),
+                    max_wait=min(45.0, max(18.0, max_wait)),
                     require_token=False,
                     use_global_limit=False,
                     allow_remount=True,
@@ -8859,18 +10794,24 @@ async def activate_grok_com(
                 )
             except Exception as e:
                 print(f"[{attempt}] activate CF handle warn: {e}", flush=True)
-            await asyncio.sleep(1.0)
+            await settle_page(
+                page, attempt, timeout_s=2.0,
+                want_stages=frozenset({
+                    "grok_chat", "grok_landing", "cf_challenge", "cookie",
+                }),
+            )
             try:
-                await page.wait_for_load_state("domcontentloaded", timeout=10000)
+                await page.wait_for_load_state("domcontentloaded", timeout=12000)
             except Exception:
                 pass
-        deadline = time.monotonic() + max_wait
+        poll_budget = max_wait if cf_visible else min(max_wait, 22.0)
+        deadline = time.monotonic() + poll_budget
         tick = 0
         while time.monotonic() < deadline:
-            if await _page_ready():
+            if await _past_cf():
                 return True
             tick += 1
-            if tick % 8 == 0:
+            if tick % 6 == 0:
                 emit_progress(
                     attempt, "activate",
                     f"waiting grok.com ({round_label}) {int(deadline - time.monotonic())}s…",
@@ -8881,14 +10822,14 @@ async def activate_grok_com(
                     await try_click_turnstile(page, attempt)
                 except Exception:
                     pass
-            await asyncio.sleep(0.5)
-        return await _page_ready()
+            await asyncio.sleep(dom_poll_s(0.3))
+        return await _past_cf()
 
-    # Wall clock for whole activate (avoid multi-minute hang under concurrent load)
-    activate_deadline = time.monotonic() + 90.0
+    # Bound whole activate — hard-fail instead of hang (refer r1+r2+r3 can exceed 3min)
+    activate_deadline = time.monotonic() + 120.0
 
     await _goto_grok()
-    ready = await _solve_cf_if_needed("r1", max_wait=22.0)
+    ready = await _solve_cf_if_needed("r1", max_wait=45.0)
     if not ready and time.monotonic() < activate_deadline:
         print(f"[{attempt}] activate: reload grok.com", flush=True)
         emit_progress(attempt, "activate", "reload grok.com…", email_addr)
@@ -8896,41 +10837,72 @@ async def activate_grok_com(
             await page.reload(wait_until="domcontentloaded", timeout=45000)
         except Exception:
             await _goto_grok()
-        await asyncio.sleep(0.8)
-        ready = await _solve_cf_if_needed("r2", max_wait=18.0)
+        await settle_page(
+            page, attempt, timeout_s=2.0,
+            want_stages=frozenset({
+                "grok_chat", "grok_landing", "cf_challenge", "cookie",
+            }),
+        )
+        ready = await _solve_cf_if_needed("r2", max_wait=40.0)
     if not ready and time.monotonic() < activate_deadline:
-        print(f"[{attempt}] activate: cool-down + retry", flush=True)
-        emit_progress(attempt, "activate", "activate cool-down…", email_addr)
-        await asyncio.sleep(2.0)
+        print(f"[{attempt}] activate: context re-check + retry", flush=True)
+        emit_progress(attempt, "activate", "activate re-check…", email_addr)
+        await asyncio.sleep(0.3)
         await _goto_grok()
-        ready = await _solve_cf_if_needed("r3", max_wait=15.0)
+        ready = await _solve_cf_if_needed("r3", max_wait=35.0)
     if not ready:
         print(f"[{attempt}] grok.com not ready after CF retries", flush=True)
         await screenshot(page, attempt, "grok_com_not_ready")
         return False
 
-    print(f"[{attempt}] grok.com ready", flush=True)
-    emit_progress(attempt, "activate", "grok.com ready", email_addr)
+    print(f"[{attempt}] grok.com past CF (surface ready)", flush=True)
+    emit_progress(attempt, "activate", "grok.com past CF", email_addr)
     await dismiss_cookie_banner(page)
 
     needs_login = True
     try:
-        has_chat = await page.locator('textarea, [contenteditable="true"]').count() > 0
-        has_signin = await page.locator("text=/[Ss]ign in|[Ll]og in/").count() > 0
-        if has_chat and not has_signin:
+        s0 = await _signals()
+        has_chat = bool(s0.get("has_chat"))
+        has_signin_btn = bool(s0.get("has_signin"))
+        if not has_signin_btn:
+            has_signin_btn = await page.get_by_role(
+                "button", name=re.compile(r"^(sign in|log in|login)$", re.I)
+            ).count() > 0
+        if has_chat and not has_signin_btn:
             needs_login = False
-            print(f"[{attempt}] already logged in on grok.com", flush=True)
+            print(
+                f"[{attempt}] already logged in on grok.com "
+                f"(has_chat=True body_len={s0.get('body_len')})",
+                flush=True,
+            )
+        elif has_signin_btn and not has_chat:
+            needs_login = True
+            print(f"[{attempt}] activate: sign-in UI present — will login", flush=True)
+        elif not has_chat:
+            needs_login = True
+            print(
+                f"[{attempt}] activate: no chat UI yet (stage={s0.get('stage')} "
+                f"body_len={s0.get('body_len')}) — will try login",
+                flush=True,
+            )
     except Exception:
         pass
 
-    if needs_login:
+    if needs_login and time.monotonic() < activate_deadline:
         try:
             await click_text_button(
                 page,
                 ["Sign in", "Log in", "Login", "Get started"],
                 exclude=["Google", "Apple", "Continue with"],
             )
-            await asyncio.sleep(1.5)
+            await settle_page(
+                page, attempt, timeout_s=3.0,
+                want_stages=frozenset({
+                    "signin_chooser", "signin_form", "oauth_consent",
+                    "oauth_user_code", "cf_challenge", "account_home",
+                    "grok_chat", "grok_landing",
+                }),
+            )
         except Exception:
             pass
         cur = page.url or ""
@@ -8938,30 +10910,89 @@ async def activate_grok_com(
             await dismiss_cookie_banner(page)
             if await page.locator('input[type="email"], input[type="password"]').count() == 0:
                 await click_login_with_email(page)
-                await asyncio.sleep(0.8)
+                await settle_page(
+                    page, attempt, timeout_s=2.0,
+                    want_stages=frozenset({"signin_form", "oauth_consent", "cf_challenge"}),
+                )
             has_form = (
                 await page.locator('input[type="email"], input[type="password"]').count() > 0
             )
             if has_form:
                 await drive_email_password_login(
                     page, email_addr, password, attempt,
-                    rounds=2, ts_max_wait=12.0, post_click_sleep=1.2,
+                    rounds=3, ts_max_wait=18.0, post_click_sleep=1.0,
                     use_global_limit=False,
                 )
             await handle_turnstile(
-                page, attempt, max_wait=15, use_global_limit=False,
+                page, attempt, max_wait=18, use_global_limit=False,
             )
-            # OAuth consent if any — Allow only (never Deny)
-            if "/oauth2/consent" in (page.url or ""):
-                await click_oauth_consent_allow(page, attempt)
-            await asyncio.sleep(1.2)
-            try:
-                await page.wait_for_url("**/grok.com/**", timeout=15000)
-            except Exception:
-                pass
-            await asyncio.sleep(1.0)
-            if not await _page_ready():
-                await _solve_cf_if_needed("post-login", max_wait=12.0)
+            # Consent: Allow + prove progress (URL leave / user-code / product)
+            post_login_deadline = time.monotonic() + 28.0
+            consent_clicks = 0
+            while time.monotonic() < post_login_deadline:
+                try:
+                    pl_url = page.url or ""
+                except Exception:
+                    pl_url = ""
+                if "grok.com" in pl_url and await _product_ready():
+                    break
+                try:
+                    body_snip = await page.evaluate(
+                        "() => (document.body && document.body.innerText || '').slice(0, 1000)"
+                    )
+                except Exception:
+                    body_snip = ""
+                has_allow = False
+                try:
+                    has_allow = await page.get_by_role(
+                        "button", name=re.compile(r"^allow$", re.I)
+                    ).count() > 0
+                except Exception:
+                    pass
+                progress = classify_oauth_post_allow(
+                    pl_url, str(body_snip or ""),
+                    code_ready=False, has_allow_btn=has_allow,
+                )
+                if progress in ("stuck_consent", "unknown") and (
+                    "/oauth2/consent" in pl_url or has_allow
+                ):
+                    if consent_clicks < 3:
+                        await click_oauth_consent_allow(page, attempt)
+                        consent_clicks += 1
+                        await settle_page(
+                            page, attempt, timeout_s=2.5,
+                            want_stages=frozenset({
+                                "grok_chat", "grok_landing", "oauth_user_code",
+                                "account_home", "cf_challenge",
+                            }),
+                            leave_stages=frozenset({"oauth_consent"}),
+                        )
+                        continue
+                if progress == "user_code":
+                    try:
+                        await page.wait_for_url(
+                            re.compile(r"grok\\.com|accounts\\.x\\.ai/account"),
+                            timeout=8000,
+                        )
+                    except Exception:
+                        pass
+                try:
+                    await page.wait_for_url("**/grok.com/**", timeout=5000)
+                except Exception:
+                    await asyncio.sleep(0.35)
+                    continue
+                if await _past_cf() and not await _product_ready():
+                    # Landed on grok but no chat yet — re-check CF then continue poll
+                    if await _cf_managed_challenge_visible():
+                        await _solve_cf_if_needed("post-login-cf", max_wait=20.0)
+                    await asyncio.sleep(0.3)
+            if not await _product_ready() and time.monotonic() < activate_deadline:
+                await _solve_cf_if_needed("post-login", max_wait=30.0)
+                # Brief settle for composer to mount after session cookies
+                for _ in range(12):
+                    if await _product_ready():
+                        break
+                    await asyncio.sleep(0.4)
 
     try:
         # Onboarding only — never cookie Reject / OAuth Deny
@@ -8973,26 +11004,28 @@ async def activate_grok_com(
     except Exception:
         pass
 
-    final_url = page.url or ""
-    await screenshot(page, attempt, "grok_com_activated")
-    print(f"[{attempt}] grok.com activation done, url={final_url[:80]}", flush=True)
-    if "accounts.x.ai" in final_url or "auth.x.ai" in final_url:
-        print(f"[{attempt}] activate hard-fail: still on auth page", flush=True)
+    # Final success requires positive product chat signal — not bare URL
+    s_final = await _signals()
+    final_url = str(s_final.get("url") or page.url or "")
+    has_chat = bool(s_final.get("has_chat"))
+    has_signin = bool(s_final.get("has_signin"))
+    still_cf = bool(s_final.get("has_cf_dom")) or await _cf_managed_challenge_visible()
+    ok, reason = classify_activate_outcome(
+        final_url,
+        has_chat=has_chat,
+        has_signin=has_signin,
+        still_cf=still_cf,
+    )
+    await screenshot(page, attempt, "grok_com_activated" if ok else f"grok_com_{reason}")
+    print(
+        f"[{attempt}] grok.com activation done, ok={ok} reason={reason} "
+        f"has_chat={has_chat} body_len={s_final.get('body_len')} "
+        f"stage={s_final.get('stage')} url={final_url[:80]}",
+        flush=True,
+    )
+    if not ok:
+        print(f"[{attempt}] activate hard-fail: {reason}", flush=True)
         return False
-    if "grok.com" not in final_url:
-        print(f"[{attempt}] activate hard-fail: unexpected url", flush=True)
-        return False
-    try:
-        has_chat = await page.locator('textarea, [contenteditable="true"]').count() > 0
-        has_signin = await page.locator("text=/[Ss]ign in|[Ll]og in/").count() > 0
-        if has_signin and not has_chat:
-            print(f"[{attempt}] activate hard-fail: still showing sign-in", flush=True)
-            return False
-        if await _cf_managed_challenge_visible() and not has_chat:
-            print(f"[{attempt}] activate hard-fail: still on CF challenge", flush=True)
-            return False
-    except Exception:
-        pass
     return True
 
 
@@ -9053,13 +11086,17 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 flush=True,
             )
 
+        try:
+            _post_login_url = page.url or ""
+        except Exception:
+            _post_login_url = ""
         tokens = await obtain_oidc_tokens(
             page,
             email_addr,
             password,
             attempt_num,
             fast=True,
-            skip_login=bool(login_ok),
+            skip_login=oauth_skip_login_after(bool(login_ok), _post_login_url),
         )
         access = str(tokens.get("access_token") or "")
         if not access:
@@ -9088,37 +11125,16 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
             tokens["web_activated"] = None  # skipped by config
 
         # Gate: grok-4.5 Responses. Soft-retry probe only (NO same-session re-activate).
-        # Re-activate on dead session was slow and looked "stuck"; full NEW spawn
-        # after probe fail is handled by DomainRejected / RecoverableFarmError.
-        ok, status, detail, credits = False, 0, "", {}
-        for probe_i in range(1, PROBE_RETRIES + 1):
-            ok, status, detail, credits = await run_chat_probe_with_hud(
-                attempt_num, email_addr, access, context="farm",
-            )
-            if ok:
-                break
-            is_403 = status == 403 or "permission-denied" in (detail or "").lower()
-            if not is_403:
-                break
-            if probe_i >= PROBE_RETRIES:
-                break
-            print(
-                f"[{attempt_num}] chat 403 soft-retry {probe_i}/{PROBE_RETRIES} "
-                f"(wait entitlement only — no same-session re-activate) "
-                f"after {PROBE_RETRY_BACKOFF_S * probe_i:.1f}s",
-                flush=True,
-            )
-            emit_progress(
-                attempt_num,
-                "chat_probe",
-                f"403 soft-retry {probe_i}/{PROBE_RETRIES}…",
-                email_addr,
-            )
-            await asyncio.sleep(PROBE_RETRY_BACKOFF_S * probe_i)
+        # 403 / 429 / 5xx / network all soft-retry same token before EXIT.
+        # Full NEW spawn only after soft-retries exhausted (DomainRejected /
+        # RecoverableFarmError).
+        ok, status, detail, credits = await run_chat_probe_soft_retries(
+            attempt_num, email_addr, access, context="farm",
+        )
 
         if not ok:
             domain = email_domain(email_addr)
-            # 403 permission-denied on free CLI chat:
+            # 403 permission-denied on free CLI chat (after soft-retries):
             #   tempmail → blacklist domain + re-roll (DomainRejectedError)
             #   google   → NEVER blacklist; RecoverableFarmError so outer loop
             #              can try a NEW local-part after cool-down (not permanent
@@ -9127,7 +11143,8 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 if MAIL_MODE == "tempmail":
                     print(
                         f"[{attempt_num}] chat 403 → tempmail domain @{domain} "
-                        f"denied — EXIT browsers, re-roll NEW domain "
+                        f"denied after {PROBE_RETRIES} soft-retries — EXIT "
+                        f"browsers, re-roll NEW domain "
                         f"(web_activated={activated})",
                         flush=True,
                     )
@@ -9144,12 +11161,14 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
                 raise RecoverableFarmError(
                     f"chat probe 403 @{domain} after soft-retries "
                     f"(web_activated={activated}): {detail}",
-                    delay_s=3.0,
+                    delay_s=1.5,
                     tag="Chat403",
                 )
+            # 429/5xx/net still transient after soft-retries → short cool-down
+            # then NEW spawn (do not long-sleep; capacity often clears fast).
             raise RecoverableFarmError(
-                f"chat probe failed: {detail}",
-                delay_s=2.0,
+                f"chat probe failed after {PROBE_RETRIES} soft-retries: {detail}",
+                delay_s=1.0,
                 tag="ChatProbeFail",
             )
         rem = credits.get("credits_remaining")
@@ -9349,8 +11368,11 @@ async def _do_register(attempt_num: int) -> dict | None:
                 attempt_num, f"DomainRejected @{getattr(dre, 'domain', '?')}"
             )
             mail_page = None
-            if MAIL_MODE != "tempmail":
-                if domain_attempt < MAX_DOMAIN_RETRIES:
+            if not should_blacklist_on_domain_reject(MAIL_MODE):
+                # Google (or any non-tempmail): NEVER blacklist catch-all domain.
+                if self_heal_should_retry(
+                    domain_attempt, MAX_DOMAIN_RETRIES, recoverable=True
+                ):
                     cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                     emit_progress(
                         attempt_num,
@@ -9405,7 +11427,9 @@ async def _do_register(attempt_num: int) -> dict | None:
             last_err_msg = f"account timeout after {ACCOUNT_TIMEOUT_S}s"
             await _force_worker_exit(attempt_num, last_err_msg)
             mail_page = None
-            if domain_attempt < MAX_DOMAIN_RETRIES:
+            if self_heal_should_retry(
+                domain_attempt, MAX_DOMAIN_RETRIES, recoverable=True
+            ):
                 cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                 print(
                     f"[{attempt_num}] TIMEOUT — EXIT worker, SPAWN NEW "
@@ -9430,12 +11454,15 @@ async def _do_register(attempt_num: int) -> dict | None:
             return None
         except RecoverableFarmError as re_err:
             last_err_msg = str(re_err)
-            tag = getattr(re_err, "tag", "Recoverable") or "Recoverable"
+            _rec, tag = classify_error_recoverable(re_err)
+            tag = tag or getattr(re_err, "tag", "Recoverable") or "Recoverable"
             delay = float(getattr(re_err, "delay_s", UI_RETRY_BACKOFF_S) or UI_RETRY_BACKOFF_S)
             # Always hard-EXIT browsers (activate fail, token 400, probe fail, …)
             await _force_worker_exit(attempt_num, f"[{tag}] {last_err_msg}")
             mail_page = None
-            if domain_attempt < MAX_DOMAIN_RETRIES:
+            if self_heal_should_retry(
+                domain_attempt, MAX_DOMAIN_RETRIES, recoverable=_rec
+            ):
                 cool = post_exit_spawn_delay(delay * domain_attempt)
                 print(
                     f"[{attempt_num}] self-heal [{tag}] try {domain_attempt}/"
@@ -9467,10 +11494,13 @@ async def _do_register(attempt_num: int) -> dict | None:
             last_err_msg = str(e)
             await _force_worker_exit(attempt_num, f"{type(e).__name__}: {last_err_msg}")
             mail_page = None
-            if _is_recoverable_error(e) and domain_attempt < MAX_DOMAIN_RETRIES:
+            _rec, _tag = classify_error_recoverable(e, mail_mode=MAIL_MODE)
+            if self_heal_should_retry(
+                domain_attempt, MAX_DOMAIN_RETRIES, recoverable=_rec
+            ):
                 cool = post_exit_spawn_delay(UI_RETRY_BACKOFF_S * domain_attempt)
                 print(
-                    f"[{attempt_num}] self-heal [{type(e).__name__}] try "
+                    f"[{attempt_num}] self-heal [{type(e).__name__}/{_tag}] try "
                     f"{domain_attempt}/{MAX_DOMAIN_RETRIES}: {last_err_msg[:140]} "
                     f"→ cool-down {cool:.1f}s + SPAWN NEW worker",
                     flush=True,
@@ -9911,9 +11941,8 @@ async def _refresh_one_account(
         page = None
         try:
             # Light stagger on first try of each slot; retries skip long waits.
-            sd = effective_spawn_delay(concurrent)
-            if sd > 0 and try_n == 1:
-                await asyncio.sleep(sd * ((idx - 1) % max(1, concurrent)))
+            if try_n == 1:
+                await asyncio.sleep(first_wave_stagger_s(idx, concurrent))
             proxy_url, proxy_id = await next_proxy()
             manager, browser, page = await launch_browser(
                 proxy_url,
@@ -9951,13 +11980,17 @@ async def _refresh_one_account(
                         f"OAuth will re-drive login (independent path)",
                         flush=True,
                     )
+                try:
+                    _pl_url = page.url or ""
+                except Exception:
+                    _pl_url = ""
                 toks = await obtain_oidc_tokens(
                     page,
                     email,
                     password,
                     idx,
                     fast=True,
-                    skip_login=bool(login_ok),
+                    skip_login=oauth_skip_login_after(bool(login_ok), _pl_url),
                 )
                 if ACTIVATE_WEB:
                     try:
@@ -9979,8 +12012,8 @@ async def _refresh_one_account(
             )
             if not tokens or not tokens.get("refresh_token"):
                 raise RuntimeError("re-auth returned no refresh_token")
-            # Same gate as farm: grok-4.5 Responses probe; keep only chat-capable tokens.
-            ok, status, detail, credits = await run_chat_probe_with_hud(
+            # Same gate as farm: soft-retry 403/429/5xx before failing the account.
+            ok, status, detail, credits = await run_chat_probe_soft_retries(
                 idx, email, str(tokens.get("access_token") or ""),
                 context="refresh",
             )
@@ -9989,15 +12022,19 @@ async def _refresh_one_account(
                 # (generator.email re-roll). Refresh re-auths existing accounts
                 # (google catch-all, Gmail, or prior temp) — banning the domain
                 # would poison google mode (e.g. untaapi.my.id) forever.
-                if status == 403 or "permission-denied" in detail.lower():
+                if status == 403 or "permission-denied" in (detail or "").lower():
                     domain = email_domain(email)
                     print(
-                        f"[{idx}] chat 403 after refresh @{domain or '?'} — "
-                        f"NOT blacklisting (refresh never bans domains). "
+                        f"[{idx}] chat 403 after refresh @{domain or '?'} "
+                        f"({PROBE_RETRIES} soft-retries) — NOT blacklisting "
+                        f"(refresh never bans domains). "
                         f"Fail this account only: {detail}",
                         flush=True,
                     )
-                raise RuntimeError(f"chat probe failed after refresh: {detail}")
+                raise RuntimeError(
+                    f"chat probe failed after refresh "
+                    f"({PROBE_RETRIES} soft-retries): {detail}"
+                )
             rem = credits.get("credits_remaining")
             lim = credits.get("credits_limit")
             tokens["chat_ok"] = True
@@ -10379,24 +12416,37 @@ async def main():
     )
     print(
         f"  Load guard : launch_parallel={LAUNCH_PARALLEL} "
+        f"nav_parallel={NAV_PARALLEL} "
         f"auto_stagger={AUTO_STAGGER}/{AUTO_SPAWN_DELAY_S}s "
         f"tempmail_block_images={TEMPMAIL_BLOCK_IMAGES}",
+        flush=True,
+    )
+    _hum = HUMANIZE_S if HUMANIZE_S is not None else "rand"
+    print(
+        f"  CPU saver  : {CPU_SAVER}  lean_browser={LEAN_BROWSER}  "
+        f"humanize={_hum}  block_images_signup={SIGNUP_BLOCK_IMAGES}  "
+        f"dom_poll≈{dom_poll_s():.2f}s  page_cache={PAGE_STATE_CACHE_S:.2f}s",
+        flush=True,
+    )
+    print(
+        f"  Resources  : ~1 Camoufox/worker (main RAM). "
+        f"Shared: emails/blacklist/CLI-ver/page-state. "
+        f"Lower GROK_CONCURRENT to cut RAM, not more Python cache.",
         flush=True,
     )
     # Banner uses .env default; final concurrent is chosen after prompts below
     _conc_hint = max(1, CONCURRENT)
     _est = _conc_hint * (2 if MAIL_MODE == "tempmail" else 1)
-    if _conc_hint > 3:
+    if _conc_hint >= 9:
         print(
-            f"  WARN       : concurrent≈{_conc_hint} → ~{_est} browsers; "
-            f"home net often bottlenecks OAuth/activate. Prefer c=2–3, "
-            f"LAUNCH_PARALLEL=2, or residential proxies.",
+            f"  WARN       : concurrent≈{_conc_hint} → ~{_est} Camoufox processes; "
+            f"CPU-heavy. Drop concurrent if the machine thrashing.",
             flush=True,
         )
     elif _conc_hint >= 3:
         print(
             f"  Tip        : concurrent≈{_conc_hint} (~{_est} browsers) — "
-            f"OK if launch_parallel≤2; raise SPAWN_DELAY if pages stall.",
+            f"max speed mode (CPU_SAVER off). Raise SPAWN_DELAY if pages stall.",
             flush=True,
         )
     print(
@@ -10409,7 +12459,11 @@ async def main():
         else f"  Proxies    : direct ({PROXY_SOURCE})",
         flush=True,
     )
-    print(f"  Email len  : {EMAIL_LOCAL_LEN} (crypto secrets)", flush=True)
+    print(
+        f"  Email local: style={EMAIL_STYLE} len≤{EMAIL_LOCAL_LEN} "
+        f"({'name combos' if EMAIL_STYLE == 'human' else 'crypto alnum'})",
+        flush=True,
+    )
     print(f"  Known mail : {known} (all batches + used_emails.txt)", flush=True)
     print(f"  Results    : {RESULTS_ROOT}/batch_<id>/  (per run)", flush=True)
     print("-" * 60, flush=True)
@@ -10579,12 +12633,8 @@ async def main():
             #   - Refill after a finished slot: always wait full SPAWN_DELAY
             #     so "close → NEW spawn" respects the same delay (was broken:
             #     (num-1)%c → 0 for every concurrent-th account).
-            sd = effective_spawn_delay(concurrent)
-            if sd > 0:
-                if num <= concurrent:
-                    await asyncio.sleep(sd * (num - 1))
-                else:
-                    await asyncio.sleep(sd)
+            # Pure first-wave / refill math (unit-tested via first_wave_stagger_s)
+            await asyncio.sleep(first_wave_stagger_s(num, concurrent))
             res = await register_one_account(num, semaphore)
             async with counter_lock:
                 if res:

@@ -503,16 +503,16 @@ function bestFarmErrorMessage(job: GrokFarmJobState, fallback: string): string {
 /** Defaults aligned with scripts/auth/grok-farm/.env.example (standalone farm). */
 export const GROK_FARM_ENV_DEFAULTS = {
   workerIsolation: true,
-  spawnDelay: 15,
+  spawnDelay: 0,
   autoStagger: true,
-  autoSpawnDelay: 15,
-  launchParallel: 2,
+  autoSpawnDelay: 1,
+  launchParallel: 4,
   tempmailBlockImages: true,
   turnstileParallel: 64,
   uiRetries: 3,
   uiRetryBackoff: 2,
   probeRetries: 5,
-  probeRetryBackoff: 2.5,
+  probeRetryBackoff: 1.0,
 } as const;
 
 function num(v: unknown, fallback: number, min: number, max: number): number {
