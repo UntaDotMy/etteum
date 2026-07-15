@@ -45,20 +45,55 @@ export async function getActiveApiKey(): Promise<string> {
  *   2. Any active row in the api_keys table (named, machine-bound, revocable).
  * Returns the api_keys row id if matched (for per-key attribution), else null.
  */
-export async function resolveApiKey(token: string): Promise<{ valid: boolean; apiKeyId?: number }> {
+/**
+ * Resolve a presented API key against all active sources.
+ * When a managed key has machineId set, the request must present a matching
+ * machine identity via x-machine-id / x-etteum-machine-id / ?machine_id=.
+ */
+export async function resolveApiKey(
+  token: string,
+  opts?: { machineId?: string | null },
+): Promise<{ valid: boolean; apiKeyId?: number; reason?: string }> {
   if (!token) return { valid: false };
-  // 1. Legacy single-key (env or settings).
+  // 1. Legacy single-key (env or settings) — not machine-bound.
   if (config.apiKey && constantTimeEqual(token, config.apiKey)) return { valid: true };
   const active = await getActiveApiKey();
   if (active && constantTimeEqual(token, active)) return { valid: true };
   // 2. Multi-key table.
   const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
-  if (row && row.isActive) return { valid: true, apiKeyId: row.id };
-  return { valid: false };
+  if (!row || !row.isActive) return { valid: false };
+  // Enforce machine binding when configured on the key.
+  if (row.machineId && row.machineId.trim()) {
+    const presented = (opts?.machineId || "").trim();
+    if (!presented || !constantTimeEqual(presented, row.machineId.trim())) {
+      return { valid: false, reason: "machine_mismatch" };
+    }
+  }
+  return { valid: true, apiKeyId: row.id };
 }
 
-export async function isValidApiKey(token: string): Promise<boolean> {
-  return (await resolveApiKey(token)).valid;
+/** Extract optional machine id from headers / query for machine-bound keys. */
+export function extractMachineId(
+  headers: Headers,
+  query?: URLSearchParams | null,
+): string {
+  const h =
+    headers.get("x-machine-id") ||
+    headers.get("x-etteum-machine-id") ||
+    headers.get("x-9r-machine-id");
+  if (h) return h.trim();
+  if (query) {
+    const q = query.get("machine_id") || query.get("machineId");
+    if (q) return q.trim();
+  }
+  return "";
+}
+
+export async function isValidApiKey(
+  token: string,
+  opts?: { machineId?: string | null },
+): Promise<boolean> {
+  return (await resolveApiKey(token, opts)).valid;
 }
 
 async function saveApiKey(key: string) {

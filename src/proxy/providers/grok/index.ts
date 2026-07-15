@@ -49,9 +49,12 @@ import {
   isAbsoluteGrokOAuthQuota,
   isTrustedGrokAbsoluteRemaining,
   normalizeGrokAbsoluteRemaining,
+  isGrokWeeklyPercentQuotaLimit,
   type GrokOAuthTokens,
   type GrokOAuthQuota,
 } from "./oauth";
+
+export { isGrokWeeklyPercentQuotaLimit } from "./oauth";
 // ---------------------------------------------------------------------------
 // Token structure
 // ---------------------------------------------------------------------------
@@ -1314,5 +1317,50 @@ export class GrokProvider extends BaseProvider {
     } catch {
       return null;
     }
+  }
+}
+
+/**
+ * After a successful Grok request on a weekly-percent account (quotaLimit 0–100),
+ * re-probe GetGrokCreditsConfig and write remaining so the dashboard pool bar
+ * updates live. Token debit is intentionally skipped on the percent scale
+ * (one request would wipe remaining); exhaustion still zeros via markExhausted.
+ *
+ * Fire-and-forget from the proxy edge. Failures are silent (next warmup heals).
+ */
+export async function refreshGrokWeeklyPoolAfterRequest(account: Account): Promise<void> {
+  try {
+    if (!account?.id || account.id <= 0) return;
+    if (account.provider !== "grok") return;
+    if (!isGrokWeeklyPercentQuotaLimit(account.quotaLimit)) return;
+    // Only OAuth accounts have GetGrokCreditsConfig; SSO uses rate-limits JSON.
+    if (!isOAuthAccount(account)) return;
+
+    const provider = new GrokProvider();
+    const live = await provider.fetchQuota(account);
+    if (!live.success || !live.quota) return;
+
+    const q = live.quota;
+    const isWeekly =
+      q.percentScale === true ||
+      (Number(q.limit) === 100 && String(q.source || "").includes("GetGrokCreditsConfig"));
+    if (!isWeekly) return;
+
+    const limit = 100;
+    const remaining = Math.min(limit, Math.max(0, Math.floor(Number(q.remaining))));
+    let resetAt: Date | null | undefined = undefined;
+    if (q.resetAt) {
+      const d = q.resetAt instanceof Date ? q.resetAt : new Date(q.resetAt as any);
+      if (!Number.isNaN(d.getTime())) resetAt = d;
+    }
+
+    const { pool } = await import("../../pool");
+    await pool.applyQuotaSnapshot(account.id, {
+      quotaRemaining: remaining,
+      quotaLimit: limit,
+      ...(resetAt !== undefined ? { quotaResetAt: resetAt } : {}),
+    });
+  } catch {
+    // best-effort; do not fail the client response
   }
 }

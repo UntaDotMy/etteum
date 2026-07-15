@@ -18,7 +18,7 @@
  */
 
 import { db } from "../db/index";
-import { combos } from "../db/schema";
+import { combos, settings } from "../db/schema";
 import { eq, and, inArray } from "drizzle-orm";
 import { pool } from "./pool";
 import type { ProviderName } from "./providers/registry";
@@ -43,10 +43,8 @@ async function getComboStrategies(): Promise<Record<string, ComboStrategy>> {
   const cached = _strategyCache.get("global");
   if (cached && cached.expiresAt > now) return cached.strategies;
 
-  const { settings } = await import("../db/index");
-  const { eq } = await import("drizzle-orm");
-  const { default: schema } = await import("../db/schema");
-
+  // settings table lives in schema (not db/index). Dynamic import of a
+  // non-export used to throw and break every combo strategy load.
   const rows = await db
     .select({ value: settings.value })
     .from(settings)

@@ -29,6 +29,8 @@ interface NodeInput {
   models: string[];
   apiType?: "openai" | "anthropic";
   headers?: Record<string, string>;
+  /** Optional node-level API key (bound as static credentials on the provider). */
+  apiKey?: string;
 }
 
 function validateNode(input: Partial<NodeInput>): { ok: boolean; error?: string } {
@@ -55,9 +57,10 @@ providerNodesRouter.post("/", async (c) => {
   const data: CompatibleNodeData = {
     prefix: input.prefix,
     baseUrl: input.baseUrl,
-    apiType: input.apiType || "openai",
+    apiType: input.type === "anthropic-compatible" ? "anthropic" : (input.apiType || "openai"),
     models: input.models,
     headers: input.headers,
+    apiKey: input.apiKey,
   };
   const [existing] = await db.select().from(providerNodes).where(eq(providerNodes.id, input.id)).limit(1);
   if (existing) return c.json({ error: "A node with that id already exists" }, 409);
@@ -77,12 +80,18 @@ providerNodesRouter.put("/:id", async (c) => {
   const [existing] = await db.select().from(providerNodes).where(eq(providerNodes.id, id)).limit(1);
   if (!existing) return c.json({ error: "Node not found" }, 404);
   const oldData = (typeof existing.data === "string" ? JSON.parse(existing.data) : existing.data) as CompatibleNodeData;
+  const nextType = (input.type as CompatibleNodeType) ?? existing.type;
   const data: CompatibleNodeData = {
     prefix: input.prefix ?? oldData.prefix,
     baseUrl: input.baseUrl ?? oldData.baseUrl,
-    apiType: input.apiType ?? oldData.apiType,
+    apiType:
+      nextType === "anthropic-compatible"
+        ? "anthropic"
+        : (input.apiType ?? oldData.apiType ?? "openai"),
     models: input.models ?? oldData.models,
     headers: input.headers ?? oldData.headers,
+    // Keep previous apiKey when omitted so updates don't wipe credentials.
+    apiKey: input.apiKey !== undefined ? input.apiKey : oldData.apiKey,
   };
   await db.update(providerNodes).set({
     name: input.name ?? existing.name,

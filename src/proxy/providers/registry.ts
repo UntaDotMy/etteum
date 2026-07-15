@@ -127,6 +127,12 @@ export function getAllModels(): ModelInfo[] {
   // Custom entries are layered on top of the hardcoded provider lists; disabled
   // models are removed so they don't appear in /v1/models or route.
   const base = PROVIDER_ORDER.flatMap((provider) => provider.getModels());
+  // Dynamic compatible-node models (user-defined) — after static providers so
+  // built-in ownership wins on id collision, matching getProviderForModel order.
+  let nodeModels: ModelInfo[] = [];
+  try {
+    nodeModels = compatibleNodeRegistry.getProviders().flatMap((p) => p.getModels());
+  } catch { /* registry not loaded yet */ }
   // Dedup by model id, keeping the FIRST occurrence. Some bare generic ids
   // (gpt-4, gpt-4o, gpt-4-turbo, gpt-3.5-turbo, claude-3.5-sonnet) are declared
   // by more than one provider (e.g. cursor AND the openai F13 catalog). Without
@@ -134,12 +140,26 @@ export function getAllModels(): ModelInfo[] {
   // dashboard as "model X leaking to all providers". The first occurrence is
   // the routing winner (PROVIDER_ORDER priority), so the list matches routing.
   const seen = new Set<string>();
-  const deduped = base.filter((m) => {
+  const deduped = [...base, ...nodeModels].filter((m) => {
     if (seen.has(m.id)) return false;
     seen.add(m.id);
     return true;
   });
   return applyCustomModelsToList(deduped);
+}
+
+/**
+ * Resolve a live provider instance for a provider name.
+ * Static map first; dynamic compatible-node registry second.
+ */
+export function resolveProviderInstance(name: string): BaseProvider | null {
+  const staticProvider = (providers as Record<string, BaseProvider | undefined>)[name];
+  if (staticProvider) return staticProvider;
+  try {
+    return compatibleNodeRegistry.getProviderByName(name);
+  } catch {
+    return null;
+  }
 }
 
 /** Iterable list of provider instances (priority order). */

@@ -5,6 +5,7 @@ import { requestLogs, usageSummary, accounts, type NewRequestLog } from "../db/s
 import { pool } from "./pool";
 import { broadcast } from "../ws/index";
 import type { ChatCompletionRequest, CreditSource, ProviderResult } from "./providers/base";
+import { resolveProviderInstance } from "./providers/registry";
 import {
   anthropicToOpenAI,
   openAIStreamToAnthropic,
@@ -34,6 +35,10 @@ import {
   runWebSearchLoopStreaming,
 } from "./built-in-tools/agent-loop";
 import { config } from "../config";
+import {
+  isGrokWeeklyPercentQuotaLimit,
+  refreshGrokWeeklyPoolAfterRequest,
+} from "./providers/grok";
 
 export const proxyRouter = new Hono();
 
@@ -188,7 +193,7 @@ function normalizeModelId(model: string): string {
 
 
 function computeCredits(
-  provider: keyof typeof providers,
+  provider: string,
   model: string,
   totalTokens: number,
   resultCredits?: number,
@@ -202,8 +207,10 @@ function computeCredits(
   }
 
   if (totalTokens > 0) {
+    const inst = resolveProviderInstance(provider);
+    const rate = inst?.getProviderCreditRate(model) ?? 0;
     return {
-      creditsUsed: Math.max(0.01, totalTokens * providers[provider].getProviderCreditRate(model)),
+      creditsUsed: Math.max(0.01, totalTokens * rate),
       creditSource: "estimated" as CreditSource,
     };
   }
@@ -212,6 +219,16 @@ function computeCredits(
     creditsUsed: 0,
     creditSource: resultCreditSource || "estimated" as CreditSource,
   };
+}
+
+/** Current managed API key id stashed by /v1 auth middleware (if any). */
+function currentApiKeyId(req?: Request | null): number | null {
+  try {
+    const id = (req as any)?.apiKeyId;
+    return typeof id === "number" && id > 0 ? id : null;
+  } catch {
+    return null;
+  }
 }
 
 function extractUsageFromSsePayload(payload: string) {
@@ -372,7 +389,7 @@ function wrapStreamWithUsageFinalizer(
     logId?: number;
     accountId: number;
     accountEmail: string;
-    provider: keyof typeof providers;
+    provider: string;
     model: string;
     quotaBefore: number;
     /** Account package / weekly-percent limit — skip token debit when 1–100 (Grok weekly %). */
@@ -384,6 +401,8 @@ function wrapStreamWithUsageFinalizer(
     fallbackCreditsUsed: number;
     fallbackCreditSource: CreditSource;
     useFreeCounter: boolean;
+    /** Synthetic node accounts (id<=0) — skip pool mutators / trackRequestEnd. */
+    skipPoolMutations?: boolean;
   }
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -488,7 +507,9 @@ function wrapStreamWithUsageFinalizer(
             // active once Qoder reports available quota again. No probe —
             // we'd rather pay the occasional false-exhaust (lifted on the
             // very next warmup tick) than serve a known-bad account.
-            await pool.markExhausted(context.accountId);
+            if (!context.skipPoolMutations && context.accountId > 0) {
+              await pool.markExhausted(context.accountId);
+            }
           }
           // Still update request log with error status
           if (context.logId) {
@@ -509,20 +530,22 @@ function wrapStreamWithUsageFinalizer(
         // (no local counter — server is sole truth). Non-Qoder providers
         // keep existing token-based decrement.
         let quotaAfter = context.quotaBefore;
-        if (isQoder && context.useFreeCounter && context.quotaBefore > 0) {
-          quotaAfter = await pool.decrementFreeQuota(context.accountId, 1);
-        } else if (!isQoder && context.quotaBefore > 0) {
-          // Grok weekly % (CLI GetGrokCreditsConfig, limit 0–100): server is
-          // source of truth — do not debit tokens onto a percent scale.
-          const skipGrokWeeklyDebit =
-            provider === "grok" &&
-            Number(context.quotaLimit ?? 0) > 0 &&
-            Number(context.quotaLimit) <= 100;
-          if (!skipGrokWeeklyDebit) {
-            quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
-            // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
-            if (quotaAfter <= 0) {
-              await pool.markExhaustedIfQuotaDepleted(context.accountId);
+        if (!context.skipPoolMutations && context.accountId > 0) {
+          if (isQoder && context.useFreeCounter && context.quotaBefore > 0) {
+            quotaAfter = await pool.decrementFreeQuota(context.accountId, 1);
+          } else if (!isQoder && context.quotaBefore > 0) {
+            // Grok weekly % (CLI GetGrokCreditsConfig, limit 0–100): server is
+            // source of truth — do not debit tokens onto a percent scale.
+            const skipGrokWeeklyDebit =
+              provider === "grok" &&
+              Number(context.quotaLimit ?? 0) > 0 &&
+              Number(context.quotaLimit) <= 100;
+            if (!skipGrokWeeklyDebit) {
+              quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
+              // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+              if (quotaAfter <= 0) {
+                await pool.markExhaustedIfQuotaDepleted(context.accountId);
+              }
             }
           }
         }
@@ -578,8 +601,8 @@ function wrapStreamWithUsageFinalizer(
               stream: true,
               _poolprox: {
                 creditSource,
-                creditUnit: providers[context.provider].getProviderCreditUnit(context.model),
-                creditRate: providers[context.provider].getProviderCreditRate(context.model),
+                creditUnit: resolveProviderInstance(context.provider)?.getProviderCreditUnit(context.model) ?? "token",
+                creditRate: resolveProviderInstance(context.provider)?.getProviderCreditRate(context.model) ?? 0,
               },
             }),
           },
@@ -591,10 +614,30 @@ function wrapStreamWithUsageFinalizer(
           promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens,
           totalTokens: finalTotalTokens, creditsUsed, cost, durationMs,
         });
+
+        // Grok weekly pool: re-probe after stream completes (token debit skipped).
+        if (
+          context.provider === "grok" &&
+          context.accountId > 0 &&
+          isGrokWeeklyPercentQuotaLimit(context.quotaLimit)
+        ) {
+          void db
+            .select()
+            .from(accounts)
+            .where(eq(accounts.id, context.accountId))
+            .limit(1)
+            .then((rows) => {
+              const a = rows[0];
+              if (a) void refreshGrokWeeklyPoolAfterRequest(a);
+            })
+            .catch(() => {});
+        }
       } catch (error) {
         console.error("[Proxy] Failed to finalize stream usage:", error);
       } finally {
-        pool.trackRequestEnd(context.accountId);
+        if (!context.skipPoolMutations && context.accountId > 0) {
+          pool.trackRequestEnd(context.accountId);
+        }
       }
     })();
   };
@@ -632,7 +675,10 @@ function wrapStreamWithUsageFinalizer(
   });
 }
 
-export async function handleChatCompletion(body: ChatCompletionRequest) {
+export async function handleChatCompletion(
+  body: ChatCompletionRequest,
+  opts?: { apiKeyId?: number | null; request?: Request | null },
+) {
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
@@ -642,9 +688,13 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
   // Resolve the provider name from the model to check forceStream before the
   // routeRequest call (which is where `provider` is normally assigned).
   const preProviderName = pool.getProviderForModel(body.model);
-  const providerForceStream = !!(preProviderName && (providers as any)[preProviderName]?.forceStream);
+  const preInst = preProviderName ? resolveProviderInstance(preProviderName) : null;
+  const providerForceStream = !!(preInst as any)?.forceStream;
   const effectiveStream = isStream || providerForceStream;
   const { result, account, provider, durationMs, compressionStats, compressedRequest } = await routeRequest(body, effectiveStream);
+  const resolvedApiKeyId =
+    opts?.apiKeyId ??
+    currentApiKeyId(opts?.request ?? null);
   let shouldReleaseTracking = true;
 
   try {
@@ -686,6 +736,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     // waiting for the next warmup mirror. The warmup runner still overrides
     // both columns from /activity each cycle, so any local drift is
     // self-correcting.
+    const isStaticLogAccount = !account.id || account.id <= 0;
     const isQoder = provider === "qoder";
     const qoderProvider = providers["qoder"] as { isFreeModel?: (m: string) => boolean } | undefined;
     const useFreeCounter = isQoder && qoderProvider?.isFreeModel?.(body.model) === true;
@@ -698,8 +749,9 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
 
     // For non-stream paths, decrement immediately. Stream paths and the
     // Qoder paid bucket (where we don't track usage locally) stay unchanged.
+    // Static node accounts (id<=0) have no DB row — skip pool mutators.
     let quotaAfter = quotaBefore;
-    if (!isStream) {
+    if (!isStream && !isStaticLogAccount) {
       if (isQoder && useFreeCounter && quotaBefore > 0) {
         // Qoder /activity bucket charges 1 request per call regardless of token count.
         quotaAfter = await pool.decrementFreeQuota(account.id, 1);
@@ -718,8 +770,9 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
       }
     }
 
+  const providerInst = resolveProviderInstance(provider);
   const logEntry = {
-    accountId: account.id,
+    accountId: account.id > 0 ? account.id : null,
     accountEmail: account.email,
     provider,
     model: body.model,
@@ -732,12 +785,14 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     durationMs,
     // Record the upstream response id for sticky response-id pinning.
     responseId: extractResponseId(result) ?? null,
+    // Multi-key attribution (stashed by /v1 auth middleware).
+    apiKeyId: resolvedApiKeyId,
     requestBody: prepareLogBody({
       ...body,
       _poolprox: {
         creditSource,
-        creditUnit: providers[provider].getProviderCreditUnit(body.model),
-        creditRate: providers[provider].getProviderCreditRate(body.model),
+        creditUnit: providerInst?.getProviderCreditUnit(body.model) ?? "token",
+        creditRate: providerInst?.getProviderCreditRate(body.model) ?? 0,
       },
     }),
     responseBody: prepareLogBody(result.response),
@@ -761,7 +816,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
 
     result.stream = wrapStreamWithUsageFinalizer(result.stream, {
       logId: created?.id,
-      accountId: account.id,
+      accountId: account.id > 0 ? account.id : 0,
       accountEmail: account.email,
       provider,
       model: body.model,
@@ -774,6 +829,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
       fallbackCreditsUsed: creditsUsed,
       fallbackCreditSource: creditSource,
       useFreeCounter,
+      skipPoolMutations: isStaticLogAccount,
     });
 
       shouldReleaseTracking = false;
@@ -796,9 +852,19 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
     data: { ...lightweightLog, email: account.email, createdAt: new Date().toISOString() },
   });
 
+    // Grok weekly pool (0–100): token debit is skipped, so re-probe after success
+    // and push account_status so the fleet Credits bar updates live.
+    if (
+      !isStaticLogAccount &&
+      provider === "grok" &&
+      isGrokWeeklyPercentQuotaLimit(account.quotaLimit)
+    ) {
+      void refreshGrokWeeklyPoolAfterRequest(account);
+    }
+
     return { result, isStream };
   } finally {
-    if (shouldReleaseTracking) pool.trackRequestEnd(account.id);
+    if (shouldReleaseTracking && account.id > 0) pool.trackRequestEnd(account.id);
   }
 }
 
@@ -879,7 +945,10 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   const isStream = body.stream === true;
 
   try {
-    const { result } = await handleChatCompletion(body);
+    const { result } = await handleChatCompletion(body, {
+      apiKeyId: currentApiKeyId(c.req.raw),
+      request: c.req.raw,
+    });
 
     if (isStream && result.stream) {
       // Return SSE stream
@@ -1045,13 +1114,14 @@ proxyRouter.post("/v1/messages", async (c) => {
       return c.json({ type: "error", error: { type: "invalid_request_error", message: msg } }, 400);
     }
 
+    const hcOpts = { apiKeyId: currentApiKeyId(c.req.raw), request: c.req.raw };
     const runners = {
       runCompletion: async (req: ChatCompletionRequest) => {
-        const { result } = await handleChatCompletion({ ...req, stream: false });
+        const { result } = await handleChatCompletion({ ...req, stream: false }, hcOpts);
         return { response: result.response };
       },
       runStream: async (req: ChatCompletionRequest) => {
-        const { result } = await handleChatCompletion({ ...req, stream: true });
+        const { result } = await handleChatCompletion({ ...req, stream: true }, hcOpts);
         return { stream: result.stream! };
       },
     };
@@ -1101,7 +1171,10 @@ proxyRouter.post("/v1/messages", async (c) => {
   }
 
   try {
-    const { result } = await handleChatCompletion(openAIRequest);
+    const { result } = await handleChatCompletion(openAIRequest, {
+      apiKeyId: currentApiKeyId(c.req.raw),
+      request: c.req.raw,
+    });
 
     if (body.stream === true && result.stream) {
       return new Response(openAIStreamToAnthropic(result.stream, body), {
@@ -1166,7 +1239,7 @@ proxyRouter.post("/v1/messages", async (c) => {
  * keeps no server-side response store (store:false semantics). Multi-turn
  * clients replay prior output items in `input`.
  */
-proxyRouter.post("/v1/responses", async (c) => {
+async function handleResponsesHttp(c: any) {
   let body: ResponsesApiRequest;
   try {
     body = await c.req.json<ResponsesApiRequest>();
@@ -1199,9 +1272,10 @@ proxyRouter.post("/v1/responses", async (c) => {
 
   const isStream = body.stream === true;
 
+  const hcOpts = { apiKeyId: currentApiKeyId(c.req.raw), request: c.req.raw };
   try {
     if (isStream) {
-      const { result } = await handleChatCompletion({ ...chatRequest, stream: true });
+      const { result } = await handleChatCompletion({ ...chatRequest, stream: true }, hcOpts);
       const meta = newResponsesResponseMeta();
       const stream = chatStreamToResponsesStream(result.stream!, chatRequest.model, meta.id, meta.createdAt);
       return new Response(stream, {
@@ -1214,7 +1288,7 @@ proxyRouter.post("/v1/responses", async (c) => {
       });
     }
 
-    const { result } = await handleChatCompletion({ ...chatRequest, stream: false });
+    const { result } = await handleChatCompletion({ ...chatRequest, stream: false }, hcOpts);
     const response = chatResponseToResponses(result.response, chatRequest.model);
     return c.json(response);
   } catch (error) {
@@ -1255,4 +1329,11 @@ proxyRouter.post("/v1/responses", async (c) => {
       },
     }, invalidModel || badUpstreamRequest ? 400 : 503);
   }
-});
+}
+
+/**
+ * POST /v1/responses - OpenAI Responses API (streaming + non-streaming)
+ * Also mounted at /backend-api/codex/responses for Codex CLI HTTP (non-WS).
+ */
+proxyRouter.post("/v1/responses", handleResponsesHttp);
+proxyRouter.post("/backend-api/codex/responses", handleResponsesHttp);

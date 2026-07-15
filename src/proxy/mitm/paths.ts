@@ -52,7 +52,11 @@ export const TOOL_HOSTS: Record<string, string[]> = {
 export const MITM_PORT = Number(process.env.MITM_PORT) || 443;
 
 /** The local router base URL the MITM forwards intercepted requests to. */
-export const MITM_ROUTER_BASE_URL = process.env.MITM_ROUTER_BASE_URL || "http://localhost:20128/v1";
+// Default to this process's PORT (1930) + /v1 — the previous 20128 default
+// pointed at a non-existent local port and guaranteed  connection failures.
+export const MITM_ROUTER_BASE_URL =
+  process.env.MITM_ROUTER_BASE_URL ||
+  `http://127.0.0.1:${process.env.PORT || "1930"}/v1`;
 
 /** Restart backoff delays (ms) for the MITM server child process. */
 export const MITM_RESTART_DELAYS_MS = [1000, 2000, 5000, 10000, 30000];
