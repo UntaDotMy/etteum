@@ -195,8 +195,9 @@ const GROK_CREATED = 1_718_000_000;
  * Catalog for /v1/models + dashboard.
  * - grok-4.5           → chat (+ vision understand)
  * - grok-4.5-reasoning → chat alias
- * - composer-2.5       → Grok Build coding
- * - grok-image         → image via /v1/responses + tools image_generation
+ * - composer-2.5            → Grok Build coding
+ * - grok-composer-2.5-fast  → Composer 2.5 Fast (Grok Build / SuperGrok)
+ * - grok-image              → image via /v1/responses + tools image_generation
  *
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
  * Image gen reuses OAuth cli-chat-proxy (not a separate Imagine host).
@@ -209,6 +210,9 @@ const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
   { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  // Composer 2.5 Fast — live probe: cli-chat-proxy accepts id "grok-composer-2.5-fast"
+  // (not "composer-2.5-fast" / "groq-…"). Free-tier often 402 subscription; SuperGrok OK.
+  { id: "grok-composer-2.5-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Image Studio / Chat media — tool-based gen on grok-4.5 Responses surface.
   { id: GROK_IMAGE_MODEL, object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 1, creditSource: "fixed" },
 ];
@@ -241,6 +245,14 @@ export class GrokProvider extends BaseProvider {
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
     if (m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5") return true;
+    // Canonical + common aliases (OpenCode uses grok-composer-2.5-fast).
+    if (
+      m === "grok-composer-2.5-fast" ||
+      m === "composer-2.5-fast" ||
+      m === "groq-composer-2.5-fast" // common typo (groq vs grok)
+    ) {
+      return true;
+    }
     if (isGrokImageModel(m)) return true;
     return false;
   }
@@ -949,6 +961,15 @@ export class GrokProvider extends BaseProvider {
   private mapConsoleModel(model: string): string {
     const m = (model || "").toLowerCase().trim();
     if (m === "composer-2.5" || m === "composer-2-5") return "composer-2.5";
+    // Live probe 2026-07-15: only "grok-composer-2.5-fast" is accepted (not
+    // bare "composer-2.5-fast"). Aliases map to that upstream id.
+    if (
+      m === "grok-composer-2.5-fast" ||
+      m === "composer-2.5-fast" ||
+      m === "groq-composer-2.5-fast"
+    ) {
+      return "grok-composer-2.5-fast";
+    }
     // grok-4.5-reasoning and any other 4.5 alias → upstream grok-4.5
     return "grok-4.5";
   }
