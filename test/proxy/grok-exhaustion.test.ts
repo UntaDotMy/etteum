@@ -102,7 +102,7 @@ describe("Grok free Build credit accounting", () => {
 });
 
 describe("Grok warmup live credit probe policy", () => {
-  test("absolute free Build quota is preferred over percent-scale 100", () => {
+  test("weekly percent is preferred over free Build absolute burn", () => {
     const absolute: GrokOAuthQuota = {
       limit: 2_000_000,
       remaining: 1_250_000,
@@ -122,19 +122,21 @@ describe("Grok warmup live credit probe policy", () => {
     expect(isAbsoluteGrokOAuthQuota(absolute)).toBe(true);
     expect(isAbsoluteGrokOAuthQuota(percent)).toBe(false);
     const picked = selectGrokOAuthQuota(null, absolute, percent);
-    expect(picked?.remaining).toBe(1_250_000);
-    expect(picked?.source).toBe("cli-chat-proxy/ratelimit-headers");
+    expect(picked?.percentScale).toBe(true);
+    expect(picked?.limit).toBe(100);
+    expect(picked?.remaining).toBe(100);
+    expect(picked?.source).toBe("grok.com/GetGrokCreditsConfig");
   });
 
-  test("warmup writes trusted partial header remaining (below package)", () => {
+  test("warmup refuses free-Build absolute package write to quota columns", () => {
     const account = {
       id: 1,
       provider: "grok",
       email: "t@oauth",
       status: "active",
-      quotaLimit: 2_000_000,
-      quotaRemaining: 2_000_000,
-      tokens: { auth_method: "oauth", credits_limit: 2_000_000, credits_remaining: 2_000_000 },
+      quotaLimit: 100,
+      quotaRemaining: 100,
+      tokens: { auth_method: "oauth", credits_limit: 100, credits_remaining: 100 },
     } as unknown as Account;
 
     const update = mapHealthToAccountUpdate(account, {
@@ -154,9 +156,10 @@ describe("Grok warmup live credit probe policy", () => {
       },
     });
 
-    expect(update.quotaLimit).toBe(2_000_000);
-    // min(db 2M, live 1.1M) → live trusted burn
-    expect(update.quotaRemaining).toBe(1_100_000);
+    // Free-Build ~2M must not clobber weekly quota columns.
+    expect(update.quotaLimit).toBeUndefined();
+    expect(update.quotaRemaining).toBeUndefined();
+    // Token blob may still refresh for OAuth, but dashboard quota stays weekly.
     expect((update.tokens as any)?.credits_remaining).toBe(1_100_000);
   });
 
@@ -199,8 +202,8 @@ describe("Grok warmup live credit probe policy", () => {
       },
     });
 
-    expect(update.quotaLimit).toBe(2_000_000);
-    // Must NOT re-inflate to full 2M
+    // Free-Build absolute must not write quota_limit/remaining at all.
+    expect(update.quotaLimit).toBeUndefined();
     expect(update.quotaRemaining).toBeUndefined();
   });
 
@@ -256,11 +259,40 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.status).toBe("exhausted");
-    expect(update.quotaRemaining).toBe(0);
-    expect(update.quotaLimit).toBe(2_000_000);
+    // Free-Build absolute exhausted must not reintroduce 2M package size.
+    expect(update.quotaLimit).toBeUndefined();
+    expect(update.quotaRemaining).toBeUndefined();
   });
 
-  test("scale change from wrong percent-100 to free-usage 2M/0", () => {
+  test("weekly exhausted health zeros remaining on 0–100 scale", () => {
+    const account = {
+      id: 3,
+      provider: "grok",
+      email: "t3b@oauth",
+      status: "active",
+      quotaLimit: 100,
+      quotaRemaining: 40,
+      tokens: null,
+    } as unknown as Account;
+
+    const update = mapHealthToAccountUpdate(account, {
+      kind: "exhausted",
+      success: true,
+      quota: {
+        limit: 100,
+        remaining: 0,
+        used: 100,
+        resetAt: null,
+        source: "cli-chat-proxy/free-usage-exhausted+weekly-percent",
+      },
+    });
+
+    expect(update.status).toBe("exhausted");
+    expect(update.quotaLimit).toBe(100);
+    expect(update.quotaRemaining).toBe(0);
+  });
+
+  test("scale change from wrong percent-100 to free-usage 2M/0 is blocked", () => {
     // Accounts that got stuck at 100/100 (percent pool written as tokens).
     const account = {
       id: 4,
@@ -285,7 +317,8 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.status).toBe("exhausted");
-    expect(update.quotaLimit).toBe(2_000_000);
-    expect(update.quotaRemaining).toBe(0);
+    // Free-Build 2M package must not replace weekly columns.
+    expect(update.quotaLimit).toBeUndefined();
+    expect(update.quotaRemaining).toBeUndefined();
   });
 });

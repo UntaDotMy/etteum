@@ -351,9 +351,21 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
     if (health.quota && !isFallbackQuota) {
       const rawLimit = Number(health.quota.limit);
       const rawRemaining = Number(health.quota.remaining);
+      const isGrok = account.provider === "grok";
+      // Free-Build absolute packages (~2e6) must never land in accounts.quota_*.
+      // Dashboard free-tier truth is weekly 0–100 only.
+      const isGrokFreeBuildAbsolute =
+        isGrok &&
+        Number.isFinite(rawLimit) &&
+        rawLimit >= 500_000 &&
+        !(
+          quotaSource.includes("GetGrokCreditsConfig") ||
+          quotaSource.includes("weekly-percent")
+        );
+
       // Sentinel `-1` means "unknown / unlimited" — preserve whatever the
       // provider already wrote into the DB instead of clobbering it.
-      if (Number.isFinite(rawLimit) && rawLimit >= 0) {
+      if (Number.isFinite(rawLimit) && rawLimit >= 0 && !isGrokFreeBuildAbsolute) {
         update.quotaLimit = rawLimit;
 
         // Compute the safe remaining: never let warmup increase
@@ -371,17 +383,12 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
           rawLimit > 0 &&
           (rawLimit / dbLimit >= 10 || dbLimit / rawLimit >= 10);
 
-        // Grok free Build: x-ratelimit-remaining-tokens often equals the full
-        // package (2M) even after real use (live-confirmed). That is NOT live
-        // remaining. Remaining is tracked by per-request debit; warmup must
-        // not re-inflate every healthy account to full package.
-        const isGrok = account.provider === "grok";
         // CLI weekly pool (0–100) is authoritative — always write upstream.
         const isGrokWeeklyPercent =
           isGrok &&
           (quotaSource.includes("GetGrokCreditsConfig") ||
             quotaSource.includes("weekly-percent") ||
-            (rawLimit > 0 && rawLimit <= 100 && quotaSource.includes("weekly")));
+            (rawLimit > 0 && rawLimit <= 100));
         const untrustedFullRemaining =
           isGrok &&
           !isGrokWeeklyPercent &&
@@ -397,19 +404,8 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
           // Same surface as Grok CLI creditUsagePercent — trust live probe.
           update.quotaRemaining = upstreamRemaining;
         } else if (untrustedFullRemaining) {
-          // Only seed full package when we have no usable local absolute remaining
-          // (first import / wrong percent-scale 100). Otherwise keep local debit.
-          const hasLocalAbsolute =
-            Number.isFinite(dbRemaining) &&
-            dbRemaining > 0 &&
-            Number.isFinite(dbLimit) &&
-            dbLimit > 1000;
-          if (!hasLocalAbsolute) {
-            // First absolute seed (or migrate off percent 100) → start at package.
-            // Subsequent requests decrement; later warmups leave local remaining.
-            update.quotaRemaining = rawLimit;
-          }
-          // else: do not set quotaRemaining — preserve local tracked remaining
+          // Never seed free-Build absolute package into remaining.
+          // (isGrokFreeBuildAbsolute already blocked limit write above.)
         } else if (scaleChanged) {
           update.quotaRemaining = upstreamRemaining;
         } else if (Number.isFinite(dbRemaining) && dbRemaining > 0) {

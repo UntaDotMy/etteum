@@ -505,11 +505,14 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
           // GetGrokCreditsConfig). Do NOT write raw x-ratelimit headers
           // (~2M free Build package) — one absolute row demotes the whole
           // Grok provider card from "Weekly pool" to "Credits".
-          const { fetchOAuthBillingQuota } = await import(
-            "../../proxy/providers/grok/oauth"
-          );
+          const {
+            fetchOAuthBillingQuota,
+            isGrokDashboardQuotaSafe,
+          } = await import("../../proxy/providers/grok/oauth");
           const q = await fetchOAuthBillingQuota(oauthTokens.access_token);
-          if (q && q.limit > 0) {
+          // Only pin dashboard-safe quota (weekly 0–100 or paid billing).
+          // Free-Build ~2M packages must never land in credits_limit → quota_limit.
+          if (q && q.limit > 0 && isGrokDashboardQuotaSafe(q)) {
             oauthTokens.credits_limit = q.limit;
             oauthTokens.credits_remaining = q.remaining;
           }
@@ -664,10 +667,18 @@ async function upsertGrokOAuthAccount(
 
   const quotaPatch: Record<string, unknown> = {};
   if (oauthTokens.credits_limit != null && oauthTokens.credits_limit > 0) {
-    quotaPatch.quotaLimit = Math.floor(oauthTokens.credits_limit);
-    quotaPatch.quotaRemaining = Math.floor(
-      oauthTokens.credits_remaining ?? oauthTokens.credits_limit,
+    const lim = Math.floor(oauthTokens.credits_limit);
+    // Guard: free-Build absolute (~2e6) must not hit accounts.quota_* columns.
+    // Weekly pool is 0–100; paid billing units are smaller than free-Build packages.
+    const { isGrokFreeBuildAbsolutePackage } = await import(
+      "../../proxy/providers/grok/oauth"
     );
+    if (!isGrokFreeBuildAbsolutePackage(lim)) {
+      quotaPatch.quotaLimit = lim;
+      quotaPatch.quotaRemaining = Math.floor(
+        oauthTokens.credits_remaining ?? oauthTokens.credits_limit,
+      );
+    }
   }
 
   if (existing.length > 0) {
