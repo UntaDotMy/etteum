@@ -1,4 +1,4 @@
-import { useEffect, useState, useCallback, useMemo } from "react";
+import { useEffect, useState, useCallback, useMemo, useRef } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
@@ -41,12 +41,25 @@ export default function BotLogs() {
   const [challenges, setChallenges] = useState<Record<string, Challenge>>({});
   const [loading, setLoading] = useState(true);
   const [bulkBusy, setBulkBusy] = useState(false);
+  const hasPaintedRef = useRef(false);
+  const scrollYRef = useRef(0);
 
   const load = useCallback(async () => {
+    const soft = hasPaintedRef.current;
+    if (soft && typeof window !== "undefined") {
+      scrollYRef.current = window.scrollY;
+    }
     try {
       const s = await fetchBrowserSessions();
       setSessions(s.filter(isWorkerDisplaySession));
+      hasPaintedRef.current = true;
       setLoading(false);
+      if (soft && typeof window !== "undefined") {
+        const y = scrollYRef.current;
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: y, left: 0, behavior: "instant" as ScrollBehavior });
+        });
+      }
     } catch {
       setLoading(false);
     }
