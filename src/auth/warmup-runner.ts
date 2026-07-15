@@ -139,6 +139,20 @@ function mergeWarmupMetadata(
   const incomingActivity = (health.metadata as Record<string, unknown> | undefined)?.activityQuota;
   const activityQuota = incomingActivity != null ? incomingActivity : (existing.activityQuota ?? null);
 
+  // Record which quota-reset boundary this tick probed so the 60s resetTick
+  // does not re-enqueue the same account forever when quotaResetAt stays in
+  // the past (common on Grok free Build after a billing period end).
+  let lastPingedResetAt: string | null =
+    (typeof prevWarmup.lastPingedResetAt === "string"
+      ? prevWarmup.lastPingedResetAt
+      : null) ?? null;
+  if (account.quotaResetAt) {
+    const resetMs = new Date(account.quotaResetAt).getTime();
+    if (Number.isFinite(resetMs)) {
+      lastPingedResetAt = new Date(resetMs).toISOString();
+    }
+  }
+
   return {
     ...existing,
     ...(health.metadata || {}),
@@ -152,6 +166,7 @@ function mergeWarmupMetadata(
       lastError: shortError(health.error || health.message),
       lastProbeAt: extras.lastProbeAt ?? (prevWarmup.lastProbeAt as string | undefined) ?? null,
       quotaOverride: quotaOverride ?? null,
+      lastPingedResetAt,
     },
     serverQuota,
     activityQuota,
@@ -401,6 +416,17 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
       if (health.quota.resetAt) {
         const resetAt = new Date(health.quota.resetAt);
         if (!Number.isNaN(resetAt.getTime())) update.quotaResetAt = resetAt;
+      } else if (
+        // Grok free Build probes often return no next reset window. A past
+        // quotaResetAt (e.g. ended billing period) would keep the 60s reset
+        // tick re-queuing forever. Clear it once we've probed healthy/exhausted
+        // without a new future boundary.
+        account.provider === "grok" &&
+        (health.kind === "healthy" || health.kind === "exhausted") &&
+        account.quotaResetAt &&
+        new Date(account.quotaResetAt).getTime() <= Date.now()
+      ) {
+        update.quotaResetAt = null;
       }
     } else if (health.quota && isFallbackQuota) {
       // Fallback quota (e.g. "tracked" source) — this is the SAME data
@@ -415,6 +441,21 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
       update.quotaRemaining = 0;
     }
     // else: no quota info and not exhausted — preserve existing DB values.
+
+    // Grok: if we never received a future reset window this tick, drop a
+    // past quotaResetAt so the global 60s resetTick stops re-adding the row.
+    // lastPingedResetAt is the primary guard; clearing is belt-and-suspenders
+    // for free Build accounts that never get a real period end.
+    if (
+      account.provider === "grok" &&
+      (health.kind === "healthy" || health.kind === "exhausted") &&
+      update.quotaResetAt === undefined &&
+      !health.quota?.resetAt &&
+      account.quotaResetAt &&
+      new Date(account.quotaResetAt).getTime() <= Date.now()
+    ) {
+      update.quotaResetAt = null;
+    }
 
     // Free counter mirrors /activity bucket qmodel_latest.
     // Same preservation logic: never increase above DB value, only write

@@ -19,8 +19,10 @@ import { tmpdir } from "node:os";
 import { Database } from "bun:sqlite";
 import {
   accountIdentityKey,
+  chooseMergeTokens,
   encryptionKeyFromEnvText,
   mergeAccountsFromPack,
+  oauthExpiresAtSec,
   BACKUP_FORMAT,
   BACKUP_VERSION,
 } from "../../src/lib/backup";
@@ -165,6 +167,51 @@ describe("backup merge helpers", () => {
     const ct = encryptWithPassphrase("same", LIVE_KEY);
     expect(reencryptSecret(ct, LIVE_KEY, LIVE_KEY)).toBe(ct);
   });
+
+  test("oauthExpiresAtSec accepts seconds, ms, and ISO", () => {
+    expect(oauthExpiresAtSec({ expires_at: 1_700_000_000 })).toBe(1_700_000_000);
+    expect(oauthExpiresAtSec({ expires_at: 1_700_000_000_000 })).toBe(1_700_000_000);
+    expect(oauthExpiresAtSec({ expires_at: "2020-01-01T00:00:00.000Z" })).toBe(
+      Math.floor(Date.parse("2020-01-01T00:00:00.000Z") / 1000),
+    );
+    expect(oauthExpiresAtSec(null)).toBe(0);
+  });
+
+  test("chooseMergeTokens keeps live when live access token is fresher", () => {
+    const live = JSON.stringify({
+      auth_method: "oauth",
+      refresh_token: "live-rotated-rt",
+      expires_at: 2_000_000_000,
+    });
+    const pack = JSON.stringify({
+      auth_method: "oauth",
+      refresh_token: "stale-pack-rt",
+      expires_at: 1_500_000_000,
+    });
+    const chosen = chooseMergeTokens(live, pack);
+    expect(JSON.parse(chosen!).refresh_token).toBe("live-rotated-rt");
+  });
+
+  test("chooseMergeTokens takes pack when pack is fresher or expiry missing", () => {
+    const live = JSON.stringify({ refresh_token: "old-rt", auth_method: "oauth" });
+    const pack = JSON.stringify({
+      refresh_token: "new-rt-from-pack",
+      auth_method: "oauth",
+      expires_at: 2_000_000_000,
+    });
+    expect(JSON.parse(chooseMergeTokens(live, pack)!).refresh_token).toBe(
+      "new-rt-from-pack",
+    );
+    // Both missing expiry → pack wins (intentional transfer)
+    expect(
+      JSON.parse(
+        chooseMergeTokens(
+          JSON.stringify({ refresh_token: "a" }),
+          JSON.stringify({ refresh_token: "b" }),
+        )!,
+      ).refresh_token,
+    ).toBe("b");
+  });
 });
 
 describe("mergeAccountsFromPack", () => {
@@ -273,5 +320,143 @@ describe("mergeAccountsFromPack", () => {
         .get(markerProvider, emailA, emailB) as { n: number }
     ).n;
     expect(after).toBe(2);
+  });
+
+  test("merge keeps live Grok tokens when live access token is fresher than pack", () => {
+    process.env.ENCRYPTION_KEY = LIVE_KEY;
+    const email = `merge-test-fresher-${Date.now()}@example.com`;
+    const packDir2 = mkdtempSync(path.join(tmpdir(), "etteum-merge-fresh-"));
+
+    const seed = liveSqlite
+      .query(
+        `INSERT INTO accounts (provider, email, password, status, enabled, tokens, priority, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', 1, ?, 0, ?, ?) RETURNING id`,
+      )
+      .get(
+        markerProvider,
+        email,
+        encryptWithPassphrase("live-pw", LIVE_KEY),
+        JSON.stringify({
+          auth_method: "oauth",
+          refresh_token: "live-rotated-rt",
+          access_token: "live-at",
+          expires_at: 2_100_000_000,
+          sub: "sub-fresher",
+        }),
+        Math.floor(Date.now() / 1000),
+        Math.floor(Date.now() / 1000),
+      ) as { id: number };
+    createdIds.push(seed.id);
+
+    writePack(
+      packDir2,
+      [
+        {
+          provider: markerProvider,
+          email,
+          password: encryptWithPassphrase("pack-pw", PACK_KEY),
+          tokens: JSON.stringify({
+            auth_method: "oauth",
+            refresh_token: "stale-pack-rt",
+            access_token: "stale-at",
+            expires_at: 1_500_000_000,
+            sub: "sub-fresher",
+          }),
+        },
+      ],
+      PACK_KEY,
+    );
+
+    try {
+      const result = mergeAccountsFromPack(packDir2);
+      expect(result.updated).toBe(1);
+      expect(result.inserted).toBe(0);
+      const row = liveSqlite
+        .query(`SELECT tokens FROM accounts WHERE id = ?`)
+        .get(seed.id) as { tokens: string };
+      const tok = JSON.parse(row.tokens);
+      // Must NOT install the pack's already-rotated refresh token.
+      expect(tok.refresh_token).toBe("live-rotated-rt");
+      expect(tok.expires_at).toBe(2_100_000_000);
+    } finally {
+      try {
+        rmSync(packDir2, { recursive: true, force: true });
+      } catch {
+        /* Windows may still hold a handle briefly */
+      }
+    }
+  });
+
+  test("merge dedups Grok by OIDC sub when emails differ (no dual-row RT race)", () => {
+    process.env.ENCRYPTION_KEY = LIVE_KEY;
+    const liveEmail = `merge-test-sub-live-${Date.now()}@example.com`;
+    const packEmail = `merge-test-sub-pack-${Date.now()}@oauth`;
+    const packDir2 = mkdtempSync(path.join(tmpdir(), "etteum-merge-sub-"));
+
+    const seed = liveSqlite
+      .query(
+        `INSERT INTO accounts (provider, email, password, status, enabled, tokens, priority, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', 1, ?, 0, ?, ?) RETURNING id`,
+      )
+      .get(
+        markerProvider,
+        liveEmail,
+        encryptWithPassphrase("live-pw", LIVE_KEY),
+        JSON.stringify({
+          auth_method: "oauth",
+          refresh_token: "same-rt",
+          expires_at: 1_600_000_000,
+          sub: "sub-shared-identity",
+        }),
+        Math.floor(Date.now() / 1000),
+        Math.floor(Date.now() / 1000),
+      ) as { id: number };
+    createdIds.push(seed.id);
+
+    writePack(
+      packDir2,
+      [
+        {
+          provider: markerProvider,
+          email: packEmail,
+          password: encryptWithPassphrase("pack-pw", PACK_KEY),
+          tokens: JSON.stringify({
+            auth_method: "oauth",
+            refresh_token: "same-rt-rotated",
+            expires_at: 2_000_000_000,
+            sub: "sub-shared-identity",
+          }),
+        },
+      ],
+      PACK_KEY,
+    );
+
+    try {
+      const result = mergeAccountsFromPack(packDir2);
+      expect(result.inserted).toBe(0);
+      expect(result.updated).toBe(1);
+      const count = (
+        liveSqlite
+          .query(
+            `SELECT COUNT(*) AS n FROM accounts WHERE provider = ? AND (
+              email = ? OR email = ? OR tokens LIKE '%sub-shared-identity%'
+            )`,
+          )
+          .get(markerProvider, liveEmail, packEmail) as { n: number }
+      ).n;
+      expect(count).toBe(1);
+      const row = liveSqlite
+        .query(`SELECT email, tokens FROM accounts WHERE id = ?`)
+        .get(seed.id) as { email: string; tokens: string };
+      // Keep live email; take fresher pack tokens (higher expires_at).
+      expect(row.email).toBe(liveEmail);
+      expect(JSON.parse(row.tokens).refresh_token).toBe("same-rt-rotated");
+    } finally {
+      try {
+        rmSync(packDir2, { recursive: true, force: true });
+      } catch {
+        /* Windows may still hold a handle briefly */
+      }
+    }
   });
 });
