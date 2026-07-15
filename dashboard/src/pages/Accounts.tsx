@@ -14,6 +14,7 @@ import {
 import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText, Square } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { formatNumber } from "@/lib/utils";
+import { sumProviderFleetCredits } from "@/lib/provider-credits";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
   completeCodexOAuthCallbackUrl,
@@ -1277,21 +1278,11 @@ export default function Accounts() {
   const providerStats = useMemo(() => {
     return providers.map((provider) => {
       const rows = accounts.filter((a) => a.provider === provider);
-      // Enabled accounts only (skip user-disabled). Include exhausted/error in
-      // package total so total stays 156×2M when some flip exhausted — remaining
-      // drops, total package capacity does not shrink.
+      // Credits bar = remaining / total (not inflated total / total from Error).
+      // See sumProviderFleetCredits — error rows keep stale full packages.
       const creditRows = rows.filter((a) => a.enabled !== false);
       const activeRows = creditRows.filter((a) => a.status === "active");
-      const positiveLimit = (n: number | undefined) => {
-        const v = Number(n || 0);
-        return Number.isFinite(v) && v > 0 ? v : 0;
-      };
-      const positiveRemaining = (n: number | undefined) => {
-        const v = Number(n || 0);
-        return Number.isFinite(v) && v > 0 ? v : 0;
-      };
-      const quotaLimit = creditRows.reduce((sum, a) => sum + positiveLimit(a.quotaLimit), 0);
-      const quotaRemaining = creditRows.reduce((sum, a) => sum + positiveRemaining(a.quotaRemaining), 0);
+      const { limit: quotaLimit, remaining: quotaRemaining } = sumProviderFleetCredits(rows);
 
       // For alibaba, aggregate per-model quotas only from accounts that can query each model
       let modelQuotasSum: Record<string, { limit: number; remaining: number; count: number }> | undefined;
