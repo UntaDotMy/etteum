@@ -1083,7 +1083,7 @@ export async function assistPrompt(payload: {
 export async function generateImage(payload: {
   prompt: string;
   type?: "image" | "video";
-  /** Model id to route (canva-image, canva-video, …). */
+  /** Required model id to route (canva-image, canva-video, grok-image, …). */
   model?: string;
   aspectRatio?: string;
   n?: number;

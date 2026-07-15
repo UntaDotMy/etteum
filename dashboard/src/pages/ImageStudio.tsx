@@ -65,6 +65,8 @@ interface GenResult {
   urls: string[];
   creditsUsed: number;
   createdAt: number;
+  /** Model id used for this generation (canva-image, grok-image, …). */
+  model?: string;
 }
 
 function resultFromStored(r: StoredResult): GenResult {
@@ -77,7 +79,15 @@ function resultFromStored(r: StoredResult): GenResult {
     urls: Array.isArray(r.urls) ? r.urls : [],
     creditsUsed: r.creditsUsed,
     createdAt: new Date(r.createdAt).getTime(),
+    model: typeof (r as { model?: string }).model === "string" ? (r as { model?: string }).model : undefined,
   };
+}
+
+const GEN_MODEL_STORAGE_KEY = "etteum-image-studio-gen-model";
+
+function safeModelFileStem(model: string | undefined, type: GenType): string {
+  const raw = (model || type || "image").toLowerCase().replace(/[^a-z0-9._-]+/g, "_");
+  return raw || "image";
 }
 
 const ASPECT_RATIOS: Array<{ value: string; label: string; icon: string }> = [
@@ -96,6 +106,7 @@ function labelProvider(provider: string) {
   if (provider === "codebuddy") return "CodeBuddy";
   if (provider === "codebuddy-china") return "CodeBuddy CN";
   if (provider === "grok") return "Grok";
+  if (provider === "canva") return "Canva";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
@@ -114,7 +125,8 @@ export default function ImageStudio() {
   const [assistModels, setAssistModels] = useState<AssistModelInfo[]>([]);
   const [assistModel, setAssistModel] = useState<string>("auto");
   const [genModels, setGenModels] = useState<GenModelInfo[]>([]);
-  const [genModel, setGenModel] = useState<string>("canva-image");
+  /** Empty until active media models load — never hardcode canva/grok. */
+  const [genModel, setGenModel] = useState<string>("");
   const [genType, setGenType] = useState<GenType>("image");
   const [aspectRatio, setAspectRatio] = useState<string>("1:1");
   const [n, setN] = useState<number>(1);
@@ -168,13 +180,18 @@ export default function ImageStudio() {
   }
 
   async function regenerate(r: GenResult) {
+    const model = (r.model || genModel || "").trim();
+    if (!model) {
+      setError("Pilih model generate dulu (Canva, Grok, …).");
+      return;
+    }
     setGenerating(true);
     setError(null);
     try {
       const res = await generateImage({
         prompt: r.prompt,
         type: r.type,
-        model: genModel || (r.type === "video" ? "canva-video" : "canva-image"),
+        model,
         aspectRatio: r.aspectRatio,
         n: r.n,
         chatId,
@@ -188,6 +205,7 @@ export default function ImageStudio() {
         urls: res.urls,
         creditsUsed: res.creditsUsed,
         createdAt: res.createdAt ? new Date(res.createdAt).getTime() : Date.now(),
+        model,
       };
       setResults((prev) => [...prev, fresh]);
       try {
@@ -217,18 +235,49 @@ export default function ImageStudio() {
         const rows = (res.data || [])
           .map((m) => ({
             id: String(m.id || m.model || ""),
-            provider: String(m.provider || m.owned_by || "unknown"),
+            provider: String(
+              m.provider ||
+                (String(m.id || "").toLowerCase().startsWith("canva")
+                  ? "canva"
+                  : String(m.id || "").toLowerCase().startsWith("grok")
+                    ? "grok"
+                    : m.owned_by || "unknown"),
+            ),
           }))
           .filter((m) => m.id && (isGenModel(m.id, "image") || isGenModel(m.id, "video")));
-        setGenModels(rows);
-        const preferred =
-          rows.find((m) => m.id === "grok-image") ||
-          rows.find((m) => m.id === "canva-image") ||
-          rows.find((m) => isGenModel(m.id, "image"));
-        if (preferred) setGenModel(preferred.id);
+        // De-dupe by id (active list can repeat aliases).
+        const byId = new Map<string, GenModelInfo>();
+        for (const row of rows) {
+          if (!byId.has(row.id)) byId.set(row.id, row);
+        }
+        const unique = Array.from(byId.values()).sort((a, b) =>
+          a.provider === b.provider
+            ? a.id.localeCompare(b.id)
+            : a.provider.localeCompare(b.provider),
+        );
+        setGenModels(unique);
+
+        // Restore last pick only if still available — never force grok/canva.
+        let saved = "";
+        try {
+          saved = localStorage.getItem(GEN_MODEL_STORAGE_KEY) || "";
+        } catch {
+          /* ignore */
+        }
+        const imageRows = unique.filter((m) => isGenModel(m.id, "image"));
+        const pick =
+          (saved && unique.some((m) => m.id === saved) ? saved : "") ||
+          imageRows[0]?.id ||
+          unique[0]?.id ||
+          "";
+        if (pick) setGenModel(pick);
       })
-      .catch(() => {
-        /* gen model list is optional — backend still defaults */
+      .catch((err) => {
+        setError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load generation models (need Canva and/or Grok accounts active)",
+        );
       });
   }, []);
 
@@ -326,12 +375,34 @@ export default function ImageStudio() {
     [genModels, genType],
   );
 
+  const groupedGenModels = useMemo(() => {
+    const map = new Map<string, GenModelInfo[]>();
+    for (const m of genModelsForType) {
+      const list = map.get(m.provider) || [];
+      list.push(m);
+      map.set(m.provider, list);
+    }
+    return Array.from(map.entries());
+  }, [genModelsForType]);
+
   useEffect(() => {
-    if (genModelsForType.length === 0) return;
+    if (genModelsForType.length === 0) {
+      if (genModel) setGenModel("");
+      return;
+    }
     if (!genModelsForType.some((m) => m.id === genModel)) {
       setGenModel(genModelsForType[0]!.id);
     }
   }, [genType, genModelsForType, genModel]);
+
+  useEffect(() => {
+    if (!genModel) return;
+    try {
+      localStorage.setItem(GEN_MODEL_STORAGE_KEY, genModel);
+    } catch {
+      /* ignore */
+    }
+  }, [genModel]);
 
   async function sendMessage(text: string) {
     const trimmed = text.trim();
@@ -378,13 +449,19 @@ export default function ImageStudio() {
       setError("Belum ada prompt — chat dulu untuk dapat final prompt, atau ketik manual di kolom input.");
       return;
     }
+    if (!genModel.trim()) {
+      setError(
+        "No generation model selected. Add an active Canva and/or Grok account, then pick a model.",
+      );
+      return;
+    }
     setGenerating(true);
     setError(null);
     try {
       const res = await generateImage({
         prompt,
         type: genType,
-        model: genModel || (genType === "video" ? "canva-video" : "canva-image"),
+        model: genModel,
         aspectRatio,
         n,
         chatId,
@@ -398,6 +475,7 @@ export default function ImageStudio() {
         urls: res.urls,
         creditsUsed: res.creditsUsed,
         createdAt: res.createdAt ? new Date(res.createdAt).getTime() : Date.now(),
+        model: genModel,
       };
       setResults((prev) => [...prev, result]);
     } catch (err) {
@@ -498,18 +576,21 @@ export default function ImageStudio() {
               <select
                 value={genModel}
                 onChange={(e) => setGenModel(e.target.value)}
-                className="h-7 max-w-[150px] appearance-none truncate rounded border border-[var(--border)] bg-[var(--background)] pl-2 pr-6 text-[11px] text-[var(--foreground)] focus:border-[var(--primary)]/50 focus:outline-none"
-                title="Image / video generation model"
+                disabled={genModelsForType.length === 0}
+                className="h-7 max-w-[180px] appearance-none truncate rounded border border-[var(--border)] bg-[var(--background)] pl-2 pr-6 text-[11px] text-[var(--foreground)] focus:border-[var(--primary)]/50 focus:outline-none disabled:opacity-50"
+                title="Image / video generation model (Canva, Grok, …)"
               >
                 {genModelsForType.length === 0 ? (
-                  <option value={genType === "video" ? "canva-video" : "canva-image"}>
-                    {genType === "video" ? "canva-video" : "canva-image"}
-                  </option>
+                  <option value="">No media models</option>
                 ) : (
-                  genModelsForType.map((m) => (
-                    <option key={m.id} value={m.id}>
-                      {m.id}
-                    </option>
+                  groupedGenModels.map(([provider, list]) => (
+                    <optgroup key={provider} label={labelProvider(provider)}>
+                      {list.map((m) => (
+                        <option key={m.id} value={m.id}>
+                          {m.id}
+                        </option>
+                      ))}
+                    </optgroup>
                   ))
                 )}
               </select>
@@ -966,8 +1047,12 @@ export default function ImageStudio() {
                                   onClick={() =>
                                     downloadUrl(
                                       url,
-                                      `canva_${r.aspectRatio}_${r.id}_${i + 1}.${
-                                        r.type === "video" ? "mp4" : "png"
+                                      `${safeModelFileStem(r.model || genModel, r.type)}_${r.aspectRatio}_${r.id}_${i + 1}.${
+                                        r.type === "video"
+                                          ? "mp4"
+                                          : url.startsWith("data:image/jpeg")
+                                            ? "jpg"
+                                            : "png"
                                       }`,
                                     )
                                   }
