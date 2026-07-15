@@ -710,18 +710,28 @@ export function normalizeGrokAbsoluteRemaining(
 }
 
 /**
- * Pick the best Grok OAuth quota snapshot for **token-budget accounting**.
+ * True when DB quota columns store the CLI weekly pool (0–100 scale), not
+ * absolute free-Build tokens (~2e6). Local token debit must not run on this
+ * scale (one request would wipe remaining).
+ */
+export function isGrokWeeklyPercentQuotaLimit(limit: number | null | undefined): boolean {
+  const lim = Number(limit);
+  return Number.isFinite(lim) && lim > 0 && lim <= 100;
+}
+
+/**
+ * Pick the best Grok OAuth quota snapshot for dashboard + pool accounting.
  *
- * Free Build accounts always answer GetGrokCreditsConfig with a percent-scale
- * 100-point pool (0% used → remaining=100). That is NOT the absolute free
- * Build token budget (~2e6 from x-ratelimit-*-tokens). Mixing them on the
- * dashboard is what produced "2M / 2.0M / 100" side by side.
+ * Free-tier CLI truth is GetGrokCreditsConfig (weekly percent 0–100), not
+ * x-ratelimit headers (often stuck at full package) and not /v1/billing
+ * (monthlyLimit=0 on free).
  *
  * Priority:
  *   1. Paid absolute billing (limit > 0)
- *   2. free-usage-exhausted absolute (even with limit 0 / no headers)
- *   3. Absolute free Build rate-limit headers (limit > 0)
- *   4. Never percent-scale 100 as a token quota (return null)
+ *   2. free-usage-exhausted → remaining 0 (prefer percent-scale shape when available)
+ *   3. Trusted absolute burn (remaining < limit on free Build headers)
+ *   4. Weekly percent (CLI GetGrokCreditsConfig) — free tier default
+ *   5. Untrusted full absolute headers → skip (do not re-inflate to 2M)
  */
 export function selectGrokOAuthQuota(
   paid: GrokOAuthQuota | null | undefined,
@@ -730,10 +740,19 @@ export function selectGrokOAuthQuota(
 ): GrokOAuthQuota | null {
   if (paid && paid.limit > 0 && !paid.percentScale) return paid;
 
-  // Live probe: free-usage-exhausted has NO rate-limit headers (limit often 0).
-  // Previously we fell through to percent 100/100 → dashboard showed "100"
-  // while the account was actually dead for chat. That must never happen again.
+  // Chat entitlement gone for this window — never report healthy 100%.
   if (absolute && isGrokFreeUsageExhaustedQuota(absolute)) {
+    if (percent?.percentScale) {
+      return {
+        ...percent,
+        remaining: 0,
+        used: 100,
+        limit: 100,
+        percentScale: true,
+        source: `${absolute.source}+weekly-percent`,
+        resetAt: percent.resetAt ?? absolute.resetAt ?? null,
+      };
+    }
     const limit =
       absolute.limit > 0 ? Math.floor(absolute.limit) : GROK_FREE_BUILD_TOKEN_LIMIT;
     return {
@@ -746,19 +765,34 @@ export function selectGrokOAuthQuota(
     };
   }
 
-  if (absolute && absolute.limit > 0 && !absolute.percentScale) {
-    // Prefer absolute numbers; keep weekly reset window from percent when present.
+  // Rare: headers report real burn (remaining strictly below package).
+  if (
+    absolute &&
+    absolute.limit > 0 &&
+    !absolute.percentScale &&
+    isTrustedGrokAbsoluteRemaining(absolute.limit, absolute.remaining)
+  ) {
     let out = absolute;
     if (!absolute.resetAt && percent?.resetAt) {
       out = { ...absolute, resetAt: percent.resetAt };
     }
-    // Mark full remaining as untrusted so warmup does not reset every account to 2M.
-    return normalizeGrokAbsoluteRemaining(out);
+    return out;
   }
 
-  // Do NOT return percent-scale as free Build token quota.
-  // Callers that only got percent keep prior DB absolute values (or no write).
-  if (absolute && !absolute.percentScale) return absolute;
+  // Free / unified Build default — same surface the Grok CLI uses.
+  if (percent && percent.percentScale) return percent;
+
+  // Untrusted full remaining (2M/2M or 53M/53M) — do not write as live budget.
+  if (absolute && absolute.limit > 0 && !absolute.percentScale) {
+    const norm = normalizeGrokAbsoluteRemaining(absolute);
+    if (norm.source.includes("untrusted-full-remaining")) return null;
+    if (!norm.resetAt && percent?.resetAt) {
+      return { ...norm, resetAt: percent.resetAt };
+    }
+    return norm;
+  }
+
+  if (absolute && !absolute.percentScale && absolute.limit > 0) return absolute;
   if (paid && !paid.percentScale) return paid;
   return null;
 }

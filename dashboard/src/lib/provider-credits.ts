@@ -20,6 +20,11 @@ export type ProviderCreditTotals = {
   limit: number;
   remaining: number;
   used: number;
+  /**
+   * True when fleet package sizes look like CLI weekly % (0–100 per account),
+   * not absolute free-Build tokens (~2e6). Dashboard can label "Weekly pool".
+   */
+  weeklyPercentScale: boolean;
 };
 
 function positive(n: number | undefined): number {
@@ -38,8 +43,15 @@ export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCredi
 
   let limit = 0;
   let remaining = 0;
+  let limitedAccounts = 0;
+  let percentScaleAccounts = 0;
   for (const a of enabled) {
     const lim = positive(a.quotaLimit);
+    if (lim > 0) {
+      limitedAccounts++;
+      // CLI weekly pool is always 100 per account; absolute free Build is ~2e6.
+      if (lim <= 100) percentScaleAccounts++;
+    }
     limit += lim;
     if (a.status === "active") {
       const rem = positive(a.quotaRemaining);
@@ -52,5 +64,7 @@ export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCredi
     limit,
     remaining,
     used: Math.max(0, limit - remaining),
+    weeklyPercentScale:
+      limitedAccounts > 0 && percentScaleAccounts === limitedAccounts,
   };
 }

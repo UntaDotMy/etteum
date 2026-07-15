@@ -375,6 +375,8 @@ function wrapStreamWithUsageFinalizer(
     provider: keyof typeof providers;
     model: string;
     quotaBefore: number;
+    /** Account package / weekly-percent limit — skip token debit when 1–100 (Grok weekly %). */
+    quotaLimit?: number;
     startedAt: number;
     fallbackPromptTokens: number;
     fallbackCompletionTokens: number;
@@ -510,10 +512,18 @@ function wrapStreamWithUsageFinalizer(
         if (isQoder && context.useFreeCounter && context.quotaBefore > 0) {
           quotaAfter = await pool.decrementFreeQuota(context.accountId, 1);
         } else if (!isQoder && context.quotaBefore > 0) {
-          quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
-          // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
-          if (quotaAfter <= 0) {
-            await pool.markExhaustedIfQuotaDepleted(context.accountId);
+          // Grok weekly % (CLI GetGrokCreditsConfig, limit 0–100): server is
+          // source of truth — do not debit tokens onto a percent scale.
+          const skipGrokWeeklyDebit =
+            provider === "grok" &&
+            Number(context.quotaLimit ?? 0) > 0 &&
+            Number(context.quotaLimit) <= 100;
+          if (!skipGrokWeeklyDebit) {
+            quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
+            // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+            if (quotaAfter <= 0) {
+              await pool.markExhaustedIfQuotaDepleted(context.accountId);
+            }
           }
         }
 
@@ -694,10 +704,16 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
         // Qoder /activity bucket charges 1 request per call regardless of token count.
         quotaAfter = await pool.decrementFreeQuota(account.id, 1);
       } else if (!isQoder && quotaBefore > 0) {
-        quotaAfter = await pool.decrementQuota(account.id, creditsUsed);
-        // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
-        if (quotaAfter <= 0) {
-          await pool.markExhaustedIfQuotaDepleted(account.id);
+        const skipGrokWeeklyDebit =
+          provider === "grok" &&
+          Number(account.quotaLimit ?? 0) > 0 &&
+          Number(account.quotaLimit) <= 100;
+        if (!skipGrokWeeklyDebit) {
+          quotaAfter = await pool.decrementQuota(account.id, creditsUsed);
+          // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+          if (quotaAfter <= 0) {
+            await pool.markExhaustedIfQuotaDepleted(account.id);
+          }
         }
       }
     }
@@ -750,6 +766,7 @@ export async function handleChatCompletion(body: ChatCompletionRequest) {
       provider,
       model: body.model,
       quotaBefore,
+      quotaLimit: Number(account.quotaLimit ?? 0),
       startedAt: Date.now() - durationMs,
       fallbackPromptTokens: promptTokens,
       fallbackCompletionTokens: completionTokens,

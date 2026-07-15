@@ -1282,7 +1282,11 @@ export default function Accounts() {
       // See sumProviderFleetCredits — error rows keep stale full packages.
       const creditRows = rows.filter((a) => a.enabled !== false);
       const activeRows = creditRows.filter((a) => a.status === "active");
-      const { limit: quotaLimit, remaining: quotaRemaining } = sumProviderFleetCredits(rows);
+      const {
+        limit: quotaLimit,
+        remaining: quotaRemaining,
+        weeklyPercentScale,
+      } = sumProviderFleetCredits(rows);
 
       // For alibaba, aggregate per-model quotas only from accounts that can query each model
       let modelQuotasSum: Record<string, { limit: number; remaining: number; count: number }> | undefined;
@@ -1419,7 +1423,12 @@ export default function Accounts() {
         exhausted: rows.filter((a) => a.status === "exhausted").length,
         pending: rows.filter((a) => a.status === "pending").length,
         error: rows.filter((a) => a.status === "error").length,
-        credits: { used: Math.max(0, quotaLimit - quotaRemaining), total: quotaLimit, remaining: quotaRemaining },
+        credits: {
+          used: Math.max(0, quotaLimit - quotaRemaining),
+          total: quotaLimit,
+          remaining: quotaRemaining,
+          weeklyPercentScale,
+        },
         modelQuotas: modelQuotasSum,
         codexWindows,
         codexCreditBalance,
@@ -1634,9 +1643,13 @@ export default function Accounts() {
               ) : stat.total > 0 && stat.provider !== "alibaba" ? (
               <div className="space-y-1.5">
                 <div className="flex justify-between text-xs">
-                  <span className="text-[var(--muted-foreground)]">Credits</span>
+                  <span className="text-[var(--muted-foreground)]">
+                    {stat.credits.weeklyPercentScale ? "Weekly pool" : "Credits"}
+                  </span>
                   <span className="text-[var(--foreground)]">
-                    {formatNumber(stat.credits.remaining)} / {formatNumber(stat.credits.total)} remaining
+                    {stat.credits.weeklyPercentScale && stat.active > 0
+                      ? `${(stat.credits.remaining / Math.max(1, stat.active)).toFixed(0)} / 100 remaining · ${stat.active} active`
+                      : `${formatNumber(stat.credits.remaining)} / ${formatNumber(stat.credits.total)} remaining`}
                   </span>
                 </div>
                 <Progress

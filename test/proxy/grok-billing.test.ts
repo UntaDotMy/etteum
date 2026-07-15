@@ -125,22 +125,39 @@ describe("selectGrokOAuthQuota", () => {
     expect(q?.limit).toBe(99900);
   });
 
-  test("free absolute tokens beat percent-scale 100 (dashboard was stuck here)", () => {
+  test("trusted absolute burn (remaining < limit) beats weekly percent", () => {
     const q = selectGrokOAuthQuota(null, absolute, percent);
     expect(q?.source).toBe("cli-chat-proxy/ratelimit-headers");
     expect(q?.limit).toBe(2_000_000);
     expect(q?.remaining).toBe(1_900_000);
-    // Keep weekly reset window from percent when absolute has none.
     expect(q?.resetAt?.toISOString()).toBe("2026-07-15T00:00:00.000Z");
   });
 
-  test("percent-scale alone is NOT used as free Build token quota", () => {
-    // Returning 100 here was the root of dashboard "100" next to "2M".
-    const q = selectGrokOAuthQuota(null, null, percent);
-    expect(q).toBeNull();
+  test("weekly percent is free-tier default when headers are untrusted full package", () => {
+    const fullPackage: GrokOAuthQuota = {
+      limit: 2_000_000,
+      remaining: 2_000_000,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/ratelimit-headers",
+      percentScale: false,
+    };
+    const q = selectGrokOAuthQuota(null, fullPackage, percent);
+    expect(q?.percentScale).toBe(true);
+    expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
+    expect(q?.limit).toBe(100);
+    expect(q?.remaining).toBe(100);
   });
 
-  test("headers-missing liveness does not fall through to percent 100", () => {
+  test("percent-scale alone is free-tier CLI billing (GetGrokCreditsConfig)", () => {
+    const q = selectGrokOAuthQuota(null, null, percent);
+    expect(q).not.toBeNull();
+    expect(q!.percentScale).toBe(true);
+    expect(q!.limit).toBe(100);
+    expect(q!.remaining).toBe(100);
+  });
+
+  test("headers-missing liveness falls through to weekly percent", () => {
     const emptyAbsolute: GrokOAuthQuota = {
       limit: 0,
       remaining: 0,
@@ -150,15 +167,12 @@ describe("selectGrokOAuthQuota", () => {
       percentScale: false,
     };
     const q = selectGrokOAuthQuota(null, emptyAbsolute, percent);
-    // Not free-usage-exhausted — return absolute as-is (caller filters limit 0)
-    // or null via fetch wrapper; never percent 100.
-    expect(q?.source).not.toBe("grok.com/GetGrokCreditsConfig");
-    expect(q?.percentScale).not.toBe(true);
+    expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
+    expect(q?.percentScale).toBe(true);
+    expect(q?.remaining).toBe(100);
   });
 
-  test("free-usage-exhausted beats percent 100 even when limit was 0", () => {
-    // Live evidence: 429 free-usage-exhausted has no rate-limit headers.
-    // Old select() fell through to GetGrokCreditsConfig → 100/100 active.
+  test("free-usage-exhausted zeros weekly percent when available", () => {
     const exhausted: GrokOAuthQuota = {
       limit: 0,
       remaining: 0,
@@ -169,7 +183,22 @@ describe("selectGrokOAuthQuota", () => {
     };
     const q = selectGrokOAuthQuota(null, exhausted, percent);
     expect(q).not.toBeNull();
-    expect(q!.source).toBe("cli-chat-proxy/free-usage-exhausted");
+    expect(q!.remaining).toBe(0);
+    expect(q!.limit).toBe(100);
+    expect(q!.percentScale).toBe(true);
+    expect(q!.source).toContain("free-usage-exhausted");
+  });
+
+  test("free-usage-exhausted without percent keeps absolute exhausted shape", () => {
+    const exhausted: GrokOAuthQuota = {
+      limit: 0,
+      remaining: 0,
+      used: 0,
+      resetAt: null,
+      source: "cli-chat-proxy/free-usage-exhausted",
+      percentScale: false,
+    };
+    const q = selectGrokOAuthQuota(null, exhausted, null);
     expect(q!.remaining).toBe(0);
     expect(q!.limit).toBe(GROK_FREE_BUILD_TOKEN_LIMIT);
     expect(q!.percentScale).toBe(false);

@@ -1093,26 +1093,6 @@ export class GrokProvider extends BaseProvider {
 
       if (live.success && live.quota) {
         const q = live.quota;
-        // Percent-scale 0–100 is a different weekly pool, not free Build tokens.
-        // Never treat it as the account credit balance (dashboard "100" vs "2M").
-        if (q.percentScale === true || (q.limit === 100 && q.source.includes("GetGrokCreditsConfig"))) {
-          const { alive } = await validateOAuthToken(working);
-          if (!alive) {
-            return {
-              kind: "session_expired",
-              success: false,
-              error: "OAuth access token invalid after refresh",
-              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-            };
-          }
-          return {
-            kind: "healthy",
-            success: true,
-            message: "token alive; skipped percent-scale credit (not free Build tokens)",
-            ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-          };
-        }
-
         const oauth = getOAuthTokens(working);
         let asGrokQuota: GrokOAuthQuota = {
           limit: q.limit,
@@ -1126,6 +1106,46 @@ export class GrokProvider extends BaseProvider {
         // real use — mark untrusted so we don't overwrite local remaining.
         if (!asGrokQuota.percentScale && asGrokQuota.limit > 0) {
           asGrokQuota = normalizeGrokAbsoluteRemaining(asGrokQuota);
+        }
+
+        // CLI weekly pool (0–100) is the free-tier source of truth.
+        const weeklyPercent =
+          asGrokQuota.percentScale === true ||
+          (asGrokQuota.limit === 100 &&
+            String(asGrokQuota.source || "").includes("GetGrokCreditsConfig"));
+
+        if (weeklyPercent) {
+          const { alive } = await validateOAuthToken(working);
+          if (!alive) {
+            return {
+              kind: "session_expired",
+              success: false,
+              error: "OAuth access token invalid after refresh",
+              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+            };
+          }
+          const limit = 100;
+          const remaining = Math.min(
+            limit,
+            Math.max(0, Math.floor(Number(asGrokQuota.remaining))),
+          );
+          const used = Math.min(limit, Math.max(0, limit - remaining));
+          const drained = remaining <= 0;
+          return {
+            kind: drained ? "exhausted" : "healthy",
+            success: true,
+            message: drained
+              ? "weekly Build pool exhausted (GetGrokCreditsConfig)"
+              : `weekly Build pool ${remaining}/100 (GetGrokCreditsConfig)`,
+            quota: {
+              limit,
+              remaining,
+              used,
+              resetAt: asGrokQuota.resetAt,
+              source: asGrokQuota.source || "grok.com/GetGrokCreditsConfig",
+            },
+            ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+          };
         }
 
         const absolute = isAbsoluteGrokOAuthQuota(asGrokQuota);
@@ -1165,6 +1185,29 @@ export class GrokProvider extends BaseProvider {
             ...oauth,
             ...(packageLimit > 0 ? { credits_limit: packageLimit } : {}),
             ...(nextRemaining != null ? { credits_remaining: nextRemaining } : {}),
+          };
+        }
+
+        // Untrusted full package (remaining==limit 2M) — do not write quota.
+        if (
+          !drained &&
+          !remainingTrusted &&
+          String(asGrokQuota.source || "").includes("untrusted-full-remaining")
+        ) {
+          const { alive } = await validateOAuthToken(working);
+          if (!alive) {
+            return {
+              kind: "session_expired",
+              success: false,
+              error: "OAuth access token invalid after refresh",
+              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+            };
+          }
+          return {
+            kind: "healthy",
+            success: true,
+            message: "token alive; skipped untrusted full rate-limit package",
+            ...(tokensOut ? { tokens: tokensOut } : ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
           };
         }
 
