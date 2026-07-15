@@ -123,6 +123,8 @@ export default function Accounts() {
   const navigate = useNavigate();
   const [accounts, setAccounts] = useState<Account[]>([]);
   const [loading, setLoading] = useState(true);
+  /** Button spinner only — never blanks the page after first paint. */
+  const [refreshing, setRefreshing] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [queue, setQueue] = useState<any>(null);
@@ -184,11 +186,26 @@ export default function Accounts() {
   const codexOauthPollRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const codexOauthStateRef = useRef<string | null>(null);
   const loadingRef = useRef(false);
+  /** After first successful paint, never swap the page for a full-page spinner. */
+  const hasPaintedRef = useRef(false);
+  const scrollYRef = useRef(0);
 
+  /**
+   * Load accounts + queue status.
+   * - First visit: full-page spinner until data arrives.
+   * - Later: keep the existing DOM (silent/soft) so WarmUp / WS ticks never
+   *   flicker the page or reset scroll to the top.
+   */
   async function load(silent = false) {
     if (loadingRef.current) return;
     loadingRef.current = true;
-    if (!silent) setLoading(true);
+    const soft = silent || hasPaintedRef.current;
+    if (!soft) setLoading(true);
+    else if (!silent) setRefreshing(true);
+    // Preserve window scroll across soft setState bursts (WarmUp / Refresh).
+    if (soft && typeof window !== "undefined") {
+      scrollYRef.current = window.scrollY;
+    }
     try {
       const [accountsRes, queueRes, warmupQueueRes, autoWarmupRes, settingsRes] = await Promise.all([
         fetchAccounts() as Promise<{ data: Account[] }>,
@@ -207,11 +224,19 @@ export default function Accounts() {
       // Load BYOK providers
       const byokRes = await fetchByokProviders();
       setByokProviders(byokRes.providers || []);
+      hasPaintedRef.current = true;
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
       loadingRef.current = false;
-      if (!silent) setLoading(false);
+      setLoading(false);
+      setRefreshing(false);
+      if (soft && typeof window !== "undefined") {
+        const y = scrollYRef.current;
+        requestAnimationFrame(() => {
+          window.scrollTo({ top: y, left: 0, behavior: "instant" as ScrollBehavior });
+        });
+      }
     }
   }
 
@@ -233,7 +258,8 @@ export default function Accounts() {
         refetched = true;
         setTimeout(() => {
           fetchAutoWarmupStatus().then(setAutoWarmup).catch(() => {});
-          load();
+          // Soft reload — never blank the grid mid-session.
+          load(true);
         }, 1500);
       }
     }, 1000);
@@ -246,13 +272,8 @@ export default function Accounts() {
   const scheduleReload = () => {
     if (reloadRef.current) clearTimeout(reloadRef.current);
     reloadRef.current = setTimeout(() => {
-      // Silent reload - don't trigger loading state.
-      // 2500ms debounce (not 800): during a large warmup (hundreds of accounts)
-      // the server broadcasts account_status WS events faster than every 800ms,
-      // so a short debounce either starves (timer keeps resetting) or fires a
-      // burst of redundant /api/accounts + /api/accounts/warmup-queue fetches.
-      // 2.5s coalesces the burst into one reload. Warmup progress still updates
-      // live via the WS payload itself (updateWarmupQueue), not via reload.
+      // Soft reconcile only — never full-page spinner / scroll jump.
+      // Warmup progress is updated via scheduleWarmupReload + WS patches.
       load(true);
     }, 2500);
   };
@@ -945,8 +966,11 @@ export default function Accounts() {
       if (count > 0) {
         setWarmupProgress((prev) => ({ ...prev, [provider]: { total: count, completed: 0, active: 0 } }));
       }
-      // Delay load slightly to let server finish enqueueing before we fetch progress
-      setTimeout(() => { load(); }, 300);
+      // Soft progress poll only — full load() used to set loading=true, swap the
+      // whole page for a spinner, and scroll the user back to the top.
+      setTimeout(() => {
+        scheduleWarmupReload();
+      }, 300);
     } catch (err) { showError(err); }
   }
 
@@ -1456,8 +1480,13 @@ export default function Accounts() {
           <p className="text-sm text-[var(--muted-foreground)] mt-1">Manage provider accounts</p>
         </div>
         <div className="flex flex-wrap gap-2">
-          <Button variant="outline" size="sm" onClick={() => load()} disabled={loading}>
-            <RefreshCw className={`w-4 h-4 mr-2 ${loading ? "animate-spin" : ""}`} /> Refresh
+          <Button
+            variant="outline"
+            size="sm"
+            onClick={() => load(true)}
+            disabled={loading || refreshing}
+          >
+            <RefreshCw className={`w-4 h-4 mr-2 ${loading || refreshing ? "animate-spin" : ""}`} /> Refresh
           </Button>
           {warmupRunning && (
             <Button
