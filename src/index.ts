@@ -11,7 +11,9 @@ import { mcpRouter } from "./proxy/mcp/router";
 import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
 import { extractApiKey } from "./utils/security";
-import { isValidApiKey, resolveApiKey } from "./api/keys";
+import { resolveApiKey, extractMachineId, isValidApiKey } from "./api/keys";
+import { getCookie } from "hono/cookie";
+import { verifyDashboardAuthToken, SESSION_COOKIE } from "./auth/dashboardSecurity";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { autoRefreshScheduler } from "./auth/refresh-scheduler";
@@ -185,8 +187,16 @@ const app = new Hono();
         if (!origin) return null;
         return allowedOrigins.includes(origin) ? origin : null;
       },
-      allowHeaders: ["Authorization", "Content-Type", "x-api-key"],
+      allowHeaders: [
+        "Authorization",
+        "Content-Type",
+        "x-api-key",
+        "x-machine-id",
+        "x-etteum-machine-id",
+        "x-9r-machine-id",
+      ],
       allowMethods: ["GET", "POST", "PATCH", "PUT", "DELETE", "OPTIONS"],
+      credentials: true,
     }),
   );
 app.use("*", logger());
@@ -203,11 +213,19 @@ app.use("/v1/*", async (c, next) => {
   }
 
   // resolveApiKey checks both the legacy single key and the multi-key table.
-  // Stash the resolved apiKeyId on the context for per-key usage attribution.
-  const resolved = await resolveApiKey(token);
+  // Machine-bound managed keys require a matching x-machine-id header.
+  const machineId = extractMachineId(c.req.raw.headers, null);
+  const resolved = await resolveApiKey(token, { machineId });
   if (!resolved.valid) {
     return c.json(
-      { error: { message: "Invalid API key", type: "auth_error" } },
+      {
+        error: {
+          message: resolved.reason === "machine_mismatch"
+            ? "API key is bound to a different machine"
+            : "Invalid API key",
+          type: "auth_error",
+        },
+      },
       401
     );
   }
@@ -220,8 +238,39 @@ app.use("/v1/*", async (c, next) => {
   await next();
 });
 
-// API Key authentication for management API
-// Paths that may be reached WITHOUT an API key. These either carry their own
+// Also protect Codex HTTP alias (same as /v1/* API-key auth).
+app.use("/backend-api/*", async (c, next) => {
+  const token = extractApiKey(c.req.raw.headers, null, { allowQuery: false });
+  if (!token) {
+    return c.json(
+      { error: { message: "Missing Authorization header", type: "auth_error" } },
+      401
+    );
+  }
+  const machineId = extractMachineId(c.req.raw.headers, null);
+  const resolved = await resolveApiKey(token, { machineId });
+  if (!resolved.valid) {
+    return c.json(
+      {
+        error: {
+          message: resolved.reason === "machine_mismatch"
+            ? "API key is bound to a different machine"
+            : "Invalid API key",
+          type: "auth_error",
+        },
+      },
+      401
+    );
+  }
+  if (resolved.apiKeyId) {
+    (c.req.raw as any).apiKeyId = resolved.apiKeyId;
+    void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, resolved.apiKeyId)).then(() => {}, () => {});
+  }
+  await next();
+});
+
+// Management API auth: valid pool API key OR dashboard JWT session cookie.
+// Paths that may be reached WITHOUT either. These either carry their own
 // auth (dashboard password / OIDC / key-test / brute-force lockout) or are
 // non-sensitive public reads. The dashboard login flow MUST be reachable
 // before the user has a key — otherwise login is impossible on a fresh
@@ -245,16 +294,32 @@ app.use("/api/*", async (c, next) => {
     return;
   }
 
+  // Dual gate: API key (existing clients) OR dashboard JWT cookie (password/OIDC).
   const token = extractApiKey(c.req.raw.headers, new URL(c.req.url).searchParams, { allowQuery: true });
-
-  if (!token || !(await isValidApiKey(token))) {
-    return c.json(
-      { error: { message: "Unauthorized", type: "auth_error" } },
-      401
-    );
+  if (token) {
+    const machineId = extractMachineId(c.req.raw.headers, new URL(c.req.url).searchParams);
+    const resolved = await resolveApiKey(token, { machineId });
+    if (resolved.valid) {
+      if (resolved.apiKeyId) {
+        (c.req.raw as any).apiKeyId = resolved.apiKeyId;
+      }
+      await next();
+      return;
+    }
   }
 
-  await next();
+  const sessionToken = getCookie(c, SESSION_COOKIE);
+  const session = await verifyDashboardAuthToken(sessionToken);
+  if (session) {
+    (c.req.raw as any).dashboardSession = session;
+    await next();
+    return;
+  }
+
+  return c.json(
+    { error: { message: "Unauthorized", type: "auth_error" } },
+    401
+  );
 });
 
 // Mount routes

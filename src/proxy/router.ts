@@ -1,5 +1,5 @@
 import type { ChatCompletionRequest, ProviderResult } from "./providers/base";
-import { providers, getAllModels, type ProviderName } from "./providers/registry";
+import { providers, getAllModels, resolveProviderInstance, type ProviderName } from "./providers/registry";
 import { isNonAccountRequestError, isTransientError } from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
@@ -165,7 +165,8 @@ export async function routeRequest(
     console.error("[Compression] Failed, passing request through unchanged:", err);
   }
 
-  const provider = providers[providerName];
+  // Static providers map + dynamic compatible-node instances.
+  const provider = resolveProviderInstance(providerName);
   if (!provider) {
     throw new Error(`Provider not configured: ${providerName}`);
   }
@@ -200,12 +201,19 @@ export async function routeRequest(
     // BYOK uses prefix-based account lookup (not the generic pool),
     // so it can also find error-status accounts and retry them.
     // For other providers, use model-aware routing to ensure account can query the model.
-    const account = providerName === "byok"
+    let account = providerName === "byok"
       ? (await pool.getAccountForModel(compressedRequest.model, {
           excludeAccountIds: attemptedByokAccountIds,
           preferredAccountId: attempt === 0 ? preferredAccountId : undefined,
         }))?.account ?? null
       : await pool.getNextAccountForModel(providerName, compressedRequest.model);
+
+    // Compatible-node static credentials: when no accounts.provider=<node.id>
+    // row exists, fall back to the node-level apiKey bound on the provider.
+    if (!account && typeof (provider as any).getStaticAccount === "function") {
+      account = (provider as any).getStaticAccount() ?? null;
+    }
+
     if (!account) {
       throw new Error(
         `No active accounts available for provider: ${providerName}`
@@ -222,8 +230,11 @@ export async function routeRequest(
     // that path so the finally skips the release.
     let handedStreamToCaller = false;
 
+    // Synthetic static-node accounts use id=0 and must not touch pool state.
+    const isStaticAccount = !account.id || account.id <= 0;
+
     try {
-      pool.trackRequestStart(account.id);
+      if (!isStaticAccount) pool.trackRequestStart(account.id);
       // dispatch through the shared executor (per-status retry + Codex
       // SSE-peek for 200-OK overload errors + uniform reclassification).
       const result = await execute({ provider, providerName, account, request: compressedRequest, stream });
@@ -232,10 +243,10 @@ export async function routeRequest(
 
       if (result.success) {
         // If provider refreshed tokens internally, persist them to database
-        if (result.tokens) {
+        if (!isStaticAccount && result.tokens) {
           await pool.updateTokens(account.id, result.tokens);
         }
-        await pool.markUsed(account.id, providerName);
+        if (!isStaticAccount) await pool.markUsed(account.id, providerName);
         // Successful stream: the caller owns the in-flight tracking now.
         if (stream && result.stream) handedStreamToCaller = true;
         return { result, account, provider: providerName, durationMs, compressionStats, compressedRequest };
@@ -270,7 +281,7 @@ export async function routeRequest(
           lastError = errText || "Quota exhausted for this model";
           continue;
         }
-        await pool.markExhausted(account.id);
+        if (!isStaticAccount) await pool.markExhausted(account.id);
         lastError = errText || "Quota exhausted";
         continue; // Try next account — exhausted accounts are excluded from selection
       }
@@ -287,7 +298,7 @@ export async function routeRequest(
           : result.retryAfterMs
             ? { retryAfterMs: result.retryAfterMs }
             : undefined;
-        await pool.markRateLimited(account.id, lastError, resetHint);
+        if (!isStaticAccount) await pool.markRateLimited(account.id, lastError, resetHint);
         if (result.resetsAt && (!earliestReset || result.resetsAt < earliestReset)) {
           earliestReset = result.resetsAt;
         }
@@ -300,7 +311,9 @@ export async function routeRequest(
       // These accounts have valid credentials but are blocked by the upstream
       // from making chat requests. Mark as error immediately — no retry.
       if (result.banned) {
-        await pool.markError(account.id, result.error || "Account banned or restricted");
+        if (!isStaticAccount) {
+          await pool.markError(account.id, result.error || "Account banned or restricted");
+        }
         lastError = result.error || "Account banned or restricted";
         continue; // Try next account
       }
@@ -310,8 +323,9 @@ export async function routeRequest(
       // retry/backoff + unrecoverable-error classification) so concurrent 401s
       // on the same account coalesce instead of racing on token rotation.
       if (
-        result.error?.includes("expired") ||
-        result.error?.includes("401")
+        !isStaticAccount &&
+        (result.error?.includes("expired") ||
+        result.error?.includes("401"))
       ) {
         const refreshResult = await coordinatedRefresh(provider, account);
         if (refreshResult.success && refreshResult.tokens) {
@@ -372,18 +386,20 @@ export async function routeRequest(
       // Generic error - check if transient (network/timeout) or permanent
       // For Alibaba: model-specific errors (quota, unpurchased) should not
       // mark the entire account as error - just skip this model.
-      if (isTransientError(result.error || "")) {
-        await pool.markTransientFailure(account.id, result.error || "Transient error");
-      } else if (providerName === "alibaba" && (
-        result.error?.includes("not activated") ||
-        result.error?.includes("not purchased") ||
-        result.error?.includes("Free quota exhausted") ||
-        result.error?.includes("quota has been exhausted")
-      )) {
-        // Alibaba model-specific error: invalidate pool but don't mark account as error
-        pool.invalidate(providerName);
-      } else {
-        await pool.markError(account.id, result.error || "Unknown error");
+      if (!isStaticAccount) {
+        if (isTransientError(result.error || "")) {
+          await pool.markTransientFailure(account.id, result.error || "Transient error");
+        } else if (providerName === "alibaba" && (
+          result.error?.includes("not activated") ||
+          result.error?.includes("not purchased") ||
+          result.error?.includes("Free quota exhausted") ||
+          result.error?.includes("quota has been exhausted")
+        )) {
+          // Alibaba model-specific error: invalidate pool but don't mark account as error
+          pool.invalidate(providerName);
+        } else {
+          await pool.markError(account.id, result.error || "Unknown error");
+        }
       }
       lastError = result.error || "Unknown error";
     } catch (error) {
@@ -392,7 +408,7 @@ export async function routeRequest(
       if (isNonAccountRequestError(errMsg)) {
         throw error;
       }
-      if (errMsg.includes("expired") || errMsg.includes("401")) {
+      if (!isStaticAccount && (errMsg.includes("expired") || errMsg.includes("401"))) {
         // route through the refresh coordinator (NOT direct
         // provider.refreshToken) so the per-account lock prevents concurrent
         // rotations, and the rotated token is persisted. Calling
@@ -424,16 +440,17 @@ export async function routeRequest(
             await pool.markTransientFailure(account.id, errMsg);
           }
         }
-      } else if (isTransientError(errMsg)) {
+      } else if (!isStaticAccount && isTransientError(errMsg)) {
         await pool.markTransientFailure(account.id, errMsg);
-      } else {
+      } else if (!isStaticAccount) {
         await pool.markError(account.id, errMsg);
       }
       lastError = errMsg;
     } finally {
       // Only release here when we did NOT hand the stream to the caller.
       // (Successful streams are released by the stream finalizer in index.ts.)
-      if (!handedStreamToCaller) pool.trackRequestEnd(account.id);
+      // Static node accounts (id<=0) never entered trackRequestStart.
+      if (!isStaticAccount && !handedStreamToCaller) pool.trackRequestEnd(account.id);
     }
   }
 

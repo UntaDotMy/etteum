@@ -62,7 +62,12 @@ describe("parseGrokCreditsProtobuf", () => {
   );
 
   test("live free-pool fixture → 0% used on 100-point scale with resetAt", () => {
-    const q = parseGrokCreditsProtobuf(new Uint8Array(LIVE_FREE_POOL));
+    // Period timestamps in this fixture are absolute unix seconds; pin "now"
+    // so the test stays valid after the window ends (parser still returns 0%).
+    const q = parseGrokCreditsProtobuf(
+      new Uint8Array(LIVE_FREE_POOL),
+      new Date("2026-07-11T12:00:00.000Z"),
+    );
     expect(q).not.toBeNull();
     expect(q!.percentScale).toBe(true);
     expect(q!.limit).toBe(100);
@@ -71,6 +76,18 @@ describe("parseGrokCreditsProtobuf", () => {
     expect(q!.source).toBe("grok.com/GetGrokCreditsConfig");
     expect(q!.resetAt).toBeInstanceOf(Date);
     expect(q!.resetAt!.getTime()).toBeGreaterThan(1_700_000_000_000);
+  });
+
+  test("expired period fixture still reports 0% used (proto3 omit)", () => {
+    // Same capture, but "now" is after the period — must not return null.
+    const q = parseGrokCreditsProtobuf(
+      new Uint8Array(LIVE_FREE_POOL),
+      new Date("2026-12-01T00:00:00.000Z"),
+    );
+    expect(q).not.toBeNull();
+    expect(q!.used).toBe(0);
+    expect(q!.remaining).toBe(100);
+    expect(q!.percentScale).toBe(true);
   });
 
   test("empty buffer returns null", () => {

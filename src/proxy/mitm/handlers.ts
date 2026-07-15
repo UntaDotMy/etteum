@@ -6,9 +6,15 @@
  * alias DB + synonyms → forward to the local router (/v1/chat/completions) →
  * pipe the SSE/response back to the IDE. The router resolves the alias to a
  * real in-pool model + handles fallback/translation.
+ *
+ * Honest protocol support: only OpenAI-shaped JSON chat is rewritten/forwarded
+ * as pool traffic. Native eventstream/protobuf vendor bodies return 501 with a
+ * clear error (claiming "kiro provider handles the wire format" was false —
+ * the local router only accepts OpenAI JSON).
  */
 import { MITM_ROUTER_BASE_URL } from "./paths";
 import { MODEL_SYNONYMS, MODEL_NO_MAP } from "./config";
+import { getActiveApiKey } from "../../api/keys";
 
 export interface MitmRequest {
   method: string;
@@ -52,6 +58,32 @@ async function remapModel(tool: string, model: string): Promise<string> {
   return model;
 }
 
+function looksLikeOpenAiChat(parsed: any): boolean {
+  if (!parsed || typeof parsed !== "object") return false;
+  // OpenAI chat completions shape
+  if (Array.isArray(parsed.messages)) return true;
+  // Responses API shape (still JSON, router has /v1/responses)
+  if (parsed.input !== undefined && parsed.model) return true;
+  return false;
+}
+
+function unsupportedProtocol(tool: string, detail: string): MitmHandlerResult {
+  return {
+    status: 501,
+    headers: { "content-type": "application/json" },
+    body: Buffer.from(JSON.stringify({
+      error: {
+        message:
+          `MITM tool "${tool}" cannot reshape this vendor protocol into the local pool. ` +
+          `${detail} Use an OpenAI-compatible client pointed at the pool, or configure ` +
+          `the IDE to speak OpenAI chat completions.`,
+        type: "not_implemented",
+        tool,
+      },
+    })),
+  };
+}
+
 /** Forward the (rewritten) request to the local router and pipe the response back. */
 async function forwardToRouter(
   path: string,
@@ -63,21 +95,37 @@ async function forwardToRouter(
   // Force JSON content-type for the router; drop hop-by-hop / host headers.
   const fwdHeaders: Record<string, string> = {
     "content-type": contentType.includes("json") ? "application/json" : contentType,
-    accept: headers.accept as string || "text/event-stream",
+    accept: (headers.accept as string) || "text/event-stream",
     "x-request-source": "mitm",
   };
-  // Preserve an authorization header if present (some flows carry the vendor token;
-  // the router ignores it and uses pool accounts, but pass it for completeness).
-  const auth = headers.authorization as string | undefined;
-  if (auth) fwdHeaders.authorization = auth;
 
-  const url = `${MITM_ROUTER_BASE_URL.replace(/\/$/, "")}${path}`;
-  const res = await fetch(url, { method, headers: fwdHeaders, body: method === "GET" || method === "HEAD" ? undefined : body });
+  // Inject the pool API key — vendor Authorization is NOT a valid pool key,
+  // so forwarding it caused permanent 401s on the local router.
+  try {
+    const poolKey = await getActiveApiKey();
+    if (poolKey) {
+      fwdHeaders.authorization = `Bearer ${poolKey}`;
+    } else {
+      const auth = headers.authorization as string | undefined;
+      if (auth) fwdHeaders.authorization = auth;
+    }
+  } catch {
+    const auth = headers.authorization as string | undefined;
+    if (auth) fwdHeaders.authorization = auth;
+  }
+
+  // MITM_ROUTER_BASE_URL already includes /v1; path is like /chat/completions.
+  const base = MITM_ROUTER_BASE_URL.replace(/\/$/, "");
+  const url = `${base}${path.startsWith("/") ? path : `/${path}`}`;
+  const res = await fetch(url, {
+    method,
+    headers: fwdHeaders,
+    body: method === "GET" || method === "HEAD" ? undefined : body,
+  });
 
   const respHeaders: Record<string, string> = {};
   res.headers.forEach((v, k) => { respHeaders[k] = v; });
 
-  // Stream the response back (SSE or JSON).
   if (res.body) {
     return { status: res.status, headers: respHeaders, body: res.body as unknown as ReadableStream<Uint8Array> };
   }
@@ -85,30 +133,45 @@ async function forwardToRouter(
   return { status: res.status, headers: respHeaders, body: buf };
 }
 
-/** Common handler: JSON body, remap model, forward to /v1/chat/completions. */
+/** Common handler: OpenAI-shaped JSON body, remap model, forward to /v1/chat/completions. */
 async function handleJsonChat(tool: string, req: MitmRequest): Promise<MitmHandlerResult> {
   let parsed: any;
   try { parsed = JSON.parse(req.body.toString("utf8")); }
-  catch { return { status: 400, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ error: "invalid JSON" })) }; }
+  catch {
+    return {
+      status: 400,
+      headers: { "content-type": "application/json" },
+      body: Buffer.from(JSON.stringify({ error: "invalid JSON" })),
+    };
+  }
+
+  if (!looksLikeOpenAiChat(parsed)) {
+    return unsupportedProtocol(
+      tool,
+      "Body is JSON but not OpenAI chat completions (missing messages[]) or Responses (missing input).",
+    );
+  }
 
   if (parsed.model) parsed.model = await remapModel(tool, parsed.model);
-  // Some vendors nest the model under request.modelConfig.model etc.; remap any
-  // top-level string `model` field we find.
   if (parsed.request?.modelConfig?.model) {
     parsed.request.modelConfig.model = await remapModel(tool, parsed.request.modelConfig.model);
   }
 
   const rewritten = Buffer.from(JSON.stringify(parsed), "utf8");
-  return forwardToRouter("/chat/completions", "POST", req.headers, rewritten, "application/json");
+  // Responses API shape → /responses; otherwise chat completions.
+  const path = parsed.input !== undefined && !Array.isArray(parsed.messages)
+    ? "/responses"
+    : "/chat/completions";
+  return forwardToRouter(path, "POST", req.headers, rewritten, "application/json");
 }
 
-/** Antigravity (Gemini Code): generateContent endpoint, Gemini-shape body. */
+/** Antigravity (Gemini Code): only OpenAI-shaped JSON is supported. */
 export async function handleAntigravity(req: MitmRequest): Promise<MitmHandlerResult> {
-  // Antigravity sends Gemini generateContent bodies. The router's /v1/chat/completions
-  // expects OpenAI shape; rather than translate Gemini→OpenAI here (the antigravity
-  // provider already does OpenAI→Gemini for outbound), we forward the body and let
-  // the router handle it via the model alias → antigravity provider. The model id
-  // in the Gemini body is under contents/model.
+  // Native Gemini generateContent is NOT OpenAI JSON — refuse honestly.
+  const ct = String(req.headers["content-type"] || "");
+  if (ct.includes("protobuf") || ct.includes("proto")) {
+    return unsupportedProtocol("antigravity", "Protobuf/Gemini native bodies are not reshaped by MITM.");
+  }
   return handleJsonChat("antigravity", req);
 }
 
@@ -117,15 +180,42 @@ export async function handleCopilot(req: MitmRequest): Promise<MitmHandlerResult
   return handleJsonChat("copilot", req);
 }
 
-/** Kiro: CodeWhisperer generateAssistantResponse (eventstream). */
+/** Kiro: AWS eventstream is not OpenAI JSON — refuse unless body is already chat JSON. */
 export async function handleKiro(req: MitmRequest): Promise<MitmHandlerResult> {
-  // Kiro uses AWS eventstream; the model id is in the body. We remap + forward;
-  // the kiro provider handles the wire format.
+  const ct = String(req.headers["content-type"] || "");
+  if (ct.includes("event-stream") || ct.includes("eventstream") || ct.includes("aws")) {
+    return unsupportedProtocol(
+      "kiro",
+      "AWS eventstream (CodeWhisperer) is not reshaped; only OpenAI JSON chat is forwarded.",
+    );
+  }
+  // Heuristic: non-JSON binary bodies
+  const head = req.body.subarray(0, Math.min(req.body.length, 8)).toString("utf8");
+  if (req.body.length > 0 && !head.trimStart().startsWith("{") && !head.trimStart().startsWith("[")) {
+    return unsupportedProtocol(
+      "kiro",
+      "Non-JSON body detected (likely eventstream). Point the client at the pool OpenAI API instead.",
+    );
+  }
   return handleJsonChat("kiro", req);
 }
 
-/** Cursor: Connect proto (BidiAppend/RunSSE/RunPoll/Run). */
+/** Cursor: Connect proto is not supported; OpenAI JSON only. */
 export async function handleCursor(req: MitmRequest): Promise<MitmHandlerResult> {
+  const ct = String(req.headers["content-type"] || "");
+  if (ct.includes("protobuf") || ct.includes("proto") || ct.includes("connect")) {
+    return unsupportedProtocol(
+      "cursor",
+      "Cursor Connect/protobuf is not reshaped; only OpenAI JSON chat is forwarded.",
+    );
+  }
+  const head = req.body.subarray(0, Math.min(req.body.length, 8)).toString("utf8");
+  if (req.body.length > 0 && !head.trimStart().startsWith("{") && !head.trimStart().startsWith("[")) {
+    return unsupportedProtocol(
+      "cursor",
+      "Non-JSON body detected (likely protobuf). Point Cursor at the pool OpenAI API instead.",
+    );
+  }
   return handleJsonChat("cursor", req);
 }
 
@@ -136,6 +226,11 @@ export async function handleToolRequest(tool: string, req: MitmRequest): Promise
     case "copilot": return handleCopilot(req);
     case "kiro": return handleKiro(req);
     case "cursor": return handleCursor(req);
-    default: return { status: 404, headers: { "content-type": "application/json" }, body: Buffer.from(JSON.stringify({ error: `unknown tool: ${tool}` })) };
+    default:
+      return {
+        status: 404,
+        headers: { "content-type": "application/json" },
+        body: Buffer.from(JSON.stringify({ error: `unknown tool: ${tool}` })),
+      };
   }
 }

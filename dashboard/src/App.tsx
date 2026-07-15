@@ -3,7 +3,7 @@ import { Routes, Route } from "react-router-dom";
 import Layout from "./components/layout/Layout";
 import Login from "./pages/Login";
 import { AntigravityChallengeModal } from "./components/auth/AntigravityChallengeModal";
-import { isAuthenticated, validateApiKey, logout } from "./lib/api";
+import { validateApiKey, logout, getDashboardAuthStatus } from "./lib/api";
 
 /** Lazy import with one reload retry when a deploy invalidated chunk hashes. */
 function lazyPage<T extends ComponentType<unknown>>(
@@ -71,18 +71,27 @@ export default function App() {
 
   useEffect(() => {
     async function check() {
-      if (!isAuthenticated()) {
-        setAuthed(false);
+      // 1) Valid dashboard JWT session cookie?
+      const session = await getDashboardAuthStatus();
+      if (session?.authenticated) {
+        localStorage.setItem("dashboard_session", "1");
+        setAuthed(true);
         return;
       }
-      const key = localStorage.getItem("api_key")!;
-      const valid = await validateApiKey(key);
-      if (!valid) {
-        logout();
-        setAuthed(false);
-      } else {
-        setAuthed(true);
+
+      // 2) API-key mode (localStorage).
+      const key = localStorage.getItem("api_key");
+      if (key) {
+        const valid = await validateApiKey(key);
+        if (valid) {
+          setAuthed(true);
+          return;
+        }
+        localStorage.removeItem("api_key");
       }
+
+      localStorage.removeItem("dashboard_session");
+      setAuthed(false);
     }
     check();
   }, []);
@@ -91,8 +100,8 @@ export default function App() {
     setAuthed(true);
   }
 
-  function handleLogout() {
-    logout();
+  async function handleLogout() {
+    await logout();
     setAuthed(false);
   }
 

@@ -312,6 +312,86 @@ class AccountPool {
   }
 
   /**
+   * Write a live quota snapshot (e.g. Grok weekly pool after a request) and
+   * broadcast account_status so the dashboard pool bar updates without waiting
+   * for the next warmup tick. Does NOT invent values — caller supplies them.
+   *
+   * When remaining hits 0 with a positive limit, flips to exhausted (same as
+   * markExhaustedIfQuotaDepleted). Never re-activates an error/pending row.
+   */
+  async applyQuotaSnapshot(
+    accountId: number,
+    snapshot: {
+      quotaRemaining: number;
+      quotaLimit?: number;
+      quotaResetAt?: Date | null;
+    },
+  ): Promise<void> {
+    if (!accountId || accountId <= 0) return;
+    const remaining = Math.max(0, Math.floor(Number(snapshot.quotaRemaining)));
+    if (!Number.isFinite(remaining)) return;
+
+    const [existing] = await db
+      .select({
+        id: accounts.id,
+        provider: accounts.provider,
+        status: accounts.status,
+        tokens: accounts.tokens,
+        quotaLimit: accounts.quotaLimit,
+        quotaRemaining: accounts.quotaRemaining,
+      })
+      .from(accounts)
+      .where(eq(accounts.id, accountId))
+      .limit(1);
+    if (!existing) return;
+
+    const nextLimit =
+      snapshot.quotaLimit !== undefined && Number.isFinite(Number(snapshot.quotaLimit))
+        ? Math.max(0, Math.floor(Number(snapshot.quotaLimit)))
+        : Number(existing.quotaLimit || 0);
+
+    // No-op if nothing changed (avoid WS spam).
+    const prevRem = Number(existing.quotaRemaining || 0);
+    const prevLim = Number(existing.quotaLimit || 0);
+    if (
+      prevRem === remaining &&
+      (snapshot.quotaLimit === undefined || prevLim === nextLimit) &&
+      snapshot.quotaResetAt === undefined
+    ) {
+      return;
+    }
+
+    const patch: Record<string, unknown> = {
+      quotaRemaining: remaining,
+      updatedAt: new Date(),
+    };
+    if (snapshot.quotaLimit !== undefined) patch.quotaLimit = nextLimit;
+    if (snapshot.quotaResetAt !== undefined) patch.quotaResetAt = snapshot.quotaResetAt;
+
+    // Drain → exhausted (realtime, same as markExhausted path).
+    let nextStatus = existing.status;
+    if (nextLimit > 0 && remaining <= 0 && existing.status === "active") {
+      patch.status = "exhausted";
+      nextStatus = "exhausted";
+    }
+
+    await db.update(accounts).set(patch).where(eq(accounts.id, accountId));
+    await this.syncTokenCreditsRemaining(accountId, remaining, existing.tokens);
+    this.invalidate(existing.provider as ProviderName);
+
+    broadcast({
+      type: "account_status",
+      data: {
+        id: accountId,
+        provider: existing.provider,
+        status: nextStatus,
+        quotaRemaining: remaining,
+        quotaLimit: snapshot.quotaLimit !== undefined ? nextLimit : prevLim,
+      },
+    });
+  }
+
+  /**
    * When the account tokens blob stores absolute free-Build credits
    * (`credits_remaining` / `credits_limit`), pin remaining to the live
    * quotaRemaining after a debit. No-op when those fields are absent.

@@ -41,7 +41,8 @@ export function getWsBase(): string {
 }
 
 function getApiKey(): string {
-  return localStorage.getItem("api_key") || "pool-proxy-secret-key";
+  // No hardcoded default — empty means "rely on session cookie only".
+  return localStorage.getItem("api_key") || "";
 }
 
 export { getApiKey };
@@ -51,6 +52,7 @@ export async function validateApiKey(key: string): Promise<boolean> {
     const res = await fetch(`${API_BASE}/api/keys/test`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
+      credentials: "include",
       body: JSON.stringify({ key }),
     });
     if (!res.ok) return false;
@@ -61,12 +63,61 @@ export async function validateApiKey(key: string): Promise<boolean> {
   }
 }
 
-export function isAuthenticated(): boolean {
-  return !!localStorage.getItem("api_key");
+/** Dashboard JWT session status (password / OIDC cookie). */
+export async function getDashboardAuthStatus(): Promise<{
+  authenticated: boolean;
+  user: { email: string; method: string } | null;
+  oidcEnabled: boolean;
+  passwordConfigured: boolean;
+} | null> {
+  try {
+    const res = await fetch(`${API_BASE}/api/dashboard-auth/status`, {
+      credentials: "include",
+    });
+    if (!res.ok) return null;
+    return await res.json();
+  } catch {
+    return null;
+  }
 }
 
-export function logout() {
+export async function loginWithPassword(password: string): Promise<{ ok: boolean; error?: string }> {
+  try {
+    const res = await fetch(`${API_BASE}/api/dashboard-auth/login`, {
+      method: "POST",
+      credentials: "include",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ password }),
+    });
+    if (!res.ok) {
+      const body = await res.json().catch(() => ({}));
+      return { ok: false, error: (body as any)?.error || `Login failed (${res.status})` };
+    }
+    return { ok: true };
+  } catch (e: any) {
+    return { ok: false, error: e?.message || "Login failed" };
+  }
+}
+
+export async function logoutDashboardSession(): Promise<void> {
+  try {
+    await fetch(`${API_BASE}/api/dashboard-auth/logout`, {
+      method: "POST",
+      credentials: "include",
+    });
+  } catch { /* best-effort */ }
+}
+
+export function isAuthenticated(): boolean {
+  // Session cookie is checked server-side; local flag covers API-key mode and
+  // a soft marker set after successful password login.
+  return !!localStorage.getItem("api_key") || localStorage.getItem("dashboard_session") === "1";
+}
+
+export async function logout() {
   localStorage.removeItem("api_key");
+  localStorage.removeItem("dashboard_session");
+  await logoutDashboardSession();
 }
 
 type FetchApiOptions = RequestInit & {
@@ -127,12 +178,16 @@ export async function fetchApi<T = any>(path: string, options?: FetchApiOptions)
   }
 
   try {
+    const key = getApiKey();
     const res = await fetch(`${API_BASE}${path}`, {
       ...fetchOptions,
+      credentials: "include",
       signal: controller.signal,
       headers: {
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${getApiKey()}`,
+        // Dual gate: send Bearer when we have an API key; otherwise rely on
+        // the dashboard JWT httpOnly cookie (credentials: include).
+        ...(key ? { Authorization: `Bearer ${key}` } : {}),
         ...fetchOptions.headers,
       },
     });
