@@ -199,6 +199,17 @@ imageStudioRouter.post("/generate", async (c) => {
   const chatId = typeof body.chatId === "number" && Number.isFinite(body.chatId) ? body.chatId : null;
 
   const requestedModel = (body.model || "").trim();
+  // Never hardcode canva-* — client must pass the selected gen model
+  // (canva-image, grok-image, canva-video, …).
+  if (!requestedModel) {
+    return c.json(
+      {
+        error:
+          "model is required (e.g. canva-image, canva-video, grok-image). Pick a generation model in Image Studio.",
+      },
+      400,
+    );
+  }
   const typeFromModel = /video/i.test(requestedModel)
     ? "video"
     : /image|imagine|flux|dall|grok-image/i.test(requestedModel)
@@ -210,10 +221,7 @@ imageStudioRouter.post("/generate", async (c) => {
       ? "image"
       : (body.type === "video" ? "video" : "image");
 
-  // Use the client's model when provided so Canva / other media models route correctly.
-  const model =
-    requestedModel ||
-    (type === "video" ? "canva-video" : "canva-image");
+  const model = requestedModel;
   const aspectRatio = VALID_ASPECTS.has(body.aspectRatio || "") ? body.aspectRatio! : "1:1";
   const n = type === "video" ? 1 : Math.min(4, Math.max(1, Number(body.n) || 1));
 
