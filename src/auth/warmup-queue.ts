@@ -90,6 +90,53 @@ export function isAccountDueForResetWarmup(
   return true;
 }
 
+/**
+ * Per-provider progress for one warmup generation.
+ * total/completed are unique-account counts (never sum re-queues of the same id).
+ */
+export type ProviderProgressState = {
+  total: number;
+  completed: number;
+  /** Account ids counted toward total this generation. */
+  seen: Set<number>;
+  /** Account ids that finished (completed or failed terminal) this generation. */
+  finished: Set<number>;
+};
+
+export function createProviderProgressState(): ProviderProgressState {
+  return { total: 0, completed: 0, seen: new Set(), finished: new Set() };
+}
+
+/** Whether this generation is done (or missing) and a new batch may reset counters. */
+export function shouldResetProviderProgress(state: ProviderProgressState | undefined): boolean {
+  return !state || state.total <= 0 || state.completed >= state.total;
+}
+
+/**
+ * Register an account for progress total. Same id twice does not inflate total
+ * (fixes UI "2000+" when ~647 accounts re-queue mid-batch via reset-tick).
+ */
+export function noteProgressEnqueued(
+  state: ProviderProgressState,
+  accountId: number,
+): void {
+  if (state.seen.has(accountId)) return;
+  state.seen.add(accountId);
+  state.total = state.seen.size;
+}
+
+/**
+ * Mark account finished once. Re-finishing the same id does not inflate completed.
+ */
+export function noteProgressFinished(
+  state: ProviderProgressState,
+  accountId: number,
+): void {
+  if (state.finished.has(accountId)) return;
+  state.finished.add(accountId);
+  state.completed = state.finished.size;
+}
+
 class WarmupQueue {
   private queue: QueueItem[] = [];
   private activeJobs = 0;
@@ -102,11 +149,11 @@ class WarmupQueue {
 
   // Event-driven wakeup: instead of polling every 100ms when slots are full,
   // the loop awaits this promise and is resolved the instant a job finishes
-  // (or concurrency is raised). Eliminates up-to-100ms latency per freed slot.
+  // (or concurrency is raised). Eliminates up-to-100ms latency per free slot.
   private slotFreed: (() => void) | null = null;
 
-  // Per-provider progress tracking (survives queue pruning)
-  private progressByProvider: Record<string, { total: number; completed: number }> = {};
+  // Per-provider progress (unique accounts per open generation — not re-queue sum)
+  private progressByProvider: Record<string, ProviderProgressState> = {};
 
   // Abort controller for the current "generation" of jobs. stop() aborts it,
   // which (a) drops queued items + prevents retries and (b) signals every
@@ -164,10 +211,7 @@ class WarmupQueue {
         cancelled++;
         const provider = this.getCachedAccountProvider(item.accountId);
         if (provider && this.progressByProvider[provider]) {
-          this.progressByProvider[provider]!.completed = Math.min(
-            this.progressByProvider[provider]!.total,
-            this.progressByProvider[provider]!.completed + 1,
-          );
+          noteProgressFinished(this.progressByProvider[provider]!, item.accountId);
         }
       } else if (item.status === "processing") {
         // Abort HTTP; processItem marks failed when signal aborts.
@@ -201,21 +245,31 @@ class WarmupQueue {
     if (this.queue.some((item) => item.accountId === accountId && item.status !== "completed" && item.status !== "failed")) {
       return;
     }
+
+    const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId));
+    const provider = account?.provider;
+
+    // Open generation already finished this id — do not re-queue mid-batch
+    // (reset-tick / double-click used to re-add and inflate total past fleet size).
+    if (provider) {
+      const prog = this.progressByProvider[provider];
+      if (prog && !shouldResetProviderProgress(prog) && prog.finished.has(accountId)) {
+        return;
+      }
+      if (shouldResetProviderProgress(prog)) {
+        this.progressByProvider[provider] = createProviderProgressState();
+      }
+      if (!this.progressByProvider[provider]) {
+        this.progressByProvider[provider] = createProviderProgressState();
+      }
+      noteProgressEnqueued(this.progressByProvider[provider]!, accountId);
+    }
+
     // Fresh abort controller if this id was cancelled earlier.
     this.accountAbort.delete(accountId);
 
     const item: QueueItem = { accountId, retries: 0, status: "queued", addedAt: new Date() };
     this.queue.push(item);
-
-    const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId));
-    const provider = account?.provider;
-
-    if (provider) {
-      if (!this.progressByProvider[provider]) {
-        this.progressByProvider[provider] = { total: 0, completed: 0 };
-      }
-      this.progressByProvider[provider].total++;
-    }
 
     const log = addAuthLog({
       type: "warmup_queue_added",
@@ -238,25 +292,35 @@ class WarmupQueue {
         .filter((item) => item.status !== "completed" && item.status !== "failed")
         .map((item) => item.accountId)
     );
-    const newIds = accountIds.filter((id) => !existingIds.has(id));
+    let newIds = accountIds.filter((id) => !existingIds.has(id));
     if (newIds.length === 0) return;
 
     // Batch-load accounts to avoid N+1 queries
     const rows = await db.select().from(accounts).where(inArray(accounts.id, newIds));
     const accountMap = new Map(rows.map((a) => [a.id, a]));
 
-    // Reset progress for providers that are being enqueued for the first
-    // time in this batch so each auto-tick shows fresh counters. Providers
-    // that still have in-flight work from a previous batch are left alone —
-    // their active/completed counters survive the reset so the dashboard
-    // doesn't jump to 0% mid-warmup.
-    const seen = new Set<string>();
-    for (const row of rows) {
-      if (seen.has(row.provider)) continue;
-      seen.add(row.provider);
-      const existing = this.progressByProvider[row.provider];
-      if (!existing || existing.completed >= existing.total) {
-        this.progressByProvider[row.provider] = { total: 0, completed: 0 };
+    // Drop ids already finished in an open generation (prevents total 647→2000+).
+    newIds = newIds.filter((id) => {
+      const account = accountMap.get(id);
+      if (!account) return false;
+      const prog = this.progressByProvider[account.provider];
+      if (prog && !shouldResetProviderProgress(prog) && prog.finished.has(id)) {
+        return false;
+      }
+      return true;
+    });
+    if (newIds.length === 0) return;
+
+    // Reset progress only when the previous generation for that provider is done.
+    const seenProviders = new Set<string>();
+    for (const id of newIds) {
+      const row = accountMap.get(id);
+      if (!row || seenProviders.has(row.provider)) continue;
+      seenProviders.add(row.provider);
+      if (shouldResetProviderProgress(this.progressByProvider[row.provider])) {
+        this.progressByProvider[row.provider] = createProviderProgressState();
+      } else if (!this.progressByProvider[row.provider]) {
+        this.progressByProvider[row.provider] = createProviderProgressState();
       }
     }
 
@@ -269,9 +333,9 @@ class WarmupQueue {
 
       if (account?.provider) {
         if (!this.progressByProvider[account.provider]) {
-          this.progressByProvider[account.provider] = { total: 0, completed: 0 };
+          this.progressByProvider[account.provider] = createProviderProgressState();
         }
-        this.progressByProvider[account.provider]!.total++;
+        noteProgressEnqueued(this.progressByProvider[account.provider]!, id);
       }
 
       const log = addAuthLog({
@@ -460,6 +524,19 @@ class WarmupQueue {
     this.accountProviderCache.set(accountId, provider);
   }
 
+  /** Terminal outcome for an item — always advance unique completed counters. */
+  private markItemTerminal(
+    item: QueueItem,
+    status: "completed" | "failed",
+    provider?: string,
+  ): void {
+    item.status = status;
+    const pn = provider || this.getCachedAccountProvider(item.accountId);
+    if (pn && this.progressByProvider[pn]) {
+      noteProgressFinished(this.progressByProvider[pn]!, item.accountId);
+    }
+  }
+
   private process(): void {
     if (this.processing) return;
     this.processing = true;
@@ -513,11 +590,16 @@ class WarmupQueue {
       if (this.activeJobs === 0 && !this.queue.some(
         (item) => item.status === "queued" || item.status === "processing" || item.status === "retrying"
       )) {
-        // Broadcast completion for each provider that had work
+        // Broadcast completion for each provider that had work (JSON-safe fields only).
         for (const provider of Object.keys(this.progressByProvider)) {
+          const p = this.progressByProvider[provider]!;
           broadcast({
             type: "warmup_complete",
-            data: { provider, ...this.progressByProvider[provider] },
+            data: {
+              provider,
+              total: p.total,
+              completed: p.completed,
+            },
           });
         }
         // Clear progress after completion so next fetch doesn't get stale data
@@ -536,7 +618,7 @@ class WarmupQueue {
 
     const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
     if (!account) {
-      item.status = "failed";
+      this.markItemTerminal(item, "failed");
       this.accountAbort.delete(item.accountId);
       return;
     }
@@ -570,7 +652,7 @@ class WarmupQueue {
       const result = await warmupAccount(account, stopSignal);
 
       if (isCancelled()) {
-        item.status = "failed";
+        this.markItemTerminal(item, "failed", account.provider);
         return;
       }
 
@@ -581,7 +663,7 @@ class WarmupQueue {
         .where(eq(accounts.id, item.accountId))
         .limit(1);
       if (!stillThere) {
-        item.status = "failed";
+        this.markItemTerminal(item, "failed", account.provider);
         return;
       }
 
@@ -590,7 +672,7 @@ class WarmupQueue {
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
         if (isCancelled()) {
-          item.status = "failed";
+          this.markItemTerminal(item, "failed", account.provider);
           return;
         }
         item.status = "queued";
@@ -599,15 +681,10 @@ class WarmupQueue {
 
       const success =
         result.success || result.kind === "unsupported" || result.kind === "transient_error";
-      item.status = success ? "completed" : "failed";
-
-      const provProgress = this.progressByProvider[account.provider];
-      if (provProgress) {
-        provProgress.completed++;
-      }
+      this.markItemTerminal(item, success ? "completed" : "failed", account.provider);
     } catch (error) {
       if (isCancelled()) {
-        item.status = "failed";
+        this.markItemTerminal(item, "failed", account.provider);
         return;
       }
       if (item.retries < this.maxRetries) {
@@ -615,18 +692,14 @@ class WarmupQueue {
         item.status = "retrying";
         await this.delay(this.backoffMs(item.retries));
         if (isCancelled()) {
-          item.status = "failed";
+          this.markItemTerminal(item, "failed", account.provider);
           return;
         }
         item.status = "queued";
         return;
       }
 
-      item.status = "failed";
-      const catchProgress = this.progressByProvider[account.provider];
-      if (catchProgress) {
-        catchProgress.completed++;
-      }
+      this.markItemTerminal(item, "failed", account.provider);
 
       const message = error instanceof Error ? error.message : String(error);
       const failLog = addAuthLog({
