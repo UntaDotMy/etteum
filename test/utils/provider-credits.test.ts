@@ -89,4 +89,29 @@ describe("sumProviderFleetCredits", () => {
     expect(t.remaining).toBe(30 * 2_000_000);
     expect(t.limit).toBe(34 * 2_000_000);
   });
+
+  test("unprobed 0/0 accounts do not demote weekly pool to Credits", () => {
+    // Real fleet shape: most Grok free-tier accounts on 0–100 weekly pool,
+    // a minority still quota_limit=0 until warmup/live probe fills them.
+    const rows = [
+      ...Array.from({ length: 362 }, () => ({
+        enabled: true,
+        status: "active",
+        quotaLimit: 100,
+        quotaRemaining: 84,
+      })),
+      ...Array.from({ length: 68 }, () => ({
+        enabled: true,
+        status: "active",
+        quotaLimit: 0,
+        quotaRemaining: 0,
+      })),
+    ];
+    const t = sumProviderFleetCredits(rows);
+    expect(t.fleetCount).toBe(430);
+    expect(t.weeklyPercentScale).toBe(true);
+    expect(t.limit).toBe(362 * 100);
+    expect(t.remaining).toBe(362 * 84);
+    expect(weeklyAverageRemaining(t)).toBeCloseTo(84, 5);
+  });
 });

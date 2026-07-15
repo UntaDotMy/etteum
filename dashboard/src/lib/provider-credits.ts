@@ -7,7 +7,8 @@
  * - remaining: sum of quotaRemaining for active + exhausted
  *   (exhausted at 0 correctly lowers remaining)
  * - limit: sum of quotaLimit for the same fleet
- * - weeklyPercentScale: all fleet packages are 0–100 (CLI weekly style)
+ * - weeklyPercentScale: all accounts that have a package are 0–100 (CLI weekly
+ *   style). Accounts with limit 0 / unknown do not demote the label.
  */
 
 export type CreditAccountRow = {
@@ -24,8 +25,9 @@ export type ProviderCreditTotals = {
   /** Accounts in the working fleet (active + exhausted, enabled). */
   fleetCount: number;
   /**
-   * True when fleet package sizes look like CLI weekly % (0–100 per account),
-   * not absolute free-Build tokens (~2e6).
+   * True when every account with a known package is CLI weekly % (0–100),
+   * not absolute free-Build tokens (~2e6). Zero/unknown limits are ignored
+   * for this flag so unprobed rows do not force the "Credits" label.
    */
   weeklyPercentScale: boolean;
 };
@@ -53,6 +55,7 @@ export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCredi
   let limit = 0;
   let remaining = 0;
   let fleetCount = 0;
+  let accountsWithLimit = 0;
   let percentScaleAccounts = 0;
 
   for (const a of enabled) {
@@ -64,6 +67,7 @@ export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCredi
 
     fleetCount++;
     if (lim > 0) {
+      accountsWithLimit++;
       limit += lim;
       if (lim <= 100) percentScaleAccounts++;
       remaining += Math.min(rem, lim);
@@ -79,7 +83,10 @@ export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCredi
     remaining,
     used: Math.max(0, limit - remaining),
     fleetCount,
-    weeklyPercentScale: fleetCount > 0 && percentScaleAccounts === fleetCount,
+    // Only packages with a known limit vote on scale. Unprobed 0/0 rows must
+    // not flip a free-tier weekly fleet back to absolute "Credits".
+    weeklyPercentScale:
+      accountsWithLimit > 0 && percentScaleAccounts === accountsWithLimit,
   };
 }
 
