@@ -32,10 +32,62 @@ export interface WarmupAllOptions {
    * warmup right around the provider's reset boundary so an exhausted account
    * is reinstated + re-probed as soon as its window rolls over, instead of
    * waiting for the next fixed-interval tick.
+   *
+   * Accounts already probed for the same reset boundary (metadata.warmup
+   * lastPingedResetAt >= quotaResetAt) are skipped so past reset timestamps
+   * do not re-enqueue forever every 60s (Grok free Build often leaves a past
+   * period-end with no next window).
    */
   onlyDueForReset?: boolean;
   /** Reset lead window in ms (only used when onlyDueForReset). Default 5 min. */
   resetLeadMs?: number;
+}
+
+/**
+ * True when an account should be selected by the reset-window tick.
+ * Pure helper — unit-tested without the DB/queue singleton.
+ *
+ * @param quotaResetAt account.quotaResetAt
+ * @param metadata account.metadata (object or JSON string)
+ * @param nowMs current time ms
+ * @param leadMs how far ahead of resetAt to start probing (default 5 min)
+ */
+export function isAccountDueForResetWarmup(
+  quotaResetAt: Date | string | number | null | undefined,
+  metadata: unknown,
+  nowMs: number = Date.now(),
+  leadMs: number = 5 * 60 * 1000,
+): boolean {
+  if (quotaResetAt == null || quotaResetAt === "") return false;
+  const resetMs = new Date(quotaResetAt as string | number | Date).getTime();
+  if (!Number.isFinite(resetMs)) return false;
+  // Not yet inside the lead window.
+  if (resetMs > nowMs + leadMs) return false;
+
+  let meta: Record<string, unknown> | null = null;
+  if (typeof metadata === "string" && metadata.trim()) {
+    try {
+      meta = JSON.parse(metadata) as Record<string, unknown>;
+    } catch {
+      meta = null;
+    }
+  } else if (metadata && typeof metadata === "object") {
+    meta = metadata as Record<string, unknown>;
+  }
+  const warmup =
+    meta && typeof meta.warmup === "object" && meta.warmup
+      ? (meta.warmup as Record<string, unknown>)
+      : null;
+  const lastPingedRaw = warmup?.lastPingedResetAt;
+  if (typeof lastPingedRaw === "string" && lastPingedRaw.trim()) {
+    const pingedMs = Date.parse(lastPingedRaw);
+    // Already probed this same reset boundary (or a later one) → skip.
+    // 1s slack for ISO round-trip / sqlite second precision.
+    if (Number.isFinite(pingedMs) && pingedMs >= resetMs - 1000) {
+      return false;
+    }
+  }
+  return true;
 }
 
 class WarmupQueue {
@@ -260,12 +312,31 @@ class WarmupQueue {
     // accounts whose quotaResetAt is within the lead window (about to reset) —
     // so warmup runs right around the provider's reset boundary and an
     // exhausted account is reinstated + re-probed as soon as its window rolls
-    // over, rather than on a fixed interval. Mirrors reference lastPingedResetAt.
+    // over, rather than on a fixed interval. lastPingedResetAt filters out
+    // accounts already probed for that same boundary (stops infinite re-queue).
     if (options.onlyDueForReset) {
       const leadMs = options.resetLeadMs ?? 5 * 60 * 1000;
       const horizon = new Date(Date.now() + leadMs);
       conditions.push(isNotNull(accounts.quotaResetAt));
       conditions.push(lte(accounts.quotaResetAt, horizon));
+
+      const rows = await db
+        .select({
+          id: accounts.id,
+          quotaResetAt: accounts.quotaResetAt,
+          metadata: accounts.metadata,
+        })
+        .from(accounts)
+        .where(and(...conditions));
+
+      const nowMs = Date.now();
+      const ids = rows
+        .filter((row) =>
+          isAccountDueForResetWarmup(row.quotaResetAt, row.metadata, nowMs, leadMs),
+        )
+        .map((row) => row.id);
+      await this.enqueueBulk(ids);
+      return ids.length;
     }
 
     const rows = await db

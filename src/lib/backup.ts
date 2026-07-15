@@ -101,6 +101,115 @@ export function accountIdentityKey(provider: string, email: string): string {
   return `${provider}\0${email}`;
 }
 
+/**
+ * Access-token expiry as unix seconds from a tokens JSON blob (string or object).
+ * OAuth providers store expires_at as seconds (or ms / ISO). Used by merge to
+ * prefer the fresher credential set and avoid installing an already-rotated
+ * refresh_token from a stale backup.
+ */
+export function oauthExpiresAtSec(tokens: unknown): number {
+  if (tokens == null) return 0;
+  let obj: Record<string, unknown> | null = null;
+  if (typeof tokens === "string") {
+    const s = tokens.trim();
+    if (!s) return 0;
+    try {
+      obj = JSON.parse(s) as Record<string, unknown>;
+    } catch {
+      return 0;
+    }
+  } else if (typeof tokens === "object") {
+    obj = tokens as Record<string, unknown>;
+  }
+  if (!obj) return 0;
+  const raw = obj.expires_at ?? obj.expiresAt ?? obj.expiresAtMs;
+  if (raw == null) return 0;
+  if (typeof raw === "number" && Number.isFinite(raw)) {
+    return raw > 1e12 ? Math.floor(raw / 1000) : Math.floor(raw);
+  }
+  if (typeof raw === "string" && raw.trim()) {
+    const asNum = Number(raw);
+    if (Number.isFinite(asNum) && asNum > 1_000_000_000) {
+      return asNum > 1e12 ? Math.floor(asNum / 1000) : Math.floor(asNum);
+    }
+    const ms = Date.parse(raw);
+    if (!Number.isNaN(ms)) return Math.floor(ms / 1000);
+  }
+  return 0;
+}
+
+/** Opaque refresh_token from a tokens JSON blob (empty if absent). */
+export function oauthRefreshToken(tokens: unknown): string {
+  if (tokens == null) return "";
+  let obj: Record<string, unknown> | null = null;
+  if (typeof tokens === "string") {
+    try {
+      obj = JSON.parse(tokens) as Record<string, unknown>;
+    } catch {
+      return "";
+    }
+  } else if (typeof tokens === "object") {
+    obj = tokens as Record<string, unknown>;
+  }
+  if (!obj) return "";
+  const rt = obj.refresh_token ?? obj.refreshToken;
+  return typeof rt === "string" ? rt.trim() : "";
+}
+
+/** OIDC `sub` from a tokens JSON blob (empty if absent). */
+export function oauthSub(tokens: unknown): string {
+  if (tokens == null) return "";
+  let obj: Record<string, unknown> | null = null;
+  if (typeof tokens === "string") {
+    try {
+      obj = JSON.parse(tokens) as Record<string, unknown>;
+    } catch {
+      return "";
+    }
+  } else if (typeof tokens === "object") {
+    obj = tokens as Record<string, unknown>;
+  }
+  if (!obj) return "";
+  return typeof obj.sub === "string" ? obj.sub.trim() : "";
+}
+
+/**
+ * Choose which token blob to keep on merge-update of an existing account.
+ *
+ * Grok (and other OAuth) refresh tokens **rotate**: using a refresh_token
+ * invalidates the previous one. Blindly writing pack tokens over a live row
+ * that already rotated installs a **revoked** refresh_token → next warmup /
+ * auto-refresh fails with invalid_grant.
+ *
+ * Policy: keep the blob with the **greater** access-token expires_at.
+ * Tie / both missing → pack wins (import is intentional source of truth).
+ */
+export function chooseMergeTokens(
+  liveTokens: string | null | undefined,
+  packTokens: string | null | undefined,
+): string | null {
+  const pack =
+    packTokens == null
+      ? null
+      : typeof packTokens === "string"
+        ? packTokens
+        : JSON.stringify(packTokens);
+  const live =
+    liveTokens == null
+      ? null
+      : typeof liveTokens === "string"
+        ? liveTokens
+        : JSON.stringify(liveTokens);
+
+  if (pack == null || pack === "") return live;
+  if (live == null || live === "") return pack;
+
+  const liveExp = oauthExpiresAtSec(live);
+  const packExp = oauthExpiresAtSec(pack);
+  if (liveExp > packExp) return live;
+  return pack;
+}
+
 /** Tables dropped in essential mode (history only — not needed to run the same accounts). */
 const ESSENTIAL_DROP_TABLES = ["request_logs", "usage_summary", "image_studio_chats", "image_studio_results"];
 
@@ -366,13 +475,16 @@ type PackAccountRow = {
 /**
  * Merge accounts from a backup pack into the live database (append, no duplicates).
  *
- * Dedup key: (provider, email) — unique index accounts_provider_email_idx.
- * - New identity → INSERT
- * - Existing identity → UPDATE tokens/status/quota (refresh), no second row
+ * Dedup keys (first match wins):
+ *   1. (provider, email) — unique index accounts_provider_email_idx
+ *   2. (provider, OIDC sub) — same Grok/Codex user under a different label
+ *   3. (provider, refresh_token) — same credential under a different email
  *
- * Tokens are stored as plaintext JSON and copied as-is. Passwords are
- * re-encrypted when the pack ENCRYPTION_KEY differs from this install.
+ * Tokens on UPDATE: prefer the fresher OAuth blob (higher access-token
+ * expires_at) so a stale pack cannot overwrite a live rotated refresh_token.
+ * Pack wins on tie / missing expiry (intentional transfer).
  *
+ * Passwords are re-encrypted when the pack ENCRYPTION_KEY differs from this install.
  * Does NOT replace the DB file — safe while the server is running (no restart).
  */
 export function mergeAccountsFromPack(packDir: string): MergeImportResult {
@@ -415,13 +527,35 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
     src.close();
   }
 
-  // Existing identities on live DB
+  // Existing identities on live DB — email + OAuth secondary keys (sub / RT).
   const existing = liveSqlite
-    .query(`SELECT id, provider, email FROM accounts`)
-    .all() as Array<{ id: number; provider: string; email: string }>;
+    .query(`SELECT id, provider, email, tokens FROM accounts`)
+    .all() as Array<{
+    id: number;
+    provider: string;
+    email: string;
+    tokens: string | null;
+  }>;
   const byKey = new Map<string, number>();
+  const bySub = new Map<string, number>();
+  const byRefresh = new Map<string, number>();
+  const liveTokensById = new Map<number, string | null>();
+
+  const indexOAuthKeys = (
+    id: number,
+    provider: string,
+    tokens: string | null | undefined,
+  ) => {
+    const sub = oauthSub(tokens);
+    const rt = oauthRefreshToken(tokens);
+    if (sub) bySub.set(`${provider}\0${sub}`, id);
+    if (rt) byRefresh.set(`${provider}\0${rt}`, id);
+  };
+
   for (const row of existing) {
     byKey.set(accountIdentityKey(row.provider, row.email), row.id);
+    liveTokensById.set(row.id, row.tokens);
+    indexOAuthKeys(row.id, row.provider, row.tokens);
   }
 
   const insertStmt = liveSqlite.prepare(
@@ -460,6 +594,8 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
   const now = Math.floor(Date.now() / 1000);
   // Within-pack dedup (same provider+email twice in export)
   const seenInPack = new Set<string>();
+  const seenSubInPack = new Set<string>();
+  const seenRtInPack = new Set<string>();
 
   const tx = liveSqlite.transaction(() => {
     for (const row of packRows) {
@@ -474,16 +610,38 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
         skipped++;
         continue;
       }
-      seenInPack.add(key);
 
       try {
         const password = reencryptSecret(String(row.password || ""), sourceKey, targetKey);
-        const tokens =
+        const packTokens =
           row.tokens == null
             ? null
             : typeof row.tokens === "string"
               ? row.tokens
               : JSON.stringify(row.tokens);
+        const packSub = oauthSub(packTokens);
+        const packRt = oauthRefreshToken(packTokens);
+
+        // Within-pack OAuth dedup (same sub / same refresh under different emails)
+        if (packSub) {
+          const subKey = `${provider}\0${packSub}`;
+          if (seenSubInPack.has(subKey)) {
+            skipped++;
+            continue;
+          }
+        }
+        if (packRt) {
+          const rtKey = `${provider}\0${packRt}`;
+          if (seenRtInPack.has(rtKey)) {
+            skipped++;
+            continue;
+          }
+        }
+
+        seenInPack.add(key);
+        if (packSub) seenSubInPack.add(`${provider}\0${packSub}`);
+        if (packRt) seenRtInPack.add(`${provider}\0${packRt}`);
+
         const metadata =
           row.metadata == null
             ? null
@@ -494,8 +652,19 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
         const enabled = row.enabled == null ? 1 : Number(row.enabled) ? 1 : 0;
         const priority = row.priority == null ? 0 : Number(row.priority);
 
-        const existingId = byKey.get(key);
+        // Resolve existing row: email → sub → refresh_token (prevents dual rows
+        // that race-refresh the same rotated credential).
+        let existingId = byKey.get(key);
+        if (existingId == null && packSub) {
+          existingId = bySub.get(`${provider}\0${packSub}`);
+        }
+        if (existingId == null && packRt) {
+          existingId = byRefresh.get(`${provider}\0${packRt}`);
+        }
+
         if (existingId != null) {
+          const liveTok = liveTokensById.get(existingId) ?? null;
+          const tokens = chooseMergeTokens(liveTok, packTokens);
           updateStmt.run({
             $id: existingId,
             $password: password,
@@ -511,6 +680,9 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
             $priority: priority,
             $now: now,
           });
+          liveTokensById.set(existingId, tokens);
+          indexOAuthKeys(existingId, provider, tokens);
+          byKey.set(key, existingId);
           updated++;
         } else {
           const info = insertStmt.run({
@@ -519,7 +691,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
             $password: password,
             $status: status,
             $enabled: enabled,
-            $tokens: tokens,
+            $tokens: packTokens,
             $quota_limit: row.quota_limit,
             $quota_remaining: row.quota_remaining,
             $free_limit: row.free_limit,
@@ -531,6 +703,8 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
           });
           const newId = Number(info.lastInsertRowid);
           byKey.set(key, newId);
+          liveTokensById.set(newId, packTokens);
+          indexOAuthKeys(newId, provider, packTokens);
           inserted++;
         }
       } catch (e) {
