@@ -146,6 +146,16 @@ class WarmupQueue {
   private concurrency = Math.max(0, Number(config.warmupConcurrency) || 0);
   private readonly maxRetries = 2;
   private readonly historyLimit = 200;
+  /**
+   * Per-account hard deadline. Grok free-tier healthCheck used to hang forever
+   * on cli-chat-proxy /responses credit probes; without a deadline, activeJobs
+   * never drop and the UI freezes mid-bar (e.g. 385/548 forever).
+   * Override: POOLPROX_WARMUP_JOB_TIMEOUT_MS (default 45s).
+   */
+  private readonly jobTimeoutMs = Math.max(
+    10_000,
+    Number(process.env.POOLPROX_WARMUP_JOB_TIMEOUT_MS) || 45_000,
+  );
 
   // Event-driven wakeup: instead of polling every 100ms when slots are full,
   // the loop awaits this promise and is resolved the instant a job finishes
@@ -180,14 +190,29 @@ class WarmupQueue {
     return c.signal;
   }
 
-  private combinedSignal(accountId: number): AbortSignal {
+  private combinedSignal(accountId: number, extra?: AbortSignal): AbortSignal {
     const global = this.stopSignal();
     const local = this.accountSignal(accountId);
+    const parts = [global, local];
+    if (extra) parts.push(extra);
     if (typeof AbortSignal !== "undefined" && typeof (AbortSignal as { any?: Function }).any === "function") {
-      return AbortSignal.any([global, local]);
+      return AbortSignal.any(parts);
     }
-    // Older runtimes: pass local; processItem also checks global abort flag.
+    // Older runtimes: prefer local; processItem also checks global abort flag.
     return local;
+  }
+
+  /** Hard deadline signal for one warmup job (does not replace stop/account abort). */
+  private jobDeadline(): { signal: AbortSignal; clear: () => void } {
+    if (
+      typeof AbortSignal !== "undefined" &&
+      typeof (AbortSignal as { timeout?: (n: number) => AbortSignal }).timeout === "function"
+    ) {
+      return { signal: AbortSignal.timeout(this.jobTimeoutMs), clear: () => {} };
+    }
+    const c = new AbortController();
+    const t = setTimeout(() => c.abort(), this.jobTimeoutMs);
+    return { signal: c.signal, clear: () => clearTimeout(t) };
   }
 
   /**
@@ -609,17 +634,20 @@ class WarmupQueue {
   }
 
   private async processItem(item: QueueItem): Promise<void> {
-    // Combined stop (global) + per-account delete abort.
-    const stopSignal = this.combinedSignal(item.accountId);
+    // Combined stop (global) + per-account delete + hard job deadline.
+    const deadline = this.jobDeadline();
+    const stopSignal = this.combinedSignal(item.accountId, deadline.signal);
     const isCancelled = () =>
       stopSignal.aborted ||
       this.accountAbort.get(item.accountId)?.signal.aborted === true ||
       this.stopController?.signal.aborted === true;
+    const isTimedOut = () => deadline.signal.aborted && !this.stopController?.signal.aborted;
 
     const [account] = await db.select().from(accounts).where(eq(accounts.id, item.accountId));
     if (!account) {
       this.markItemTerminal(item, "failed");
       this.accountAbort.delete(item.accountId);
+      deadline.clear();
       return;
     }
 
@@ -652,6 +680,18 @@ class WarmupQueue {
       const result = await warmupAccount(account, stopSignal);
 
       if (isCancelled()) {
+        // Deadline timeout is retryable; user stop/delete is terminal.
+        if (isTimedOut() && item.retries < this.maxRetries) {
+          item.retries++;
+          item.status = "retrying";
+          await this.delay(this.backoffMs(item.retries));
+          if (isCancelled() && !isTimedOut()) {
+            this.markItemTerminal(item, "failed", account.provider);
+            return;
+          }
+          item.status = "queued";
+          return;
+        }
         this.markItemTerminal(item, "failed", account.provider);
         return;
       }
@@ -684,6 +724,15 @@ class WarmupQueue {
       this.markItemTerminal(item, success ? "completed" : "failed", account.provider);
     } catch (error) {
       if (isCancelled()) {
+        if (isTimedOut() && item.retries < this.maxRetries) {
+          item.retries++;
+          item.status = "retrying";
+          await this.delay(this.backoffMs(item.retries));
+          if (!isCancelled() || isTimedOut()) {
+            item.status = "queued";
+            return;
+          }
+        }
         this.markItemTerminal(item, "failed", account.provider);
         return;
       }
@@ -723,6 +772,7 @@ class WarmupQueue {
         },
       });
     } finally {
+      deadline.clear();
       this.accountAbort.delete(item.accountId);
     }
   }

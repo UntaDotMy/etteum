@@ -817,12 +817,38 @@ export function selectGrokOAuthQuota(
   return null;
 }
 
+/** Combine parent abort with a hard deadline so hung upstreams free warmup slots. */
+export function withDeadlineSignal(
+  parent: AbortSignal | undefined,
+  ms: number,
+): AbortSignal {
+  const deadline =
+    typeof AbortSignal !== "undefined" &&
+    typeof (AbortSignal as { timeout?: (n: number) => AbortSignal }).timeout === "function"
+      ? AbortSignal.timeout(ms)
+      : (() => {
+          const c = new AbortController();
+          setTimeout(() => c.abort(), ms);
+          return c.signal;
+        })();
+  if (!parent) return deadline;
+  if (
+    typeof AbortSignal !== "undefined" &&
+    typeof (AbortSignal as { any?: (s: AbortSignal[]) => AbortSignal }).any === "function"
+  ) {
+    return AbortSignal.any([parent, deadline]);
+  }
+  return parent.aborted ? parent : deadline;
+}
+
 /**
  * Fetch real OAuth quota for a Grok Build account.
  *
  * 1. GET /v1/billing — absolute monthlyLimit/used when paid (limit > 0).
- * 2. Absolute free Build credits via rate-limit headers on a tiny probe.
- * 3. Else POST GetGrokCreditsConfig — shared pool percent (limit=100 scale).
+ * 2. POST GetGrokCreditsConfig — free-tier weekly % (0–100) — FAST.
+ * 3. Absolute free-Build probe (POST /responses) ONLY if weekly percent is
+ *    missing. That probe is slow and hangs easily; fleet warmup of 500+
+ *    accounts stuck mid-bar when every job waited on it first.
  * 4. Never invent a fake 100/100 placeholder when every source fails.
  */
 export async function fetchOAuthBillingQuota(
@@ -830,6 +856,8 @@ export async function fetchOAuthBillingQuota(
   signal?: AbortSignal,
 ): Promise<GrokOAuthQuota | null> {
   const cliVersion = await getGrokCliVersion();
+  // Cap each upstream hop so one dead connection cannot park a warmup slot forever.
+  const hop = (ms = 12_000) => withDeadlineSignal(signal, ms);
 
   let paid: GrokOAuthQuota | null = null;
   let absolute: GrokOAuthQuota | null = null;
@@ -844,7 +872,7 @@ export async function fetchOAuthBillingQuota(
         Accept: "application/json",
         "x-grok-client-version": cliVersion,
       },
-      signal,
+      signal: hop(10_000),
     });
     if (response.ok) {
       const json = (await response.json()) as GrokBillingResponse;
@@ -861,22 +889,20 @@ export async function fetchOAuthBillingQuota(
       };
     }
   } catch (err: any) {
-    if (err?.name === "AbortError") throw err;
+    if (err?.name === "AbortError" && signal?.aborted) throw err;
   }
 
   // Paid absolute pool wins immediately (no extra probe cost).
-  if (paid && paid.limit > 0 && !paid.percentScale) return paid;
-
-  // 2) Farm-compatible absolute free Build credits (x-ratelimit-*-tokens).
-  //    Must run BEFORE GetGrokCreditsConfig — that endpoint always returns a
-  //    percent-scale 100 and would hide real 2M token budgets forever.
-  try {
-    absolute = await probeOAuthChatCredits(bearer, signal);
-  } catch (err: any) {
-    if (err?.name === "AbortError") throw err;
+  if (
+    paid &&
+    paid.limit > 0 &&
+    !paid.percentScale &&
+    !isGrokFreeBuildAbsolutePackage(paid.limit)
+  ) {
+    return paid;
   }
 
-  // 3) Shared weekly pool percent (reset window / usage %).
+  // 2) Shared weekly pool percent FIRST (fast gRPC-web; free-tier source of truth).
   try {
     const response = await fetch(GROK_OAUTH.creditsConfigEndpoint, {
       method: "POST",
@@ -891,14 +917,28 @@ export async function fetchOAuthBillingQuota(
       },
       // Empty gRPC-web data frame (flags=0, length=0).
       body: new Uint8Array([0, 0, 0, 0, 0]),
-      signal,
+      signal: hop(10_000),
     });
     if (response.ok) {
       const buf = new Uint8Array(await response.arrayBuffer());
       percent = parseGrokCreditsProtobuf(buf);
     }
   } catch (err: any) {
-    if (err?.name === "AbortError") throw err;
+    if (err?.name === "AbortError" && signal?.aborted) throw err;
+  }
+
+  // Free tier: weekly percent is enough — skip slow /responses absolute probe
+  // (that was hanging fleet WarmUp at e.g. 385/548 with many slots parked).
+  if (percent && percent.percentScale) {
+    const selected = selectGrokOAuthQuota(paid, null, percent);
+    if (selected) return selected;
+  }
+
+  // 3) Absolute probe only when weekly percent is unavailable.
+  try {
+    absolute = await probeOAuthChatCredits(bearer, hop(20_000));
+  } catch (err: any) {
+    if (err?.name === "AbortError" && signal?.aborted) throw err;
   }
 
   const selected = selectGrokOAuthQuota(paid, absolute, percent);
