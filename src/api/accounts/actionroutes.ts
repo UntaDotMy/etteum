@@ -501,8 +501,14 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
 
       if (probeCredits) {
         try {
-          const { probeOAuthChatCredits } = await import("../../proxy/providers/grok/oauth");
-          const q = await probeOAuthChatCredits(oauthTokens.access_token);
+          // Same selector as warmup: free-tier → weekly % (0–100 via
+          // GetGrokCreditsConfig). Do NOT write raw x-ratelimit headers
+          // (~2M free Build package) — one absolute row demotes the whole
+          // Grok provider card from "Weekly pool" to "Credits".
+          const { fetchOAuthBillingQuota } = await import(
+            "../../proxy/providers/grok/oauth"
+          );
+          const q = await fetchOAuthBillingQuota(oauthTokens.access_token);
           if (q && q.limit > 0) {
             oauthTokens.credits_limit = q.limit;
             oauthTokens.credits_remaining = q.remaining;
