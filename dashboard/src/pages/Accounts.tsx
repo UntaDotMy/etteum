@@ -14,7 +14,7 @@ import {
 import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, Key, Pencil, Trash2, Zap, Lock, Shield, Eye, EyeOff, Search, FileText, Square } from "lucide-react";
 import { Progress } from "@/components/ui/progress";
 import { formatNumber } from "@/lib/utils";
-import { sumProviderFleetCredits } from "@/lib/provider-credits";
+import { sumProviderFleetCredits, weeklyAverageRemaining } from "@/lib/provider-credits";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
   completeCodexOAuthCallbackUrl,
@@ -1286,6 +1286,7 @@ export default function Accounts() {
         limit: quotaLimit,
         remaining: quotaRemaining,
         weeklyPercentScale,
+        fleetCount,
       } = sumProviderFleetCredits(rows);
 
       // For alibaba, aggregate per-model quotas only from accounts that can query each model
@@ -1428,6 +1429,14 @@ export default function Accounts() {
           total: quotaLimit,
           remaining: quotaRemaining,
           weeklyPercentScale,
+          fleetCount,
+          weeklyAvg: weeklyAverageRemaining({
+            limit: quotaLimit,
+            remaining: quotaRemaining,
+            used: Math.max(0, quotaLimit - quotaRemaining),
+            fleetCount,
+            weeklyPercentScale,
+          }),
         },
         modelQuotas: modelQuotasSum,
         codexWindows,
@@ -1647,8 +1656,10 @@ export default function Accounts() {
                     {stat.credits.weeklyPercentScale ? "Weekly pool" : "Credits"}
                   </span>
                   <span className="text-[var(--foreground)]">
-                    {stat.credits.weeklyPercentScale && stat.active > 0
-                      ? `${(stat.credits.remaining / Math.max(1, stat.active)).toFixed(0)} / 100 remaining · ${stat.active} active`
+                    {stat.credits.weeklyPercentScale && (stat.active + stat.exhausted) > 0
+                      ? `${Math.round(stat.credits.weeklyAvg ?? 0)} / 100 remaining · ${stat.active} active${
+                          stat.exhausted > 0 ? ` · ${stat.exhausted} exhausted` : ""
+                        }`
                       : `${formatNumber(stat.credits.remaining)} / ${formatNumber(stat.credits.total)} remaining`}
                   </span>
                 </div>
