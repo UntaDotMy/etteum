@@ -154,7 +154,16 @@ statsRouter.get("/requests/:id", async (c) => {
   const id = Number(c.req.param("id"));
   const [log] = await db.select().from(requestLogs).where(eq(requestLogs.id, id));
   if (!log) return c.json({ error: "Request log not found" }, 404);
-  return c.json({ data: log });
+  // Surface body-logging policy so the UI can explain empty request/response panels
+  // (default: bodies disabled to keep request_logs from multi-GB growth).
+  return c.json({
+    data: log,
+    meta: {
+      logBodyEnabled: config.logBodyEnabled,
+      logBodyFull: config.logBodyFull,
+      logBodyMaxBytes: config.logBodyMaxBytes,
+    },
+  });
 });
 
 /**

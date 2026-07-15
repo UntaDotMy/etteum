@@ -71,6 +71,11 @@ export default function Requests() {
   const [provider, setProvider] = useState("all");
   const [selected, setSelected] = useState<RequestLog | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
+  const [detailMeta, setDetailMeta] = useState<{
+    logBodyEnabled?: boolean;
+    logBodyFull?: boolean;
+    logBodyMaxBytes?: number;
+  } | null>(null);
   const [page, setPage] = useState(1);
   const perPage = 25;
 
@@ -126,13 +131,18 @@ export default function Requests() {
    */
   async function openDetail(req: RequestLog) {
     setSelected(req);
+    setDetailMeta(null);
     if (req.requestBody !== undefined && req.responseBody !== undefined) return;
     setDetailLoading(true);
     try {
-      const res = (await fetchRequestDetail(req.id)) as { data: RequestLog };
+      const res = (await fetchRequestDetail(req.id)) as {
+        data: RequestLog;
+        meta?: { logBodyEnabled?: boolean; logBodyFull?: boolean; logBodyMaxBytes?: number };
+      };
       if (res?.data) {
         setSelected((current) => (current?.id === req.id ? { ...current, ...res.data } : current));
       }
+      if (res?.meta) setDetailMeta(res.meta);
     } catch {
       // best-effort; leave bodies undefined and let the UI render empty blocks
     } finally {
@@ -296,8 +306,32 @@ export default function Requests() {
               </div>
             ) : (
               <>
-                <JsonBlock title="Request Body" value={selected.requestBody} />
-                <JsonBlock title="Response Body" value={selected.responseBody} />
+                {!selected.requestBody && !selected.responseBody && (
+                  <div className="mt-5 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 p-3 text-xs text-[var(--muted-foreground)] space-y-1">
+                    {detailMeta?.logBodyEnabled === false || detailMeta?.logBodyEnabled == null ? (
+                      <>
+                        <p className="font-medium text-[var(--foreground)]">Bodies not stored</p>
+                        <p>
+                          Request/response body logging is <strong>off by default</strong> (keeps the DB small).
+                          Enable in <code className="text-[var(--foreground)]">.env</code>:
+                        </p>
+                        <pre className="mt-1 rounded bg-black/30 p-2 text-[10px] text-[var(--foreground)] overflow-x-auto">
+{`POOLPROX_LOG_BODY_ENABLED=true
+POOLPROX_LOG_BODY_FULL=false
+POOLPROX_LOG_BODY_MAX_BYTES=4096`}
+                        </pre>
+                        <p>Then restart Etteum. New requests will store redacted/truncated bodies. Grok is SSE-streamed; response text is captured when the stream finishes.</p>
+                      </>
+                    ) : (
+                      <p>
+                        Body logging is on, but this row has no bodies (older stream logs, or pruned).
+                        Make a new Grok request after updating to populate response text.
+                      </p>
+                    )}
+                  </div>
+                )}
+                <JsonBlock title="Request Body" value={selected.requestBody} emptyHint="null — not stored" />
+                <JsonBlock title="Response Body" value={selected.responseBody} emptyHint="null — not stored (or stream not finalized)" />
               </>
             )}
           </aside>
@@ -450,15 +484,33 @@ function CompressionPanel({
   );
 }
 
-function JsonBlock({ title, value }: { title: string; value: unknown }) {
-  const text = JSON.stringify(value || {}, null, 2);
+function JsonBlock({
+  title,
+  value,
+  emptyHint,
+}: {
+  title: string;
+  value: unknown;
+  emptyHint?: string;
+}) {
+  const empty = value == null || value === "";
+  const text = empty ? (emptyHint || "null") : JSON.stringify(value, null, 2);
   return (
     <div className="mt-5">
       <div className="mb-2 flex items-center justify-between">
         <p className="text-xs uppercase text-[var(--muted-foreground)]">{title}</p>
-        <button className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]" onClick={() => navigator.clipboard.writeText(text)}>Copy</button>
+        {!empty && (
+          <button
+            className="text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+            onClick={() => navigator.clipboard.writeText(text)}
+          >
+            Copy
+          </button>
+        )}
       </div>
-      <pre className="max-h-72 overflow-auto rounded-md border border-[var(--border)] bg-black/30 p-3 text-xs text-[var(--muted-foreground)]">{text}</pre>
+      <pre className="max-h-72 overflow-auto rounded-md border border-[var(--border)] bg-black/30 p-3 text-xs text-[var(--muted-foreground)]">
+        {text}
+      </pre>
     </div>
   );
 }
