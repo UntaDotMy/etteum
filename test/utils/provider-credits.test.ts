@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { sumProviderFleetCredits } from "../../dashboard/src/lib/provider-credits";
 
 describe("sumProviderFleetCredits", () => {
-  test("excludes error rows so remaining/total is not 241×2M with 30 active", () => {
+  test("remaining is active-only; total is all enabled package (30 active + 211 error)", () => {
     const rows = [
       ...Array.from({ length: 30 }, () => ({
         enabled: true,
@@ -18,12 +18,13 @@ describe("sumProviderFleetCredits", () => {
       })),
     ];
     const t = sumProviderFleetCredits(rows);
-    expect(t.limit).toBe(30 * 2_000_000);
+    // remaining / all-total  →  60M / 482M  (not 60/60 and not 482/482)
     expect(t.remaining).toBe(30 * 2_000_000);
-    expect(t.used).toBe(0);
+    expect(t.limit).toBe(241 * 2_000_000);
+    expect(t.used).toBe(211 * 2_000_000);
   });
 
-  test("exhausted keep package in total and zero remaining contribution", () => {
+  test("partial burn on active still uses all-enabled package as total", () => {
     const t = sumProviderFleetCredits([
       {
         enabled: true,
@@ -37,13 +38,19 @@ describe("sumProviderFleetCredits", () => {
         quotaLimit: 2_000_000,
         quotaRemaining: 0,
       },
+      {
+        enabled: true,
+        status: "error",
+        quotaLimit: 2_000_000,
+        quotaRemaining: 2_000_000,
+      },
     ]);
-    expect(t.limit).toBe(4_000_000);
+    expect(t.limit).toBe(6_000_000);
     expect(t.remaining).toBe(500_000);
-    expect(t.used).toBe(3_500_000);
+    expect(t.used).toBe(5_500_000);
   });
 
-  test("disabled accounts are ignored", () => {
+  test("disabled accounts are ignored for both sides", () => {
     const t = sumProviderFleetCredits([
       {
         enabled: false,

@@ -1,9 +1,12 @@
 /**
- * Provider-card credit totals: remaining / total for the working fleet.
+ * Provider-card credit totals: remaining / all-total.
  *
- * Error/pending rows often still hold a full import package (e.g. Grok free
- * Build 2M/2M) that cannot serve traffic. Summing them painted remaining=total
- * at "all accounts × package" even when only a few are Active.
+ * Display shape: <usable remaining> / <all package total>
+ * - remaining: only Active accounts (Error rows often store full package but
+ *   cannot serve — do not count them as usable remaining).
+ * - total: package capacity of every enabled account that has a quotaLimit
+ *   (active + exhausted + error + pending), so the bar denominator is the
+ *   full pool package, not only the active slice.
  */
 
 export type CreditAccountRow = {
@@ -27,19 +30,15 @@ function positive(n: number | undefined): number {
 /**
  * Sum package capacity + usable remaining for dashboard Credits line.
  *
- * - total (limit): sum of quotaLimit for enabled active + exhausted
+ * - total (limit): sum of quotaLimit for all enabled accounts
  * - remaining: sum of quotaRemaining for enabled active only (capped per package)
- * - exhausted contribute 0 remaining but keep their package in the total
  */
 export function sumProviderFleetCredits(rows: CreditAccountRow[]): ProviderCreditTotals {
   const enabled = rows.filter((a) => a.enabled !== false);
-  const fleet = enabled.filter(
-    (a) => a.status === "active" || a.status === "exhausted",
-  );
 
   let limit = 0;
   let remaining = 0;
-  for (const a of fleet) {
+  for (const a of enabled) {
     const lim = positive(a.quotaLimit);
     limit += lim;
     if (a.status === "active") {
