@@ -562,6 +562,33 @@ function wrapStreamWithUsageFinalizer(
         };
         const cost = await calculateCost(context.model, breakdown).catch(() => 0);
 
+        // Streaming providers (Grok cli-chat-proxy always SSE) insert the log
+        // row before the stream finishes — responseBody was always null at insert.
+        // Assemble a chat.completion-shaped body from observed SSE tokens so the
+        // Requests detail drawer can show something when body logging is on.
+        const assistantText = streamedParts.join("");
+        const streamResponseBody = prepareLogBody({
+          id: `chatcmpl-stream-${context.logId ?? "x"}`,
+          object: "chat.completion",
+          model: context.model,
+          choices: [
+            {
+              index: 0,
+              message: {
+                role: "assistant",
+                content: assistantText,
+              },
+              finish_reason: "stop",
+            },
+          ],
+          usage: {
+            prompt_tokens: finalPromptTokens,
+            completion_tokens: finalCompletionTokens,
+            total_tokens: finalTotalTokens,
+          },
+          _poolprox: { stream: true, creditSource },
+        });
+
         if (context.logId) {
           await db
             .update(requestLogs)
@@ -573,6 +600,7 @@ function wrapStreamWithUsageFinalizer(
               cost,
               durationMs,
               accountQuotaAfter: quotaAfter,
+              ...(streamResponseBody != null ? { responseBody: streamResponseBody } : {}),
             })
             .where(eq(requestLogs.id, context.logId));
         }
@@ -596,15 +624,8 @@ function wrapStreamWithUsageFinalizer(
             accountQuotaBefore: context.quotaBefore,
             accountQuotaAfter: quotaAfter,
             createdAt: new Date(context.startedAt).toISOString(),
-            requestBody: prepareLogBody({
-              model: context.model,
-              stream: true,
-              _poolprox: {
-                creditSource,
-                creditUnit: resolveProviderInstance(context.provider)?.getProviderCreditUnit(context.model) ?? "token",
-                creditRate: resolveProviderInstance(context.provider)?.getProviderCreditRate(context.model) ?? 0,
-              },
-            }),
+            // Light WS payload — full request body already stored at insert.
+            // Do not re-send multi-KB bodies on every stream end.
           },
         });
 
