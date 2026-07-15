@@ -453,15 +453,21 @@ _CLI_VERSION_CACHE: str | None = None
 ACTIVATE_WEB = _env_bool("GROK_ACTIVATE_WEB", True)
 
 FIRST_NAMES = [
+    # Common professional first names (alphabetic tokens only after clean)
     "Alex", "Jordan", "Taylor", "Morgan", "Casey", "Riley", "Quinn", "Avery",
-    "Parker", "Sage", "River", "Skyler", "Dakota", "Reese", "Finley", "Rowan",
-    "Charlie", "Emerson", "Hayden", "Jamie", "Blake", "Drew", "Eden", "Kai",
-    "Noah", "Liam", "Emma", "Olivia", "Mia", "Lucas", "Mason", "Sophia",
-    "Ethan", "Ava", "Isabella", "James", "Benjamin", "Charlotte", "Amelia",
-    "Henry", "Harper", "Evelyn", "Daniel", "Michael", "Emily", "Grace",
-    "Samuel", "Nathan", "Chloe", "Zoe", "Hannah", "Owen", "Jack", "Lily",
-    "Ryan", "Nina", "Leo", "Ella", "Mateo", "Sofia", "Adrian", "Clara",
-    "Dylan", "Maya", "Caleb", "Nora", "Isaac", "Luna", "Julian", "Ivy",
+    "Parker", "Sage", "Reese", "Finley", "Rowan", "Charlie", "Hayden", "Jamie",
+    "Blake", "Drew", "Eden", "Kai", "Noah", "Liam", "Emma", "Olivia", "Mia",
+    "Lucas", "Mason", "Sophia", "Ethan", "Ava", "Isabella", "James", "Benjamin",
+    "Charlotte", "Amelia", "Henry", "Harper", "Evelyn", "Daniel", "Michael",
+    "Emily", "Grace", "Samuel", "Nathan", "Chloe", "Zoe", "Hannah", "Owen",
+    "Jack", "Lily", "Ryan", "Nina", "Leo", "Ella", "Mateo", "Sofia", "Adrian",
+    "Clara", "Dylan", "Maya", "Caleb", "Nora", "Isaac", "Julian", "Ivy",
+    "Andrew", "Anthony", "Brian", "Christopher", "David", "Eric", "Frank",
+    "George", "Helen", "Jennifer", "Jessica", "Joseph", "Kevin", "Laura",
+    "Linda", "Mark", "Matthew", "Michelle", "Nicole", "Patricia", "Paul",
+    "Peter", "Rachel", "Robert", "Sarah", "Steven", "Susan", "Thomas",
+    "Victoria", "William", "Brandon", "Justin", "Megan", "Amanda", "Stephanie",
+    "Jonathan", "Christine", "Katherine", "Alexander", "Elizabeth", "Christopher",
 ]
 LAST_NAMES = [
     "Smith", "Johnson", "Williams", "Brown", "Jones", "Garcia", "Miller",
@@ -472,6 +478,11 @@ LAST_NAMES = [
     "Roberts", "Carter", "Phillips", "Evans", "Turner", "Torres", "Parker",
     "Collins", "Edwards", "Stewart", "Flores", "Morris", "Nguyen", "Murphy",
     "Rivera", "Cook", "Rogers", "Morgan", "Peterson", "Cooper", "Reed",
+    "Bennett", "Brooks", "Butler", "Coleman", "Foster", "Gray", "Hayes",
+    "Hughes", "Jenkins", "Kelly", "Long", "Patterson", "Perry", "Powell",
+    "Price", "Richardson", "Russell", "Sanders", "Simmons", "Sullivan",
+    "Watson", "Wood", "Ward", "Bailey", "Barnes", "Bell", "Cox", "Diaz",
+    "Fisher", "Graham", "Howard", "Kim", "Lopez", "Myers", "Ortiz", "Reyes",
 ]
 
 # ── Proxy pool ───────────────────────────────────────────────────────────────
@@ -1644,60 +1655,62 @@ def _clean_name_token(s: str) -> str:
 
 
 def _human_local_part(max_len: int | None = None) -> str:
-    """Realistic mailbox local-part: name combos + small digits (not random soup).
+    """Professional mailbox local-part: real name combos, letters+digits only.
 
-    Examples: jordan.lee, emma.smith27, l.garcia, noah_wright91, mia.j.brown
+    No dots, underscores, or hyphens — looks like a normal corporate mailbox.
+
+    Examples: jordanlee, emmasmith27, jgarcia, noahwright, miasmith91, alexchen
     Uniqueness is still enforced by generate_email()'s used set.
     """
     cap = max(6, min(32, int(max_len or EMAIL_LOCAL_LEN or 20)))
     first = _clean_name_token(random.choice(FIRST_NAMES)) or "alex"
     last = _clean_name_token(random.choice(LAST_NAMES)) or "smith"
+    # Avoid first==last tokens like taylor+taylor → re-pick last once
+    if last == first:
+        last = _clean_name_token(random.choice(LAST_NAMES)) or "smith"
     fi, li = first[0], last[0]
-    # Prefer 1–2 digit suffixes; sometimes 3; rarely 4 (looks less bot-like)
-    r = secrets.randbelow(100)
-    if r < 55:
-        digits = str(secrets.randbelow(90) + 10)  # 10–99
-    elif r < 85:
-        digits = str(secrets.randbelow(9) + 1)  # 1–9
-    elif r < 95:
-        digits = str(secrets.randbelow(900) + 100)  # 100–999
-    else:
-        digits = ""
 
+    # Digit suffix: often none or 2 digits (most natural); rarely 1 or 3
+    r = secrets.randbelow(100)
+    if r < 35:
+        digits = ""  # pure name — most professional
+    elif r < 80:
+        digits = str(secrets.randbelow(90) + 10)  # 10–99
+    elif r < 92:
+        digits = str(secrets.randbelow(9) + 1)  # 1–9
+    else:
+        digits = str(secrets.randbelow(900) + 100)  # 100–999
+
+    # Only a-z0-9 patterns (no . _ -)
     patterns = [
-        f"{first}.{last}",
-        f"{first}.{last}{digits}" if digits else f"{first}.{last}",
         f"{first}{last}",
         f"{first}{last}{digits}" if digits else f"{first}{last}",
-        f"{first}_{last}",
-        f"{first}_{last}{digits}" if digits else f"{first}_{last}",
-        f"{fi}.{last}",
-        f"{fi}.{last}{digits}" if digits else f"{fi}.{last}",
-        f"{first}.{li}",
-        f"{first}.{li}{digits}" if digits else f"{first}.{li}",
-        f"{first}{li}{digits}" if digits else f"{first}{li}",
+        f"{fi}{last}",
         f"{fi}{last}{digits}" if digits else f"{fi}{last}",
-        f"{first}.{fi}.{last}" if len(first) > 2 else f"{first}.{last}",
-        f"{first}{digits}.{last}" if digits else f"{first}.{last}",
-        f"{last}.{first}",
-        f"{last}{digits}" if digits else f"{last}.{fi}",
+        f"{first}{li}",
+        f"{first}{li}{digits}" if digits else f"{first}{li}",
+        f"{first}{last}{li}" if len(first) + len(last) + 1 <= cap else f"{first}{last}",
+        f"{last}{first}",
+        f"{last}{fi}",
+        f"{first}{digits}" if digits else f"{first}{last}",
     ]
-    # Weight toward first.last / firstlast styles
-    weights = [
-        18, 16, 12, 10, 8, 6,
-        8, 5, 5, 4, 4, 4,
-        3, 3, 2, 2,
-    ]
+    # Weight toward firstlast / firstlastNN / flast (common work mailboxes)
+    weights = [28, 22, 14, 10, 8, 6, 4, 3, 3, 2]
     local = random.choices(patterns, weights=weights, k=1)[0]
-    local = re.sub(r"[._-]{2,}", ".", local).strip("._-")
+    local = re.sub(r"[^a-z0-9]", "", local)
     if len(local) < 5:
         local = f"{first}{last}{secrets.randbelow(90) + 10}"
     if len(local) > cap:
-        # Prefer keeping name start; trim from right
-        local = local[:cap].rstrip("._-")
-    # Final sanitize: only RFC-ish local chars we allow
-    local = re.sub(r"[^a-z0-9._-]", "", local)
-    if not local or local[0] in "._-" or local[-1] in "._-":
+        # Keep name start; drop trailing digits first if needed
+        local = local[:cap]
+        if local and local[-1].isdigit() and not any(c.isalpha() for c in local):
+            local = f"{first}{last}"[:cap]
+    # Must start with a letter (looks real; some providers reject digit-first)
+    if not local or not local[0].isalpha():
+        local = f"{first}{last}{secrets.randbelow(90) + 10}"[:cap]
+    # Final sanitize: letters + digits only
+    local = re.sub(r"[^a-z0-9]", "", local)
+    if len(local) < 5:
         local = f"{first}{last}{secrets.randbelow(90) + 10}"[:cap]
     return local
 
@@ -1707,10 +1720,12 @@ def _make_local_part(*, for_plus_tag: bool = False) -> str:
     if EMAIL_STYLE == "crypto":
         n = max(6, min(20, EMAIL_LOCAL_LEN)) if for_plus_tag else EMAIL_LOCAL_LEN
         return _crypto_local_part(n)
-    # human: plus tags stay short (gmail +tag limit feel)
+    # human: plus tags = short professional name+digits (gmail +tag)
     if for_plus_tag:
         first = _clean_name_token(random.choice(FIRST_NAMES)) or "user"
-        return f"{first}{secrets.randbelow(9000) + 1000}"[:20]
+        last = _clean_name_token(random.choice(LAST_NAMES)) or "lee"
+        tag = f"{first}{last[0]}{secrets.randbelow(900) + 100}"
+        return re.sub(r"[^a-z0-9]", "", tag)[:20]
     return _human_local_part(EMAIL_LOCAL_LEN)
 
 
@@ -7879,7 +7894,11 @@ async def tempmail_gen_email(mail_page, attempt: int, max_rolls: int = 25) -> st
                 f"[w{attempt}] apply domain @{pick}",
                 "",
             )
-            email = await tempmail_apply_domain(mail_page, pick, attempt=attempt)
+            # Professional local-part (same as google domain mode), not site random soup
+            local = _make_local_part(for_plus_tag=False)
+            email = await tempmail_apply_domain(
+                mail_page, pick, attempt=attempt, local_part=local
+            )
         else:
             print(
                 f"[{attempt}] tempmail map exhausted/empty — "
