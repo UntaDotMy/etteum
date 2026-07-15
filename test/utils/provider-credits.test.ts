@@ -22,6 +22,28 @@ describe("sumProviderFleetCredits", () => {
     expect(t.remaining).toBe(30 * 2_000_000);
     expect(t.limit).toBe(241 * 2_000_000);
     expect(t.used).toBe(211 * 2_000_000);
+    expect(t.weeklyPercentScale).toBe(false);
+  });
+
+  test("weekly percent fleet flags weeklyPercentScale for Grok CLI pool display", () => {
+    const rows = [
+      ...Array.from({ length: 30 }, () => ({
+        enabled: true,
+        status: "active",
+        quotaLimit: 100,
+        quotaRemaining: 96,
+      })),
+      ...Array.from({ length: 10 }, () => ({
+        enabled: true,
+        status: "error",
+        quotaLimit: 100,
+        quotaRemaining: 100,
+      })),
+    ];
+    const t = sumProviderFleetCredits(rows);
+    expect(t.weeklyPercentScale).toBe(true);
+    expect(t.remaining).toBe(30 * 96);
+    expect(t.limit).toBe(40 * 100);
   });
 
   test("partial burn on active still uses all-enabled package as total", () => {

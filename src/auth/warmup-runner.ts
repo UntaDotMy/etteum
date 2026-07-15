@@ -376,8 +376,15 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
         // remaining. Remaining is tracked by per-request debit; warmup must
         // not re-inflate every healthy account to full package.
         const isGrok = account.provider === "grok";
+        // CLI weekly pool (0–100) is authoritative — always write upstream.
+        const isGrokWeeklyPercent =
+          isGrok &&
+          (quotaSource.includes("GetGrokCreditsConfig") ||
+            quotaSource.includes("weekly-percent") ||
+            (rawLimit > 0 && rawLimit <= 100 && quotaSource.includes("weekly")));
         const untrustedFullRemaining =
           isGrok &&
+          !isGrokWeeklyPercent &&
           (quotaSource.includes("untrusted-full-remaining") ||
             (rawLimit > 1000 &&
               upstreamRemaining >= rawLimit &&
@@ -386,6 +393,9 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
         if (health.kind === "exhausted") {
           // Provider says exhausted — always zero out.
           update.quotaRemaining = 0;
+        } else if (isGrokWeeklyPercent) {
+          // Same surface as Grok CLI creditUsagePercent — trust live probe.
+          update.quotaRemaining = upstreamRemaining;
         } else if (untrustedFullRemaining) {
           // Only seed full package when we have no usable local absolute remaining
           // (first import / wrong percent-scale 100). Otherwise keep local debit.
