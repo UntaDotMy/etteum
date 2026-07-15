@@ -618,20 +618,22 @@ export function parseGrokCreditsProtobuf(
   let usedPercent: number | null =
     percentCandidates.length > 0 ? percentCandidates[0]!.value : null;
 
-  const nowSec = Math.floor(now.getTime() / 1000);
-  const resetCandidates = scan.varints
+  // Epoch-looking varints mark a period window even after it has ended.
+  // Do NOT filter by "now" before deciding usedPercent — a fixture captured
+  // mid-period must still parse as 0% used weeks later (proto3 omit of
+  // credit_usage_percent). resetAt still prefers future timestamps.
+  const periodTimestamps = scan.varints
     .map((v) => v.value)
     .filter((ts) => ts >= 1_700_000_000 && ts <= 2_100_000_000)
-    .map((ts) => new Date(ts * 1000))
-    .filter((d) => d.getTime() > now.getTime() - 60_000); // allow just-past for clock skew
+    .map((ts) => new Date(ts * 1000));
 
-  const futureResets = resetCandidates.filter((d) => d.getTime() > now.getTime());
+  const futureResets = periodTimestamps.filter((d) => d.getTime() > now.getTime() - 60_000);
   const resetAt =
-    (futureResets.length ? futureResets : resetCandidates)
+    (futureResets.length ? futureResets : periodTimestamps)
       .sort((a, b) => a.getTime() - b.getTime())[0] ?? null;
 
   // Period present (unix timestamps found) + no percent field → 0% used (proto3 omit).
-  if (usedPercent == null && resetCandidates.length > 0) {
+  if (usedPercent == null && periodTimestamps.length > 0) {
     usedPercent = 0;
   }
   if (usedPercent == null) return null;
@@ -639,8 +641,6 @@ export function parseGrokCreditsProtobuf(
   const used = Math.min(100, Math.max(0, Math.round(usedPercent)));
   const limit = 100;
   const remaining = Math.max(0, limit - used);
-  // silence unused nowSec (kept for future period-window filters)
-  void nowSec;
 
   return {
     limit,

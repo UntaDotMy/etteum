@@ -37,22 +37,53 @@ describe("camoufox adapter surface", () => {
       "print('import_ok')",
     ].join("; ");
 
-    const proc = Bun.spawnSync({
-      cmd: ["py", "-3", "-c", code],
-      cwd: AUTH_DIR,
-      stdout: "pipe",
-      stderr: "pipe",
-    });
-    const out =
-      new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
-    if (proc.exitCode !== 0) {
-      if (/ModuleNotFoundError|No module named|not found|Unable to create process/i.test(out)) {
-        console.warn("Python adapter import skipped:", out.slice(0, 240));
-        return;
+    // Windows launcher first, then POSIX names used on CI/Linux.
+    const candidates: string[][] = [
+      ["py", "-3", "-c", code],
+      ["python3", "-c", code],
+      ["python", "-c", code],
+    ];
+
+    let lastOut = "";
+    let lastCode: number | null = null;
+    let ran = false;
+    for (const cmd of candidates) {
+      try {
+        const proc = Bun.spawnSync({
+          cmd,
+          cwd: AUTH_DIR,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        ran = true;
+        lastCode = proc.exitCode;
+        lastOut =
+          new TextDecoder().decode(proc.stdout) + new TextDecoder().decode(proc.stderr);
+        if (proc.exitCode === 0 && lastOut.includes("import_ok")) {
+          expect(lastOut).toContain("import_ok");
+          return;
+        }
+        // Missing deps / broken env → skip (smoke test, not a hard CI gate).
+        if (/ModuleNotFoundError|No module named|not found|Unable to create process/i.test(lastOut)) {
+          console.warn("Python adapter import skipped:", lastOut.slice(0, 240));
+          return;
+        }
+      } catch (err) {
+        // Bun throws when the executable is missing from PATH (Linux CI has no `py`).
+        const msg = err instanceof Error ? err.message : String(err);
+        lastOut = msg;
+        if (/Executable not found|ENOENT|not found/i.test(msg)) continue;
+        throw err;
       }
     }
-    expect(proc.exitCode).toBe(0);
-    expect(out).toContain("import_ok");
+
+    if (!ran) {
+      console.warn("Python adapter import skipped: no python launcher in PATH");
+      return;
+    }
+    // A launcher ran but import failed for a non-skip reason — surface it.
+    expect(lastCode).toBe(0);
+    expect(lastOut).toContain("import_ok");
   });
 });
 
