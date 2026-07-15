@@ -720,27 +720,61 @@ export function isGrokWeeklyPercentQuotaLimit(limit: number | null | undefined):
 }
 
 /**
+ * Free Build rate-limit package sizes (x-ratelimit-limit-tokens ~2e6).
+ * These must never land in accounts.quota_limit — they flip the dashboard
+ * fleet label from "Weekly pool" to "Credits".
+ */
+export function isGrokFreeBuildAbsolutePackage(limit: number): boolean {
+  const lim = Number(limit);
+  // Observed free Build packages: ~2M; allow a wide band so header variants
+  // (1M–100M) still count as free-Build absolute, not weekly (≤100) or small
+  // paid billing units.
+  return Number.isFinite(lim) && lim >= 500_000;
+}
+
+/**
+ * True when a quota snapshot is safe to persist on accounts.quota_* columns.
+ * Weekly percent (0–100) and paid billing absolute are OK; free-Build ~2M is not.
+ */
+export function isGrokDashboardQuotaSafe(
+  q: Pick<GrokOAuthQuota, "limit" | "percentScale" | "source"> | null | undefined,
+): boolean {
+  if (!q || !Number.isFinite(q.limit) || q.limit <= 0) return false;
+  if (q.percentScale || q.limit <= 100) return true;
+  if (isGrokFreeBuildAbsolutePackage(q.limit)) return false;
+  // Paid / invoiced billing units (e.g. monthlyLimit 99900).
+  return String(q.source || "").includes("billing");
+}
+
+/**
  * Pick the best Grok OAuth quota snapshot for dashboard + pool accounting.
  *
  * Free-tier CLI truth is GetGrokCreditsConfig (weekly percent 0–100), not
- * x-ratelimit headers (often stuck at full package) and not /v1/billing
- * (monthlyLimit=0 on free).
+ * x-ratelimit headers (~2e6 free Build package) and not /v1/billing when
+ * monthlyLimit=0.
  *
  * Priority:
- *   1. Paid absolute billing (limit > 0)
- *   2. free-usage-exhausted → remaining 0 (prefer percent-scale shape when available)
- *   3. Trusted absolute burn (remaining < limit on free Build headers)
- *   4. Weekly percent (CLI GetGrokCreditsConfig) — free tier default
- *   5. Untrusted full absolute headers → skip (do not re-inflate to 2M)
+ *   1. Paid absolute billing (limit > 0, not free-Build package)
+ *   2. free-usage-exhausted → weekly remaining 0 (always 0–100 scale)
+ *   3. Weekly percent (CLI GetGrokCreditsConfig) — free tier default
+ *   4. Never return free-Build absolute ~2M for dashboard writes
  */
 export function selectGrokOAuthQuota(
   paid: GrokOAuthQuota | null | undefined,
   absolute: GrokOAuthQuota | null | undefined,
   percent: GrokOAuthQuota | null | undefined,
 ): GrokOAuthQuota | null {
-  if (paid && paid.limit > 0 && !paid.percentScale) return paid;
+  // Paid / invoiced monthly pool only — not free-Build rate-limit headers.
+  if (
+    paid &&
+    paid.limit > 0 &&
+    !paid.percentScale &&
+    !isGrokFreeBuildAbsolutePackage(paid.limit)
+  ) {
+    return paid;
+  }
 
-  // Chat entitlement gone for this window — never report healthy 100%.
+  // Chat entitlement gone — always report on weekly 0–100 scale (never 2M/0).
   if (absolute && isGrokFreeUsageExhaustedQuota(absolute)) {
     if (percent?.percentScale) {
       return {
@@ -753,47 +787,33 @@ export function selectGrokOAuthQuota(
         resetAt: percent.resetAt ?? absolute.resetAt ?? null,
       };
     }
-    const limit =
-      absolute.limit > 0 ? Math.floor(absolute.limit) : GROK_FREE_BUILD_TOKEN_LIMIT;
     return {
-      ...absolute,
-      limit,
+      limit: 100,
       remaining: 0,
-      used: limit,
-      percentScale: false,
-      resetAt: absolute.resetAt ?? percent?.resetAt ?? null,
+      used: 100,
+      resetAt: absolute.resetAt ?? null,
+      source: `${absolute.source}+weekly-percent-synth`,
+      percentScale: true,
+      raw: absolute.raw,
     };
   }
 
-  // Rare: headers report real burn (remaining strictly below package).
-  if (
-    absolute &&
-    absolute.limit > 0 &&
-    !absolute.percentScale &&
-    isTrustedGrokAbsoluteRemaining(absolute.limit, absolute.remaining)
-  ) {
-    let out = absolute;
-    if (!absolute.resetAt && percent?.resetAt) {
-      out = { ...absolute, resetAt: percent.resetAt };
-    }
-    return out;
-  }
-
   // Free / unified Build default — same surface the Grok CLI uses.
+  // Do NOT prefer free-Build absolute headers (even when remaining < limit):
+  // that wrote ~2M into quota_limit and demoted the fleet to "Credits".
   if (percent && percent.percentScale) return percent;
 
-  // Untrusted full remaining (2M/2M or 53M/53M) — do not write as live budget.
+  // No weekly percent available — refuse free-Build absolute packages.
+  // (Paid already returned above; untrusted 2M/2M must not re-inflate the bar.)
   if (absolute && absolute.limit > 0 && !absolute.percentScale) {
-    const norm = normalizeGrokAbsoluteRemaining(absolute);
-    if (norm.source.includes("untrusted-full-remaining")) return null;
-    if (!norm.resetAt && percent?.resetAt) {
-      return { ...norm, resetAt: percent.resetAt };
-    }
-    return norm;
+    if (isGrokFreeBuildAbsolutePackage(absolute.limit)) return null;
+    // Small non-percent absolute (unusual free probe) — still skip for dashboard.
+    return null;
   }
 
-  if (absolute && !absolute.percentScale && absolute.limit > 0) return absolute;
-  if (paid && !paid.percentScale) return paid;
+  if (paid && !paid.percentScale && !isGrokFreeBuildAbsolutePackage(paid.limit)) {
+    return paid;
+  }
   return null;
 }
 

@@ -142,12 +142,14 @@ describe("selectGrokOAuthQuota", () => {
     expect(q?.limit).toBe(99900);
   });
 
-  test("trusted absolute burn (remaining < limit) beats weekly percent", () => {
+  test("free-Build absolute burn does NOT beat weekly percent (dashboard stays 0–100)", () => {
+    // Even when headers show real burn (remaining < 2M), free tier must keep
+    // weekly pool — absolute 2M demotes the fleet card to "Credits".
     const q = selectGrokOAuthQuota(null, absolute, percent);
-    expect(q?.source).toBe("cli-chat-proxy/ratelimit-headers");
-    expect(q?.limit).toBe(2_000_000);
-    expect(q?.remaining).toBe(1_900_000);
-    expect(q?.resetAt?.toISOString()).toBe("2026-07-15T00:00:00.000Z");
+    expect(q?.percentScale).toBe(true);
+    expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
+    expect(q?.limit).toBe(100);
+    expect(q?.remaining).toBe(100);
   });
 
   test("weekly percent is free-tier default when headers are untrusted full package", () => {
@@ -164,6 +166,11 @@ describe("selectGrokOAuthQuota", () => {
     expect(q?.source).toBe("grok.com/GetGrokCreditsConfig");
     expect(q?.limit).toBe(100);
     expect(q?.remaining).toBe(100);
+  });
+
+  test("free-Build absolute alone (no weekly percent) is refused for dashboard", () => {
+    const q = selectGrokOAuthQuota(null, absolute, null);
+    expect(q).toBeNull();
   });
 
   test("percent-scale alone is free-tier CLI billing (GetGrokCreditsConfig)", () => {
@@ -206,7 +213,7 @@ describe("selectGrokOAuthQuota", () => {
     expect(q!.source).toContain("free-usage-exhausted");
   });
 
-  test("free-usage-exhausted without percent keeps absolute exhausted shape", () => {
+  test("free-usage-exhausted without percent synthesizes weekly 0/100", () => {
     const exhausted: GrokOAuthQuota = {
       limit: 0,
       remaining: 0,
@@ -217,7 +224,8 @@ describe("selectGrokOAuthQuota", () => {
     };
     const q = selectGrokOAuthQuota(null, exhausted, null);
     expect(q!.remaining).toBe(0);
-    expect(q!.limit).toBe(GROK_FREE_BUILD_TOKEN_LIMIT);
-    expect(q!.percentScale).toBe(false);
+    expect(q!.limit).toBe(100);
+    expect(q!.percentScale).toBe(true);
+    expect(q!.source).toContain("weekly-percent-synth");
   });
 });
