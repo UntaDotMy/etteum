@@ -1,93 +1,92 @@
 import { describe, expect, test } from "bun:test";
-import { sumProviderFleetCredits } from "../../dashboard/src/lib/provider-credits";
+import {
+  sumProviderFleetCredits,
+  weeklyAverageRemaining,
+} from "../../dashboard/src/lib/provider-credits";
 
 describe("sumProviderFleetCredits", () => {
-  test("remaining is active-only; total is all enabled package (30 active + 211 error)", () => {
+  test("exhausted remaining=0 lowers weekly average (not active-only 100/100)", () => {
     const rows = [
-      ...Array.from({ length: 30 }, () => ({
+      ...Array.from({ length: 26 }, () => ({
         enabled: true,
         status: "active",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 2_000_000,
-      })),
-      ...Array.from({ length: 211 }, () => ({
-        enabled: true,
-        status: "error",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 2_000_000,
-      })),
-    ];
-    const t = sumProviderFleetCredits(rows);
-    // remaining / all-total  →  60M / 482M  (not 60/60 and not 482/482)
-    expect(t.remaining).toBe(30 * 2_000_000);
-    expect(t.limit).toBe(241 * 2_000_000);
-    expect(t.used).toBe(211 * 2_000_000);
-    expect(t.weeklyPercentScale).toBe(false);
-  });
-
-  test("weekly percent fleet flags weeklyPercentScale for Grok CLI pool display", () => {
-    const rows = [
-      ...Array.from({ length: 30 }, () => ({
-        enabled: true,
-        status: "active",
-        quotaLimit: 100,
-        quotaRemaining: 96,
-      })),
-      ...Array.from({ length: 10 }, () => ({
-        enabled: true,
-        status: "error",
         quotaLimit: 100,
         quotaRemaining: 100,
+      })),
+      ...Array.from({ length: 4 }, () => ({
+        enabled: true,
+        status: "exhausted",
+        quotaLimit: 100,
+        quotaRemaining: 0,
       })),
     ];
     const t = sumProviderFleetCredits(rows);
     expect(t.weeklyPercentScale).toBe(true);
-    expect(t.remaining).toBe(30 * 96);
-    expect(t.limit).toBe(40 * 100);
+    expect(t.fleetCount).toBe(30);
+    expect(t.remaining).toBe(26 * 100);
+    expect(t.limit).toBe(30 * 100);
+    // 2600/3000 → 86.67 average on 0–100 scale
+    expect(weeklyAverageRemaining(t)).toBeCloseTo(86.666, 2);
   });
 
-  test("partial burn on active still uses all-enabled package as total", () => {
+  test("error rows do not inflate remaining or limit", () => {
     const t = sumProviderFleetCredits([
       {
         enabled: true,
         status: "active",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 500_000,
-      },
-      {
-        enabled: true,
-        status: "exhausted",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 0,
+        quotaLimit: 100,
+        quotaRemaining: 100,
       },
       {
         enabled: true,
         status: "error",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 2_000_000,
+        quotaLimit: 100,
+        quotaRemaining: 100,
       },
     ]);
-    expect(t.limit).toBe(6_000_000);
-    expect(t.remaining).toBe(500_000);
-    expect(t.used).toBe(5_500_000);
+    expect(t.fleetCount).toBe(1);
+    expect(t.remaining).toBe(100);
+    expect(t.limit).toBe(100);
+    expect(weeklyAverageRemaining(t)).toBe(100);
   });
 
-  test("disabled accounts are ignored for both sides", () => {
+  test("disabled accounts are ignored", () => {
     const t = sumProviderFleetCredits([
       {
         enabled: false,
         status: "active",
-        quotaLimit: 2_000_000,
-        quotaRemaining: 2_000_000,
+        quotaLimit: 100,
+        quotaRemaining: 100,
       },
       {
         enabled: true,
         status: "active",
-        quotaLimit: 1_000_000,
-        quotaRemaining: 250_000,
+        quotaLimit: 100,
+        quotaRemaining: 50,
       },
     ]);
-    expect(t.limit).toBe(1_000_000);
-    expect(t.remaining).toBe(250_000);
+    expect(t.remaining).toBe(50);
+    expect(t.limit).toBe(100);
+  });
+
+  test("absolute token packages still sum correctly", () => {
+    const rows = [
+      ...Array.from({ length: 30 }, () => ({
+        enabled: true,
+        status: "active",
+        quotaLimit: 2_000_000,
+        quotaRemaining: 2_000_000,
+      })),
+      ...Array.from({ length: 4 }, () => ({
+        enabled: true,
+        status: "exhausted",
+        quotaLimit: 2_000_000,
+        quotaRemaining: 0,
+      })),
+    ];
+    const t = sumProviderFleetCredits(rows);
+    expect(t.weeklyPercentScale).toBe(false);
+    expect(t.remaining).toBe(30 * 2_000_000);
+    expect(t.limit).toBe(34 * 2_000_000);
   });
 });
