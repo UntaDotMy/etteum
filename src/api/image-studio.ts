@@ -201,7 +201,7 @@ imageStudioRouter.post("/generate", async (c) => {
   const requestedModel = (body.model || "").trim();
   const typeFromModel = /video/i.test(requestedModel)
     ? "video"
-    : /image|imagine|flux|dall/i.test(requestedModel)
+    : /image|imagine|flux|dall|grok-image/i.test(requestedModel)
       ? "image"
       : null;
   const type = body.type === "video" || typeFromModel === "video"
@@ -259,18 +259,25 @@ imageStudioRouter.post("/generate", async (c) => {
 
     const content = (result.response.choices?.[0]?.message?.content as string) || "";
     const allUrls: string[] = [];
-    const re = /\((https?:\/\/[^)]+)\)/g;
+    // http(s) URLs (Canva etc.) + data:image base64 (Grok image_generation tool).
+    const re = /\(((?:https?:\/\/[^)\s]+)|(?:data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+))\)/g;
     let match: RegExpExecArray | null;
     while ((match = re.exec(content)) !== null) {
-      allUrls.push(match[1]!);
+      allUrls.push(match[1]!.replace(/\s+/g, ""));
     }
     // For video, the first URL is the video and subsequent ones are thumbnails — keep only the video.
     const urls = type === "video" ? allUrls.slice(0, 1) : allUrls;
 
     const creditsUsed = Number(result.creditsUsed || 0);
-    const quotaAfter = creditsUsed > 0 && quotaBefore > 0
-      ? await pool.decrementQuota(account.id, creditsUsed)
-      : quotaBefore;
+    // Grok free-tier weekly pool is 0–100 (server-owned); do not invent local debit.
+    const skipGrokWeeklyDebit =
+      providerName === "grok" &&
+      Number(account.quotaLimit || 0) > 0 &&
+      Number(account.quotaLimit) <= 100;
+    const quotaAfter =
+      creditsUsed > 0 && quotaBefore > 0 && !skipGrokWeeklyDebit
+        ? await pool.decrementQuota(account.id, creditsUsed)
+        : quotaBefore;
 
     void recordRequest({
       accountId: account.id,

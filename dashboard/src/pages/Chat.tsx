@@ -79,6 +79,7 @@ function mediaGenKind(modelId: string): "image" | "video" | null {
   if (l.includes("video") || l === "canva-video") return "video";
   if (
     l.includes("image") ||
+    l === "grok-image" ||
     l.startsWith("canva-image") ||
     l.includes("dall-e") ||
     l.includes("flux") ||

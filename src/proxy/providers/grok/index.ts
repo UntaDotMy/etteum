@@ -53,8 +53,14 @@ import {
   type GrokOAuthTokens,
   type GrokOAuthQuota,
 } from "./oauth";
+import {
+  GROK_IMAGE_MODEL,
+  grokGenerateImage,
+  isGrokImageModel,
+} from "./image";
 
 export { isGrokWeeklyPercentQuotaLimit } from "./oauth";
+export { isGrokImageModel, GROK_IMAGE_MODEL } from "./image";
 // ---------------------------------------------------------------------------
 // Token structure
 // ---------------------------------------------------------------------------
@@ -190,9 +196,10 @@ const GROK_CREATED = 1_718_000_000;
  * - grok-4.5           → chat (+ vision understand)
  * - grok-4.5-reasoning → chat alias
  * - composer-2.5       → Grok Build coding
+ * - grok-image         → image via /v1/responses + tools image_generation
  *
  * Per xAI: grok-4.5 always reasons; effort controls depth (cannot disable).
- * Chat only — no image/video generation models in the Grok catalog.
+ * Image gen reuses OAuth cli-chat-proxy (not a separate Imagine host).
  */
 // Free Build quota is absolute tokens (x-ratelimit-*-tokens, typically ~2e6).
 // creditRate 1 → creditsUsed = totalTokens so pool.decrementQuota tracks the
@@ -202,6 +209,8 @@ const GROK_MODELS: ModelInfo[] = [
   { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
   { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  // Image Studio / Chat media — tool-based gen on grok-4.5 Responses surface.
+  { id: GROK_IMAGE_MODEL, object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 1, creditSource: "fixed" },
 ];
 
 export type GrokReasoningEffort = "low" | "medium" | "high";
@@ -231,8 +240,9 @@ export class GrokProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    // Strict chat catalog only.
-    return m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5";
+    if (m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5") return true;
+    if (isGrokImageModel(m)) return true;
+    return false;
   }
 
   private resolveMode(model: string): GrokModeId {
@@ -255,6 +265,74 @@ export class GrokProvider extends BaseProvider {
   }
 
   // -------------------------------------------------------------------------
+  // Image generation (cli-chat-proxy /v1/responses + image_generation tool)
+  // -------------------------------------------------------------------------
+
+  /**
+   * Image Studio / Chat route media models through chatCompletion with markdown
+   * image URLs (incl. data:image/*;base64) so the existing URL extractors work.
+   */
+  private async imageCompletion(
+    account: Account,
+    request: ChatCompletionRequest,
+  ): Promise<ProviderResult> {
+    const lastUser = [...(request.messages || [])].reverse().find((m) => m.role === "user");
+    let prompt = "";
+    if (typeof lastUser?.content === "string") {
+      prompt = lastUser.content;
+    } else if (Array.isArray(lastUser?.content)) {
+      prompt = lastUser.content
+        .map((p: any) => (typeof p === "string" ? p : p?.text || p?.input_text || ""))
+        .filter(Boolean)
+        .join("\n");
+    }
+    if (!prompt.trim()) {
+      return { success: false, error: "Empty prompt for Grok image generation" };
+    }
+
+    const n = Math.min(4, Math.max(1, Number((request as any).n) || 1));
+    const result = await grokGenerateImage(account, { prompt: prompt.trim(), n });
+    if (!result.ok || result.urls.length === 0) {
+      return this.classifyError(
+        new Error(result.error || "Grok image generation returned no media"),
+      );
+    }
+
+    const content = result.urls
+      .map((u, i) => `![Image ${i + 1}](${u})`)
+      .join("\n\n");
+
+    const response: ChatCompletionResponse = {
+      id: `chatcmpl-grok-image-${Date.now()}`,
+      object: "chat.completion",
+      created: now(),
+      model: request.model || GROK_IMAGE_MODEL,
+      choices: [
+        {
+          index: 0,
+          message: { role: "assistant", content },
+          finish_reason: "stop",
+        },
+      ],
+      usage: {
+        prompt_tokens: 0,
+        completion_tokens: 0,
+        total_tokens: result.urls.length,
+      },
+    };
+
+    // Do not invent token debit on weekly % pool; live re-probe owns remaining.
+    // Fixed image unit for request logs only.
+    return {
+      success: true,
+      response,
+      tokensUsed: result.urls.length,
+      creditsUsed: result.urls.length,
+      creditSource: "fixed",
+    };
+  }
+
+  // -------------------------------------------------------------------------
   // Chat completion (non-streaming)
   // -------------------------------------------------------------------------
 
@@ -262,6 +340,9 @@ export class GrokProvider extends BaseProvider {
     account: Account,
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
+    if (isGrokImageModel(request.model || "")) {
+      return this.imageCompletion(account, request);
+    }
     try {
       const oauthAccount = isOAuthAccount(account);
       const tokens = oauthAccount ? null : this.getTokens(account);
@@ -352,6 +433,10 @@ export class GrokProvider extends BaseProvider {
     account: Account,
     request: ChatCompletionRequest
   ): Promise<ProviderResult> {
+    // Image gen is non-streaming; return full completion (router wraps if needed).
+    if (isGrokImageModel(request.model || "")) {
+      return this.imageCompletion(account, request);
+    }
     try {
       const oauthAccount = isOAuthAccount(account);
       const tokens = oauthAccount ? null : this.getTokens(account);

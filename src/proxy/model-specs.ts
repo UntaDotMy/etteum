@@ -132,6 +132,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
   // Cursor docs: 200k context for composer-2.5 (xAI API models page has no entry).
   "composer-2.5":           { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: false },
+  // Image Studio / Chat — tool image_generation on cli-chat-proxy /v1/responses.
+  "grok-image":             { contextWindow: 1_024,     maxOutput: 0,       thinking: false, vision: false },
   "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.3-reasoning":     { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
   "grok-4.3-heavy":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },

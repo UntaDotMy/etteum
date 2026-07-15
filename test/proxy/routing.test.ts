@@ -58,6 +58,7 @@ describe("getProviderForModel", () => {
     ["grok-4.5", "grok"],
     ["grok-4.5-reasoning", "grok"],
     ["composer-2.5", "grok"],
+    ["grok-image", "grok"],
     ["grok-imagine-image", null],
     ["grok-imagine-image-quality", null],
     ["grok-imagine-video", null],
