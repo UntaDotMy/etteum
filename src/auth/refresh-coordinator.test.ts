@@ -47,6 +47,10 @@ describe("refresh-coordinator isUnrecoverableRefreshError", () => {
     expect(isUnrecoverableRefreshError("refresh_token_expired")).toBe(true);
     expect(isUnrecoverableRefreshError("refresh_token_invalidated")).toBe(true);
     expect(isUnrecoverableRefreshError("unrecoverable_refresh_error")).toBe(true);
+    // Grok/xAI exchange wording + missing RT (warmup must hard-error only these)
+    expect(isUnrecoverableRefreshError("refresh token invalid or revoked (invalid_grant)")).toBe(true);
+    expect(isUnrecoverableRefreshError("No refresh token to renew OAuth access")).toBe(true);
+    expect(isUnrecoverableRefreshError("wrong OAuth client (token not issued to this client_id)")).toBe(true);
   });
 
   test("does not flag transient/unknown errors", () => {

@@ -38,6 +38,7 @@ const DEFAULT_LEAD_MINUTES = 5;
 
 // Per-provider refresh lead (ms before expiry to trigger refresh).
 // Mirrors reference REFRESH_LEAD_MS (tokenRefresh.js:47-49 + per-provider registry).
+// Grok OAuth access JWTs are ~6h (auth.x.ai); refresh 5 min early like other OIDC.
 const PROVIDER_REFRESH_LEAD_MS: Record<string, number> = {
   codex: 5 * 24 * 60 * 60 * 1000, // 5 days — Codex tokens rotate on a long window
   kiro: 5 * 60 * 1000,             // 5 min
@@ -45,6 +46,7 @@ const PROVIDER_REFRESH_LEAD_MS: Record<string, number> = {
   codebuddy: 5 * 60 * 1000,        // 5 min
   "codebuddy-china": 5 * 60 * 1000,
   qoder: 5 * 60 * 1000,
+  grok: 5 * 60 * 1000,             // 5 min — heal near-expiry before chat 401
 };
 
 function getRefreshLeadMs(provider: string, globalLeadMinutes: number): number {
@@ -53,18 +55,54 @@ function getRefreshLeadMs(provider: string, globalLeadMinutes: number): number {
 
 /**
  * Extract the token expiry as an epoch-ms timestamp from an account's `tokens`
- * JSONB. Providers store `expires_at` as epoch-seconds (string or number).
- * Returns null when unknown / already expired-as-parsed / unparseable.
+ * JSONB. Accepts unix seconds/ms (number or numeric string) **and ISO-8601**
+ * (farm / paste blobs). Also peeks JWT `exp` when expires_at is missing so
+ * proactive refresh still heals Grok OAuth rows.
+ *
+ * Returns null when unparseable (scheduler skips — no blind refresh).
  */
-function extractExpiryMs(tokens: unknown): number | null {
+export function extractExpiryMs(tokens: unknown): number | null {
   if (!tokens || typeof tokens !== "object") return null;
   const t = tokens as Record<string, any>;
   const raw = t.expires_at ?? t.expiresAt ?? t.expiresAtMs;
-  if (raw == null) return null;
-  const num = typeof raw === "number" ? raw : Number(raw);
-  if (!Number.isFinite(num) || num <= 0) return null;
-  // Heuristic: if the value is in seconds (< 10^12), multiply to ms.
-  return num < 1e12 ? num * 1000 : num;
+
+  if (raw != null) {
+    if (typeof raw === "number" && Number.isFinite(raw) && raw > 0) {
+      return raw < 1e12 ? raw * 1000 : raw;
+    }
+    if (typeof raw === "string" && raw.trim()) {
+      const asNum = Number(raw);
+      if (Number.isFinite(asNum) && asNum > 1_000_000_000) {
+        return asNum < 1e12 ? asNum * 1000 : asNum;
+      }
+      const ms = Date.parse(raw);
+      if (!Number.isNaN(ms) && ms > 0) return ms;
+    }
+  }
+
+  // Fall back to access JWT exp (Grok OAuth / OIDC AT) when expires_at absent.
+  const access =
+    (typeof t.access_token === "string" && t.access_token) ||
+    (typeof t.accessToken === "string" && t.accessToken) ||
+    "";
+  if (access && access.split(".").length >= 2) {
+    try {
+      const payload = access.split(".")[1];
+      if (!payload) return null;
+      let b64 = payload.replace(/-/g, "+").replace(/_/g, "/");
+      while (b64.length % 4) b64 += "=";
+      const claims = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as {
+        exp?: number;
+      };
+      if (typeof claims.exp === "number" && claims.exp > 0) {
+        return claims.exp * 1000;
+      }
+    } catch {
+      /* ignore */
+    }
+  }
+
+  return null;
 }
 
 class AutoRefreshScheduler {
@@ -106,10 +144,14 @@ class AutoRefreshScheduler {
       if (!enabled) return;
 
       const now = Date.now();
-      // Active, enabled accounts only — exhausted/error/pending are skipped
-      // (they need warmup/re-login, not a refresh).
+      // Active + exhausted, enabled — still refresh OAuth so tokens heal before
+      // the next request / quota reset. error/pending stay for warmup (may need
+      // re-login after true invalid_grant).
       const acctRows = await db.select().from(accounts).where(
-        and(eq(accounts.status, "active"), eq(accounts.enabled, true)),
+        and(
+          inArray(accounts.status, ["active", "exhausted"]),
+          eq(accounts.enabled, true),
+        ),
       );
 
       for (const acct of acctRows) {
