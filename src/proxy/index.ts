@@ -537,7 +537,7 @@ function wrapStreamWithUsageFinalizer(
             // Grok weekly % (CLI GetGrokCreditsConfig, limit 0–100): server is
             // source of truth — do not debit tokens onto a percent scale.
             const skipGrokWeeklyDebit =
-              provider === "grok" &&
+              context.provider === "grok" &&
               Number(context.quotaLimit ?? 0) > 0 &&
               Number(context.quotaLimit) <= 100;
             if (!skipGrokWeeklyDebit) {
