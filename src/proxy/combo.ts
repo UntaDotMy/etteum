@@ -208,24 +208,15 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         continue;
       }
 
-      // Mirror routeRequest's account selection: BYOK uses the generic
-      // getAccountForModel (prefix-based, also surfaces error/exhausted
-      // accounts for retry) with exclusion; other providers use the
-      // model-aware getNextAccountForModel so e.g. Alibaba accounts are
-      // filtered to those that can actually query this model.
-      // NOTE: getNextAccountForModel does not support excludeAccountIds, so
-      // excluded accounts may be re-selected; routeRequest has the same
-      // limitation for non-BYOK providers. Excluded set is still maintained
-      // for the BYOK path below.
+      // Mirror routeRequest: BYOK + non-BYOK both pass excludeAccountIds so
+      // exhausted / just-failed credentials are not re-selected mid-loop.
       let account;
       if (providerName === "byok") {
         account = (await pool.getAccountForModel(modelName, { excludeAccountIds: excludedAccounts }))?.account ?? null;
       } else {
-        account = await pool.getNextAccountForModel(providerName, modelName);
-        if (account && excludedAccounts.has(account.id)) {
-          // Skip already-tried accounts; loop will fetch the next round.
-          account = null;
-        }
+        account = await pool.getNextAccountForModel(providerName, modelName, {
+          excludeAccountIds: excludedAccounts,
+        });
       }
 
       if (!account) {
