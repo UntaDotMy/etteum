@@ -1,6 +1,11 @@
 import type { ChatCompletionRequest, ProviderResult } from "./providers/base";
 import { providers, getAllModels, resolveProviderInstance, type ProviderName } from "./providers/registry";
-import { isNonAccountRequestError, isTransientError } from "./errors";
+import {
+  isNonAccountRequestError,
+  isTransientError,
+  isHardConnectFailure,
+  isAccessDeniedForbidden,
+} from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
 import type { Account } from "../db/schema";
@@ -198,6 +203,10 @@ export async function routeRequest(
   let allRateLimited = true;
   let attemptsMade = 0;
   let earliestReset: Date | null = null;
+  // Provider-host is dead (connection refused / upstream connect) — do not walk
+  // the whole fleet with multi-second TCP timeouts on every account.
+  let hardConnectFailures = 0;
+  const MAX_HARD_CONNECT_ACCOUNT_ATTEMPTS = 2;
 
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     // BYOK uses prefix-based account lookup (not the generic pool),
@@ -313,15 +322,36 @@ export async function routeRequest(
       // A non-rate-limit failure means not ALL accounts were rate-limited.
       allRateLimited = false;
 
-      // Handle banned / restricted accounts (403 with code 11140 etc).
-      // These accounts have valid credentials but are blocked by the upstream
-      // from making chat requests. Mark as error immediately — no retry.
-      if (result.banned) {
+      // Handle banned / restricted / Access denied accounts.
+      // These credentials are blocked for chat (not an auth-refresh issue).
+      // Terminal mark so they leave the active pool immediately — hysteresis
+      // would leave them selectable and stall every request for 3 full hops.
+      if (result.banned || isAccessDeniedForbidden(errText)) {
         if (!isStaticAccount) {
-          await pool.markError(account.id, result.error || "Account banned or restricted");
+          await pool.markError(
+            account.id,
+            result.error || errText || "Account banned or restricted",
+            { terminal: true },
+          );
         }
-        lastError = result.error || "Account banned or restricted";
-        continue; // Try next account
+        lastError = result.error || errText || "Account banned or restricted";
+        allRateLimited = false;
+        continue; // Try next account (excluded via attemptedAccountIds)
+      }
+
+      // Hard connect failure (503 connection refused / upstream connect) —
+      // same host for all Grok OAuth accounts. One failover attempt, then stop.
+      if (isHardConnectFailure(errText)) {
+        allRateLimited = false;
+        hardConnectFailures++;
+        if (!isStaticAccount) {
+          await pool.markTransientFailure(account.id, errText);
+        }
+        lastError = errText;
+        if (hardConnectFailures >= MAX_HARD_CONNECT_ACCOUNT_ATTEMPTS) {
+          break;
+        }
+        continue;
       }
 
       // Handle token refresh for expired/401 errors.

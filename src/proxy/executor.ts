@@ -21,6 +21,7 @@ import type { Account } from "../db/schema";
 import type { ChatCompletionRequest } from "./providers/base";
 import type { BaseProvider, ProviderResult } from "./providers/base";
 import { classifyError } from "./error-rules";
+import { isHardConnectFailure } from "./errors";
 
 // Retry config — mirrors reference runtimeConfig.js DEFAULT_RETRY_CONFIG + RETRY_CONFIG.
 const RETRY_CONFIG: Record<number, { attempts: number; delayMs: number }> = {
@@ -138,6 +139,11 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
 
       // Failure — classify + decide retry.
       lastResult = result;
+      // Hard connect (connection refused / upstream connect) will fail the same
+      // way on every attempt — do not burn 3×2s sleeps on the same account.
+      if (isHardConnectFailure(result.error)) {
+        return result;
+      }
       const status = inferStatus(result);
       const rule = classifyError(status, result.error);
 
@@ -146,7 +152,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
         return result;
       }
 
-      // Retryable status (502/503/504) → retry per config.
+      // Retryable status (502/503/504) → retry per config (soft overload only).
       if (status && RETRY_CONFIG[status]) {
         const retry = RETRY_CONFIG[status]!;
         if (attempt < retry.attempts) {
@@ -164,6 +170,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
       return result;
     } catch (err: any) {
       lastResult = { success: false, error: err?.message || String(err) };
+      if (isHardConnectFailure(lastResult.error)) return lastResult;
       const rule = classifyError(undefined, lastResult.error);
       if (rule && (rule.kind === "nonAccount" || rule.kind === "permanent")) return lastResult;
       if (attempt < DEFAULT_MAX_ATTEMPTS) continue;
@@ -189,11 +196,21 @@ function inferStatus(result: ProviderResult): number | undefined {
     ) {
       return 402;
     }
-    if (e.includes("(502)") || e.includes("bad gateway")) return 502;
-    if (e.includes("(503)") || e.includes("service unavailable") || e.includes("server_is_overloaded")) return 503;
-    if (e.includes("(504)") || e.includes("gateway timeout")) return 504;
+    if (e.includes("(502)") || e.includes("bad gateway") || /\berror\s+502\b/.test(e)) return 502;
+    // Grok: `cli-chat-proxy error 503: ...` (no parentheses)
+    if (
+      e.includes("(503)") ||
+      e.includes("service unavailable") ||
+      e.includes("server_is_overloaded") ||
+      /\berror\s+503\b/.test(e) ||
+      (/\b503\b/.test(e) && (e.includes("connect") || e.includes("upstream")))
+    ) {
+      return 503;
+    }
+    if (e.includes("(504)") || e.includes("gateway timeout") || /\berror\s+504\b/.test(e)) return 504;
     if (e.includes("(429)") || e.includes("rate limit") || e.includes("too many requests")) return 429;
     if (e.includes("(401)") || e.includes("unauthorized") || e.includes("expired")) return 401;
+    if (e.includes("access denied") || (/\b403\b/.test(e) && e.includes("forbidden"))) return 403;
   }
   return undefined;
 }

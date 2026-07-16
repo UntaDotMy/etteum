@@ -121,10 +121,20 @@ export const ERROR_RULES: ErrorRule[] = [
     kind: "transient",
     backoff: true,
   },
-  // 6. Banned/restricted — permanent account disable.
+  // 6. Banned/restricted / Build Access denied — permanent account disable.
   {
     id: "banned",
-    match: (_s, e) => !!e?.toLowerCase().includes("banned") || !!e?.toLowerCase().includes("suspended") || !!e?.toLowerCase().includes("restricted"),
+    match: (_s, e) => {
+      const n = e?.toLowerCase() ?? "";
+      return (
+        n.includes("banned") ||
+        n.includes("suspended") ||
+        n.includes("restricted") ||
+        n.includes("access denied") ||
+        n.includes("permission-denied") ||
+        n.includes("chat endpoint is denied")
+      );
+    },
     kind: "permanent",
   },
 ];

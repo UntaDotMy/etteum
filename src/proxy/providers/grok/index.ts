@@ -142,11 +142,15 @@ export function classifyGrokUpstreamError(err: unknown): ProviderResult {
       quotaExhausted: true,
     };
   }
-  // xAI "permission-denied" on chat is NOT an expired token — the access JWT
-  // is valid (models/billing often still 200) but this principal/team has no
-  // chat entitlement. Do not prefix with "expired:" or the router will
-  // uselessly burn the refresh token trying to "fix" it.
-  if (/permission-denied|chat endpoint is denied/i.test(msg)) {
+  // xAI "permission-denied" / "Access denied" on chat is NOT an expired token —
+  // the access JWT is often valid (billing/models may still work) but this
+  // principal has no Build chat entitlement. Mark banned so the router removes
+  // the credential immediately instead of rate-limit/hysteresis stalling the fleet.
+  // Live body: cli-chat-proxy error 403: {"error":"Access denied"}
+  if (
+    /permission-denied|chat endpoint is denied|access\s*denied/i.test(msg) ||
+    (/\b403\b/i.test(msg) && /access\s*denied|banned|suspended|restricted|disabled|revoked/i.test(msg))
+  ) {
     return {
       success: false,
       error: `forbidden: ${msg}`,
@@ -156,17 +160,15 @@ export function classifyGrokUpstreamError(err: unknown): ProviderResult {
   if (/expired|unauthorized|\b401\b/i.test(msg)) {
     return { success: false, error: `expired: ${msg}` };
   }
-  // Only treat 403 as hard-ban when the body says so — bare 403 is often
-  // entitlement lag / IP / temporary and must not permanently disable.
-  if (/\b403\b/i.test(msg) && /banned|suspended|restricted|disabled|revoked/i.test(msg)) {
-    return { success: false, error: `forbidden: ${msg}`, banned: true };
-  }
+  // Bare 403 without Access denied — entitlement lag / temporary; do not ban.
   if (/\b403\b/i.test(msg)) {
     return { success: false, error: `error: ${msg}` };
   }
   if (/rate_limit|429|too many/i.test(msg)) {
     return { success: false, error: `rate_limited: ${msg}`, rateLimited: true };
   }
+  // Hard connect / envoy 503 — surface as error text; executor must NOT
+  // multi-retry the same account (router fail-fasts after 1–2 accounts).
   return { success: false, error: `error: ${msg}` };
 }
 

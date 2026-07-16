@@ -795,8 +795,42 @@ class AccountPool {
    * account. Below the threshold the account stays `active` with a short
    * cooldown, so a single transient 401/auth blip no longer permanently kills
    * it. A subsequent success resets the counter.
+   *
+   * Pass `{ terminal: true }` for permanent ban / Access denied so the row is
+   * removed from the active pool immediately (no 3-strike stall on a dead
+   * Build credential).
    */
-  async markError(accountId: number, errorMessage: string): Promise<void> {
+  async markError(
+    accountId: number,
+    errorMessage: string,
+    opts?: { terminal?: boolean },
+  ): Promise<void> {
+    if (opts?.terminal) {
+      const [account] = await db
+        .update(accounts)
+        .set({
+          status: "error",
+          errorMessage,
+          consecutiveAuthErrors: TERMINAL_ERROR_THRESHOLD,
+          cooldownUntil: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(accounts.id, accountId))
+        .returning();
+      if (!account) return;
+      this.invalidate(account.provider as ProviderName);
+      broadcast({
+        type: "account_status",
+        data: {
+          id: accountId,
+          status: "error",
+          error: errorMessage,
+          consecutiveAuthErrors: TERMINAL_ERROR_THRESHOLD,
+        },
+      });
+      return;
+    }
+
     // Atomic increment: SET consecutive_auth_errors = consecutive_auth_errors + 1
     // in a single statement with RETURNING, so two concurrent failures can't
     // both read the same baseline and lose an increment (read-modify-write race).
