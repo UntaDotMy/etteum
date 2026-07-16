@@ -6,9 +6,28 @@ import { pool } from "../proxy/pool";
 import { db } from "../db/index";
 import { imageStudioChats, imageStudioResults } from "../db/schema";
 import { desc, eq, asc } from "drizzle-orm";
-import type { ChatCompletionRequest } from "../proxy/providers/base";
+import type { ChatCompletionRequest, ProviderResult } from "../proxy/providers/base";
 
 export const imageStudioRouter = new Hono();
+
+/**
+ * Resolve credits for Image Studio logs the same way /v1 does when the
+ * provider already set creditsUsed; otherwise estimate from tokens × rate.
+ */
+function resolveStudioCredits(
+  providerName: string,
+  model: string,
+  result: ProviderResult,
+  totalTokens: number,
+): number {
+  const upstream = Number(result.creditsUsed || 0);
+  if (upstream > 0) return upstream;
+  if (totalTokens <= 0) return 0;
+  const inst = providers[providerName as keyof typeof providers];
+  const rate = inst?.getProviderCreditRate?.(model) ?? 0;
+  if (rate <= 0) return 0;
+  return Math.max(0.01, totalTokens * rate);
+}
 
 const ASSIST_SYSTEM_PROMPT = `Kamu adalah AI Prompt Engineer untuk Canva Magic Media (image generator).
 
@@ -96,86 +115,93 @@ imageStudioRouter.post("/assist", async (c) => {
 
   const { result, account, provider: providerName, durationMs } = routed;
   const quotaBefore = Number(account.quotaRemaining || 0);
+  // routeRequest already released in-flight tracking in its finally.
 
-  try {
-    if (!result.success || !result.response) {
-      void recordRequest({
-        accountId: account.id,
-        accountEmail: account.email,
-        provider: providerName,
-        model: assistModel,
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        creditsUsed: 0,
-        status: "error",
-        durationMs,
-        errorMessage: result.error || "Assist call failed",
-        requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.assist" } }),
-        accountQuotaBefore: quotaBefore,
-        accountQuotaAfter: quotaBefore,
-      });
-      return c.json({ error: result.error || "Assist call failed" }, 502);
-    }
-
-    const reply = (result.response.choices?.[0]?.message?.content as string) || "";
-
-    let message = reply.trim();
-    let options: string[] = [];
-    let finalPrompt: string | null = null;
-
-    const jsonMatch = reply.match(/<ASSIST_JSON>([\s\S]*?)<\/ASSIST_JSON>/);
-    if (jsonMatch && jsonMatch[1]) {
-      try {
-        const parsed = JSON.parse(jsonMatch[1].trim());
-        message = typeof parsed.message === "string" ? parsed.message : message;
-        options = Array.isArray(parsed.options)
-          ? parsed.options.filter((o: unknown) => typeof o === "string").slice(0, 6)
-          : [];
-        finalPrompt = typeof parsed.finalPrompt === "string" && parsed.finalPrompt.trim()
-          ? parsed.finalPrompt.trim()
-          : null;
-      } catch {
-        message = reply.replace(/<ASSIST_JSON>[\s\S]*?<\/ASSIST_JSON>/g, "").trim() || reply.trim();
-      }
-    } else {
-      const finalMatch = reply.match(/<FINAL_PROMPT>([\s\S]*?)<\/FINAL_PROMPT>/);
-      if (finalMatch && finalMatch[1]) {
-        finalPrompt = finalMatch[1].trim();
-        message = reply.replace(/<FINAL_PROMPT>[\s\S]*?<\/FINAL_PROMPT>/g, "").trim();
-      }
-    }
-
-    const promptTokens = Number(result.promptTokens || result.response?.usage?.prompt_tokens || 0);
-    const completionTokens = Number(result.completionTokens || result.response?.usage?.completion_tokens || 0);
-    const totalTokens = Number(result.tokensUsed || result.response?.usage?.total_tokens || promptTokens + completionTokens);
-    const creditsUsed = Number(result.creditsUsed || 0);
-
-    const quotaAfter = creditsUsed > 0 && quotaBefore > 0
-      ? await pool.decrementQuota(account.id, creditsUsed)
-      : quotaBefore;
-
+  if (!result.success || !result.response) {
     void recordRequest({
       accountId: account.id,
       accountEmail: account.email,
       provider: providerName,
       model: assistModel,
-      promptTokens,
-      completionTokens,
-      totalTokens,
-      creditsUsed,
-      status: "success",
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      creditsUsed: 0,
+      status: "error",
       durationMs,
+      errorMessage: result.error || "Assist call failed",
       requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.assist" } }),
-      responseBody: prepareLogBody(result.response),
       accountQuotaBefore: quotaBefore,
-      accountQuotaAfter: quotaAfter,
+      accountQuotaAfter: quotaBefore,
     });
-
-    return c.json({ reply: message, options, finalPrompt });
-  } finally {
-    pool.trackRequestEnd(account.id);
+    return c.json({ error: result.error || "Assist call failed" }, 502);
   }
+
+  const reply = (result.response.choices?.[0]?.message?.content as string) || "";
+
+  let message = reply.trim();
+  let options: string[] = [];
+  let finalPrompt: string | null = null;
+
+  const jsonMatch = reply.match(/<ASSIST_JSON>([\s\S]*?)<\/ASSIST_JSON>/);
+  if (jsonMatch && jsonMatch[1]) {
+    try {
+      const parsed = JSON.parse(jsonMatch[1].trim());
+      message = typeof parsed.message === "string" ? parsed.message : message;
+      options = Array.isArray(parsed.options)
+        ? parsed.options.filter((o: unknown) => typeof o === "string").slice(0, 6)
+        : [];
+      finalPrompt = typeof parsed.finalPrompt === "string" && parsed.finalPrompt.trim()
+        ? parsed.finalPrompt.trim()
+        : null;
+    } catch {
+      message = reply.replace(/<ASSIST_JSON>[\s\S]*?<\/ASSIST_JSON>/g, "").trim() || reply.trim();
+    }
+  } else {
+    const finalMatch = reply.match(/<FINAL_PROMPT>([\s\S]*?)<\/FINAL_PROMPT>/);
+    if (finalMatch && finalMatch[1]) {
+      finalPrompt = finalMatch[1].trim();
+      message = reply.replace(/<FINAL_PROMPT>[\s\S]*?<\/FINAL_PROMPT>/g, "").trim();
+    }
+  }
+
+  const promptTokens = Number(result.promptTokens || result.response?.usage?.prompt_tokens || 0);
+  const completionTokens = Number(result.completionTokens || result.response?.usage?.completion_tokens || 0);
+  const totalTokens = Number(
+    result.tokensUsed ||
+      result.response?.usage?.total_tokens ||
+      promptTokens + completionTokens,
+  );
+  const creditsUsed = resolveStudioCredits(providerName, assistModel, result, totalTokens);
+
+  // Grok free-tier weekly pool is 0–100 (server-owned); do not invent local debit.
+  const skipGrokWeeklyDebit =
+    providerName === "grok" &&
+    Number(account.quotaLimit || 0) > 0 &&
+    Number(account.quotaLimit) <= 100;
+  const quotaAfter =
+    creditsUsed > 0 && quotaBefore > 0 && !skipGrokWeeklyDebit
+      ? await pool.decrementQuota(account.id, creditsUsed)
+      : quotaBefore;
+
+  void recordRequest({
+    accountId: account.id,
+    accountEmail: account.email,
+    provider: providerName,
+    model: assistModel,
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    creditsUsed,
+    status: "success",
+    durationMs,
+    requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.assist" } }),
+    responseBody: prepareLogBody(result.response),
+    accountQuotaBefore: quotaBefore,
+    accountQuotaAfter: quotaAfter,
+  });
+
+  return c.json({ reply: message, options, finalPrompt });
 });
 
 const VALID_ASPECTS = new Set(["1:1", "16:9", "5:4", "4:3", "2:1", "9:16", "4:5", "3:4"]);
@@ -243,50 +269,9 @@ imageStudioRouter.post("/generate", async (c) => {
 
   const { result, account, provider: providerName, durationMs } = routed;
   const quotaBefore = Number(account.quotaRemaining || 0);
+  // routeRequest already released in-flight tracking in its finally.
 
-  try {
-    if (!result.success || !result.response) {
-      void recordRequest({
-        accountId: account.id,
-        accountEmail: account.email,
-        provider: providerName,
-        model,
-        promptTokens: 0,
-        completionTokens: 0,
-        totalTokens: 0,
-        creditsUsed: 0,
-        status: "error",
-        durationMs,
-        errorMessage: result.error || "Generation failed",
-        requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.generate" } }),
-        accountQuotaBefore: quotaBefore,
-        accountQuotaAfter: quotaBefore,
-      });
-      return c.json({ error: result.error || "Generation failed" }, 502);
-    }
-
-    const content = (result.response.choices?.[0]?.message?.content as string) || "";
-    const allUrls: string[] = [];
-    // http(s) URLs (Canva etc.) + data:image base64 (Grok image_generation tool).
-    const re = /\(((?:https?:\/\/[^)\s]+)|(?:data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+))\)/g;
-    let match: RegExpExecArray | null;
-    while ((match = re.exec(content)) !== null) {
-      allUrls.push(match[1]!.replace(/\s+/g, ""));
-    }
-    // For video, the first URL is the video and subsequent ones are thumbnails — keep only the video.
-    const urls = type === "video" ? allUrls.slice(0, 1) : allUrls;
-
-    const creditsUsed = Number(result.creditsUsed || 0);
-    // Grok free-tier weekly pool is 0–100 (server-owned); do not invent local debit.
-    const skipGrokWeeklyDebit =
-      providerName === "grok" &&
-      Number(account.quotaLimit || 0) > 0 &&
-      Number(account.quotaLimit) <= 100;
-    const quotaAfter =
-      creditsUsed > 0 && quotaBefore > 0 && !skipGrokWeeklyDebit
-        ? await pool.decrementQuota(account.id, creditsUsed)
-        : quotaBefore;
-
+  if (!result.success || !result.response) {
     void recordRequest({
       accountId: account.id,
       accountEmail: account.email,
@@ -295,50 +280,95 @@ imageStudioRouter.post("/generate", async (c) => {
       promptTokens: 0,
       completionTokens: 0,
       totalTokens: 0,
-      creditsUsed,
-      status: "success",
+      creditsUsed: 0,
+      status: "error",
       durationMs,
+      errorMessage: result.error || "Generation failed",
       requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.generate" } }),
-      responseBody: prepareLogBody(result.response),
       accountQuotaBefore: quotaBefore,
-      accountQuotaAfter: quotaAfter,
+      accountQuotaAfter: quotaBefore,
     });
-
-    let savedResultId: number | undefined;
-    if (urls.length > 0) {
-      try {
-        const [saved] = await db
-          .insert(imageStudioResults)
-          .values({
-            chatId: chatId ?? null,
-            prompt,
-            type,
-            aspectRatio,
-            n,
-            urls,
-            creditsUsed,
-          })
-          .returning({ id: imageStudioResults.id });
-        savedResultId = saved?.id;
-      } catch (err) {
-        console.error("[image-studio] Failed to persist result:", err);
-      }
-    }
-
-    return c.json({
-      id: savedResultId,
-      urls,
-      prompt,
-      type,
-      aspectRatio,
-      n,
-      creditsUsed,
-      createdAt: new Date().toISOString(),
-      account: { id: account.id, email: account.email },
-    });
-  } finally {
-    pool.trackRequestEnd(account.id);
+    return c.json({ error: result.error || "Generation failed" }, 502);
   }
+
+  const content = (result.response.choices?.[0]?.message?.content as string) || "";
+  const allUrls: string[] = [];
+  // http(s) URLs (Canva etc.) + data:image base64 (Grok image_generation tool).
+  const re = /\(((?:https?:\/\/[^)\s]+)|(?:data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+))\)/g;
+  let match: RegExpExecArray | null;
+  while ((match = re.exec(content)) !== null) {
+    allUrls.push(match[1]!.replace(/\s+/g, ""));
+  }
+  // For video, the first URL is the video and subsequent ones are thumbnails — keep only the video.
+  const urls = type === "video" ? allUrls.slice(0, 1) : allUrls;
+
+  const totalTokens = Number(
+    result.tokensUsed || result.response?.usage?.total_tokens || urls.length || 0,
+  );
+  const creditsUsed = resolveStudioCredits(providerName, model, result, totalTokens);
+  // Grok free-tier weekly pool is 0–100 (server-owned); do not invent local debit.
+  const skipGrokWeeklyDebit =
+    providerName === "grok" &&
+    Number(account.quotaLimit || 0) > 0 &&
+    Number(account.quotaLimit) <= 100;
+  const quotaAfter =
+    creditsUsed > 0 && quotaBefore > 0 && !skipGrokWeeklyDebit
+      ? await pool.decrementQuota(account.id, creditsUsed)
+      : quotaBefore;
+
+  void recordRequest({
+    accountId: account.id,
+    accountEmail: account.email,
+    provider: providerName,
+    model,
+    promptTokens: Number(result.promptTokens || result.response?.usage?.prompt_tokens || 0),
+    completionTokens: Number(
+      result.completionTokens || result.response?.usage?.completion_tokens || 0,
+    ),
+    // Media gens often bill by image unit, not LLM tokens — still record a
+    // non-zero totalTokens (image count) so usage charts/filters can see them.
+    totalTokens,
+    creditsUsed,
+    status: "success",
+    durationMs,
+    requestBody: prepareLogBody({ ...request, _poolprox: { source: "image-studio.generate" } }),
+    responseBody: prepareLogBody(result.response),
+    accountQuotaBefore: quotaBefore,
+    accountQuotaAfter: quotaAfter,
+  });
+
+  let savedResultId: number | undefined;
+  if (urls.length > 0) {
+    try {
+      const [saved] = await db
+        .insert(imageStudioResults)
+        .values({
+          chatId: chatId ?? null,
+          prompt,
+          type,
+          aspectRatio,
+          n,
+          urls,
+          creditsUsed,
+        })
+        .returning({ id: imageStudioResults.id });
+      savedResultId = saved?.id;
+    } catch (err) {
+      console.error("[image-studio] Failed to persist result:", err);
+    }
+  }
+
+  return c.json({
+    id: savedResultId,
+    urls,
+    prompt,
+    type,
+    aspectRatio,
+    n,
+    creditsUsed,
+    createdAt: new Date().toISOString(),
+    account: { id: account.id, email: account.email },
+  });
 });
 
 imageStudioRouter.get("/chats", async (c) => {

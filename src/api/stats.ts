@@ -185,9 +185,11 @@ statsRouter.get("/usage", async (c) => {
         ? summaryBucketExpr("day", timeZone)
         : summaryBucketExpr("month", timeZone);
 
+  // Include credit-only media generations (Canva/Grok image) where total_tokens
+  // may be 0 but credits_used / request count is real. Match /models filter.
   const whereExpr = isAll
-    ? sql`${usageSummary.totalTokens} > 0`
-    : sql`${usageSummary.bucket} >= ${since.toISOString()} AND ${usageSummary.totalTokens} > 0`;
+    ? sql`(${usageSummary.totalTokens} > 0 OR ${usageSummary.creditsUsed} > 0 OR ${usageSummary.totalRequests} > 0)`
+    : sql`${usageSummary.bucket} >= ${since.toISOString()} AND (${usageSummary.totalTokens} > 0 OR ${usageSummary.creditsUsed} > 0 OR ${usageSummary.totalRequests} > 0)`;
 
   const hourlyUsage = await db
     .select({
