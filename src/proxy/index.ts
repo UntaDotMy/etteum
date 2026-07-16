@@ -164,8 +164,13 @@ function extractResponseId(result: ProviderResult | undefined): string | undefin
 
 export async function recordRequest(entry: NewRequestLog) {
   try {
-    await db.insert(requestLogs).values(entry);
-    void upsertUsageSummary({
+    // Returning id so Requests / live feeds can match rows (they require numeric id).
+    const [created] = await db.insert(requestLogs).values(entry).returning({
+      id: requestLogs.id,
+      createdAt: requestLogs.createdAt,
+    });
+    // Await summary write before WS so dashboard refetch cannot race an empty bucket.
+    await upsertUsageSummary({
       provider: entry.provider || "unknown",
       model: entry.model || "unknown",
       status: entry.status,
@@ -179,7 +184,12 @@ export async function recordRequest(entry: NewRequestLog) {
     // Log pruning is background-only (setInterval below) to avoid SQLite write contention.
     broadcast({
       type: "request_log",
-      data: { ...entry, email: entry.accountEmail, createdAt: new Date().toISOString() },
+      data: {
+        ...entry,
+        id: created?.id,
+        email: entry.accountEmail,
+        createdAt: created?.createdAt?.toISOString?.() || new Date().toISOString(),
+      },
     });
   } catch (err) {
     console.error("[Proxy] Failed to record request:", err);
@@ -366,10 +376,17 @@ function openAIErrorResponse(message: string, status: 400 | 503) {
 async function logProxyError(entry: NewRequestLog, label: string) {
   try {
     await db.insert(requestLogs).values(entry);
-    // Also track errors in usage_summary
-    void upsertUsageSummary({
-      provider: entry.provider || "unknown", model: entry.model || "unknown", status: "error",
-      promptTokens: 0, completionTokens: 0, totalTokens: 0, creditsUsed: 0, cost: 0, durationMs: entry.durationMs || 0,
+    // Also track errors in usage_summary (await so any WS error feed stays consistent).
+    await upsertUsageSummary({
+      provider: entry.provider || "unknown",
+      model: entry.model || "unknown",
+      status: "error",
+      promptTokens: 0,
+      completionTokens: 0,
+      totalTokens: 0,
+      creditsUsed: 0,
+      cost: 0,
+      durationMs: entry.durationMs || 0,
     });
   } catch (logError) {
     console.error(`[Proxy] Failed to log ${label}:`, logError);
@@ -605,6 +622,20 @@ function wrapStreamWithUsageFinalizer(
             .where(eq(requestLogs.id, context.logId));
         }
 
+        // Persist usage_summary BEFORE request_log so dashboard WS revalidate
+        // cannot read a pre-upsert snapshot (stream path previously raced this).
+        await upsertUsageSummary({
+          provider: context.provider,
+          model: context.model,
+          status: "success",
+          promptTokens: finalPromptTokens,
+          completionTokens: finalCompletionTokens,
+          totalTokens: finalTotalTokens,
+          creditsUsed,
+          cost,
+          durationMs,
+        });
+
         broadcast({
           type: "request_log",
           data: {
@@ -627,13 +658,6 @@ function wrapStreamWithUsageFinalizer(
             // Light WS payload — full request body already stored at insert.
             // Do not re-send multi-KB bodies on every stream end.
           },
-        });
-
-        // Upsert to usage_summary + periodic prune
-        void upsertUsageSummary({
-          provider: context.provider, model: context.model, status: "success",
-          promptTokens: finalPromptTokens, completionTokens: finalCompletionTokens,
-          totalTokens: finalTotalTokens, creditsUsed, cost, durationMs,
         });
 
         // Grok weekly pool: re-probe after stream completes (token debit skipped).
@@ -857,12 +881,23 @@ export async function handleChatCompletion(
       return { result, isStream };
     }
 
-  await db.insert(requestLogs).values(logEntry);
+  // Returning id so live Requests list can prepend the row (needs numeric id).
+  const [created] = await db.insert(requestLogs).values(logEntry).returning({
+    id: requestLogs.id,
+    createdAt: requestLogs.createdAt,
+  });
 
-  // Upsert to usage_summary + periodic prune
-  void upsertUsageSummary({
-    provider, model: body.model, status: "success",
-    promptTokens, completionTokens, totalTokens, creditsUsed, cost, durationMs,
+  // Await usage_summary so WS-triggered dashboard refetch sees this request.
+  await upsertUsageSummary({
+    provider,
+    model: body.model,
+    status: "success",
+    promptTokens,
+    completionTokens,
+    totalTokens,
+    creditsUsed,
+    cost,
+    durationMs,
   });
 
   // Broadcast lightweight event — strip heavy fields (requestBody/responseBody)
@@ -870,7 +905,12 @@ export async function handleChatCompletion(
   const { requestBody: _rb, responseBody: _rsb, ...lightweightLog } = logEntry;
   broadcast({
     type: "request_log",
-    data: { ...lightweightLog, email: account.email, createdAt: new Date().toISOString() },
+    data: {
+      ...lightweightLog,
+      id: created?.id,
+      email: account.email,
+      createdAt: created?.createdAt?.toISOString?.() || new Date().toISOString(),
+    },
   });
 
     // Grok weekly pool (0–100): token debit is skipped, so re-probe after success

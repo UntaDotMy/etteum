@@ -12,7 +12,8 @@ export default function Dashboard() {
     "dashboard-stats",
     () => fetchDashboardStats(undefined, "all"),
     {
-      staleTime: 5000,
+      // Keep short so request_log revalidates can land soon after usage_summary write.
+      staleTime: 1500,
       wsEvents: [
         "request_log",
         "request_error",
@@ -29,7 +30,7 @@ export default function Dashboard() {
   const { data: modelStatsRes } = useApiCache<{ data: any[] }>(
     "dashboard-models",
     () => fetchModelUsage(undefined, "all"),
-    { staleTime: 5000, wsEvents: ["request_log", "request_error"] }
+    { staleTime: 1500, wsEvents: ["request_log", "request_error"] }
   );
 
   const modelStats = modelStatsRes?.data || [];

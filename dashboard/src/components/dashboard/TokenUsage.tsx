@@ -280,13 +280,18 @@ export default function TokenUsage({
   );
 
   const reloadRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const periodRef = useRef(period);
+  periodRef.current = period;
 
   async function loadData() {
-    const hours = getChartHours(period);
-    const range = period === "all" ? "all" : undefined;
+    const hours = getChartHours(periodRef.current);
+    const range = periodRef.current === "all" ? "all" : undefined;
     try {
       const usageRes = await fetchUsage(hours, range) as { data: UsageRow[] };
-      const { chartData: chart, stats: s, modelUsage: m } = processUsageData(usageRes.data || [], period);
+      const { chartData: chart, stats: s, modelUsage: m } = processUsageData(
+        usageRes.data || [],
+        periodRef.current,
+      );
       setChartData(chart);
       setFilteredStats(s);
       setFilteredModelUsage(m);
@@ -299,15 +304,118 @@ export default function TokenUsage({
 
   const scheduleReload = () => {
     if (reloadRef.current) clearTimeout(reloadRef.current);
-    reloadRef.current = setTimeout(() => { loadData(); }, 500);
+    // Slightly longer debounce so server usage_summary upsert is durable before refetch.
+    reloadRef.current = setTimeout(() => {
+      loadData();
+    }, 400);
   };
+
+  /**
+   * Apply a live request_log immediately so totals move without waiting on
+   * /api/stats/usage. Server reload still reconciles chart + exact aggregates.
+   */
+  function applyLiveRequest(msg: { type?: string; data?: Record<string, unknown> }) {
+    const d = msg?.data;
+    if (!d) return;
+    // Stream starts with zero usage — ignore until finalize request_log.
+    if (msg.type === "request_started") return;
+
+    const prompt = Number(d.promptTokens || 0);
+    const completion = Number(d.completionTokens || 0);
+    const tokens = Number(d.totalTokens || 0) || prompt + completion;
+    const credits = Number(d.creditsUsed || 0);
+    const cost = Number(d.cost || 0);
+    const provider = String(d.provider || "unknown");
+    const model = String(d.model || "unknown");
+    const isError = msg.type === "request_error" || d.status === "error";
+
+    // Still refresh from server; optimistic patch is for snappy UI.
+    scheduleReload();
+
+    if (isError && tokens <= 0 && credits <= 0) return;
+
+    setFilteredStats((prev) => ({
+      total: prev.total + tokens,
+      prompt: prev.prompt + prompt,
+      completion: prev.completion + completion,
+      credits: Number(prev.credits || 0) + credits,
+      cost: Number(prev.cost || 0) + cost,
+    }));
+
+    setFilteredModelUsage((prev) => {
+      const key = `${provider}/${model}`;
+      const idx = prev.findIndex(
+        (m) => `${m.provider || "unknown"}/${m.model || "unknown"}` === key,
+      );
+      if (idx >= 0) {
+        const next = prev.slice();
+        const cur = next[idx]!;
+        next[idx] = {
+          ...cur,
+          tokens: Number(cur.tokens || 0) + tokens,
+          promptTokens: Number(cur.promptTokens || 0) + prompt,
+          completionTokens: Number(cur.completionTokens || 0) + completion,
+          credits: Number(cur.credits || 0) + credits,
+          cost: Number(cur.cost || 0) + cost,
+          requests: Number(cur.requests || 0) + 1,
+        };
+        return next
+          .filter((m) => Number(m.tokens || 0) > 0 || Number(m.credits || 0) > 0)
+          .sort((a, b) => Number(b.tokens || 0) - Number(a.tokens || 0))
+          .slice(0, 8);
+      }
+      const color = modelColor(key, prev.length);
+      return [
+        {
+          provider,
+          model,
+          tokens,
+          promptTokens: prompt,
+          completionTokens: completion,
+          credits,
+          cost,
+          requests: 1,
+          creditSource: "estimated",
+          color,
+        },
+        ...prev,
+      ]
+        .filter((m) => Number(m.tokens || 0) > 0 || Number(m.credits || 0) > 0)
+        .sort((a, b) => Number(b.tokens || 0) - Number(a.tokens || 0))
+        .slice(0, 8);
+    });
+
+    // Bump current local-hour chart bar so "over time" moves live too.
+    const now = new Date();
+    const localHourEpoch = new Date(
+      now.getFullYear(),
+      now.getMonth(),
+      now.getDate(),
+      now.getHours(),
+    ).getTime();
+    const seriesKey = `${provider}/${model}`;
+    setChartData((prev) => {
+      if (!prev.length || tokens <= 0) return prev;
+      const next = prev.map((row) => ({ ...row }));
+      // Prefer matching local-hour bucket; else last bucket.
+      let targetIdx = next.findIndex((row) => Number(row.hour) === localHourEpoch);
+      if (targetIdx < 0) targetIdx = next.length - 1;
+      if (targetIdx < 0) return prev;
+      const row = { ...next[targetIdx]! };
+      row[seriesKey] = Number(row[seriesKey] || 0) + tokens;
+      next[targetIdx] = row;
+      return next;
+    });
+  }
 
   useEffect(() => {
     loadData();
-    return () => { if (reloadRef.current) clearTimeout(reloadRef.current); };
+    return () => {
+      if (reloadRef.current) clearTimeout(reloadRef.current);
+    };
   }, [period]);
 
-  useWsEvent(["request_log", "request_error"], scheduleReload);
+  useWsEvent(["request_log", "request_error"], applyLiveRequest);
 
   return (
     <Card className="border-[var(--border)]">
