@@ -174,7 +174,9 @@ export async function routeRequest(
   // Try up to 3 accounts before giving up
   const maxRetries = 3;
   let lastError = "";
-  const attemptedByokAccountIds = new Set<number>();
+  // Exclude every attempted account id (all providers) so exhaustion/rate-limit
+  // retries never re-select the same dead credential for another full upstream hop.
+  const attemptedAccountIds = new Set<number>();
 
   // Sticky response-id pinning: if the request carries a previous_response_id,
   // resolve which account created that response and prefer it on the first
@@ -200,13 +202,17 @@ export async function routeRequest(
   for (let attempt = 0; attempt < maxRetries; attempt++) {
     // BYOK uses prefix-based account lookup (not the generic pool),
     // so it can also find error-status accounts and retry them.
-    // For other providers, use model-aware routing to ensure account can query the model.
+    // For other providers, use model-aware routing with the same exclude set
+    // so depleted / just-failed accounts are not re-hit inside this request.
     let account = providerName === "byok"
       ? (await pool.getAccountForModel(compressedRequest.model, {
-          excludeAccountIds: attemptedByokAccountIds,
+          excludeAccountIds: attemptedAccountIds,
           preferredAccountId: attempt === 0 ? preferredAccountId : undefined,
         }))?.account ?? null
-      : await pool.getNextAccountForModel(providerName, compressedRequest.model);
+      : await pool.getNextAccountForModel(providerName, compressedRequest.model, {
+          excludeAccountIds: attemptedAccountIds,
+          preferredAccountId: attempt === 0 ? preferredAccountId : undefined,
+        });
 
     // Compatible-node static credentials: when no accounts.provider=<node.id>
     // row exists, fall back to the node-level apiKey bound on the provider.
@@ -219,7 +225,7 @@ export async function routeRequest(
         `No active accounts available for provider: ${providerName}`
       );
     }
-    if (providerName === "byok") attemptedByokAccountIds.add(account.id);
+    if (account.id > 0) attemptedAccountIds.add(account.id);
 
     const startTime = Date.now();
     // For a successful STREAMING result we hand the live stream back to the

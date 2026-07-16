@@ -8,6 +8,45 @@ import { getProviderForModel, type ProviderName } from "./providers/registry";
 
 export type { ProviderName };
 
+/** Options for pool account selection (RR / sequential / sticky). */
+export interface AccountSelectOptions {
+  /** Skip these account ids (in-loop retry exclusion after exhaustion/fail). */
+  excludeAccountIds?: Set<number>;
+  /** Prefer this account when still dispatch-eligible (response-id stickiness). */
+  preferredAccountId?: number;
+}
+
+/**
+ * Can this active row be chosen for a new chat attempt without a known-dead
+ * local package budget?
+ *
+ * status=exhausted is already excluded by fetchActiveAccounts. This catches
+ * active rows with limit>0 and remaining<=0 (local debit drained, or not yet
+ * marked exhausted) so round-robin does not pay a full upstream hop on a
+ * credential that will only return free-usage-exhausted / 402.
+ *
+ * limit<=0 or non-finite remaining → treat as unknown budget (still eligible).
+ */
+export function isAccountEligibleForDispatch(account: Account): boolean {
+  const limit = Number(account.quotaLimit);
+  const remaining = Number(account.quotaRemaining);
+  if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining) && remaining <= 0) {
+    return false;
+  }
+  return true;
+}
+
+/** Filter active accounts for dispatch: exclude ids + known-depleted packages. */
+export function filterDispatchEligibleAccounts(
+  list: Account[],
+  excludeAccountIds?: Set<number> | null,
+): Account[] {
+  return list.filter((a) => {
+    if (excludeAccountIds?.has(a.id)) return false;
+    return isAccountEligibleForDispatch(a);
+  });
+}
+
 // --- Routing resilience constants  ---
 // Exponential backoff for transient failures: start at 2s, double each time,
 // cap at 5 min. A transient blip cools an account briefly; sustained flakiness
@@ -105,29 +144,35 @@ class AccountPool {
   }
 
   /**
-   * Get the next available account for a provider using configured method.
+   * Pick among already-filtered eligible accounts using sequential / sticky RR.
+   * Eligibility (depleted skip + exclude ids) must be applied by the caller.
    */
-  async getNextAccount(provider: ProviderName): Promise<Account | null> {
-    const activeAccounts = await this.getActiveAccounts(provider);
+  private async pickFromEligible(
+    provider: ProviderName,
+    eligibleAccounts: Account[],
+    options: AccountSelectOptions = {},
+  ): Promise<Account | null> {
+    if (eligibleAccounts.length === 0) return null;
 
-    if (activeAccounts.length === 0) {
-      return null;
+    // Response-id / sticky pin: only if still eligible (not depleted, not excluded).
+    if (options.preferredAccountId) {
+      const pref = eligibleAccounts.find((a) => a.id === options.preferredAccountId);
+      if (pref) return pref;
     }
 
     const method = await this.getLoadBalancingMethod(provider);
 
     if (method === "sequential") {
-      // Sequential: use first account with lowest in-flight, prefer order
-      for (const account of activeAccounts) {
+      for (const account of eligibleAccounts) {
         if (this.getInFlightCount(account.id) === 0) return account;
       }
-      return activeAccounts[0] || null;
+      return eligibleAccounts[0] || null;
     }
 
     // Round Robin (default)
-    // Sticky: accounts are ordered priority ASC, lastUsedAt DESC, so [0] is the
-    // most-recently-used. Re-use it while under threshold + not overloaded.
-    const stickyCandidate = activeAccounts[0];
+    // Sticky: list ordered priority ASC, lastUsedAt DESC, so [0] is most recent.
+    // Only sticky when still dispatch-eligible (depleted already filtered out).
+    const stickyCandidate = eligibleAccounts[0];
     if (
       stickyCandidate &&
       Number(stickyCandidate.consecutiveUseCount || 0) < STICKY_MAX_CONSECUTIVE &&
@@ -137,14 +182,14 @@ class AccountPool {
       return stickyCandidate;
     }
 
-    const startIdx = ((this.state.lastIndex.get(provider) || 0) + 1) % activeAccounts.length;
-    let selected = activeAccounts[startIdx];
+    const startIdx = ((this.state.lastIndex.get(provider) || 0) + 1) % eligibleAccounts.length;
+    let selected = eligibleAccounts[startIdx];
     let selectedIdx = startIdx;
     let selectedLoad = selected ? this.getInFlightCount(selected.id) : Number.POSITIVE_INFINITY;
 
-    for (let i = 1; i < activeAccounts.length; i++) {
-      const idx = (startIdx + i) % activeAccounts.length;
-      const candidate = activeAccounts[idx];
+    for (let i = 1; i < eligibleAccounts.length; i++) {
+      const idx = (startIdx + i) % eligibleAccounts.length;
+      const candidate = eligibleAccounts[idx];
       if (!candidate) continue;
       const load = this.getInFlightCount(candidate.id);
       if (load < selectedLoad) {
@@ -160,11 +205,29 @@ class AccountPool {
   }
 
   /**
+   * Get the next available account for a provider using configured method.
+   * Skips known-depleted packages (limit>0 remaining<=0) and excludeAccountIds.
+   */
+  async getNextAccount(
+    provider: ProviderName,
+    options: AccountSelectOptions = {},
+  ): Promise<Account | null> {
+    const activeAccounts = await this.getActiveAccounts(provider);
+    const eligible = filterDispatchEligibleAccounts(activeAccounts, options.excludeAccountIds);
+    return this.pickFromEligible(provider, eligible, options);
+  }
+
+  /**
    * Get the next available account for a specific model.
    * For Alibaba: filters by queryableModels to ensure account can actually query the model.
    * For other providers: falls back to standard getNextAccount.
+   * Supports excludeAccountIds so routeRequest retries never re-pay a dead credential.
    */
-  async getNextAccountForModel(provider: ProviderName, model: string): Promise<Account | null> {
+  async getNextAccountForModel(
+    provider: ProviderName,
+    model: string,
+    options: AccountSelectOptions = {},
+  ): Promise<Account | null> {
     // For Alibaba, filter by queryable models
     if (provider === "alibaba") {
       const activeAccounts = await this.getActiveAccounts(provider);
@@ -173,12 +236,16 @@ class AccountPool {
       // Resolve model name (strip ali- prefix if present)
       const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
 
-      // Filter accounts that have this model in queryableModels
-      const eligibleAccounts = activeAccounts.filter((account) => {
+      // Filter accounts that have this model in queryableModels + dispatch budget
+      const modelEligible = activeAccounts.filter((account) => {
         const tokens = account.tokens as { queryableModels?: string[] } | null;
         if (!tokens?.queryableModels) return false;
         return tokens.queryableModels.includes(upstreamModel);
       });
+      const eligibleAccounts = filterDispatchEligibleAccounts(
+        modelEligible,
+        options.excludeAccountIds,
+      );
 
       if (eligibleAccounts.length === 0) {
         // No eligible accounts - trigger auto-warmup to populate queryableModels
@@ -200,52 +267,11 @@ class AccountPool {
         return null;
       }
 
-      // Apply load balancing to eligible accounts
-      const method = await this.getLoadBalancingMethod(provider);
-
-      if (method === "sequential") {
-        for (const account of eligibleAccounts) {
-          if (this.getInFlightCount(account.id) === 0) return account;
-        }
-        return eligibleAccounts[0] || null;
-      }
-
-      // Round Robin
-      // Sticky: re-use the most-recently-used eligible account under threshold.
-      const stickyCandidate = eligibleAccounts[0];
-      if (
-        stickyCandidate &&
-        Number(stickyCandidate.consecutiveUseCount || 0) < STICKY_MAX_CONSECUTIVE &&
-        this.getInFlightCount(stickyCandidate.id) === 0
-      ) {
-        this.state.lastIndex.set(provider, 0);
-        return stickyCandidate;
-      }
-
-      const startIdx = ((this.state.lastIndex.get(provider) || 0) + 1) % eligibleAccounts.length;
-      let selected = eligibleAccounts[startIdx];
-      let selectedIdx = startIdx;
-      let selectedLoad = selected ? this.getInFlightCount(selected.id) : Number.POSITIVE_INFINITY;
-
-      for (let i = 1; i < eligibleAccounts.length; i++) {
-        const idx = (startIdx + i) % eligibleAccounts.length;
-        const candidate = eligibleAccounts[idx];
-        if (!candidate) continue;
-        const load = this.getInFlightCount(candidate.id);
-        if (load < selectedLoad) {
-          selected = candidate;
-          selectedIdx = idx;
-          selectedLoad = load;
-          if (load === 0) break;
-        }
-      }
-
-      this.state.lastIndex.set(provider, selectedIdx);
-      return selected || null;
+      return this.pickFromEligible(provider, eligibleAccounts, options);
     }
 
-    // For other providers, use standard routing
-    return this.getNextAccount(provider);
+    // For other providers, use standard routing with same exclude/depleted filters
+    return this.getNextAccount(provider, options);
   }
 
   getInFlightCount(accountId: number): number {
@@ -626,11 +652,13 @@ class AccountPool {
     // Sticky/preferred-connection pinning : if a preferred account
     // id was passed (e.g. the account that served a previous_response_id),
     // return it first if it is eligible — preserves Codex session continuity.
+    // Depleted packages (remaining<=0 with limit>0) are NOT preferred.
     if (options.preferredAccountId) {
       const [pref] = await db.select().from(accounts).where(eq(accounts.id, options.preferredAccountId)).limit(1);
       if (pref && pref.provider === provider && pref.status === "active" && pref.enabled &&
         !(options.excludeAccountIds?.has(pref.id)) &&
-        (!pref.cooldownUntil || pref.cooldownUntil < new Date())) {
+        (!pref.cooldownUntil || pref.cooldownUntil < new Date()) &&
+        isAccountEligibleForDispatch(pref)) {
         return { account: pref, provider };
       }
     }
@@ -649,10 +677,22 @@ class AccountPool {
       return { account, provider: "byok" };
     }
 
-    const account = await this.getNextAccount(provider);
+    const account = await this.getNextAccount(provider, {
+      excludeAccountIds: options.excludeAccountIds,
+      preferredAccountId: options.preferredAccountId,
+    });
     if (!account) return null;
 
     return { account, provider };
+  }
+
+  /**
+   * Active accounts for a model that are still dispatch-eligible
+   * (not known-depleted). Used by tests and combo ranking.
+   */
+  async getDispatchEligibleAccountsForModel(model: string): Promise<Account[]> {
+    const list = await this.getAccountsForModel(model);
+    return filterDispatchEligibleAccounts(list);
   }
 
   /**
