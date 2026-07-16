@@ -115,6 +115,44 @@ export function isNonAccountRequestError(error?: string): boolean {
 }
 
 /**
+ * Hard infrastructure connect failure (same host for all accounts of a provider).
+ * Retrying the same credential or walking the whole fleet pays multi-second
+ * TCP/TLS timeouts without improving odds — fail-fast instead.
+ *
+ * Live Grok example: `cli-chat-proxy error 503: upstream connect error...
+ * Connection refused` / `delayed connect error`.
+ */
+export function isHardConnectFailure(error?: string): boolean {
+  if (!error) return false;
+  const n = error.toLowerCase();
+  return (
+    n.includes("connection refused") ||
+    n.includes("econnrefused") ||
+    n.includes("upstream connect") ||
+    n.includes("delayed connect") ||
+    n.includes("transport failure") ||
+    n.includes("connect error") ||
+    (n.includes("503") &&
+      (n.includes("connect") || n.includes("refused") || n.includes("reset before headers")))
+  );
+}
+
+/**
+ * Grok/xAI Build "Access denied" (HTTP 403 body) — permanent for that credential
+ * on cli-chat-proxy, not a temporary rate limit and not a dead refresh token.
+ */
+export function isAccessDeniedForbidden(error?: string): boolean {
+  if (!error) return false;
+  const n = error.toLowerCase();
+  return (
+    n.includes("access denied") ||
+    (n.includes("403") && n.includes("access denied")) ||
+    n.includes("permission-denied") ||
+    n.includes("chat endpoint is denied")
+  );
+}
+
+/**
  * Transient errors that are temporary and should not permanently mark an account as errored.
  * These include network issues, timeouts, rate limits, upstream server errors,
  * and bad-request errors that are caused by the request format (not the account).
@@ -142,10 +180,18 @@ export function isTransientError(error?: string): boolean {
     normalized.includes("eai again") ||
     normalized.includes("temporary failure") ||
     // Upstream server errors (not account-specific)
+    // Match bare "503" / "error 503:" as well as "(503)" — Grok cli-chat-proxy
+    // formats as `cli-chat-proxy error 503: ...` without parentheses.
     normalized.includes("(500)") ||
     normalized.includes("(502)") ||
     normalized.includes("(503)") ||
     normalized.includes("(504)") ||
+    /\berror\s+50[0-4]\b/.test(normalized) ||
+    (/\b50[0-4]\b/.test(normalized) &&
+      (normalized.includes("upstream") ||
+        normalized.includes("gateway") ||
+        normalized.includes("unavailable") ||
+        normalized.includes("connect"))) ||
     normalized.includes("internal server error") ||
     normalized.includes("bad gateway") ||
     normalized.includes("service unavailable") ||
