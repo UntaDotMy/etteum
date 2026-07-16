@@ -354,19 +354,42 @@ export function getOAuthTokens(account: Account): GrokOAuthTokens | null {
 }
 
 /**
+ * Lead window (seconds) before access JWT expiry when we treat the token as
+ * "needs refresh". Matches Grok CLI-scale ~6h access tokens and the global
+ * auto_refresh_lead_minutes default (5).
+ *
+ * Verified against xAI OIDC discovery (grant_types includes refresh_token):
+ * https://auth.x.ai/.well-known/openid-configuration
+ * and RFC 6749 §6 refresh grant + RFC 9700 rotation (new RT must replace old).
+ */
+export const GROK_ACCESS_REFRESH_MARGIN_SEC = 300;
+
+/**
+ * Resolve access-token expiry as unix seconds for scheduling / freshness.
+ * Prefer stored expires_at (ISO or unix, via normalizeExpiresAt); if missing
+ * (0), peek JWT `exp` so farm blobs without a numeric field still heal.
+ */
+export function resolveGrokAccessExpiresAtSec(tokens: GrokOAuthTokens): number {
+  if (tokens.expires_at > 0) return tokens.expires_at;
+  const claims = peekJwtClaims(tokens.access_token);
+  return claims.exp && claims.exp > 0 ? claims.exp : 0;
+}
+
 /**
  * Return the current Bearer access token IF it is still valid (not near expiry).
  * Returns null if the account is not OAuth, or the token is expired/near-expiry.
  *
  * IMPORTANT: this function does NOT refresh. Refresh-token rotation happens via
  * the central refresh-coordinator (locked + deduped + persisted) — either the
- * proactive scheduler (refresh-scheduler.ts) or the router's reactive 401 path
+ * proactive scheduler (refresh-scheduler.ts), warmup healthCheck
+ * (refreshOAuthIfNeeded), or the router's reactive 401 path
  * (router.ts → coordinatedRefresh). Doing refresh here would bypass the lock and
  * race the coordinator: two concurrent refreshes would rotate the token twice,
- * and the loser's "old" refresh token is already revoked → account bricked.
+ * and the loser's "old" refresh token is already revoked → account bricked
+ * (RFC 9700 refresh-token rotation).
  *
- * So: when this returns null, the caller throws "expired" → the router catches
- * it → coordinatedRefresh rotates once, safely, and retries.
+ * So: when this returns null, warmup/scheduler/router call coordinatedRefresh
+ * once, persist the new AT (+ rotated RT), and continue.
  *
  * @param account the DB account row
  * @returns a Bearer token string ready for `Authorization`, or null if expired
@@ -379,15 +402,18 @@ export async function ensureFreshAccessToken(
   if (!tokens) return null;
 
   const nowSec = Math.floor(Date.now() / 1000);
-  const REFRESH_MARGIN = 300; // 5 minutes before expiry
+  const expiresAt = resolveGrokAccessExpiresAtSec(tokens);
 
-  // Still valid → use as-is.
-  if (tokens.expires_at === 0 || tokens.expires_at - nowSec > REFRESH_MARGIN) {
+  // Unknown expiry → force refresh path so we do not ride a dead JWT forever.
+  // (Old code treated expires_at===0 as always-valid and never healed.)
+  if (expiresAt <= 0) return null;
+
+  // Still valid beyond the lead margin → use as-is.
+  if (expiresAt - nowSec > GROK_ACCESS_REFRESH_MARGIN_SEC) {
     return tokens.access_token;
   }
 
-  // Expired / near-expiry → return null. The caller throws "expired"; the
-  // router's 401 path rotates via the coordinator (safe, locked, persisted).
+  // Expired / near-expiry → null so coordinator can rotate RT safely.
   return null;
 }
 
@@ -1101,6 +1127,127 @@ export async function fetchModelsCatalog(
   }
 }
 
+// ---------------------------------------------------------------------------
+// Warmup / secondary-probe classification (pure — no network)
+// ---------------------------------------------------------------------------
+
+/**
+ * Outcome of a secondary GET /v1/models liveness probe.
+ *
+ * IMPORTANT: this is NOT the sole proof of a live OAuth session. An auth'd
+ * live quota probe (billing / GetGrokCreditsConfig) that already succeeded
+ * with the same bearer is stronger proof. Models 403 "Access denied" is
+ * Build API policy, not refresh-token death.
+ */
+export type GrokModelsLivenessReason =
+  | "ok"
+  | "no_bearer"
+  | "access_denied"
+  | "unauthorized"
+  | "transient"
+  | "http_error";
+
+export interface GrokModelsLiveness {
+  alive: boolean;
+  reason: GrokModelsLivenessReason;
+  status?: number;
+  error?: string;
+}
+
+/**
+ * Classify a GET /v1/models HTTP outcome for Grok OAuth warmup.
+ * Pure function — unit-tested; healthCheck must not invent a parallel map.
+ */
+export function classifyGrokModelsLiveness(args: {
+  httpStatus: number | null;
+  bodySnippet?: string;
+  networkError?: string;
+}): GrokModelsLiveness {
+  if (args.httpStatus == null) {
+    const err = args.networkError || "models probe network failure";
+    return { alive: false, reason: "transient", error: err };
+  }
+  const status = args.httpStatus;
+  const body = (args.bodySnippet || "").toLowerCase();
+  if (status === 200 || status === 304) {
+    return { alive: true, reason: "ok", status };
+  }
+  if (status === 403 || body.includes("access denied")) {
+    return {
+      alive: false,
+      reason: "access_denied",
+      status,
+      // why: never phrase as refresh-token death — RT may still exchange 200
+      error:
+        "cli-chat-proxy Access denied (403) — Build API blocked (not a dead refresh token)",
+    };
+  }
+  if (status === 401) {
+    return {
+      alive: false,
+      reason: "unauthorized",
+      status,
+      error: "OAuth access token rejected by cli-chat-proxy (401)",
+    };
+  }
+  if (status === 429 || status >= 500) {
+    return {
+      alive: false,
+      reason: "transient",
+      status,
+      error: `models probe HTTP ${status}`,
+    };
+  }
+  return {
+    alive: false,
+    reason: "http_error",
+    status,
+    error: `models probe HTTP ${status}`,
+  };
+}
+
+/**
+ * Map secondary models probe → health kind when NO auth'd live quota succeeded.
+ * When live quota already succeeded, callers must not use this to kill the row.
+ */
+export function classifyGrokOAuthFallbackFromModels(
+  models: GrokModelsLiveness,
+): {
+  kind: "healthy" | "banned" | "session_expired" | "transient_error" | "auth_error";
+  success: boolean;
+  retryable: boolean;
+  error?: string;
+} {
+  switch (models.reason) {
+    case "ok":
+      return { kind: "healthy", success: true, retryable: false };
+    case "access_denied":
+      return {
+        kind: "banned",
+        success: false,
+        retryable: false,
+        error: models.error,
+      };
+    case "unauthorized":
+    case "no_bearer":
+      return {
+        kind: "session_expired",
+        success: false,
+        retryable: true,
+        error: models.error || "OAuth access token unavailable",
+      };
+    case "transient":
+    case "http_error":
+    default:
+      return {
+        kind: "transient_error",
+        success: false,
+        retryable: true,
+        error: models.error || "models probe failed",
+      };
+  }
+}
+
 /**
  * Lightweight "is this token alive?" check. Calls GET /v1/models (no token cost)
  * and returns true on 200/304.
@@ -1108,18 +1255,39 @@ export async function fetchModelsCatalog(
  * Does NOT rotate refresh tokens. Callers that need a valid access JWT when the
  * stored one is expired (warmup healthCheck, validateAccount) must refresh first
  * via coordinatedRefresh / provider.refreshToken, then call this.
+ *
+ * Prefer {@link probeOAuthModelsLiveness} when the caller needs 403 vs transient
+ * classification (warmup healthCheck).
  */
 export async function validateOAuthToken(
   account: Account,
   onRefreshed?: (tokens: GrokOAuthTokens) => Promise<void>
 ): Promise<{ alive: boolean; refreshed: boolean }> {
+  const probe = await probeOAuthModelsLiveness(account, onRefreshed);
+  return { alive: probe.alive, refreshed: probe.refreshed };
+}
+
+/**
+ * Probe GET /v1/models and classify the outcome (alive / 403 / 401 / transient).
+ * Does NOT rotate refresh tokens.
+ */
+export async function probeOAuthModelsLiveness(
+  account: Account,
+  onRefreshed?: (tokens: GrokOAuthTokens) => Promise<void>,
+): Promise<GrokModelsLiveness & { refreshed: boolean }> {
   const bearer = await ensureFreshAccessToken(account, onRefreshed);
-  if (!bearer) return { alive: false, refreshed: false };
+  if (!bearer) {
+    return {
+      alive: false,
+      reason: "no_bearer",
+      refreshed: false,
+      error: "OAuth access token expired or missing (refresh required)",
+    };
+  }
 
   const wasRefreshed = (() => {
     const tokens = getOAuthTokens(account);
     if (!tokens) return false;
-    // If the bearer we just got differs from the stored access token, we refreshed.
     return bearer !== tokens.access_token;
   })();
 
@@ -1132,8 +1300,20 @@ export async function validateOAuthToken(
         "x-grok-client-version": cliVersion,
       },
     });
-    return { alive: response.ok || response.status === 304, refreshed: wasRefreshed };
-  } catch {
-    return { alive: false, refreshed: wasRefreshed };
+    const bodySnippet =
+      response.ok || response.status === 304
+        ? ""
+        : (await response.text().catch(() => "")).slice(0, 200);
+    const classified = classifyGrokModelsLiveness({
+      httpStatus: response.status,
+      bodySnippet,
+    });
+    return { ...classified, refreshed: wasRefreshed };
+  } catch (err) {
+    const classified = classifyGrokModelsLiveness({
+      httpStatus: null,
+      networkError: err instanceof Error ? err.message : String(err),
+    });
+    return { ...classified, refreshed: wasRefreshed };
   }
 }

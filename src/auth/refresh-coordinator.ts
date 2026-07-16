@@ -71,7 +71,10 @@ export function isUnrecoverableRefreshError(error: string | undefined): boolean 
     e.includes("refresh token expired") ||
     e.includes("refresh_token_invalidated") ||
     e.includes("refresh token invalidated") ||
-    e.includes("unrecoverable_refresh_error")
+    e.includes("refresh token invalid or revoked") ||
+    e.includes("unrecoverable_refresh_error") ||
+    e.includes("no refresh token to renew") ||
+    e.includes("wrong oauth client")
   );
 }
 

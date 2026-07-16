@@ -44,6 +44,8 @@ import {
   ensureFreshAccessToken,
   exchangeRefreshToken,
   validateOAuthToken,
+  probeOAuthModelsLiveness,
+  classifyGrokOAuthFallbackFromModels,
   getGrokCliVersion,
   fetchOAuthBillingQuota,
   isAbsoluteGrokOAuthQuota,
@@ -52,6 +54,12 @@ import {
   isGrokWeeklyPercentQuotaLimit,
   type GrokOAuthTokens,
   type GrokOAuthQuota,
+} from "./oauth";
+
+export {
+  classifyGrokModelsLiveness,
+  classifyGrokOAuthFallbackFromModels,
+  probeOAuthModelsLiveness,
 } from "./oauth";
 import {
   GROK_IMAGE_MODEL,
@@ -1187,10 +1195,21 @@ export class GrokProvider extends BaseProvider {
     if (isOAuthAccount(account)) {
       const ready = await this.refreshOAuthIfNeeded(account);
       if (ready.error) {
+        // Permanent RT death only → hard auth_error (warmup may mark error).
+        // Transient refresh failures must NOT mass-flip the fleet to
+        // session_expired → error (network blip during WarmUp-all of 2k).
+        if (ready.unrecoverable) {
+          return {
+            kind: "auth_error",
+            success: false,
+            retryable: false,
+            error: ready.error,
+          };
+        }
         return {
-          kind: ready.unrecoverable ? "auth_error" : "session_expired",
+          kind: "transient_error",
           success: false,
-          retryable: !ready.unrecoverable,
+          retryable: true,
           error: ready.error,
         };
       }
@@ -1224,15 +1243,9 @@ export class GrokProvider extends BaseProvider {
             String(asGrokQuota.source || "").includes("GetGrokCreditsConfig"));
 
         if (weeklyPercent) {
-          const { alive } = await validateOAuthToken(working);
-          if (!alive) {
-            return {
-              kind: "session_expired",
-              success: false,
-              error: "OAuth access token invalid after refresh",
-              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-            };
-          }
+          // why: auth'd GetGrokCreditsConfig already proved the bearer. A
+          // secondary GET /v1/models 403 "Access denied" must NOT mass-kill
+          // the fleet as session_expired / "invalid after refresh" (RT still works).
           const limit = 100;
           const remaining = Math.min(
             limit,
@@ -1298,20 +1311,12 @@ export class GrokProvider extends BaseProvider {
         }
 
         // Untrusted full package (remaining==limit 2M) — do not write quota.
+        // Live quota already returned with this bearer → trust auth, skip models gate.
         if (
           !drained &&
           !remainingTrusted &&
           String(asGrokQuota.source || "").includes("untrusted-full-remaining")
         ) {
-          const { alive } = await validateOAuthToken(working);
-          if (!alive) {
-            return {
-              kind: "session_expired",
-              success: false,
-              error: "OAuth access token invalid after refresh",
-              ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
-            };
-          }
           return {
             kind: "healthy",
             success: true,
@@ -1349,25 +1354,33 @@ export class GrokProvider extends BaseProvider {
         };
       }
 
-      // 2) Credit probe failed — fall back to token liveness only.
-      //    Do NOT invent full farm credits; omit quota so warmup keeps DB values.
-      const { alive } = await validateOAuthToken(working);
-      if (!alive) {
+      // 2) Credit probe failed — fall back to classified models liveness.
+      //    Never report Build 403 as "invalid after refresh" (RT may still work).
+      //    Transient models failures keep the account out of hard error.
+      const models = await probeOAuthModelsLiveness(working);
+      const fallback = classifyGrokOAuthFallbackFromModels(models);
+      if (fallback.kind === "healthy") {
         return {
-          kind: "session_expired",
-          success: false,
-          error: live.error || "OAuth access token invalid after refresh",
+          kind: "healthy",
+          success: true,
+          // no quota → warmup will not overwrite remaining with a fake 2M
+          message: live.error
+            ? `token alive; live credit probe failed: ${live.error}`
+            : "token alive; live credit probe returned no quota",
           ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
         };
       }
       return {
-        kind: "healthy",
-        success: true,
-        // no quota → warmup will not overwrite remaining with a fake 2M
-        message: live.error
-          ? `token alive; live credit probe failed: ${live.error}`
-          : "token alive; live credit probe returned no quota",
+        kind: fallback.kind,
+        success: false,
+        retryable: fallback.retryable,
+        error: fallback.error || live.error || "OAuth liveness probe failed",
         ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
+        metadata: {
+          modelsReason: models.reason,
+          modelsStatus: models.status,
+          liveQuotaError: live.error,
+        },
       };
     }
 

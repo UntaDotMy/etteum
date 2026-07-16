@@ -872,16 +872,24 @@ class AccountPool {
   }
 
   /**
-   * Update account tokens (stored as jsonb)
+   * Update account tokens (stored as jsonb).
+   * Invalidates the active-account pool cache for that provider so the next
+   * select does not keep serving a pre-rotation access/refresh token
+   * (RFC 9700: rotated refresh tokens invalidate the previous RT).
    */
   async updateTokens(accountId: number, tokens: unknown): Promise<void> {
-    await db
+    const [account] = await db
       .update(accounts)
       .set({
         tokens,
         updatedAt: new Date(),
       })
-      .where(eq(accounts.id, accountId));
+      .where(eq(accounts.id, accountId))
+      .returning({ id: accounts.id, provider: accounts.provider });
+
+    if (account?.provider) {
+      this.invalidate(account.provider as ProviderName);
+    }
   }
 
   /**
