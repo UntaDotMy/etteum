@@ -517,7 +517,7 @@ export default function ImageStudio() {
               Image Studio
             </h1>
             <p className="text-xs text-[var(--muted-foreground)]">
-              AI prompt assistant untuk Canva Magic Media
+              AI prompt assistant for image / video generation
             </p>
           </div>
         </div>
@@ -1086,7 +1086,15 @@ export default function ImageStudio() {
                     Generating {genType}...
                   </p>
                   <p className="mt-1 text-xs text-[var(--muted-foreground)]">
-                    Canva Magic Media sedang melukis
+                    {(() => {
+                      const row = genModels.find((m) => m.id === genModel);
+                      const providerLabel = row
+                        ? labelProvider(row.provider)
+                        : genModel
+                          ? genModel
+                          : "Media model";
+                      return `${providerLabel}${genModel ? ` · ${genModel}` : ""} is working…`;
+                    })()}
                   </p>
                 </div>
               </div>
