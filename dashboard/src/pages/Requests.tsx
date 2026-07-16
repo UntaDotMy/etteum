@@ -98,8 +98,7 @@ export default function Requests() {
     if (provider !== "all" && row.provider !== provider) return;
     void mutate((prev) => {
       const list = prev?.data || [];
-      if (list.some((r) => r.id === row.id)) return prev;
-      // Prepend light fields only (match list endpoint shape).
+      // Light fields only (match list endpoint shape).
       const light: RequestLog = {
         id: row.id,
         createdAt: row.createdAt,
@@ -119,6 +118,14 @@ export default function Requests() {
         errorMessage: row.errorMessage ?? null,
         compressionStats: row.compressionStats,
       };
+      // Stream finalize re-emits request_log for the same id with final tokens —
+      // update in place instead of dropping the event.
+      const existingIdx = list.findIndex((r) => r.id === row.id);
+      if (existingIdx >= 0) {
+        const next = list.slice();
+        next[existingIdx] = { ...list[existingIdx]!, ...light };
+        return { data: next };
+      }
       return { data: [light, ...list].slice(0, 50) };
     });
   });
