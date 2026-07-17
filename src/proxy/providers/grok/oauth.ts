@@ -1079,6 +1079,351 @@ export async function probeOAuthChatCredits(
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// Throttled chat liveness (warmup) — Alibaba-style "can this credential chat?"
+// ---------------------------------------------------------------------------
+
+/**
+ * How often a healthy account must re-prove chat via POST /v1/responses.
+ * Credit probes still run every warmup tick; this hop is slower and was
+ * known to hang fleet WarmUp when run unconditionally on every account.
+ */
+export const GROK_CHAT_PROBE_THROTTLE_MS = 2 * 60 * 60 * 1000; // 2 hours
+
+/** Hard deadline for one chat liveness hop (parent abort still wins). */
+export const GROK_CHAT_PROBE_DEADLINE_MS = 15_000;
+
+export type GrokChatLivenessReason =
+  | "ok"
+  | "exhausted"
+  | "access_denied"
+  | "unauthorized"
+  | "transient"
+  | "http_error";
+
+export interface GrokChatLivenessResult {
+  reason: GrokChatLivenessReason;
+  status?: number;
+  error?: string;
+  /** Absolute / exhausted quota when the probe returned a usable snapshot. */
+  quota?: GrokOAuthQuota;
+}
+
+/**
+ * Read last successful/failed chat-probe timestamp from account metadata.
+ * Written by healthCheck into metadata.warmup.lastChatProbeAt (and top-level
+ * for older rows).
+ */
+export function getGrokLastChatProbeAtMs(account: Account): number | null {
+  const meta =
+    account.metadata && typeof account.metadata === "object" && !Array.isArray(account.metadata)
+      ? (account.metadata as Record<string, unknown>)
+      : null;
+  if (!meta) return null;
+  const warmup =
+    meta.warmup && typeof meta.warmup === "object" && !Array.isArray(meta.warmup)
+      ? (meta.warmup as Record<string, unknown>)
+      : null;
+  const raw = warmup?.lastChatProbeAt ?? meta.lastChatProbeAt;
+  if (typeof raw !== "string" || !raw.trim()) return null;
+  const ms = Date.parse(raw);
+  return Number.isFinite(ms) ? ms : null;
+}
+
+/**
+ * Whether warmup should run the expensive POST /v1/responses chat probe.
+ *
+ * Always when: never probed, throttle elapsed, healing error/pending, or
+ * last error looks like chat auth (Access denied / 401).
+ * Skip when: recent ok/exhaustion probe still inside the throttle window.
+ */
+export function shouldRunGrokChatLivenessProbe(
+  account: Account,
+  opts?: { now?: number; throttleMs?: number },
+): boolean {
+  const now = opts?.now ?? Date.now();
+  const throttleMs = opts?.throttleMs ?? GROK_CHAT_PROBE_THROTTLE_MS;
+
+  const status = String(account.status || "").toLowerCase();
+  if (status === "error" || status === "pending") return true;
+
+  const err = String(account.errorMessage || "").toLowerCase();
+  if (
+    err.includes("access denied") ||
+    err.includes("unauthorized") ||
+    err.includes("(401)") ||
+    err.includes("session expired") ||
+    err.includes("banned")
+  ) {
+    return true;
+  }
+
+  const last = getGrokLastChatProbeAtMs(account);
+  if (last == null) return true;
+  return now - last >= throttleMs;
+}
+
+/**
+ * Classify a POST /v1/responses outcome for warmup (pure — unit-tested).
+ * Transient failures must NOT map to hard auth death (credits may still work).
+ */
+export function classifyGrokChatLiveness(args: {
+  httpStatus: number | null;
+  bodySnippet?: string;
+  networkError?: string;
+  /** When rate-limit headers or free-usage body already produced a quota. */
+  quota?: GrokOAuthQuota | null;
+}): GrokChatLivenessResult {
+  if (args.quota && isGrokFreeUsageExhaustedQuota(args.quota)) {
+    return { reason: "exhausted", status: args.httpStatus ?? undefined, quota: args.quota };
+  }
+  if (
+    args.quota &&
+    (args.quota.source.includes("ratelimit-headers") ||
+      args.quota.source.includes("responses-probe"))
+  ) {
+    // remaining==0 with a real limit and exhausted-ish status is exhausted
+    if (
+      args.quota.limit > 0 &&
+      args.quota.remaining <= 0 &&
+      (args.httpStatus === 402 || args.httpStatus === 429)
+    ) {
+      return {
+        reason: "exhausted",
+        status: args.httpStatus ?? undefined,
+        quota: {
+          ...args.quota,
+          source: args.quota.source.includes("exhausted")
+            ? args.quota.source
+            : "cli-chat-proxy/free-usage-exhausted",
+        },
+      };
+    }
+    return { reason: "ok", status: args.httpStatus ?? undefined, quota: args.quota };
+  }
+
+  if (args.httpStatus == null) {
+    return {
+      reason: "transient",
+      error: args.networkError || "chat probe network failure",
+    };
+  }
+
+  const status = args.httpStatus;
+  const body = (args.bodySnippet || "").toLowerCase();
+
+  if (status === 200 || status === 201) {
+    return {
+      reason: "ok",
+      status,
+      quota: args.quota ?? undefined,
+    };
+  }
+
+  const exhausted =
+    status === 402 ||
+    body.includes("free-usage-exhausted") ||
+    body.includes("spending-limit") ||
+    body.includes("spending_limit") ||
+    body.includes("you've used all") ||
+    body.includes("you have used all") ||
+    body.includes("payment required");
+  if (exhausted) {
+    const limit =
+      args.quota && args.quota.limit > 0 ? args.quota.limit : GROK_FREE_BUILD_TOKEN_LIMIT;
+    return {
+      reason: "exhausted",
+      status,
+      quota: {
+        limit,
+        remaining: 0,
+        used: limit,
+        resetAt: null,
+        source: "cli-chat-proxy/free-usage-exhausted",
+        percentScale: false,
+      },
+    };
+  }
+
+  if (status === 403 || body.includes("access denied")) {
+    return {
+      reason: "access_denied",
+      status,
+      error:
+        "cli-chat-proxy Access denied (403) on chat probe — Build API blocked (not a dead refresh token)",
+    };
+  }
+
+  if (status === 401) {
+    return {
+      reason: "unauthorized",
+      status,
+      error: "OAuth access token rejected by chat probe (401)",
+    };
+  }
+
+  if (status === 429 || status >= 500) {
+    return {
+      reason: "transient",
+      status,
+      error: `chat probe HTTP ${status}`,
+    };
+  }
+
+  return {
+    reason: "http_error",
+    status,
+    error: `chat probe HTTP ${status}`,
+  };
+}
+
+/**
+ * Map chat liveness → healthCheck fields when credits already said healthy.
+ * Transient / http_error → keep healthy (do not mass-kill); retry next tick.
+ */
+export function mapGrokChatLivenessToHealthPatch(
+  live: GrokChatLivenessResult,
+): {
+  kind: "healthy" | "exhausted" | "banned" | "session_expired" | "transient_keep";
+  retryable?: boolean;
+  error?: string;
+  message?: string;
+  quota?: GrokOAuthQuota;
+} {
+  switch (live.reason) {
+    case "ok":
+      return { kind: "healthy", message: "chat probe ok" };
+    case "exhausted":
+      return {
+        kind: "exhausted",
+        message: "chat probe: free usage exhausted",
+        quota: live.quota,
+      };
+    case "access_denied":
+      return {
+        kind: "banned",
+        retryable: false,
+        error: live.error || "chat probe Access denied",
+      };
+    case "unauthorized":
+      return {
+        kind: "session_expired",
+        retryable: true,
+        error: live.error || "chat probe unauthorized",
+      };
+    case "transient":
+    case "http_error":
+    default:
+      return {
+        kind: "transient_keep",
+        retryable: true,
+        error: live.error || "chat probe transient",
+      };
+  }
+}
+
+/**
+ * POST /v1/responses liveness probe with full classification (warmup guard).
+ * Never throws on network — returns reason "transient" so callers stay fail-open
+ * on blips. AbortError from parent signal is rethrown so stop cancels WarmUp.
+ */
+export async function probeOAuthChatLiveness(
+  bearer: string,
+  signal?: AbortSignal,
+): Promise<GrokChatLivenessResult> {
+  try {
+    const cliVersion = await getGrokCliVersion();
+    const response = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${bearer}`,
+        "Content-Type": "application/json",
+        Accept: "application/json",
+        "x-grok-client-version": cliVersion,
+        "x-grok-client-identifier": "grok-build",
+        "x-grok-client-surface": "grok-build",
+      },
+      body: JSON.stringify({
+        model: "grok-4.5",
+        input: "Reply with exactly: OK",
+        stream: false,
+        max_output_tokens: 16,
+      }),
+      signal,
+    });
+
+    const rem = Number(response.headers.get("x-ratelimit-remaining-tokens"));
+    const lim = Number(response.headers.get("x-ratelimit-limit-tokens"));
+    let quota: GrokOAuthQuota | null = null;
+    if (Number.isFinite(rem) && Number.isFinite(lim) && lim > 0) {
+      quota = {
+        limit: lim,
+        remaining: Math.max(0, rem),
+        used: Math.max(0, lim - rem),
+        resetAt: null,
+        source: "cli-chat-proxy/ratelimit-headers",
+        percentScale: false,
+        raw: { status: response.status, ok: response.ok, rem, lim },
+      };
+    }
+
+    let bodySnippet = "";
+    if (!quota || !response.ok) {
+      bodySnippet = (await response.text().catch(() => "")).slice(0, 400);
+      if (!quota) {
+        // Reuse free-usage parsing from credit probe shape
+        const lower = bodySnippet.toLowerCase();
+        const exhausted =
+          response.status === 402 ||
+          lower.includes("free-usage-exhausted") ||
+          lower.includes("spending-limit") ||
+          lower.includes("spending_limit") ||
+          lower.includes("you've used all") ||
+          lower.includes("you have used all") ||
+          lower.includes("payment required");
+        if (exhausted) {
+          const limit =
+            Number.isFinite(lim) && lim > 0 ? lim : GROK_FREE_BUILD_TOKEN_LIMIT;
+          quota = {
+            limit,
+            remaining: 0,
+            used: limit,
+            resetAt: null,
+            source: "cli-chat-proxy/free-usage-exhausted",
+            percentScale: false,
+            raw: { status: response.status, body: bodySnippet.slice(0, 200) },
+          };
+        } else if (response.ok) {
+          quota = {
+            limit: 0,
+            remaining: 0,
+            used: 0,
+            resetAt: null,
+            source: "cli-chat-proxy/responses-probe",
+            percentScale: false,
+            raw: { status: response.status, headersMissing: true },
+          };
+        }
+      }
+    }
+
+    return classifyGrokChatLiveness({
+      httpStatus: response.status,
+      bodySnippet,
+      quota,
+    });
+  } catch (err: any) {
+    if (err?.name === "AbortError") {
+      if (signal?.aborted) throw err;
+      return { reason: "transient", error: "chat probe aborted or deadline exceeded" };
+    }
+    return {
+      reason: "transient",
+      error: err instanceof Error ? err.message : String(err),
+    };
+  }
+}
+
 /**
  * True when a live Grok OAuth quota snapshot is absolute free-Build / paid
  * tokens (not the percent-scale 0–100 weekly pool placeholder).
