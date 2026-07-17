@@ -20,6 +20,14 @@ import { invalidateCompressionCache } from "../proxy/compression/settings";
 const POLICY_KEY = "compression_policy_v1";
 const POLICY_VALUE = "applied";
 
+// v2: raise the RTK tool-result cap to the new default (4000) on installs that
+// still carry an older healthy value (e.g. 1500). Unlike the v1 always-on clamp
+// (which only fixes pathological <500 values), this runs ONCE per DB so a user
+// who later lowers the cap in Settings is not overridden on every boot.
+const POLICY_KEY_V2 = "compression_policy_v2";
+const POLICY_VALUE_V2 = "applied";
+const V2_TARGET_MAX = 4000;
+
 /** Matches Settings UI min=500 for max tool chars. Below this is always a bug. */
 const UI_MIN_MAX_TOOL_CHARS = 500;
 
@@ -95,6 +103,20 @@ export async function bootstrapCompressionSettings(): Promise<void> {
     console.log(
       `[DB] Clamped pathological RTK settings (max≥${UI_MIN_MAX_TOOL_CHARS}, defaults ${SAFE_MAX}/${SAFE_KEEP})`,
     );
+  }
+
+  // One-time v2 migration: bump any healthy-but-stale cap (>= UI floor, < target)
+  // up to the new default. Runs once so later manual Settings changes win.
+  const appliedV2 = await getSetting(POLICY_KEY_V2);
+  if (appliedV2 !== POLICY_VALUE_V2) {
+    const cur = await getSetting("compression_rtk_max_tool_chars");
+    const curN = cur != null && cur.trim() !== "" ? parseInt(cur, 10) : null;
+    if (curN != null && Number.isFinite(curN) && curN >= UI_MIN_MAX_TOOL_CHARS && curN < V2_TARGET_MAX) {
+      await setSetting("compression_rtk_max_tool_chars", String(V2_TARGET_MAX));
+      console.log(`[DB] Applied compression policy v2 — RTK max_tool_chars ${curN}→${V2_TARGET_MAX}`);
+      invalidateCompressionCache();
+    }
+    await setSetting(POLICY_KEY_V2, POLICY_VALUE_V2);
   }
 
   if (fixed) invalidateCompressionCache();
