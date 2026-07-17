@@ -33,6 +33,14 @@ function makeJwt(expSec: number): string {
 
 function makeOAuthAccount(overrides: Partial<Account> = {}): Account {
   const exp = Math.floor(Date.now() / 1000) + 3600;
+  // Default: recent chat probe so credit/models-path tests stay isolated from
+  // the throttled POST /responses hop (covered in grok-chat-probe tests).
+  const baseMeta = {
+    warmup: {
+      lastChatProbeAt: new Date().toISOString(),
+      chatProbe: "ok",
+    },
+  };
   return {
     id: 42,
     provider: "grok",
@@ -56,7 +64,7 @@ function makeOAuthAccount(overrides: Partial<Account> = {}): Account {
     freeResetAt: null,
     lastUsed: null,
     errorMessage: null,
-    metadata: null,
+    metadata: baseMeta,
     createdAt: new Date(),
     updatedAt: new Date(),
     ...overrides,

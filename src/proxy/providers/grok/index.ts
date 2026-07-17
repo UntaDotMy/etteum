@@ -52,14 +52,26 @@ import {
   isTrustedGrokAbsoluteRemaining,
   normalizeGrokAbsoluteRemaining,
   isGrokWeeklyPercentQuotaLimit,
+  shouldRunGrokChatLivenessProbe,
+  mapGrokChatLivenessToHealthPatch,
+  getGrokLastChatProbeAtMs,
+  probeOAuthChatLiveness,
+  withDeadlineSignal,
+  GROK_CHAT_PROBE_DEADLINE_MS,
   type GrokOAuthTokens,
   type GrokOAuthQuota,
+  type GrokChatLivenessResult,
 } from "./oauth";
 
 export {
   classifyGrokModelsLiveness,
   classifyGrokOAuthFallbackFromModels,
   probeOAuthModelsLiveness,
+  shouldRunGrokChatLivenessProbe,
+  classifyGrokChatLiveness,
+  mapGrokChatLivenessToHealthPatch,
+  getGrokLastChatProbeAtMs,
+  GROK_CHAT_PROBE_THROTTLE_MS,
 } from "./oauth";
 import {
   GROK_IMAGE_MODEL,
@@ -1143,6 +1155,144 @@ export class GrokProvider extends BaseProvider {
    * - SSO accounts: validated via the grok.com rate-limits endpoint.
    */
   /**
+   * Throttled POST /v1/responses chat liveness (Alibaba-style).
+   * Overridable in unit tests so credit/models cases stay isolated.
+   */
+  protected async runChatLivenessProbe(
+    bearer: string,
+    signal?: AbortSignal,
+  ): Promise<GrokChatLivenessResult> {
+    const hop = withDeadlineSignal(signal, GROK_CHAT_PROBE_DEADLINE_MS);
+    return probeOAuthChatLiveness(bearer, hop);
+  }
+
+  /**
+   * After credits already marked the row healthy, optionally prove chat works.
+   * Skipped when throttle says a recent probe is still good. Transient chat
+   * blips keep healthy (credits proved the bearer); access denied / 401 /
+   * free-usage-exhausted remove the account from the dispatch pool.
+   */
+  private async withOptionalChatLiveness(
+    account: Account,
+    bearer: string,
+    base: ProviderHealthResult,
+    signal?: AbortSignal,
+  ): Promise<ProviderHealthResult> {
+    if (base.kind !== "healthy") return base;
+
+    if (!shouldRunGrokChatLivenessProbe(account)) {
+      const lastMs = getGrokLastChatProbeAtMs(account);
+      return {
+        ...base,
+        metadata: {
+          ...(base.metadata || {}),
+          chatProbe: "throttled",
+          ...(lastMs != null
+            ? { lastChatProbeAt: new Date(lastMs).toISOString() }
+            : {}),
+        },
+      };
+    }
+
+    let live: GrokChatLivenessResult;
+    try {
+      live = await this.runChatLivenessProbe(bearer, signal);
+    } catch (err: any) {
+      if (err?.name === "AbortError" && signal?.aborted) throw err;
+      live = {
+        reason: "transient",
+        error: err?.message || "chat probe failed",
+      };
+    }
+
+    const patch = mapGrokChatLivenessToHealthPatch(live);
+    const nowIso = new Date().toISOString();
+
+    if (patch.kind === "healthy") {
+      return {
+        ...base,
+        message: base.message
+          ? `${base.message}; chat probe ok`
+          : "chat probe ok",
+        metadata: {
+          ...(base.metadata || {}),
+          chatProbe: "ok",
+          lastChatProbeAt: nowIso,
+        },
+      };
+    }
+
+    if (patch.kind === "exhausted") {
+      const q = patch.quota;
+      return {
+        kind: "exhausted",
+        success: true,
+        message: patch.message || "chat probe: free usage exhausted",
+        quota: q
+          ? {
+              limit: q.limit,
+              remaining: 0,
+              used: q.used ?? q.limit,
+              resetAt: q.resetAt,
+              source: q.source,
+            }
+          : base.quota
+            ? { ...base.quota, remaining: 0, used: base.quota.limit }
+            : undefined,
+        ...(base.tokens ? { tokens: base.tokens } : {}),
+        metadata: {
+          ...(base.metadata || {}),
+          chatProbe: "exhausted",
+          lastChatProbeAt: nowIso,
+        },
+      };
+    }
+
+    if (patch.kind === "banned") {
+      return {
+        kind: "banned",
+        success: false,
+        retryable: false,
+        error: patch.error,
+        ...(base.tokens ? { tokens: base.tokens } : {}),
+        metadata: {
+          ...(base.metadata || {}),
+          chatProbe: "access_denied",
+          lastChatProbeAt: nowIso,
+        },
+      };
+    }
+
+    if (patch.kind === "session_expired") {
+      return {
+        kind: "session_expired",
+        success: false,
+        retryable: true,
+        error: patch.error,
+        ...(base.tokens ? { tokens: base.tokens } : {}),
+        metadata: {
+          ...(base.metadata || {}),
+          chatProbe: "unauthorized",
+          lastChatProbeAt: nowIso,
+        },
+      };
+    }
+
+    // transient_keep — do NOT stamp lastChatProbeAt so the next tick retries
+    return {
+      ...base,
+      message: base.message
+        ? `${base.message}; chat probe transient: ${patch.error || "unknown"}`
+        : `chat probe transient: ${patch.error || "unknown"}`,
+      metadata: {
+        ...(base.metadata || {}),
+        chatProbe: "transient",
+        chatProbeError: patch.error,
+      },
+    };
+  }
+
+  /**
    * When access JWT is expired/near-expiry, rotate via the refresh coordinator
    * (locked + persisted). Used by warmup healthCheck and validateAccount.
    *
@@ -1248,6 +1398,7 @@ export class GrokProvider extends BaseProvider {
           // why: auth'd GetGrokCreditsConfig already proved the bearer. A
           // secondary GET /v1/models 403 "Access denied" must NOT mass-kill
           // the fleet as session_expired / "invalid after refresh" (RT still works).
+          // Chat liveness (throttled) still runs below when remaining > 0.
           const limit = 100;
           const remaining = Math.min(
             limit,
@@ -1255,7 +1406,7 @@ export class GrokProvider extends BaseProvider {
           );
           const used = Math.min(limit, Math.max(0, limit - remaining));
           const drained = remaining <= 0;
-          return {
+          const weeklyBase: ProviderHealthResult = {
             kind: drained ? "exhausted" : "healthy",
             success: true,
             message: drained
@@ -1270,6 +1421,12 @@ export class GrokProvider extends BaseProvider {
             },
             ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
           };
+          if (drained) return weeklyBase;
+          const bearer =
+            (await ensureFreshAccessToken(working)) ||
+            getOAuthTokens(working)?.access_token ||
+            "";
+          return this.withOptionalChatLiveness(working, bearer, weeklyBase, signal);
         }
 
         const absolute = isAbsoluteGrokOAuthQuota(asGrokQuota);
@@ -1319,12 +1476,17 @@ export class GrokProvider extends BaseProvider {
           !remainingTrusted &&
           String(asGrokQuota.source || "").includes("untrusted-full-remaining")
         ) {
-          return {
+          const untrustedBase: ProviderHealthResult = {
             kind: "healthy",
             success: true,
             message: "token alive; skipped untrusted full rate-limit package",
             ...(tokensOut ? { tokens: tokensOut } : ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
           };
+          const bearer =
+            (await ensureFreshAccessToken(working)) ||
+            getOAuthTokens(working)?.access_token ||
+            "";
+          return this.withOptionalChatLiveness(working, bearer, untrustedBase, signal);
         }
 
         if (drained) {
@@ -1342,7 +1504,7 @@ export class GrokProvider extends BaseProvider {
           };
         }
 
-        return {
+        const absoluteHealthy: ProviderHealthResult = {
           kind: "healthy",
           success: true,
           quota: {
@@ -1354,6 +1516,13 @@ export class GrokProvider extends BaseProvider {
           },
           ...(tokensOut ? { tokens: tokensOut } : {}),
         };
+        {
+          const bearer =
+            (await ensureFreshAccessToken(working)) ||
+            getOAuthTokens(working)?.access_token ||
+            "";
+          return this.withOptionalChatLiveness(working, bearer, absoluteHealthy, signal);
+        }
       }
 
       // 2) Credit probe failed — fall back to classified models liveness.
@@ -1362,7 +1531,7 @@ export class GrokProvider extends BaseProvider {
       const models = await probeOAuthModelsLiveness(working);
       const fallback = classifyGrokOAuthFallbackFromModels(models);
       if (fallback.kind === "healthy") {
-        return {
+        const modelsHealthy: ProviderHealthResult = {
           kind: "healthy",
           success: true,
           // no quota → warmup will not overwrite remaining with a fake 2M
@@ -1371,6 +1540,11 @@ export class GrokProvider extends BaseProvider {
             : "token alive; live credit probe returned no quota",
           ...(ready.refreshedTokens ? { tokens: ready.refreshedTokens } : {}),
         };
+        const bearer =
+          (await ensureFreshAccessToken(working)) ||
+          getOAuthTokens(working)?.access_token ||
+          "";
+        return this.withOptionalChatLiveness(working, bearer, modelsHealthy, signal);
       }
       return {
         kind: fallback.kind,

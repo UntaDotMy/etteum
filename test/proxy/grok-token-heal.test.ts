@@ -190,6 +190,10 @@ describe("GrokProvider.healthCheck heals near-expired OAuth on warmup path", () 
           },
         };
       }
+      // Isolate token-heal path from throttled chat liveness hop.
+      protected override async runChatLivenessProbe() {
+        return { reason: "ok" as const, status: 200 };
+      }
     }
 
     // Avoid real DB write if pool.updateTokens is invoked — intercept via mock

@@ -153,6 +153,21 @@ function mergeWarmupMetadata(
     }
   }
 
+  // Grok throttled chat liveness: stamp from this tick when present, else keep.
+  const healthMeta = asObject(health.metadata);
+  const lastChatProbeAt =
+    typeof healthMeta.lastChatProbeAt === "string"
+      ? healthMeta.lastChatProbeAt
+      : typeof prevWarmup.lastChatProbeAt === "string"
+        ? prevWarmup.lastChatProbeAt
+        : null;
+  const chatProbe =
+    typeof healthMeta.chatProbe === "string"
+      ? healthMeta.chatProbe
+      : typeof prevWarmup.chatProbe === "string"
+        ? prevWarmup.chatProbe
+        : null;
+
   return {
     ...existing,
     ...(health.metadata || {}),
@@ -167,6 +182,8 @@ function mergeWarmupMetadata(
       lastProbeAt: extras.lastProbeAt ?? (prevWarmup.lastProbeAt as string | undefined) ?? null,
       quotaOverride: quotaOverride ?? null,
       lastPingedResetAt,
+      lastChatProbeAt,
+      chatProbe,
     },
     serverQuota,
     activityQuota,
