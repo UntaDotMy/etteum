@@ -16,6 +16,13 @@ import { loadFilterCache } from "../proxy/filter-cache";
 const POLICY_KEY = "filter_policy_v3";
 const POLICY_VALUE = "applied";
 
+// Bumped to _v4 to DELETE remove_cch_hash (see filters.ts): it stripped legitimate
+// tool-call arguments (Grep/Glob `ch=abc123`, git hashes) — the "model goes dumb"
+// corruption. Hard-delete from the DB, matching the source removal.
+const POLICY_KEY_V4 = "filter_policy_v4";
+const POLICY_VALUE_V4 = "applied";
+const CCH_RULE_ID = "remove_cch_hash";
+
 /** Hard-deleted: broken / over-broad regex rules. */
 const PURGE_RULE_IDS = [
   "remove_claude_code_identity_variations",
@@ -91,6 +98,21 @@ export async function bootstrapFilterRules(): Promise<void> {
       .returning({ id: filterRules.id });
     if (deleted.length > 0) {
       console.log(`[DB] Purged ${deleted.length} inactive filter rule(s)`);
+    }
+  }
+
+  // One-time v4 migration: DELETE remove_cch_hash from existing DBs. It stripped
+  // legitimate tool-call arguments (any `ch=<hex>` token — Grep/Glob patterns, git
+  // hashes), silently corrupting tool calls and making the model look "dumb".
+  const appliedV4 = await getSetting(POLICY_KEY_V4);
+  if (appliedV4 !== POLICY_VALUE_V4) {
+    const deleted = await db
+      .delete(filterRules)
+      .where(eq(filterRules.ruleId, CCH_RULE_ID))
+      .returning({ id: filterRules.id });
+    await setSetting(POLICY_KEY_V4, POLICY_VALUE_V4);
+    if (deleted.length > 0) {
+      console.log(`[DB] Applied filter policy v4 — removed ${CCH_RULE_ID} (tool-arg corruption)`);
     }
   }
 

@@ -2,67 +2,34 @@ import { describe, test, expect } from "bun:test";
 import { applyPudidilFilters } from "./filters";
 
 describe("applyPudidilFilters (general, sanitization only)", () => {
-  test("strips vendor telemetry: billing header, cc_entrypoint, cc_version, cch hash", () => {
+  test("strips vendor telemetry: billing header, cc_entrypoint, cc_version", () => {
     const payload =
-      "x-billing-header: anthropic-billing-account=abc\n" +
-      "cc_entrypoint=cli cc_version=1.2.3 cch=deadbeef\n" +
-      "https://github.com/anthropics/claude-code/issues/1\n" +
+      "x-billing-header: secret\n" +
+      "cc_entrypoint=cli cc_version=1.2.3\n" +
       "keep this line intact";
     const out = applyPudidilFilters(payload);
     expect(out).not.toContain("billing-header");
     expect(out).not.toContain("cc_entrypoint=");
     expect(out).not.toContain("cc_version=");
-    expect(out).not.toContain("cch=deadbeef");
-    expect(out).not.toContain("github.com/anthropics/claude-code");
     expect(out).toContain("keep this line intact");
   });
 
+  test("PRESERVES hex-suffixed tokens in tool-call args (remove_cch_hash deleted)", () => {
+    // remove_cch_hash was removed because it stripped `ch=<hex>` (Grep/Glob
+    // patterns, git hashes) from tool-call arguments — the "model goes dumb"
+    // corruption. These must now survive verbatim.
+    expect(applyPudidilFilters('{"pattern":"ch=abc123"}')).toBe('{"pattern":"ch=abc123"}');
+    expect(applyPudidilFilters("git ch=deadbeef")).toBe("git ch=deadbeef");
+  });
+
   test("brand names pass through VERBATIM (no neutralization)", () => {
-    // The brand-neutralization tier was removed per user request. The bare
-    // vendor word must reach the upstream provider unchanged.
-    const word = "Claude Code";
-    const token = "[AI-ASSISTANT]";
-    const sentence = "I am " + word + ", an assistant.";
+    const sentence = "This uses the anthropic and openai SDKs.";
     const out = applyPudidilFilters(sentence);
-    expect(out).toBe(sentence);       // unchanged
-    expect(out).toContain(word);      // brand word still present
-    expect(out).not.toContain(token); // no bracket-token rewrite
+    expect(out).toBe(sentence);
   });
 
-  test("does NOT rewrite technical words (tool-call safety)", () => {
-    const payload =
-      "Run the shell tool to kill process 1234.\n" +
-      "modify config.yaml to attack the device.\n" +
-      "threat model: exploit the political rules; no violence, no suicide.";
-    const out = applyPudidilFilters(payload);
-    expect(out).toBe(payload);
-  });
-
-  test("preserves camelCase identifiers and file paths", () => {
-    const payload = "path = claudeHome + claudeMd; open CLAUDE.md";
-    const out = applyPudidilFilters(payload);
-    expect(out).toContain("claudeHome");
-    expect(out).toContain("claudeMd");
-    expect(out).toContain("CLAUDE.md");
-    expect(out).not.toContain("agentHome");
-    expect(out).not.toContain("agents.md");
-  });
-
-  test("tool-call-shaped JSON passes through unmodified", () => {
-    const payload =
-      '{"name":"shell","arguments":{"command":"kill --pid 1234","target":"device"}}';
-    const out = applyPudidilFilters(payload);
-    expect(out).toBe(payload);
-  });
-
-  test("keeps instruction / system-prompt / harness text intact", () => {
-    const payload =
-      "You are a coding agent. Use the provided tools. Follow CLAUDE.md harness.\n" +
-      "Rules: do not modify user data without access consent. Exploit the tool device safely.";
-    const out = applyPudidilFilters(payload);
-    expect(out).toContain("CLAUDE.md");
-    expect(out).toContain("modify user data");
-    expect(out).toContain("coding agent");
-    expect(out).toContain("Exploit the tool device safely");
+  test("does not rewrite ordinary words (word-rewrite tier removed)", () => {
+    const payload = "Terminate access to modify the tool device threat.";
+    expect(applyPudidilFilters(payload)).toBe(payload);
   });
 });

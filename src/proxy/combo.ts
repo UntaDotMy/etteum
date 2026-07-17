@@ -27,6 +27,7 @@ import { routeRequest } from "./router";
 import type { ChatCompletionRequest } from "./providers/base";
 import { getProviderForModel } from "./providers/registry";
 import { routeComboFusion, routeComboFusionWithJudge } from "./fusion";
+import { broadcast } from "../ws/index";
 
 // ─── Settings helpers ──────────────────────────────────────────────────────────
 
@@ -128,7 +129,7 @@ function reorderByCapabilitiesLocal(models: string[], messages: { role: string; 
     const required = detectRequiredCapabilities(messages);
     if (!required.size) return models;
 
-    return reorderByCapabilities(models, required, (m) => {
+    return reorderByCapabilities(models, required, (m: string) => {
       const slash = m.indexOf("/");
       const provider = slash < 0 ? "" : m.slice(0, slash);
       const model = slash < 0 ? m : m.slice(slash + 1);
@@ -214,7 +215,7 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
       if (providerName === "byok") {
         account = (await pool.getAccountForModel(modelName, { excludeAccountIds: excludedAccounts }))?.account ?? null;
       } else {
-        account = await pool.getNextAccountForModel(providerName, modelName, {
+        account = await pool.getNextAccountForModel(providerName as import("./pool").ProviderName, modelName, {
           excludeAccountIds: excludedAccounts,
         });
       }
@@ -232,7 +233,10 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         // "provider/model" spec — so routeRequest's getProviderForModel
         // matches the bare model id. Prefixed combo entries like
         // "gitlab-duo/claude-sonnet-4" would otherwise fail routing.
-        const result = await routeRequest({ ...request, model: modelName }, request.stream ?? false);
+        const result = await routeRequest({ ...request, model: modelName }, request.stream ?? false, {
+          excludeAccountIds: excludedAccounts,
+          _skipComboExpansion: true,
+        });
         broadcast({
           type: "combo_success",
           data: { comboName, model: modelSpec, accountId: account.id },
@@ -276,7 +280,7 @@ export async function expandComboRequest(request: ChatCompletionRequest): Promis
   if (!chain) return null;
 
   // Replace the combo/model request with just the alias (first model in chain)
-  const firstModel = alias || chain[0];
+  const firstModel = alias ?? chain[0] ?? modelStr;
   return {
     expanded: true,
     comboName,

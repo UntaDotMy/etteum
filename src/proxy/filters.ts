@@ -47,13 +47,12 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
     is_active: true,
     is_regex: true,
   },
-  {
-    id: "remove_cch_hash",
-    pattern: "c?ch=[a-f0-9]+",
-    replacement: "",
-    is_active: true,
-    is_regex: true,
-  },
+  // REMOVED: remove_cch_hash (`c?ch=[a-f0-9]+`). Even after anchoring, it stripped
+  // legitimate tool-call arguments — a Grep/Glob `pattern` of `ch=abc123`, a git
+  // short-hash, or any hex-suffixed token — silently corrupting the tool call and
+  // making the model look "dumb" (the exact failure the disabled word-rewrite tier
+  // caused). The value it removed (Anthropic's `cch=` billing hash) is negligible
+  // vs. the tool-call corruption it introduces. Intentionally deleted, not disabled.
   {
     id: "remove_claude_code_github",
     pattern: "https?://github\\.com/anthropics/claude-code[^\\s]*",
@@ -91,14 +90,14 @@ export const PUDIDIL_FILTERS: FilterRule[] = [
   },
   {
     id: "remove_feedback_line",
-    pattern: "Claude Code. To give feedback, users should report the issue at https://github.com/anthropics/claude-code/issues",
+    pattern: "Claude Code. To give feedback, users should report the issue at",
     replacement: "",
     is_active: true,
     is_regex: false,
   },
   {
     id: "remove_powerful_ai_agent",
-    pattern: "Advanced AI Agent",
+    pattern: "You are a powerful AI agent",
     replacement: "",
     is_active: true,
     is_regex: false,

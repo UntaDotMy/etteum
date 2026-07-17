@@ -46,7 +46,8 @@ describe("bootstrapCompressionSettings v1", () => {
       .limit(1);
 
     expect(Number(maxRow?.value)).toBeGreaterThanOrEqual(500);
-    expect(Number(maxRow?.value)).toBe(1500);
+    // Clamped to SAFE_MAX = DEFAULT_COMPRESSION_CONFIG.rtk.maxToolChars (4000).
+    expect(Number(maxRow?.value)).toBe(4000);
     expect(Number(keepRow?.value)).toBeGreaterThanOrEqual(4);
     expect(policy?.value).toBe("applied");
   });

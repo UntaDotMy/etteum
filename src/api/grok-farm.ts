@@ -145,7 +145,7 @@ grokFarmRouter.get("/config", async (c) => {
 
 /** PUT /api/grok-farm/config */
 grokFarmRouter.put("/config", async (c) => {
-  const body = await c.req.json<Partial<GrokFarmConfig>>().catch(() => ({}));
+  const body = await c.req.json<Partial<GrokFarmConfig>>().catch((): Partial<GrokFarmConfig> => ({}));
   const current = await loadConfig();
   const next = clampFarmConfig(
     {
@@ -172,7 +172,7 @@ grokFarmRouter.get("/jobs/latest", (c) => c.json({ job: getGrokFarmJob() }));
 
 /** POST /api/grok-farm/start */
 grokFarmRouter.post("/start", async (c) => {
-  const body = await c.req.json<Partial<GrokFarmConfig> & { saveConfig?: boolean }>().catch(() => ({}));
+  const body = await c.req.json<Partial<GrokFarmConfig> & { saveConfig?: boolean }>().catch((): Partial<GrokFarmConfig> & { saveConfig?: boolean } => ({}));
   const saved = await loadConfig();
   const cfg = clampFarmConfig(
     {

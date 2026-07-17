@@ -5,6 +5,7 @@ import {
   isTransientError,
   isHardConnectFailure,
   isAccessDeniedForbidden,
+  isCloudflareChallenge,
 } from "./errors";
 import { applyPudidilFilters } from "./filters";
 import { pool } from "./pool";
@@ -104,12 +105,20 @@ function sanitizeRequest(request: ChatCompletionRequest, providerName?: string):
  */
 export async function routeRequest(
   request: ChatCompletionRequest,
-  stream: boolean
+  stream: boolean,
+  options?: {
+    /** Account ids to skip on every attempt (e.g. combo cross-model exclusion). */
+    excludeAccountIds?: Set<number>;
+    /** Prefer this account on the first attempt (combo sticky pinning). */
+    preferredAccountId?: number;
+    /** Internal re-entry guard: combo/fusion expansions must not re-expand. */
+    _skipComboExpansion?: boolean;
+  }
 ): Promise<RouteResult> {
   // ── Combo expansion ──────────────────────────────────────────────────────────
   // If the model string looks like "combo-name/model-alias", expand it to a
   // multi-model fallback chain before routing.
-  const comboExpansion = await expandComboRequest(request);
+  const comboExpansion = options?._skipComboExpansion ? null : await expandComboRequest(request);
   if (comboExpansion?.expanded) {
     return routeCombo({
       request: comboExpansion.request,
@@ -182,11 +191,17 @@ export async function routeRequest(
   // Exclude every attempted account id (all providers) so exhaustion/rate-limit
   // retries never re-select the same dead credential for another full upstream hop.
   const attemptedAccountIds = new Set<number>();
+  // Seed with caller-supplied exclusions (combo cross-model exclusion set) so a
+  // credential that already failed on an earlier combo model is never re-picked
+  // mid-request. The in-request set below still accumulates per-attempt ids.
+  if (options?.excludeAccountIds) {
+    for (const id of options.excludeAccountIds) attemptedAccountIds.add(id);
+  }
 
   // Sticky response-id pinning: if the request carries a previous_response_id,
   // resolve which account created that response and prefer it on the first
   // attempt. Preserves Codex/OpenAI-Responses session continuity.
-  let preferredAccountId: number | undefined;
+  let preferredAccountId: number | undefined = options?.preferredAccountId;
   const prevResponseId = (request as any)?.previous_response_id;
   if (prevResponseId) {
     try {
@@ -317,6 +332,15 @@ export async function routeRequest(
         if (result.resetsAt && (!earliestReset || result.resetsAt < earliestReset)) {
           earliestReset = result.resetsAt;
         }
+        // Static-node providers (id<=0, single apiKey credential) can't be marked
+        // in the pool and the exclusion set is ignored for them, so the next
+        // attempt would re-hit the SAME node instantly — 3 immediate 429s with no
+        // cooldown. Back off briefly before the final retry. Capped at 1.5s so the
+        // request stays well inside the proxy's 10s frontend-timeout budget.
+        if (isStaticAccount && attempt < maxRetries - 1) {
+          const waitMs = Math.min(result.retryAfterMs ?? 1500, 1500);
+          await new Promise((r) => setTimeout(r, waitMs));
+        }
         continue; // Try next account
       }
       // A non-rate-limit failure means not ALL accounts were rate-limited.
@@ -326,7 +350,10 @@ export async function routeRequest(
       // These credentials are blocked for chat (not an auth-refresh issue).
       // Terminal mark so they leave the active pool immediately — hysteresis
       // would leave them selectable and stall every request for 3 full hops.
-      if (result.banned || isAccessDeniedForbidden(errText)) {
+      // Cloudflare anti-bot challenge on the ChatGPT mirror: the credential is
+      // fine, the IP is gated. Terminal-mark so the account leaves the pool
+      // instead of being retried as a refreshable 401 / transient blip.
+      if (result.banned || isAccessDeniedForbidden(errText) || isCloudflareChallenge(errText)) {
         if (!isStaticAccount) {
           await pool.markError(
             account.id,

@@ -26,7 +26,16 @@ export function isBadUpstreamRequest(error?: string): boolean {
   const normalized = error.toLowerCase();
   return (
     normalized.includes("improperly formed request") ||
-    normalized.includes("unsupported parameter")
+    normalized.includes("unsupported parameter") ||
+    // why: CodeBuddy China rejects a structurally-invalid payload with HTTP 400
+    // {"msg":"Invalid request parameters", extError.type:"invalid_request_error"}
+    // and "param":"" — i.e. the upstream can't even name the field. That is a
+    // request-content failure (bad tool_choice / tool schema / message field),
+    // NOT an account failure, so the router must fail fast on the first account
+    // instead of retrying every account and mis-marking them ("All accounts
+    // failed"). See codebuddy-china provider + router isNonAccountRequestError.
+    normalized.includes("invalid request parameters") ||
+    normalized.includes("invalid_parameter_value")
   );
 }
 
@@ -153,6 +162,25 @@ export function isAccessDeniedForbidden(error?: string): boolean {
 }
 
 /**
+ * Cloudflare anti-bot challenge (HTTP 403 + `cf-mitigated: challenge`) on the
+ * ChatGPT backend mirror. This is NOT an auth/token failure and NOT a quota
+ * exhaustion — the credential is fine; Cloudflare is gating the datacenter IP.
+ * The router must treat it as terminal for that account (leave the pool
+ * immediately) rather than as a refreshable 401 or a retryable transient.
+ */
+export function isCloudflareChallenge(error?: string): boolean {
+  if (!error) return false;
+  const n = error.toLowerCase();
+  return (
+    n.includes("cf-mitigated") ||
+    n.includes("cf_challenge") ||
+    n.includes("cf-challenge") ||
+    (n.includes("cloudflare") && (n.includes("challenge") || n.includes("attention required"))) ||
+    n.includes("cf-ray") && n.includes("403")
+  );
+}
+
+/**
  * Transient errors that are temporary and should not permanently mark an account as errored.
  * These include network issues, timeouts, rate limits, upstream server errors,
  * and bad-request errors that are caused by the request format (not the account).
@@ -202,7 +230,15 @@ export function isTransientError(error?: string): boolean {
     normalized.includes("(429)") ||
     // Bad request format (not account issue — request content caused it)
     normalized.includes("parse message failed") ||
-    normalized.includes("invalid request") ||
+    // NOTE: deliberately NOT the bare substring "invalid request"/"invalid_request".
+    // That is the OpenAI/Anthropic error *type* string upstreams (GitLab Duo,
+    // CodeBuddy, Anthropic) attach to invalid-model and account-exhaustion 400s.
+    // Matching it here classified those as transient, which (a) skipped model
+    // failover in proxy/index.ts and (b) made CodeBuddy's
+    // "Invalid request: No available chat account" mark the account as a generic
+    // error instead of quota-exhausted — so exhausted accounts kept being retried
+    // fleet-wide. Genuine transient 400s (parse failures, malformed bodies) are
+    // still caught above/below via "parse message failed" and "(400)"/"http 400".
     // HTTP status codes in any format: "(400)", "HTTP 400:", "status 400", etc.
     // Previously only matched "(400)" which missed "HTTP 400:" (Alibaba format).
     normalized.includes("(400)") ||

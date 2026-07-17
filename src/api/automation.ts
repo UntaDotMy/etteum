@@ -191,7 +191,7 @@ automationRouter.get("/codebuddy-cn/config", async (c) => {
 
 /** PUT /api/automation/codebuddy-cn/config */
 automationRouter.put("/codebuddy-cn/config", async (c) => {
-  const body = await c.req.json<Partial<CodebuddyCnFarmConfig>>().catch(() => ({}));
+  const body = await c.req.json<Partial<CodebuddyCnFarmConfig>>().catch((): Partial<CodebuddyCnFarmConfig> => ({}));
   const cur = await loadCbcConfig();
   const next = {
     ...cur,
@@ -222,7 +222,7 @@ automationRouter.get("/codebuddy-cn/jobs", (c) => {
 
 /** POST /api/automation/codebuddy-cn/start */
 automationRouter.post("/codebuddy-cn/start", async (c) => {
-  const body = await c.req.json<Partial<CodebuddyCnFarmConfig> & { saveConfig?: boolean }>().catch(() => ({}));
+  const body = await c.req.json<Partial<CodebuddyCnFarmConfig> & { saveConfig?: boolean }>().catch((): Partial<CodebuddyCnFarmConfig> & { saveConfig?: boolean } => ({}));
   const saved = await loadCbcConfig();
   const fiveSimToken =
     body.fiveSimToken && body.fiveSimToken !== "••••••••"

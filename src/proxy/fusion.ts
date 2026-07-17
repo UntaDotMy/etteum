@@ -43,7 +43,7 @@ export async function routeComboFusion(opts: FusionOptions): Promise<RouteResult
 
   const results = await Promise.allSettled(
     models.map(async (modelSpec) => {
-      return routeRequest({ ...request, model: modelSpec }, request.stream ?? false);
+      return routeRequest({ ...request, model: modelSpec }, request.stream ?? false, { _skipComboExpansion: true });
     })
   );
 
@@ -127,7 +127,7 @@ export async function routeComboFusionWithJudge(opts: FusionOptions): Promise<Ro
   const successes: Array<{ model: string; result: RouteResult }> = [];
 
   const results = await Promise.allSettled(
-    models.map(async (modelSpec) => routeRequest({ ...request, model: modelSpec }, false))
+    models.map(async (modelSpec) => routeRequest({ ...request, model: modelSpec }, false, { _skipComboExpansion: true }))
   );
   for (let i = 0; i < results.length; i++) {
     const r = results[i];
@@ -167,6 +167,7 @@ export async function routeComboFusionWithJudge(opts: FusionOptions): Promise<Ro
   const judgeResult = await routeRequest(
     { ...request, model: judgeModel, messages: judgeMessages as any, stream: false, tools: undefined },
     false,
+    { _skipComboExpansion: true },
   );
 
   broadcast({ type: "combo_success", data: { comboName, model: judgeModel, allModels: models, strategy: "fusion-judge", judgedFrom: successes.map((s) => s.model) } });

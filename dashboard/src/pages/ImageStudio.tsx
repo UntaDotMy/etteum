@@ -36,6 +36,14 @@ import {
   type ChatMessage,
   type StoredResult,
 } from "@/lib/api";
+import {
+  markPending,
+  clearPending,
+  getPending,
+  subscribePending,
+  promptKey,
+  type PendingRequest,
+} from "@/lib/pending";
 
 type GenType = "image" | "video";
 
@@ -143,6 +151,8 @@ export default function ImageStudio() {
   const [brokenUrls, setBrokenUrls] = useState<Set<string>>(new Set());
   const [error, setError] = useState<string | null>(null);
   const [lightbox, setLightbox] = useState<string | null>(null);
+  // In-flight requests started here or on a previous mount (survives navigation).
+  const [pending, setPending] = useState<PendingRequest[]>(() => getPending());
 
   const chatScrollRef = useRef<HTMLDivElement>(null);
   const previewScrollRef = useRef<HTMLDivElement>(null);
@@ -187,6 +197,8 @@ export default function ImageStudio() {
     }
     setGenerating(true);
     setError(null);
+    const pkey = promptKey(r.type, chatId ?? "anon", r.prompt);
+    markPending({ key: pkey, kind: r.type, startedAt: Date.now(), label: r.prompt.slice(0, 60) });
     try {
       const res = await generateImage({
         prompt: r.prompt,
@@ -216,6 +228,7 @@ export default function ImageStudio() {
     } catch (err) {
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      clearPending(pkey);
       setGenerating(false);
     }
   }
@@ -281,6 +294,19 @@ export default function ImageStudio() {
       });
   }, []);
 
+  // Track the shared pending registry (survives navigation). Restore the local
+  // "generating" flag if an image/video request for this studio is still in
+  // flight from a previous mount.
+  useEffect(() => {
+    const sync = () => {
+      const list = getPending();
+      setPending(list);
+      if (list.some((p) => p.kind === "image" || p.kind === "video")) setGenerating(true);
+    };
+    sync();
+    return subscribePending(sync);
+  }, []);
+
   useEffect(() => {
     let cancelled = false;
     (async () => {
@@ -303,11 +329,17 @@ export default function ImageStudio() {
         );
         if (cancelled) return;
         setResults((resultsRes.data || []).map(resultFromStored));
+        // Re-sync: any generation that completed while we were navigated away is
+        // already in the DB, so clearing the matching pending marker now is safe.
+        for (const p of getPending()) {
+          if (p.kind === "image" || p.kind === "video") clearPending(p.key);
+        }
       } catch (err) {
         if (!cancelled) setError(err instanceof Error ? err.message : String(err));
       } finally {
         if (!cancelled) {
           setLoadingHistory(false);
+          setGenerating(false);
           skipSaveRef.current = false;
         }
       }
@@ -457,6 +489,8 @@ export default function ImageStudio() {
     }
     setGenerating(true);
     setError(null);
+    const pkey = promptKey(genType, chatId ?? "anon", prompt);
+    markPending({ key: pkey, kind: genType, startedAt: Date.now(), label: prompt.slice(0, 60) });
     try {
       const res = await generateImage({
         prompt,
@@ -479,8 +513,12 @@ export default function ImageStudio() {
       };
       setResults((prev) => [...prev, result]);
     } catch (err) {
+      // why: a navigation can orphan the awaiting fetch even though the server
+      // finished and persisted the row. Surface a hint; the mount re-sync will
+      // surface the result from the DB on return.
       setError(err instanceof Error ? err.message : String(err));
     } finally {
+      clearPending(pkey);
       setGenerating(false);
     }
   }

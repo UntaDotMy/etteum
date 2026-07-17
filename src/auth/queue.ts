@@ -629,6 +629,16 @@ class LoginQueue {
           totalFailed: this.totalFailed,
         },
       });
+      return;
+    }
+    // why: accounts enqueue()'d while this batch was running were appended to
+    // this.queue, but nothing re-triggered process() once the batch drained —
+    // they sat in "queued" state forever until an unrelated restart. When the
+    // batch is fully drained (no in-flight jobs/retries) but the queue has
+    // accumulated new items, kick off the next batch.
+    if (this.activeJobs === 0 && this.retryTimers.size === 0 && this.queue.length > 0) {
+      this.processing = false;
+      void this.process();
     }
   }
 

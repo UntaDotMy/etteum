@@ -800,8 +800,17 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     if (tools.length > 0) {
       body.tools = tools;
     }
-    if (request.tool_choice) {
-      body.tool_choice = request.tool_choice;
+    // why: CodeBuddy China's subset chat API rejects a restrictive tool_choice
+    // ({type:"function",function:{name}} / "required") with HTTP 400
+    // "Invalid request parameters" (invalid_parameter_value, param:"") — and it
+    // does not reliably honor a forced call either. Normalize to "auto" when
+    // tools are present, drop it entirely when they are not, so a Claude-Code /
+    // CLI "must-call-a-tool" directive never produces a 400. This is the
+    // low-risk fix: the provider already converts tool_calls/tool_responses to
+    // plain text via stripToolReferences, so forcing a specific tool was never
+    // meaningful here anyway.
+    if (request.tool_choice && tools.length > 0) {
+      body.tool_choice = "auto";
     }
 
     const timeoutMs = stream ? 300_000 : config.providerRequestTimeoutMs;

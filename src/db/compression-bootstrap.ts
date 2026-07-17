@@ -23,7 +23,7 @@ const POLICY_VALUE = "applied";
 /** Matches Settings UI min=500 for max tool chars. Below this is always a bug. */
 const UI_MIN_MAX_TOOL_CHARS = 500;
 
-const SAFE_MAX = DEFAULT_COMPRESSION_CONFIG.rtk.maxToolChars; // 1500
+const SAFE_MAX = DEFAULT_COMPRESSION_CONFIG.rtk.maxToolChars; // 4000
 const SAFE_KEEP = DEFAULT_COMPRESSION_CONFIG.rtk.keepLastNTurnsFull; // 4
 
 async function getSetting(key: string): Promise<string | null> {
