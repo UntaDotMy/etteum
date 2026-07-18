@@ -18,6 +18,7 @@ import {
   type ManagedKey,
   type ManagedKeyInput,
 } from "@/lib/api";
+import { rememberFullKey } from "./fullKeyStore";
 
 /**
  * Create / edit dialog for a managed (friend) API key. When `editing` is null it
@@ -129,6 +130,7 @@ export default function KeyFormDialog(props: {
         onOpenChange(false);
       } else {
         const res = await createManagedKey(payload);
+        rememberFullKey(res.id, res.key);
         onCreated(res.key);
         onOpenChange(false);
       }

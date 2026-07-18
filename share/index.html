@@ -250,6 +250,19 @@
   // is reached through a tunnel / different host than this page). Falls back to
   // the path-only "/v1".
   var BASE_URL = "__SHARE_BASE_URL__";
+  // "1" = link-only mode: the page ONLY shows the key embedded in the share
+  // link (URL fragment) and never accepts a manually pasted key.
+  var LOCK = "__SHARE_LOCK__" === "1";
+
+  // Read the key from the URL fragment (#k=…, also accepts #key= / #token=).
+  // Fragment (not query) so the key isn't sent to this server or written to
+  // server logs — it stays in the friend's browser only.
+  function keyFromHash() {
+    var h = window.location.hash || "";
+    if (h.charAt(0) === "#") h = h.slice(1);
+    var params = new URLSearchParams(h);
+    return params.get("k") || params.get("key") || params.get("token") || "";
+  }
 
   function fmt(n) {
     if (n == null) return "∞";
@@ -381,6 +394,27 @@
     if (timer) clearInterval(timer);
     load();
     timer = setInterval(load, 10000);
+  }
+
+  function startWithKey(k) {
+    currentKey = k;
+    err.textContent = "";
+    if (timer) clearInterval(timer);
+    load();
+    timer = setInterval(load, 10000);
+  }
+
+  // Auto-connect when the key is embedded in the share link (#k=…).
+  var urlKey = keyFromHash();
+  if (urlKey) {
+    keyInput.value = urlKey;
+    startWithKey(urlKey);
+  } else if (LOCK) {
+    // Link-only mode and no key in the URL: hide manual entry entirely.
+    var prompt = document.querySelector(".prompt");
+    if (prompt) prompt.classList.add("hidden");
+    setSig("bad");
+    err.textContent = "this console opens from a shared link. Ask for your link.";
   }
 
   $("view").addEventListener("click", start);

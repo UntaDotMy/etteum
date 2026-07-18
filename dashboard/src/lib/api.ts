@@ -1398,6 +1398,13 @@ export async function deleteManagedKey(id: number): Promise<{ success: boolean }
   return fetchApi(`/api/keys/managed/${id}`, { method: "DELETE" });
 }
 
+/** Pool info incl. the friend-status share URL + link-only flag (for building share links). */
+export async function fetchPoolInfo(): Promise<{
+  share?: { url: string | null; port: number; lock: boolean };
+}> {
+  return fetchApi("/api/info");
+}
+
 export async function testByokProvider(
   id: number,
   model?: string

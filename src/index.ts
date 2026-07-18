@@ -349,6 +349,13 @@ app.get("/api/info", (c) => {
       websocket: "/ws",
     },
     wsClients: getClientCount(),
+    // Friend-key status console: public base URL + link-only mode, so the
+    // dashboard can build copyable per-key share links.
+    share: {
+      url: process.env.SHARE_PUBLIC_URL || null,
+      port: config.sharePort,
+      lock: process.env.SHARE_LOCK === "1",
+    },
   });
 });
 

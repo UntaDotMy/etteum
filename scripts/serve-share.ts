@@ -25,6 +25,9 @@ const host = process.env.HOST || "0.0.0.0";
 const backendOrigin =
   process.env.BACKEND_ORIGIN || `http://127.0.0.1:${Number(process.env.PORT) || 1930}`;
 const shareBaseUrl = process.env.SHARE_BASE_URL || "";
+// "1" = link-only mode: the page only shows keys embedded in the share link
+// (#k=…) and hides the manual paste box. "0"/unset = manual paste allowed.
+const shareLock = process.env.SHARE_LOCK === "1" ? "1" : "0";
 
 const htmlFile = new URL("../share/index.html", import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1");
 
@@ -55,7 +58,8 @@ Bun.serve({
     }
     const html = (await Bun.file(htmlFile).text())
       .replaceAll("__BACKEND_ORIGIN__", backendOrigin)
-      .replaceAll("__SHARE_BASE_URL__", shareBaseUrl);
+      .replaceAll("__SHARE_BASE_URL__", shareBaseUrl)
+      .replaceAll("__SHARE_LOCK__", shareLock);
     return new Response(html, { headers: SECURITY_HEADERS });
   },
 });

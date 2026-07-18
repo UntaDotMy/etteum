@@ -21,16 +21,22 @@ import {
   Loader2,
   KeyRound,
   Infinity as InfinityIcon,
+  Link2,
 } from "lucide-react";
 import { useApiCache } from "@/hooks/useApiCache";
 import {
   fetchManagedKeys,
+  fetchPoolInfo,
   revokeManagedKey,
   activateManagedKey,
   deleteManagedKey,
   type ManagedKey,
 } from "@/lib/api";
+import { getFullKey } from "./fullKeyStore";
 import KeyFormDialog from "./KeyFormDialog";
+
+/** Recently-connected window: a key whose lastUsedAt is within this is "connected". */
+const CONNECTED_WINDOW_MS = 60_000;
 
 export default function ManagedKeys(props: { onError: (msg: string) => void; onInfo: (msg: string) => void }) {
   const { onError, onInfo } = props;
@@ -41,10 +47,24 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   );
   const keys = data?.keys ?? [];
 
+  // Share-page public URL (for building copyable per-key links).
+  const { data: info } = useApiCache<{ share?: { url: string | null } }>(
+    "pool-info",
+    () => fetchPoolInfo(),
+    { staleTime: 60_000 },
+  );
+  const shareBase = info?.share?.url ?? null;
+
+  function shareLink(key: string): string {
+    const base = (shareBase || window.location.origin).replace(/\/$/, "");
+    return `${base}/#k=${encodeURIComponent(key)}`;
+  }
+
   const [formOpen, setFormOpen] = useState(false);
   const [editing, setEditing] = useState<ManagedKey | null>(null);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLinkId, setCopiedLinkId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState<ManagedKey | null>(null);
 
@@ -80,6 +100,21 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
     );
   }
 
+  function copyShareLink(k: ManagedKey) {
+    const full = getFullKey(k.id);
+    if (!full) {
+      onError("Share link needs the full key — only available right after creating it this session. Create a new key to get its link.");
+      return;
+    }
+    navigator.clipboard.writeText(shareLink(full)).then(
+      () => {
+        setCopiedLinkId(k.id);
+        setTimeout(() => setCopiedLinkId((c) => (c === k.id ? null : c)), 1800);
+      },
+      () => onError("Could not copy link."),
+    );
+  }
+
   return (
     <>
       <Card className="border-[var(--border)]">
@@ -111,6 +146,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                   key={k.id}
                   k={k}
                   busy={busyId === k.id}
+                  linkCopied={copiedLinkId === k.id}
+                  hasShareLink={getFullKey(k.id) != null}
+                  onCopyLink={() => copyShareLink(k)}
                   onEdit={() => openEdit(k)}
                   onToggle={() =>
                     run(
@@ -207,13 +245,17 @@ function statusOf(k: ManagedKey): { label: string; variant: "success" | "warning
 function KeyCard(props: {
   k: ManagedKey;
   busy: boolean;
+  linkCopied: boolean;
+  hasShareLink: boolean;
+  onCopyLink: () => void;
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
   onCopy: () => void;
 }) {
-  const { k, busy, onEdit, onToggle, onDelete, onCopy } = props;
+  const { k, busy, linkCopied, hasShareLink, onCopyLink, onEdit, onToggle, onDelete, onCopy } = props;
   const st = statusOf(k);
+  const connected = k.isActive && k.lastUsedAt != null && Date.now() - new Date(k.lastUsedAt).getTime() < CONNECTED_WINDOW_MS;
   const hasQuota = k.tokenQuota != null && k.tokenQuota > 0;
   const pct = hasQuota ? Math.min(100, ((k.tokensUsed ?? 0) / k.tokenQuota!) * 100) : 0;
   const models = k.allowedModels ?? null;
@@ -231,7 +273,15 @@ function KeyCard(props: {
             {k.keyPreview}
           </button>
         </div>
-        <Badge variant={st.variant}>{st.label}</Badge>
+        <div className="flex items-center gap-1.5 shrink-0">
+          {connected && (
+            <Badge variant="success" className="gap-1">
+              <span className="w-1.5 h-1.5 rounded-full bg-current inline-block" />
+              connected
+            </Badge>
+          )}
+          <Badge variant={st.variant}>{st.label}</Badge>
+        </div>
       </div>
 
       <div>
@@ -283,6 +333,13 @@ function KeyCard(props: {
       </div>
 
       <div className="flex gap-1 pt-1 border-t border-[var(--border)]">
+        <IconBtn
+          title={hasShareLink ? "Copy share link" : "Share link (needs the full key — only right after creating)"}
+          onClick={onCopyLink}
+          disabled={busy}
+        >
+          {linkCopied ? <Check className="w-3.5 h-3.5 text-[var(--success)]" /> : <Link2 className="w-3.5 h-3.5" />}
+        </IconBtn>
         <IconBtn title="Edit limits" onClick={onEdit} disabled={busy}>
           <Pencil className="w-3.5 h-3.5" />
         </IconBtn>
