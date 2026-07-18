@@ -26,7 +26,7 @@ import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
 import { estimateRequestTokens } from "./compression";
 import { calculateCost, type TokenBreakdown } from "./pricing";
-import { eq, sql } from "drizzle-orm";
+import { and, desc, eq, gt, gte, isNotNull, sql } from "drizzle-orm";
 import { providerList, refreshByokModels } from "./providers/registry";
 import {
   extractWebSearchConfig,
@@ -1169,7 +1169,25 @@ function shareKeyPublic(
 async function loadShareSpeedSamples(windowMs = 15 * 60 * 1000, limit = 200): Promise<
   Array<{ apiKeyId: number | null; completionTokens: number; durationMs: number; ttftMs: number | null }>
 > {
-  const since = new Date(Date.now() - windowMs);
+  // created_at is integer epoch-ms. Bind a number (not Date/ISO string) so
+  // SQLite never hits "datatype mismatch" on integer comparison.
+  const sinceMs = Date.now() - windowMs;
+  const mapRows = (
+    rows: Array<{
+      apiKeyId: number | null;
+      completionTokens: number | null;
+      durationMs: number | null;
+      ttftMs?: number | null;
+    }>,
+  ) =>
+    rows.map((r) => ({
+      apiKeyId: r.apiKeyId ?? null,
+      completionTokens: Number(r.completionTokens) || 0,
+      durationMs: Number(r.durationMs) || 0,
+      ttftMs:
+        r.ttftMs == null || Number.isNaN(Number(r.ttftMs)) ? null : Number(r.ttftMs),
+    }));
+
   try {
     const rows = await db
       .select({
@@ -1180,20 +1198,43 @@ async function loadShareSpeedSamples(windowMs = 15 * 60 * 1000, limit = 200): Pr
       })
       .from(requestLogs)
       .where(
-        sql`${requestLogs.status} = 'success'
-          AND ${requestLogs.createdAt} >= ${since}
-          AND ${requestLogs.durationMs} IS NOT NULL
-          AND ${requestLogs.durationMs} > 0`,
+        and(
+          eq(requestLogs.status, "success"),
+          // Compare against epoch-ms Date so drizzle's timestamp mode encodes an integer.
+          gte(requestLogs.createdAt, new Date(sinceMs)),
+          isNotNull(requestLogs.durationMs),
+          gt(requestLogs.durationMs, 0),
+        ),
       )
-      .orderBy(sql`${requestLogs.createdAt} DESC`)
+      .orderBy(desc(requestLogs.createdAt))
       .limit(limit);
-    return rows.map((r) => ({
-      apiKeyId: r.apiKeyId ?? null,
-      completionTokens: Number(r.completionTokens) || 0,
-      durationMs: Number(r.durationMs) || 0,
-      ttftMs: r.ttftMs == null ? null : Number(r.ttftMs),
-    }));
+    return mapRows(rows);
   } catch (err) {
+    // Pre-migrate DBs may lack ttft_ms; retry without it so the board still works.
+    const msg = String((err as Error)?.message || err);
+    if (/no such column|ttft_ms|datatype mismatch/i.test(msg)) {
+      try {
+        const rows = await db
+          .select({
+            apiKeyId: requestLogs.apiKeyId,
+            completionTokens: requestLogs.completionTokens,
+            durationMs: requestLogs.durationMs,
+          })
+          .from(requestLogs)
+          .where(
+            sql`status = 'success'
+              AND created_at >= ${sinceMs}
+              AND duration_ms IS NOT NULL
+              AND duration_ms > 0`,
+          )
+          .orderBy(sql`created_at DESC`)
+          .limit(limit);
+        return mapRows(rows.map((r) => ({ ...r, ttftMs: null })));
+      } catch (err2) {
+        console.error("[Share] Failed to load speed samples (fallback):", err2);
+        return [];
+      }
+    }
     console.error("[Share] Failed to load speed samples:", err);
     return [];
   }
