@@ -227,10 +227,10 @@ app.use("/v1/*", async (c, next) => {
   if (c.req.method === "OPTIONS") {
     return next();
   }
-  // Friend status page does its own key lookup; skip the global gate so a
-  // missing/invalid key returns the share handler's 401 shape (and CORS works).
+  // Friend status page does its own auth/listing; skip the global gate so
+  // /v1/share and /v1/share/board are reachable without a bearer token.
   const path = new URL(c.req.url).pathname;
-  if (path === "/v1/share" || path === "/v1/share/") {
+  if (path === "/v1/share" || path === "/v1/share/" || path.startsWith("/v1/share/")) {
     return next();
   }
 

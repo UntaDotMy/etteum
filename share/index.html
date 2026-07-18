@@ -424,6 +424,9 @@
     font-size: 13px;
     padding: 4px 0;
   }
+  #board { display: flex; flex-direction: column; gap: 16px; }
+  #board .card + .card { margin-top: 0; }
+  .key-block { display: flex; flex-direction: column; gap: 16px; }
 
   /* footer */
   .foot {
@@ -503,81 +506,18 @@
     </div>
   </header>
 
-  <!-- shown when no share link / key is present or the key is invalid -->
+  <!-- shown when admin has not created any managed keys yet -->
   <section class="card empty" id="empty" aria-live="polite">
     <div class="icon" aria-hidden="true">🔑</div>
     <h2 id="emptytitle">No keys yet</h2>
     <p id="emptymsg">Nothing has been shared with you right now. Come back later.</p>
   </section>
 
-  <div id="sess" class="sess hidden">
-    <section class="card" aria-label="Key status">
-      <div class="khead">
-        <h1 class="ktitle" id="kname">—</h1>
-        <div class="kactions">
-          <div class="pill" title="API key">
-            <span id="kprev" class="mono">sk-…</span>
-            <button type="button" id="copykey" title="Copy key preview" aria-label="Copy key preview">
-              <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-            </button>
-          </div>
-          <span class="badge active" id="kstatus">ACTIVE</span>
-        </div>
-      </div>
-
-      <div class="credit-row">
-        <div class="credit" id="credit">0</div>
-        <div class="credit-sub" id="creditsub">credit left · 0</div>
-      </div>
-
-      <div class="bar-meta">
-        <span class="pct" id="pctlbl">0%</span>
-        <span class="side">LEFT</span>
-      </div>
-      <div class="bar" id="bar" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0">
-        <i id="barfill"></i>
-      </div>
-      <div class="bar-ends">
-        <span id="usedlbl">0 used</span>
-        <span id="quotalbl">∞ total</span>
-      </div>
-
-      <div class="meta">
-        <div class="cell">
-          <div class="k">TOTAL QUOTA</div>
-          <div class="v"><span id="quota">—</span></div>
-        </div>
-        <div class="cell">
-          <div class="k">CREATED</div>
-          <div class="v"><span id="created">—</span></div>
-        </div>
-        <div class="cell">
-          <div class="k">LAST USED</div>
-          <div class="v"><span id="last">—</span></div>
-        </div>
-        <div class="cell">
-          <div class="k">BASE URL</div>
-          <div class="v accent">
-            <span id="base">/v1</span>
-            <button type="button" class="iconbtn" id="copybase" title="Copy base URL" aria-label="Copy base URL">
-              <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>
-            </button>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section class="card" aria-label="Usable models">
-      <div class="mhead">
-        <div class="t">Models</div>
-        <div class="c" id="mcount">0 USABLE</div>
-      </div>
-      <div class="models" id="models"></div>
-    </section>
-  </div>
+  <!-- one status block per managed key from GET /v1/share/board -->
+  <div id="board" class="sess hidden" aria-live="polite"></div>
 
   <footer class="foot">
-    <div class="tag">etteum pool · friend key</div>
+    <div class="tag">etteum pool · friend keys</div>
     <div class="upd"><i aria-hidden="true"></i><span id="upd">waiting</span></div>
   </footer>
 </div>
@@ -587,21 +527,14 @@
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var sess = $("sess"), empty = $("empty"), toast = $("toast");
-  var currentKey = null, timer = null, toastT = null;
+  var board = $("board"), empty = $("empty"), toast = $("toast");
+  var timer = null, toastT = null;
 
-  // Injected for BASE URL display only — status is fetched same-origin via the
-  // share server's /v1/share proxy (avoids localhost vs 127.0.0.1 CORS).
+  // BASE URL display only — status is same-origin via share proxy.
   var BACKEND = "__BACKEND_ORIGIN__";
   var BASE_URL = "__SHARE_BASE_URL__";
-
-  // Fragment-only key so it never hits this server's access logs.
-  function keyFromHash() {
-    var h = window.location.hash || "";
-    if (h.charAt(0) === "#") h = h.slice(1);
-    var params = new URLSearchParams(h);
-    return params.get("k") || params.get("key") || params.get("token") || "";
-  }
+  var COPY_SVG =
+    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
   function fmt(n) {
     if (n == null) return "∞";
@@ -633,6 +566,11 @@
     if (isNaN(d)) return "—";
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   }
+  function esc(s) {
+    return String(s).replace(/[&<>"]/g, function (c) {
+      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    });
+  }
 
   function setLive(state) {
     var el = $("live"), txt = $("livetxt");
@@ -646,86 +584,13 @@
   }
 
   function showEmpty(title, msg) {
-    sess.classList.add("hidden");
+    board.classList.add("hidden");
+    board.innerHTML = "";
     empty.classList.remove("hidden");
     $("emptytitle").textContent = title || "No keys yet";
     $("emptymsg").textContent = msg || "Nothing has been shared with you right now. Come back later.";
     setLive("standby");
     $("upd").textContent = "come back later";
-  }
-
-  function render(d) {
-    empty.classList.add("hidden");
-    sess.classList.remove("hidden");
-
-    var nm = d.name || "friend key";
-    $("kname").textContent = nm;
-    $("kprev").textContent = d.keyPreview || "sk-…";
-
-    var st = d.status || "active";
-    var stEl = $("kstatus");
-    stEl.textContent = st.toUpperCase();
-    stEl.className = "badge " + st;
-    setLive(st === "active" ? "on" : "bad");
-
-    var quota = d.tokenQuota;
-    var used = d.tokensUsed || 0;
-    var left = d.tokensLeft;
-    var hasQuota = quota != null && quota > 0;
-    var pctLeft = hasQuota
-      ? Math.max(0, Math.min(100, ((left != null ? left : 0) / quota) * 100))
-      : 100;
-    var pctUsed = hasQuota
-      ? Math.max(0, Math.min(100, (used / quota) * 100))
-      : 0;
-
-    $("credit").textContent = hasQuota ? fmt(left) : "∞";
-    $("creditsub").textContent = hasQuota
-      ? "credit left · " + full(left)
-      : "credit left · unlimited";
-
-    var pctEl = $("pctlbl");
-    pctEl.textContent = hasQuota ? Math.round(pctLeft) + "%" : "∞";
-    pctEl.className = "pct" + (!hasQuota || pctLeft > 30 ? " ok" : pctLeft > 5 ? " mid" : "");
-
-    var bar = $("bar");
-    bar.className = "bar" + (!hasQuota || pctLeft > 30 ? " ok" : pctLeft > 5 ? " mid" : "");
-    bar.setAttribute("aria-valuenow", String(Math.round(pctUsed)));
-    $("barfill").style.width = (hasQuota ? pctUsed : 0) + "%";
-
-    $("usedlbl").textContent = fmt(used) + " used";
-    $("quotalbl").textContent = (hasQuota ? fmt(quota) : "∞") + " total";
-    $("quota").textContent = hasQuota ? full(quota) : "∞";
-    $("created").textContent = dte(d.createdAt);
-    $("last").textContent = rel(d.lastUsedAt);
-    $("base").textContent = baseUrl();
-
-    var models = Array.isArray(d.models) ? d.models : [];
-    $("mcount").textContent = models.length + " USABLE";
-    var box = $("models");
-    box.innerHTML = "";
-    if (!models.length) {
-      box.innerHTML = '<div class="none">No models available for this key</div>';
-    }
-    models.forEach(function (id) {
-      var el = document.createElement("button");
-      el.type = "button";
-      el.className = "m";
-      el.title = "Copy model id";
-      el.innerHTML =
-        esc(id) +
-        ' <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
-      el.onclick = function () { copy(id); };
-      box.appendChild(el);
-    });
-
-    $("upd").textContent = "updated just now";
-  }
-
-  function esc(s) {
-    return String(s).replace(/[&<>"]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
-    });
   }
 
   function copy(text) {
@@ -739,44 +604,155 @@
     toastT = setTimeout(function () { toast.classList.remove("show"); }, 1400);
   }
 
-  function fail() {
-    // No technical errors — friend-facing empty state only.
-    showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+  function cardHtml(d, bu) {
+    var nm = d.name || "friend key";
+    var st = d.status || "active";
+    var quota = d.tokenQuota;
+    var used = d.tokensUsed || 0;
+    var left = d.tokensLeft;
+    var hasQuota = quota != null && quota > 0;
+    var pctLeft = hasQuota
+      ? Math.max(0, Math.min(100, ((left != null ? left : 0) / quota) * 100))
+      : 100;
+    var pctUsed = hasQuota ? Math.max(0, Math.min(100, (used / quota) * 100)) : 0;
+    var barTone = !hasQuota || pctLeft > 30 ? " ok" : pctLeft > 5 ? " mid" : "";
+    var credit = hasQuota ? fmt(left) : "∞";
+    var creditSub = hasQuota ? "credit left · " + full(left) : "credit left · unlimited";
+    var models = Array.isArray(d.models) ? d.models : [];
+    var modelsHtml = models.length
+      ? models
+          .map(function (id) {
+            return (
+              '<button type="button" class="m" data-copy="' +
+              esc(id) +
+              '" title="Copy model id">' +
+              esc(id) +
+              " " +
+              COPY_SVG +
+              "</button>"
+            );
+          })
+          .join("")
+      : '<div class="none">No models available for this key</div>';
+
+    return (
+      '<div class="key-block">' +
+      '<section class="card" aria-label="Key status">' +
+      '<div class="khead">' +
+      '<h1 class="ktitle">' +
+      esc(nm) +
+      "</h1>" +
+      '<div class="kactions">' +
+      '<div class="pill" title="API key preview">' +
+      '<span class="mono">' +
+      esc(d.keyPreview || "sk-…") +
+      "</span>" +
+      '<button type="button" class="iconbtn" data-copy="' +
+      esc(d.keyPreview || "") +
+      '" title="Copy key preview" aria-label="Copy key preview">' +
+      COPY_SVG +
+      "</button>" +
+      "</div>" +
+      '<span class="badge ' +
+      esc(st) +
+      '">' +
+      esc(st.toUpperCase()) +
+      "</span>" +
+      "</div></div>" +
+      '<div class="credit-row">' +
+      '<div class="credit">' +
+      esc(credit) +
+      "</div>" +
+      '<div class="credit-sub">' +
+      esc(creditSub) +
+      "</div></div>" +
+      '<div class="bar-meta">' +
+      '<span class="pct' +
+      barTone +
+      '">' +
+      (hasQuota ? Math.round(pctLeft) + "%" : "∞") +
+      "</span>" +
+      '<span class="side">LEFT</span></div>' +
+      '<div class="bar' +
+      barTone +
+      '" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+      Math.round(pctUsed) +
+      '"><i style="width:' +
+      pctUsed +
+      '%"></i></div>' +
+      '<div class="bar-ends"><span>' +
+      esc(fmt(used)) +
+      " used</span><span>" +
+      esc(hasQuota ? fmt(quota) : "∞") +
+      " total</span></div>" +
+      '<div class="meta">' +
+      '<div class="cell"><div class="k">TOTAL QUOTA</div><div class="v"><span>' +
+      esc(hasQuota ? full(quota) : "∞") +
+      "</span></div></div>" +
+      '<div class="cell"><div class="k">CREATED</div><div class="v"><span>' +
+      esc(dte(d.createdAt)) +
+      "</span></div></div>" +
+      '<div class="cell"><div class="k">LAST USED</div><div class="v"><span>' +
+      esc(rel(d.lastUsedAt)) +
+      "</span></div></div>" +
+      '<div class="cell"><div class="k">BASE URL</div><div class="v accent"><span>' +
+      esc(bu) +
+      '</span><button type="button" class="iconbtn" data-copy="' +
+      esc(bu) +
+      '" title="Copy base URL" aria-label="Copy base URL">' +
+      COPY_SVG +
+      "</button></div></div>" +
+      "</div></section>" +
+      '<section class="card" aria-label="Usable models">' +
+      '<div class="mhead"><div class="t">Models</div><div class="c">' +
+      models.length +
+      " USABLE</div></div>" +
+      '<div class="models">' +
+      modelsHtml +
+      "</div></section></div>"
+    );
+  }
+
+  function renderBoard(keys) {
+    if (!keys || !keys.length) {
+      showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+      return;
+    }
+    empty.classList.add("hidden");
+    board.classList.remove("hidden");
+    var bu = baseUrl();
+    board.innerHTML = keys.map(function (k) { return cardHtml(k, bu); }).join("");
+    var anyActive = keys.some(function (k) { return k.status === "active"; });
+    setLive(anyActive ? "on" : "bad");
+    $("upd").textContent = "updated just now · " + keys.length + " key" + (keys.length === 1 ? "" : "s");
   }
 
   function load() {
-    if (!currentKey) return;
-    // Same-origin proxy on the share server — no cross-origin CORS.
-    fetch("/v1/share", { headers: { "Authorization": "Bearer " + currentKey } })
+    fetch("/v1/share/board")
       .then(function (r) {
         return r.json().then(function (j) { return { ok: r.ok, j: j }; });
       })
       .then(function (res) {
-        if (!res.ok) { fail(); return; }
-        render(res.j);
+        if (!res.ok) {
+          showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+          return;
+        }
+        renderBoard(Array.isArray(res.j.keys) ? res.j.keys : []);
       })
-      .catch(function () { fail(); });
+      .catch(function () {
+        showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+      });
   }
 
-  function startWithKey(k) {
-    currentKey = k;
-    if (timer) clearInterval(timer);
-    load();
-    timer = setInterval(load, 10000);
-  }
-
-  var urlKey = keyFromHash();
-  if (urlKey) {
-    startWithKey(urlKey);
-  } else {
-    showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
-  }
-
-  $("copybase").addEventListener("click", function () { copy(baseUrl()); });
-  $("copykey").addEventListener("click", function () {
-    // Preview only — full key is never re-fetched after creation.
-    copy($("kprev").textContent || "");
+  board.addEventListener("click", function (e) {
+    var t = e.target;
+    if (!t) return;
+    var btn = t.closest ? t.closest("[data-copy]") : null;
+    if (btn && btn.getAttribute) copy(btn.getAttribute("data-copy") || "");
   });
+
+  load();
+  timer = setInterval(load, 10000);
 })();
 </script>
 </body>

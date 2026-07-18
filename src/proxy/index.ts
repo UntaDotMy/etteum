@@ -1037,42 +1037,29 @@ proxyRouter.get("/v1/models", async (c) => {
   });
 });
 
-/**
- * GET /v1/share — friend-key status (powers the dudul-style card on the share page).
- *
- * Authless-by-design: the caller presents their own managed key as
- * `Authorization: Bearer <key>` or `?key=`. The key is resolved against the
- * api_keys table (NOT the legacy env/settings key) and the response exposes ONLY
- * what that one key can see: its allowlisted models, its token quota/usage, its
- * rate cap, and its expiry. No other keys, accounts, providers, or admin data.
- *
- * Hardening: per-IP rate limit (brute-force), Cache-Control: no-store (the key
- * is in the query string), and localhost bypass for your own testing.
- */
-proxyRouter.get("/v1/share", async (c) => {
-  const ip = getClientIpFromHeaders(c.req.raw.headers);
-  if (!isLocalRequest(c.req.raw.headers, new URL(c.req.url).hostname)) {
-    const rl = shareLimiter.check(`share:${ip}`);
-    if (!rl.allowed) {
-      return c.json({ error: { message: "Too many attempts. Try again later.", type: "rate_limit_error" } }, 429);
-    }
-  }
-  c.header("Cache-Control", "no-store");
+type ShareKeyRow = typeof apiKeys.$inferSelect;
 
-  const token = c.req.query("key") || c.req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
-  if (!token) {
-    return c.json({ error: { message: "Missing key", type: "auth_error" } }, 401);
-  }
-  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
-  if (!row) {
-    return c.json({ error: { message: "Invalid key", type: "auth_error" } }, 401);
-  }
-
-  // Usable models = the key's allowlist ∩ models an active account can serve.
+/** Public status payload for one managed key (never includes the full secret). */
+function shareKeyPublic(
+  row: ShareKeyRow,
+  activeModelIds: string[],
+): {
+  name: string | null;
+  keyPreview: string;
+  status: string;
+  isActive: boolean;
+  createdAt: Date | null;
+  lastUsedAt: Date | null;
+  tokenQuota: number | null;
+  tokensUsed: number;
+  tokensLeft: number | null;
+  rateLimit: number | null;
+  expiresAt: Date | null;
+  models: string[];
+  baseUrl: string;
+} {
   const allowlist = parseAllowedModels(row.allowedModels);
-  const activeModels = await getActiveModelsCached(true);
-  const usable = activeModels.filter((m) => modelAllowed(allowlist, m.id)).map((m) => m.id);
-
+  const usable = activeModelIds.filter((id) => modelAllowed(allowlist, id));
   const tokenQuota = row.tokenQuota ?? null;
   const tokensUsed = row.tokensUsed ?? 0;
   const tokensLeft = tokenQuota != null ? Math.max(0, tokenQuota - tokensUsed) : null;
@@ -1083,8 +1070,7 @@ proxyRouter.get("/v1/share", async (c) => {
       : (tokenQuota != null && tokensLeft === 0)
         ? "exhausted"
         : "active";
-
-  return c.json({
+  return {
     name: row.name || null,
     keyPreview: row.key.slice(0, 12) + "…",
     status,
@@ -1098,7 +1084,64 @@ proxyRouter.get("/v1/share", async (c) => {
     expiresAt: row.expiresAt,
     models: usable,
     baseUrl: "/v1",
-  });
+  };
+}
+
+function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }): Response | null {
+  const ip = getClientIpFromHeaders(c.req.raw.headers);
+  if (!isLocalRequest(c.req.raw.headers, new URL(c.req.url).hostname)) {
+    const rl = shareLimiter.check(`share:${ip}`);
+    if (!rl.allowed) {
+      return new Response(
+        JSON.stringify({ error: { message: "Too many attempts. Try again later.", type: "rate_limit_error" } }),
+        { status: 429, headers: { "Content-Type": "application/json", "Cache-Control": "no-store" } },
+      );
+    }
+  }
+  return null;
+}
+
+/**
+ * GET /v1/share/board — public status board for ALL managed friend keys.
+ *
+ * Powers the bare share page (open :SHARE_PORT with no #k=). Returns name,
+ * masked preview, quota, models, status — never full secrets, accounts, or
+ * admin settings. Rate-limited per IP.
+ */
+proxyRouter.get("/v1/share/board", async (c) => {
+  const blocked = shareRateLimited(c);
+  if (blocked) return blocked;
+  c.header("Cache-Control", "no-store");
+
+  const rows = await db.select().from(apiKeys);
+  const activeModels = await getActiveModelsCached(true);
+  const activeIds = activeModels.map((m) => m.id);
+  const keys = rows.map((row) => shareKeyPublic(row, activeIds));
+  return c.json({ keys, baseUrl: "/v1", count: keys.length });
+});
+
+/**
+ * GET /v1/share — single friend-key status (optional deep link with Bearer/?key=).
+ *
+ * Authless-by-design for one presented managed key. Prefer /v1/share/board for
+ * the public multi-key status page.
+ */
+proxyRouter.get("/v1/share", async (c) => {
+  const blocked = shareRateLimited(c);
+  if (blocked) return blocked;
+  c.header("Cache-Control", "no-store");
+
+  const token = c.req.query("key") || c.req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
+  if (!token) {
+    return c.json({ error: { message: "Missing key", type: "auth_error" } }, 401);
+  }
+  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
+  if (!row) {
+    return c.json({ error: { message: "Invalid key", type: "auth_error" } }, 401);
+  }
+
+  const activeModels = await getActiveModelsCached(true);
+  return c.json(shareKeyPublic(row, activeModels.map((m) => m.id)));
 });
 
 /**

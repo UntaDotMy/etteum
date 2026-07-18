@@ -33,7 +33,6 @@ import {
   deleteManagedKey,
   type ManagedKey,
 } from "@/lib/api";
-import { getFullKey } from "./fullKeyStore";
 import KeyFormDialog from "./KeyFormDialog";
 
 /** Recently-connected window: a key whose lastUsedAt is within this is "connected". */
@@ -56,9 +55,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   );
   const shareBase = info?.share?.url ?? null;
 
-  function shareLink(key: string): string {
-    const base = (shareBase || window.location.origin).replace(/\/$/, "");
-    return `${base}/#k=${encodeURIComponent(key)}`;
+  /** Public share status page — lists all managed keys (no #k= needed). */
+  function sharePageUrl(): string {
+    return (shareBase || window.location.origin).replace(/\/$/, "") || window.location.origin;
   }
 
   const [formOpen, setFormOpen] = useState(false);
@@ -103,15 +102,11 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   }
 
   function copyShareLink(k: ManagedKey) {
-    const full = getFullKey(k.id);
-    if (!full) {
-      onError("Share link needs the full key — only available right after creating it this session. Create a new key to get its link.");
-      return;
-    }
-    navigator.clipboard.writeText(shareLink(full)).then(
+    navigator.clipboard.writeText(sharePageUrl()).then(
       () => {
         setCopiedLinkId(k.id);
         setTimeout(() => setCopiedLinkId((c) => (c === k.id ? null : c)), 1800);
+        onInfo("Share page link copied.");
       },
       () => onError("Could not copy link."),
     );
@@ -128,9 +123,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
             </CardTitle>
             <CardDescription>
               Per-key model access, token quota, rate cap, and expiry. A managed key only ever
-              reaches <span className="font-mono">/v1/*</span> — never this dashboard. The friend
-              status page only shows a key when opened via its <strong>share link</strong> (not by
-              listing keys from admin).
+              reaches <span className="font-mono">/v1/*</span> — never this dashboard. Keys you
+              create appear on the public share page (<span className="font-mono">SHARE_PORT</span>
+              , e.g. :80) automatically.
             </CardDescription>
           </div>
           <Button size="sm" onClick={openCreate}>
@@ -151,7 +146,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                   k={k}
                   busy={busyId === k.id}
                   linkCopied={copiedLinkId === k.id}
-                  hasShareLink={getFullKey(k.id) != null}
+                  hasShareLink={true}
                   onCopyLink={() => copyShareLink(k)}
                   onEdit={() => openEdit(k)}
                   onToggle={() =>
@@ -199,9 +194,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
           <DialogHeader>
             <DialogTitle>Key created</DialogTitle>
             <DialogDescription>
-              This is the only time the full key is shown. Send the <strong>share link</strong> to
-              your friend — opening that link is how the status card loads. Opening the bare share
-              page with no link will say &quot;No keys yet&quot;.
+              This is the only time the full API key is shown — copy it for the friend&apos;s
+              client. Status (quota / models) is public on the share page at{" "}
+              <span className="font-mono">{sharePageUrl()}</span> — no special hash needed.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -214,44 +209,40 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                 </Button>
               </div>
             </div>
-            {createdKey && (
-              <div>
-                <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">Share link (status page)</div>
-                <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
-                  <code className="flex-1 break-all font-mono text-xs text-[var(--foreground)]">
-                    {shareLink(createdKey)}
-                  </code>
-                  <Button
-                    variant="outline"
-                    size="icon"
-                    title="Copy share link"
-                    onClick={() => {
-                      navigator.clipboard.writeText(shareLink(createdKey)).then(
-                        () => {
-                          setCopiedLink(true);
-                          setTimeout(() => setCopiedLink(false), 1800);
-                          onInfo("Share link copied.");
-                        },
-                        () => onError("Could not copy link."),
-                      );
-                    }}
-                  >
-                    {copiedLink ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Link2 className="w-4 h-4" />}
-                  </Button>
-                </div>
+            <div>
+              <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">Status page</div>
+              <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
+                <code className="flex-1 break-all font-mono text-xs text-[var(--foreground)]">
+                  {sharePageUrl()}
+                </code>
+                <Button
+                  variant="outline"
+                  size="icon"
+                  title="Copy status page URL"
+                  onClick={() => {
+                    navigator.clipboard.writeText(sharePageUrl()).then(
+                      () => {
+                        setCopiedLink(true);
+                        setTimeout(() => setCopiedLink(false), 1800);
+                        onInfo("Status page link copied.");
+                      },
+                      () => onError("Could not copy link."),
+                    );
+                  }}
+                >
+                  {copiedLink ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Link2 className="w-4 h-4" />}
+                </Button>
               </div>
-            )}
+            </div>
           </div>
           <DialogFooter className="gap-2 sm:gap-0">
-            {createdKey && (
-              <Button
-                variant="outline"
-                onClick={() => window.open(shareLink(createdKey), "_blank", "noopener,noreferrer")}
-              >
-                <ExternalLink className="w-4 h-4" />
-                Open status page
-              </Button>
-            )}
+            <Button
+              variant="outline"
+              onClick={() => window.open(sharePageUrl(), "_blank", "noopener,noreferrer")}
+            >
+              <ExternalLink className="w-4 h-4" />
+              Open status page
+            </Button>
             <Button onClick={() => setCreatedKey(null)}>Done</Button>
           </DialogFooter>
         </DialogContent>
@@ -388,7 +379,7 @@ function KeyCard(props: {
 
       <div className="flex gap-1 pt-1 border-t border-[var(--border)]">
         <IconBtn
-          title={hasShareLink ? "Copy share link" : "Share link (needs the full key — only right after creating)"}
+          title="Copy status page URL"
           onClick={onCopyLink}
           disabled={busy}
         >
