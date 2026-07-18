@@ -6,14 +6,11 @@ import {
   Settings2,
   Sparkles,
   Loader2,
-  Bot,
-  User,
   ChevronDown,
   StopCircle,
   PanelLeft,
   MessageSquare,
   X,
-  Paperclip,
   Image as ImageIcon,
   FileText,
   Video,
@@ -866,22 +863,230 @@ export default function Chat() {
     filteredModelsByProvider[m.provider]!.push(m);
   }
 
+  const isEmptyThread = !active || (active.messages.length === 0 && !streaming);
+
+  const modelPicker = (
+    <div className="relative shrink-0">
+      <button
+        type="button"
+        onClick={() => setShowModelSelect((v) => !v)}
+        disabled={modelsLoading || !active}
+        className="inline-flex h-8 max-w-[11rem] items-center gap-1 rounded-full border border-[var(--border)] bg-[var(--background)] px-2.5 text-[11px] text-[var(--foreground)] transition-colors hover:border-[var(--primary)]/40 disabled:opacity-50"
+        title={activeModel || "Select model"}
+      >
+        <Sparkles className="h-3 w-3 shrink-0 text-[var(--primary)]" />
+        <span className="truncate font-mono">{activeModel || "model"}</span>
+        <ChevronDown className="h-3 w-3 shrink-0 opacity-60" />
+      </button>
+      {showModelSelect && (
+        <>
+          <div className="fixed inset-0 z-40" onClick={() => setShowModelSelect(false)} />
+          <div className="absolute bottom-full right-0 z-50 mb-2 w-[min(100vw-2rem,18rem)] max-h-80 overflow-hidden rounded-xl border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
+            <div className="border-b border-[var(--border)] p-2">
+              <Input
+                value={searchQuery}
+                onChange={(e) => setSearchQuery(e.target.value)}
+                placeholder="Search models…"
+                className="h-8 text-xs"
+                autoFocus
+              />
+            </div>
+            <div className="max-h-64 overflow-y-auto p-1">
+              {modelsLoading ? (
+                <div className="flex justify-center py-8">
+                  <Loader2 className="h-5 w-5 animate-spin text-[var(--primary)]" />
+                </div>
+              ) : Object.keys(filteredModelsByProvider).length === 0 ? (
+                <p className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">
+                  No models. Check accounts and pool.
+                </p>
+              ) : (
+                Object.entries(filteredModelsByProvider).map(([provider, mods]) => (
+                  <div key={provider} className="mb-1">
+                    <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
+                      {provider}
+                    </p>
+                    {mods.map((m) => (
+                      <button
+                        key={m.id}
+                        type="button"
+                        onClick={() => handleModelChange(m.id)}
+                        className={cn(
+                          "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors",
+                          m.id === activeModel
+                            ? "bg-[color-mix(in_srgb,var(--primary)_12%,transparent)] text-[var(--primary)]"
+                            : "text-[var(--foreground)] hover:bg-[var(--secondary)]",
+                        )}
+                      >
+                        <span className="truncate font-mono">{m.id}</span>
+                        {m.id === activeModel && (
+                          <Badge variant="outline" className="ml-2 shrink-0 text-[9px]">
+                            active
+                          </Badge>
+                        )}
+                      </button>
+                    ))}
+                  </div>
+                ))
+              )}
+            </div>
+          </div>
+        </>
+      )}
+    </div>
+  );
+
+  const composerInner = (
+    <>
+      {genKind && (
+        <div className="mb-2 flex items-center gap-2 rounded-full border border-[var(--primary)]/25 bg-[color-mix(in_srgb,var(--primary)_8%,var(--card))] px-3 py-1.5 text-[11px] text-[var(--foreground)]">
+          {genKind === "video" ? (
+            <Video className="h-3.5 w-3.5 text-[var(--primary)]" />
+          ) : (
+            <Wand2 className="h-3.5 w-3.5 text-[var(--primary)]" />
+          )}
+          <span>
+            This model generates <strong>{genKind}</strong> — message is the prompt.
+          </span>
+        </div>
+      )}
+      {attachments.length > 0 && (
+        <div className="mb-2 flex flex-wrap gap-2">
+          {attachments.map((a) => (
+            <div
+              key={a.id}
+              className="group relative flex items-center gap-2 rounded-full border border-[var(--border)] bg-[var(--secondary)]/40 px-2 py-1.5"
+            >
+              {a.kind === "image" && a.dataUrl ? (
+                <img src={a.dataUrl} alt="" className="h-8 w-8 rounded-md object-cover" />
+              ) : (
+                <FileText className="h-4 w-4 text-[var(--muted-foreground)]" />
+              )}
+              <span className="max-w-[8rem] truncate text-[11px] text-[var(--foreground)]">
+                {a.name}
+              </span>
+              <button
+                type="button"
+                className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--secondary)] hover:text-[var(--error)]"
+                onClick={() => removeAttachment(a.id)}
+                aria-label="Remove attachment"
+              >
+                <X className="h-3 w-3" />
+              </button>
+            </div>
+          ))}
+        </div>
+      )}
+      {attachError && <p className="mb-2 text-[11px] text-[var(--error)]">{attachError}</p>}
+      <div
+        className={cn(
+          "flex items-center gap-1.5 rounded-[1.75rem] border border-[var(--border)] bg-[var(--card)]/95 p-1.5 shadow-[var(--shadow-card)] backdrop-blur-xl",
+          "focus-within:border-[var(--primary)]/40 focus-within:shadow-[var(--glow)]",
+          "supports-[backdrop-filter]:bg-[var(--card)]/88",
+        )}
+      >
+        <input
+          ref={fileInputRef}
+          type="file"
+          multiple
+          accept="image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml"
+          className="hidden"
+          onChange={(e) => {
+            if (e.target.files?.length) void addFiles(e.target.files);
+            e.target.value = "";
+          }}
+        />
+        <button
+          type="button"
+          disabled={streaming || !active || !!genKind}
+          title={genKind ? "Attachments not used for generation models" : "Attach files"}
+          onClick={() => fileInputRef.current?.click()}
+          className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--background)] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)] disabled:opacity-40"
+        >
+          <Plus className="h-4 w-4" />
+        </button>
+        <textarea
+          ref={inputRef}
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          onPaste={handlePaste}
+          placeholder={
+            streaming
+              ? "Waiting for response…"
+              : genKind
+                ? `Describe the ${genKind} to generate…`
+                : isEmptyThread
+                  ? "What do you want to know?"
+                  : "Ask anything"
+          }
+          disabled={streaming || !active}
+          rows={1}
+          className="max-h-36 min-h-[36px] flex-1 resize-none bg-transparent py-2 text-sm leading-5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none disabled:opacity-60"
+        />
+        {modelPicker}
+        <button
+          type="button"
+          disabled={streaming || !active || !!genKind}
+          title="Attach image"
+          onClick={() => {
+            if (fileInputRef.current) {
+              fileInputRef.current.accept = "image/*";
+              fileInputRef.current.click();
+              setTimeout(() => {
+                if (fileInputRef.current) {
+                  fileInputRef.current.accept =
+                    "image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml";
+                }
+              }, 500);
+            }
+          }}
+          className="hidden h-9 w-9 shrink-0 items-center justify-center rounded-full text-[var(--muted-foreground)] transition-colors hover:bg-[var(--secondary)] hover:text-[var(--foreground)] disabled:opacity-40 sm:flex"
+        >
+          <ImageIcon className="h-4 w-4" />
+        </button>
+        {streaming ? (
+          <button
+            type="button"
+            onClick={handleStop}
+            title="Stop"
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full border border-[var(--error)]/40 bg-[var(--error)]/10 text-[var(--error)]"
+          >
+            <StopCircle className="h-4 w-4" />
+          </button>
+        ) : (
+          <button
+            type="button"
+            onClick={() => void handleSend()}
+            disabled={(!input.trim() && attachments.length === 0) || !active || !activeModel}
+            title={genKind ? `Generate ${genKind}` : "Send"}
+            className="flex h-9 w-9 shrink-0 items-center justify-center rounded-full bg-[var(--primary)] text-[var(--primary-foreground)] transition-opacity hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-40"
+          >
+            {genKind ? <Wand2 className="h-4 w-4" /> : <Send className="h-4 w-4" />}
+          </button>
+        )}
+      </div>
+    </>
+  );
+
   const historyPanel = (
     <div
       className={cn(
-        "flex w-72 shrink-0 flex-col border-r border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]",
-        "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[min(100%,18rem)] max-md:shadow-[var(--shadow-card)]",
+        "flex w-[15.5rem] shrink-0 flex-col border-r border-[var(--sidebar-border)] bg-[var(--sidebar-bg)]",
+        "max-md:fixed max-md:inset-y-0 max-md:left-0 max-md:z-50 max-md:w-[min(100%,16rem)] max-md:shadow-[var(--shadow-card)]",
       )}
     >
-      <div className="flex items-center justify-between border-b border-[var(--sidebar-border)] px-3 py-3">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--foreground)]">Chat</h2>
-          <p className="text-[10px] text-[var(--muted-foreground)]">Local history · pool models</p>
+      <div className="flex items-center justify-between px-3 pt-3 pb-2">
+        <div className="flex items-center gap-2">
+          <div className="flex h-7 w-7 items-center justify-center rounded-full border border-[var(--primary)]/30 bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
+            <Sparkles className="h-3.5 w-3.5 text-[var(--primary)]" />
+          </div>
+          <span className="text-sm font-semibold tracking-tight text-[var(--foreground)]">Chat</span>
         </div>
         <Button
           variant="ghost"
           size="icon"
-          className="md:hidden"
+          className="h-8 w-8 md:hidden"
           onClick={() => setShowHistory(false)}
           aria-label="Close history"
         >
@@ -889,14 +1094,31 @@ export default function Chat() {
         </Button>
       </div>
 
-      <div className="p-2">
-        <Button variant="outline" size="sm" className="w-full justify-start" onClick={handleNewChat}>
-          <Plus className="mr-2 h-3.5 w-3.5" />
-          New chat
-        </Button>
+      <div className="space-y-1 px-2 pb-2">
+        <button
+          type="button"
+          onClick={handleNewChat}
+          className="flex w-full items-center gap-2 rounded-xl border border-transparent bg-[var(--secondary)]/70 px-3 py-2 text-left text-sm text-[var(--foreground)] transition-colors hover:border-[var(--border)] hover:bg-[var(--secondary)]"
+        >
+          <MessageSquare className="h-4 w-4 text-[var(--primary)]" />
+          New Chat
+        </button>
+        <button
+          type="button"
+          onClick={() => setShowSystemPrompt((v) => !v)}
+          className={cn(
+            "flex w-full items-center gap-2 rounded-xl px-3 py-2 text-left text-sm transition-colors",
+            showSystemPrompt
+              ? "bg-[color-mix(in_srgb,var(--primary)_10%,transparent)] text-[var(--primary)]"
+              : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/60 hover:text-[var(--foreground)]",
+          )}
+        >
+          <Settings2 className="h-4 w-4" />
+          System prompt
+        </button>
       </div>
 
-      <div className="px-3 pb-1">
+      <div className="px-3 pb-1.5 pt-1">
         <p className="text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
           History
         </p>
@@ -916,53 +1138,30 @@ export default function Chat() {
               }
             }}
             className={cn(
-              "group flex w-full cursor-pointer items-start gap-2 rounded-lg border px-2.5 py-2 text-left transition-colors",
+              "group flex w-full cursor-pointer items-center gap-2 rounded-xl px-2.5 py-2 text-left transition-colors",
               conv.id === activeId
-                ? "border-[var(--primary)]/30 bg-[color-mix(in_srgb,var(--primary)_10%,transparent)] shadow-[var(--shadow-card)]"
-                : "border-transparent hover:border-[var(--border)] hover:bg-[var(--secondary)]/60",
+                ? "bg-[var(--secondary)] text-[var(--foreground)]"
+                : "text-[var(--muted-foreground)] hover:bg-[var(--secondary)]/50 hover:text-[var(--foreground)]",
             )}
           >
-            <div
-              className={cn(
-                "mt-0.5 flex h-7 w-7 shrink-0 items-center justify-center rounded-md border",
-                conv.id === activeId
-                  ? "border-[var(--primary)]/40 bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))]"
-                  : "border-[var(--border)] bg-[var(--card)]",
-              )}
-            >
-              <MessageSquare
-                className={cn(
-                  "h-3.5 w-3.5",
-                  conv.id === activeId ? "text-[var(--primary)]" : "text-[var(--muted-foreground)]",
-                )}
-              />
-            </div>
             <div className="min-w-0 flex-1">
-              <p
-                className={cn(
-                  "truncate text-xs font-medium",
-                  conv.id === activeId ? "text-[var(--primary)]" : "text-[var(--foreground)]",
-                )}
-              >
-                {conv.title}
-              </p>
-              <p className="mt-0.5 truncate text-[10px] text-[var(--muted-foreground)]">
+              <p className="truncate text-xs font-medium text-[var(--foreground)]">{conv.title}</p>
+              <p className="mt-0.5 truncate font-mono text-[10px] text-[var(--muted-foreground)]">
                 {conv.model}
               </p>
             </div>
-            <Button
-              variant="ghost"
-              size="icon"
-              className="h-7 w-7 shrink-0 opacity-0 group-hover:opacity-100"
+            <button
+              type="button"
+              className="rounded-md p-1 opacity-0 transition-opacity hover:bg-[var(--background)] group-hover:opacity-100"
               onClick={(e) => handleDeleteConversation(conv.id, e)}
               aria-label="Delete conversation"
             >
               <Trash2 className="h-3 w-3 text-[var(--error)]" />
-            </Button>
+            </button>
           </div>
         ))}
         {conversations.length === 0 && (
-          <div className="rounded-lg border border-dashed border-[var(--border)] px-3 py-8 text-center">
+          <div className="rounded-xl border border-dashed border-[var(--border)] px-3 py-8 text-center">
             <p className="text-xs text-[var(--muted-foreground)]">No conversations yet</p>
           </div>
         )}
@@ -971,7 +1170,7 @@ export default function Chat() {
   );
 
   return (
-    <div className="flex h-[calc(100vh-4rem)] min-h-[28rem] overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
+    <div className="relative -mx-4 -mb-4 flex h-[calc(100vh-5rem)] min-h-[28rem] overflow-hidden bg-[var(--background)] md:-mx-6 md:-mb-6 md:h-[calc(100vh-3rem)]">
       {/* Desktop history */}
       {showHistory && <div className="hidden md:flex">{historyPanel}</div>}
 
@@ -988,108 +1187,34 @@ export default function Chat() {
       )}
 
       {/* Main column */}
-      <div className="flex min-w-0 flex-1 flex-col bg-[var(--background)]">
-        {/* Toolbar */}
-        <div className="flex flex-wrap items-center gap-2 border-b border-[var(--border)] bg-[var(--card)] px-3 py-2.5">
-          <Button
-            variant="outline"
-            size="sm"
+      <div className="relative flex min-w-0 flex-1 flex-col">
+        {/* Compact top bar */}
+        <div className="flex items-center gap-2 px-3 py-2.5 md:px-4">
+          <button
+            type="button"
             onClick={() => setShowHistory((v) => !v)}
             title="Toggle history"
+            className="flex h-8 w-8 items-center justify-center rounded-full border border-[var(--border)] bg-[var(--card)] text-[var(--muted-foreground)] transition-colors hover:text-[var(--foreground)]"
           >
-            <PanelLeft className="mr-1.5 h-3.5 w-3.5" />
-            History
-          </Button>
-          <Button variant="outline" size="sm" onClick={handleNewChat}>
-            <Plus className="mr-1.5 h-3.5 w-3.5" />
+            <PanelLeft className="h-3.5 w-3.5" />
+          </button>
+          <button
+            type="button"
+            onClick={handleNewChat}
+            className="flex h-8 items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--card)] px-3 text-xs text-[var(--foreground)] transition-colors hover:border-[var(--primary)]/40"
+          >
+            <Plus className="h-3.5 w-3.5" />
             New
-          </Button>
-
-          <div className="mx-1 hidden h-5 w-px bg-[var(--border)] sm:block" />
-
-          <div className="relative min-w-0 flex-1 sm:flex-none">
-            <Button
-              variant="outline"
-              size="sm"
-              className="max-w-full"
-              onClick={() => setShowModelSelect(!showModelSelect)}
-              disabled={modelsLoading}
-            >
-              <Sparkles className="mr-1.5 h-3.5 w-3.5 shrink-0 text-[var(--primary)]" />
-              <span className="truncate font-mono text-xs">{activeModel || "Select model"}</span>
-              <ChevronDown className="ml-1.5 h-3 w-3 shrink-0 opacity-60" />
-            </Button>
-
-            {showModelSelect && (
-              <>
-                <div className="fixed inset-0 z-10" onClick={() => setShowModelSelect(false)} />
-                <div className="absolute left-0 top-full z-20 mt-1 w-[min(100vw-2rem,20rem)] max-h-96 overflow-hidden rounded-lg border border-[var(--border)] bg-[var(--card)] shadow-[var(--shadow-card)]">
-                  <div className="border-b border-[var(--border)] p-2">
-                    <Input
-                      value={searchQuery}
-                      onChange={(e) => setSearchQuery(e.target.value)}
-                      placeholder="Search models…"
-                      className="h-8 text-xs"
-                      autoFocus
-                    />
-                  </div>
-                  <div className="max-h-72 overflow-y-auto p-1">
-                    {modelsLoading ? (
-                      <div className="flex justify-center py-8">
-                        <Loader2 className="h-5 w-5 animate-spin text-[var(--primary)]" />
-                      </div>
-                    ) : Object.keys(filteredModelsByProvider).length === 0 ? (
-                      <p className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">
-                        No models. Check accounts and pool.
-                      </p>
-                    ) : (
-                      Object.entries(filteredModelsByProvider).map(([provider, mods]) => (
-                        <div key={provider} className="mb-1">
-                          <p className="px-2 py-1 text-[10px] font-semibold uppercase tracking-wider text-[var(--muted-foreground)]">
-                            {provider}
-                          </p>
-                          {mods.map((m) => (
-                            <button
-                              key={m.id}
-                              type="button"
-                              onClick={() => handleModelChange(m.id)}
-                              className={cn(
-                                "flex w-full items-center justify-between rounded-md px-2 py-1.5 text-left text-xs transition-colors",
-                                m.id === activeModel
-                                  ? "bg-[color-mix(in_srgb,var(--primary)_12%,transparent)] text-[var(--primary)]"
-                                  : "text-[var(--foreground)] hover:bg-[var(--secondary)]",
-                              )}
-                            >
-                              <span className="truncate font-mono">{m.id}</span>
-                              {m.id === activeModel && (
-                                <Badge variant="outline" className="ml-2 shrink-0 text-[9px]">
-                                  active
-                                </Badge>
-                              )}
-                            </button>
-                          ))}
-                        </div>
-                      ))
-                    )}
-                  </div>
-                </div>
-              </>
-            )}
-          </div>
-
-          <Button
-            variant={showSystemPrompt ? "secondary" : "ghost"}
-            size="sm"
-            onClick={() => setShowSystemPrompt(!showSystemPrompt)}
-            title="System prompt"
-          >
-            <Settings2 className="mr-1.5 h-3.5 w-3.5" />
-            System
-          </Button>
+          </button>
+          {!isEmptyThread && active && (
+            <p className="ml-1 min-w-0 flex-1 truncate text-xs text-[var(--muted-foreground)]">
+              {active.title}
+            </p>
+          )}
         </div>
 
         {showSystemPrompt && (
-          <div className="border-b border-[var(--border)] bg-[var(--secondary)]/40 px-3 py-3">
+          <div className="mx-3 mb-2 rounded-2xl border border-[var(--border)] bg-[var(--card)] px-3 py-3 md:mx-4">
             <div className="mb-2 flex items-center justify-between">
               <label className="text-xs font-medium text-[var(--foreground)]">System prompt</label>
               <div className="flex gap-2">
@@ -1113,15 +1238,15 @@ export default function Chat() {
               onChange={(e) => setSystemPrompt(e.target.value)}
               rows={3}
               placeholder="Instructions for the model…"
-              className="w-full resize-none rounded-lg border border-[var(--border)] bg-[var(--background)] p-2.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
+              className="w-full resize-none rounded-xl border border-[var(--border)] bg-[var(--background)] p-2.5 text-xs text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)]"
             />
           </div>
         )}
 
-        {/* Messages — scroll container (do not use scrollIntoView; it moves the page). */}
+        {/* Messages / empty state */}
         <div
           ref={messagesScrollRef}
-          className="flex-1 overflow-y-auto"
+          className={cn("flex-1 overflow-y-auto", isEmptyThread && "flex flex-col")}
           onScroll={() => {
             const el = messagesScrollRef.current;
             if (!el) return;
@@ -1129,26 +1254,26 @@ export default function Chat() {
             stickMessagesToBottomRef.current = dist < 80;
           }}
         >
-          {active && active.messages.length === 0 && !streaming && (
-            <div className="flex h-full flex-col items-center justify-center px-4 py-16 text-center">
-              <div className="mb-4 flex h-14 w-14 items-center justify-center rounded-lg border border-[var(--border)] bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
-                <Bot className="h-7 w-7 text-[var(--primary)]" />
+          {isEmptyThread && (
+            <div className="flex flex-1 flex-col items-center justify-center px-4 pb-28 pt-8 text-center">
+              <div className="mb-5 flex items-center gap-3">
+                <div className="flex h-11 w-11 items-center justify-center rounded-full border border-[var(--primary)]/35 bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))] shadow-[var(--glow)]">
+                  <Sparkles className="h-5 w-5 text-[var(--primary)]" />
+                </div>
+                <h1 className="text-3xl font-semibold tracking-tight text-[var(--foreground)] sm:text-4xl">
+                  Etteum
+                </h1>
               </div>
-              <h2 className="text-lg font-semibold text-[var(--foreground)]">Start a conversation</h2>
-              <p className="mt-2 max-w-sm text-sm text-[var(--muted-foreground)]">
-                Pick a pool model, then send a message. Completions go through Etteum and use account
-                credits like any other client.
+              <p className="mb-8 max-w-md text-sm text-[var(--muted-foreground)]">
+                Chat through your proxy pool. Pick a model, ask anything — streaming, vision, and
+                image models all work here.
               </p>
-              {activeModel && (
-                <Badge variant="outline" className="mt-4 font-mono text-[10px]">
-                  {activeModel}
-                </Badge>
-              )}
+              <div className="w-full max-w-2xl">{composerInner}</div>
             </div>
           )}
 
-          {active && (active.messages.length > 0 || streaming) && (
-            <div className="mx-auto max-w-3xl space-y-4 px-3 py-6 sm:px-4">
+          {!isEmptyThread && active && (
+            <div className="mx-auto w-full max-w-3xl space-y-5 px-3 pb-36 pt-4 sm:px-6">
               {active.messages.map((msg) => {
                 const isUser = msg.role === "user";
                 const isError =
@@ -1158,122 +1283,155 @@ export default function Chat() {
                 return (
                   <div
                     key={msg.id}
-                    className={cn("flex gap-2.5", isUser ? "flex-row-reverse" : "flex-row")}
+                    className={cn(
+                      "flex w-full",
+                      isUser ? "justify-end" : "justify-start",
+                    )}
                   >
                     <div
                       className={cn(
-                        "flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border",
-                        isUser
-                          ? "border-[var(--border)] bg-[var(--secondary)]"
-                          : "border-[var(--primary)]/30 bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]",
+                        "min-w-0",
+                        isUser ? "max-w-[min(100%,28rem)]" : "w-full max-w-[min(100%,42rem)]",
                       )}
                     >
-                      {isUser ? (
-                        <User className="h-3.5 w-3.5 text-[var(--muted-foreground)]" />
-                      ) : (
-                        <Bot className="h-3.5 w-3.5 text-[var(--primary)]" />
-                      )}
-                    </div>
-                    <div className={cn("min-w-0 max-w-[min(100%,42rem)]", isUser && "text-right")}>
-                      <div
-                        className={cn(
-                          "rounded-lg border px-3 py-2.5 text-left shadow-[var(--shadow-card)]",
-                          isUser
-                            ? "border-[var(--primary)]/35 bg-[color-mix(in_srgb,var(--primary)_14%,var(--card))] text-sm leading-relaxed text-[var(--foreground)] whitespace-pre-wrap"
-                            : isError
-                              ? "border-[var(--error)]/40 bg-[color-mix(in_srgb,var(--error)_10%,var(--card))] text-sm leading-relaxed text-[var(--error)] whitespace-pre-wrap"
-                              : "border-[var(--border)] bg-[var(--card)] text-[var(--foreground)]",
-                        )}
-                      >
-                        {!isUser && !isError && msg.thinking ? (
+                      {!isUser && !isError && msg.thinking ? (
+                        <div className="mb-2">
                           <ThinkingBlock content={msg.thinking} defaultOpen={false} />
-                        ) : null}
-                        {msg.media && msg.media.length > 0 && (
-                          <div className={cn("mb-2 flex flex-col gap-2", isUser && "items-end")}>
-                            {msg.media.map((med, i) => {
-                              if (med.type === "image" && med.url) {
-                                return (
-                                  <a
-                                    key={i}
-                                    href={med.url}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="block max-w-full overflow-hidden rounded-md border border-[var(--border)]"
-                                  >
-                                    <img
+                        </div>
+                      ) : null}
+
+                      {isUser ? (
+                        <div className="rounded-2xl rounded-br-md bg-[var(--secondary)] px-3.5 py-2 text-left text-sm leading-relaxed text-[var(--foreground)] whitespace-pre-wrap">
+                          {msg.media && msg.media.length > 0 && (
+                            <div className="mb-2 flex flex-col items-end gap-2">
+                              {msg.media.map((med, i) => {
+                                if (med.type === "image" && med.url) {
+                                  return (
+                                    <a
+                                      key={i}
+                                      href={med.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="block max-w-full overflow-hidden rounded-xl"
+                                    >
+                                      <img
+                                        src={med.url}
+                                        alt={med.name || "attachment"}
+                                        className="max-h-56 max-w-full object-contain"
+                                        loading="lazy"
+                                      />
+                                    </a>
+                                  );
+                                }
+                                if (med.type === "file") {
+                                  return (
+                                    <span
+                                      key={i}
+                                      className="inline-flex items-center gap-1.5 rounded-full bg-[var(--background)]/50 px-2 py-1 text-[11px] text-[var(--muted-foreground)]"
+                                    >
+                                      <FileText className="h-3 w-3" />
+                                      {med.name || "file"}
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })}
+                            </div>
+                          )}
+                          {displayContent}
+                        </div>
+                      ) : (
+                        <div
+                          className={cn(
+                            "text-left text-sm leading-relaxed",
+                            isError
+                              ? "rounded-2xl border border-[var(--error)]/40 bg-[color-mix(in_srgb,var(--error)_10%,var(--card))] px-3.5 py-2.5 text-[var(--error)] whitespace-pre-wrap"
+                              : "text-[var(--foreground)]",
+                          )}
+                        >
+                          {msg.media && msg.media.length > 0 && (
+                            <div className="mb-3 flex flex-col gap-2">
+                              {msg.media.map((med, i) => {
+                                if (med.type === "image" && med.url) {
+                                  return (
+                                    <a
+                                      key={i}
+                                      href={med.url}
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="block max-w-full overflow-hidden rounded-xl border border-[var(--border)]"
+                                    >
+                                      <img
+                                        src={med.url}
+                                        alt={med.name || "attachment"}
+                                        className="max-h-80 max-w-full object-contain"
+                                        loading="lazy"
+                                      />
+                                    </a>
+                                  );
+                                }
+                                if (med.type === "video" && med.url) {
+                                  return (
+                                    <video
+                                      key={i}
                                       src={med.url}
-                                      alt={med.name || "attachment"}
-                                      className="max-h-72 max-w-full object-contain"
-                                      loading="lazy"
+                                      controls
+                                      className="max-h-80 max-w-full rounded-xl border border-[var(--border)]"
                                     />
-                                  </a>
-                                );
-                              }
-                              if (med.type === "video" && med.url) {
-                                return (
-                                  <video
-                                    key={i}
-                                    src={med.url}
-                                    controls
-                                    className="max-h-80 max-w-full rounded-md border border-[var(--border)]"
-                                  />
-                                );
-                              }
-                              if (med.type === "file") {
-                                return (
-                                  <span
-                                    key={i}
-                                    className="inline-flex items-center gap-1.5 rounded-md border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-1 text-[11px] text-[var(--muted-foreground)]"
-                                  >
-                                    <FileText className="h-3 w-3" />
-                                    {med.name || "file"}
-                                  </span>
-                                );
-                              }
-                              return null;
-                            })}
-                          </div>
-                        )}
-                        {isUser || isError ? (
-                          displayContent
-                        ) : (
-                          <MarkdownContent content={displayContent} />
-                        )}
-                        {!isUser && msg.media && msg.media.some((m) => m.url && (m.type === "image" || m.type === "video")) && (
-                          <div className="mt-2 flex flex-wrap gap-2">
-                            {msg.media
-                              .filter((m) => m.url && (m.type === "image" || m.type === "video"))
-                              .map((m, i) => (
-                                <a
-                                  key={`dl-${i}`}
-                                  href={m.url}
-                                  download
-                                  target="_blank"
-                                  rel="noopener noreferrer"
-                                  className="inline-flex items-center gap-1 text-[10px] text-[var(--primary)] hover:underline"
-                                >
-                                  <Download className="h-3 w-3" />
-                                  Open {m.type}
-                                </a>
-                              ))}
-                          </div>
-                        )}
-                      </div>
+                                  );
+                                }
+                                if (med.type === "file") {
+                                  return (
+                                    <span
+                                      key={i}
+                                      className="inline-flex items-center gap-1.5 rounded-full border border-[var(--border)] bg-[var(--secondary)]/50 px-2 py-1 text-[11px] text-[var(--muted-foreground)]"
+                                    >
+                                      <FileText className="h-3 w-3" />
+                                      {med.name || "file"}
+                                    </span>
+                                  );
+                                }
+                                return null;
+                              })}
+                            </div>
+                          )}
+                          {isError ? displayContent : <MarkdownContent content={displayContent} />}
+                          {!isError &&
+                            msg.media &&
+                            msg.media.some(
+                              (m) => m.url && (m.type === "image" || m.type === "video"),
+                            ) && (
+                              <div className="mt-2 flex flex-wrap gap-2">
+                                {msg.media
+                                  .filter(
+                                    (m) => m.url && (m.type === "image" || m.type === "video"),
+                                  )
+                                  .map((m, i) => (
+                                    <a
+                                      key={`dl-${i}`}
+                                      href={m.url}
+                                      download
+                                      target="_blank"
+                                      rel="noopener noreferrer"
+                                      className="inline-flex items-center gap-1 text-[10px] text-[var(--primary)] hover:underline"
+                                    >
+                                      <Download className="h-3 w-3" />
+                                      Open {m.type}
+                                    </a>
+                                  ))}
+                              </div>
+                            )}
+                        </div>
+                      )}
+
                       <div
                         className={cn(
-                          "mt-1 flex flex-wrap items-center gap-2 px-0.5 text-[10px] text-[var(--muted-foreground)]",
+                          "mt-1.5 flex flex-wrap items-center gap-2 px-0.5 text-[10px] text-[var(--muted-foreground)]",
                           isUser && "justify-end",
                         )}
                       >
                         {msg.model && !isUser && (
-                          <Badge variant="outline" className="h-5 font-mono text-[9px]">
-                            {msg.model}
-                          </Badge>
-                        )}
-                        {msg.thinking && !isUser && (
-                          <Badge variant="outline" className="h-5 text-[9px]">
-                            thinking
-                          </Badge>
+                          <span className="font-mono text-[9px] opacity-70">{msg.model}</span>
                         )}
                         {msg.timestamp ? <span>{formatMsgTime(msg.timestamp)}</span> : null}
                       </div>
@@ -1283,18 +1441,16 @@ export default function Chat() {
               })}
 
               {streaming && (
-                <div className="flex gap-2.5">
-                  <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-lg border border-[var(--primary)]/30 bg-[color-mix(in_srgb,var(--primary)_12%,var(--card))]">
-                    <Bot className="h-3.5 w-3.5 text-[var(--primary)]" />
-                  </div>
-                  <div className="min-w-0 max-w-[min(100%,42rem)] rounded-lg border border-[var(--border)] bg-[var(--card)] px-3 py-2.5 shadow-[var(--shadow-card)]">
+                <div className="flex w-full justify-start">
+                  <div className="w-full max-w-[min(100%,42rem)] text-sm leading-relaxed text-[var(--foreground)]">
                     {streamingThinking ? (
-                      <ThinkingBlock
-                        content={streamingThinking}
-                        // Keep reasoning streaming (and auto-scroll) until reply text finishes too.
-                        streaming={streaming}
-                        defaultOpen
-                      />
+                      <div className="mb-2">
+                        <ThinkingBlock
+                          content={streamingThinking}
+                          streaming={streaming}
+                          defaultOpen
+                        />
+                      </div>
                     ) : null}
                     {streamingText ? (
                       <div className="relative">
@@ -1304,7 +1460,7 @@ export default function Chat() {
                     ) : (
                       <span className="inline-flex items-center gap-2 text-xs text-[var(--muted-foreground)]">
                         <Loader2 className="h-3.5 w-3.5 animate-spin text-[var(--primary)]" />
-                        {streamingThinking ? "Writing reply…" : "Generating…"}
+                        {streamingThinking ? "Writing reply…" : "Thinking…"}
                       </span>
                     )}
                   </div>
@@ -1315,147 +1471,12 @@ export default function Chat() {
           )}
         </div>
 
-        {/* Composer */}
-        <div className="border-t border-[var(--border)] bg-[var(--card)] px-3 py-3 sm:px-4">
-          <div className="mx-auto max-w-3xl">
-            {genKind && (
-              <div className="mb-2 flex items-center gap-2 rounded-md border border-[var(--primary)]/25 bg-[color-mix(in_srgb,var(--primary)_8%,transparent)] px-2.5 py-1.5 text-[11px] text-[var(--foreground)]">
-                {genKind === "video" ? (
-                  <Video className="h-3.5 w-3.5 text-[var(--primary)]" />
-                ) : (
-                  <Wand2 className="h-3.5 w-3.5 text-[var(--primary)]" />
-                )}
-                <span>
-                  This model generates <strong>{genKind}</strong>. Your message is used as the prompt;
-                  results appear in the thread.
-                </span>
-              </div>
-            )}
-            {attachments.length > 0 && (
-              <div className="mb-2 flex flex-wrap gap-2">
-                {attachments.map((a) => (
-                  <div
-                    key={a.id}
-                    className="group relative flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--secondary)]/40 px-2 py-1.5"
-                  >
-                    {a.kind === "image" && a.dataUrl ? (
-                      <img src={a.dataUrl} alt="" className="h-10 w-10 rounded object-cover" />
-                    ) : (
-                      <FileText className="h-4 w-4 text-[var(--muted-foreground)]" />
-                    )}
-                    <span className="max-w-[8rem] truncate text-[11px] text-[var(--foreground)]">
-                      {a.name}
-                    </span>
-                    <button
-                      type="button"
-                      className="rounded p-0.5 text-[var(--muted-foreground)] hover:bg-[var(--secondary)] hover:text-[var(--error)]"
-                      onClick={() => removeAttachment(a.id)}
-                      aria-label="Remove attachment"
-                    >
-                      <X className="h-3 w-3" />
-                    </button>
-                  </div>
-                ))}
-              </div>
-            )}
-            {attachError && (
-              <p className="mb-2 text-[11px] text-[var(--error)]">{attachError}</p>
-            )}
-            <div
-              className={cn(
-                "flex items-end gap-2 rounded-lg border border-[var(--border)] bg-[var(--background)] px-2.5 py-2",
-                "focus-within:border-[var(--primary)]/40 focus-within:shadow-[var(--glow)]",
-              )}
-            >
-              <input
-                ref={fileInputRef}
-                type="file"
-                multiple
-                accept="image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml"
-                className="hidden"
-                onChange={(e) => {
-                  if (e.target.files?.length) void addFiles(e.target.files);
-                  e.target.value = "";
-                }}
-              />
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="shrink-0"
-                disabled={streaming || !active || !!genKind}
-                title={genKind ? "Attachments not used for generation models" : "Attach images or text files"}
-                onClick={() => fileInputRef.current?.click()}
-              >
-                <Paperclip className="h-4 w-4" />
-              </Button>
-              <Button
-                type="button"
-                variant="ghost"
-                size="icon"
-                className="shrink-0"
-                disabled={streaming || !active || !!genKind}
-                title="Attach image"
-                onClick={() => {
-                  if (fileInputRef.current) {
-                    fileInputRef.current.accept = "image/*";
-                    fileInputRef.current.click();
-                    // restore broad accept after open
-                    setTimeout(() => {
-                      if (fileInputRef.current) {
-                        fileInputRef.current.accept =
-                          "image/*,.txt,.md,.json,.csv,.log,.ts,.tsx,.js,.jsx,.py,.rs,.go,.html,.css,.xml,.yml,.yaml";
-                      }
-                    }, 500);
-                  }
-                }}
-              >
-                <ImageIcon className="h-4 w-4" />
-              </Button>
-              <textarea
-                ref={inputRef}
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={handleKeyDown}
-                onPaste={handlePaste}
-                placeholder={
-                  streaming
-                    ? "Waiting for response…"
-                    : genKind
-                      ? `Describe the ${genKind} to generate…`
-                      : "Message… (paste or attach images/files)"
-                }
-                disabled={streaming || !active}
-                rows={1}
-                className="max-h-40 min-h-[2.25rem] flex-1 resize-none bg-transparent py-1.5 text-sm text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none disabled:opacity-60"
-              />
-              {streaming ? (
-                <Button
-                  variant="outline"
-                  size="icon"
-                  className="shrink-0 border-[var(--error)]/40 text-[var(--error)]"
-                  onClick={handleStop}
-                  title="Stop"
-                >
-                  <StopCircle className="h-4 w-4" />
-                </Button>
-              ) : (
-                <Button
-                  size="icon"
-                  className="shrink-0"
-                  onClick={() => void handleSend()}
-                  disabled={(!input.trim() && attachments.length === 0) || !active || !activeModel}
-                  title={genKind ? `Generate ${genKind}` : "Send"}
-                >
-                  {genKind ? <Wand2 className="h-4 w-4" /> : <Send className="h-4 w-4" />}
-                </Button>
-              )}
-            </div>
-            <p className="mt-2 text-center text-[10px] text-[var(--muted-foreground)]">
-              Proxied via Etteum · Enter to send · Shift+Enter newline · Paste images · Vision models see attachments
-            </p>
+        {/* Floating composer — only when thread has messages (empty state embeds it) */}
+        {!isEmptyThread && (
+          <div className="pointer-events-none absolute inset-x-0 bottom-0 z-30 px-3 pb-4 sm:px-6 sm:pb-5">
+            <div className="pointer-events-auto mx-auto w-full max-w-3xl">{composerInner}</div>
           </div>
-        </div>
+        )}
       </div>
     </div>
   );
