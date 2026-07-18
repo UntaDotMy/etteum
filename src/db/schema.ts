@@ -60,6 +60,9 @@ export const requestLogs = sqliteTable("request_logs", {
   creditsUsed: real("credits_used").default(0),
   status: text("status").notNull(), // success | error
   durationMs: integer("duration_ms"),
+  // Time-to-first-token (ms) for streams: request start → first contentful SSE chunk.
+  // null for non-stream or when no contentful chunk was observed.
+  ttftMs: integer("ttft_ms"),
   errorMessage: text("error_message"),
   requestBody: text("request_body", { mode: "json" }),
   responseBody: text("response_body", { mode: "json" }),

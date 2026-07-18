@@ -285,6 +285,31 @@
     color: var(--muted-foreground);
   }
 
+  .speed {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+    margin-top: 14px;
+  }
+  .speed .cell {
+    background: color-mix(in srgb, var(--muted) 55%, transparent);
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 4px);
+    padding: 10px 12px;
+  }
+  .speed .cell .v {
+    font-family: var(--mono);
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--foreground);
+  }
+  .speed .cell .l {
+    margin-top: 2px;
+    font-size: 11px;
+    color: var(--muted-foreground);
+  }
+
   .meta {
     display: grid;
     grid-template-columns: 1fr 1fr;
@@ -407,7 +432,6 @@
   var board = $("board"), empty = $("empty"), toast = $("toast");
   var prev = {};
   var toastT = null;
-  var CONNECTED_MS = 60000;
   var POLL_MS = 3000;
   var BACKEND = "__BACKEND_ORIGIN__";
   var BASE_URL = "__SHARE_BASE_URL__";
@@ -447,10 +471,17 @@
       return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
     });
   }
-  function connected(iso) {
-    if (!iso) return false;
-    var t = new Date(iso).getTime();
-    return !isNaN(t) && Date.now() - t < CONNECTED_MS;
+  function fmtMs(n) {
+    if (n == null || !isFinite(n)) return "—";
+    n = Number(n);
+    if (n < 1000) return Math.round(n) + "ms";
+    return (n / 1000).toFixed(n >= 10000 ? 1 : 2).replace(/\.0+$|(\.\d*?)0+$/, "$1") + "s";
+  }
+  function fmtTps(n) {
+    if (n == null || !isFinite(n) || n <= 0) return "—";
+    n = Number(n);
+    if (n >= 100) return Math.round(n) + " tok/s";
+    return (Math.round(n * 10) / 10) + " tok/s";
   }
   function tone(pctLeft, hasQuota) {
     if (!hasQuota) return "ok";
@@ -549,7 +580,6 @@
       : 100;
     var t = tone(pctLeft, hasQuota);
     var stClass = st === "active" ? "ok" : st === "exhausted" ? "warn" : "bad";
-    var isOn = connected(d.lastUsedAt);
     var models = Array.isArray(d.models) ? d.models : [];
     var chips = models.length
       ? models
@@ -564,6 +594,8 @@
           })
           .join("")
       : '<span class="none">No models</span>';
+    var ttft = fmtMs(d.ttftMs);
+    var tps = fmtTps(d.tokensPerSecond);
 
     return (
       '<article class="card" data-id="' +
@@ -574,7 +606,6 @@
       esc(d.name || "Key") +
       "</h2>" +
       '<div class="tags">' +
-      (isOn ? '<span class="tag conn">client</span>' : "") +
       '<span class="tag ' +
       stClass +
       '">' +
@@ -609,6 +640,14 @@
       " used</span><span>" +
       esc(hasQuota ? fmt(quota) : "∞") +
       " total</span></div>" +
+      '<div class="speed">' +
+      '<div class="cell"><div class="v">' +
+      esc(ttft) +
+      '</div><div class="l">TTFT (avg 15m)</div></div>' +
+      '<div class="cell"><div class="v">' +
+      esc(tps) +
+      '</div><div class="l">tok/s (avg 15m)</div></div>' +
+      "</div>" +
       '<dl class="meta">' +
       "<div><dt>Created</dt><dd>" +
       esc(dte(d.createdAt)) +
@@ -653,7 +692,8 @@
     });
   }
 
-  function render(keys) {
+  function render(payload) {
+    var keys = Array.isArray(payload.keys) ? payload.keys : [];
     if (!keys.length) {
       showEmpty();
       return;
@@ -663,17 +703,19 @@
     var bu = baseUrl();
     board.innerHTML = keys.map(function (k) { return card(k, bu); }).join("");
     flashDeltas(keys);
-    var any = keys.some(function (k) {
-      return k.status === "active" || connected(k.lastUsedAt);
-    });
+    var clients = Number(payload.activeClients) || 0;
+    var any = clients > 0 || keys.some(function (k) { return k.status === "active"; });
     setLive(any ? "on" : "off");
-    var clients = keys.filter(function (k) { return connected(k.lastUsedAt); }).length;
-    $("upd").textContent =
-      keys.length +
-      " key" +
-      (keys.length === 1 ? "" : "s") +
-      (clients ? " · " + clients + " client" + (clients === 1 ? "" : "s") : "") +
-      " · just now";
+    var parts = [
+      keys.length + " key" + (keys.length === 1 ? "" : "s"),
+      clients + " in flight",
+    ];
+    var boardTtft = fmtMs(payload.ttftMs);
+    var boardTps = fmtTps(payload.tokensPerSecond);
+    if (boardTtft !== "—") parts.push("TTFT " + boardTtft);
+    if (boardTps !== "—") parts.push(boardTps);
+    parts.push("just now");
+    $("upd").textContent = parts.join(" · ");
   }
 
   function load() {
@@ -688,7 +730,7 @@
           showEmpty();
           return;
         }
-        render(Array.isArray(res.j.keys) ? res.j.keys : []);
+        render(res.j || {});
       })
       .catch(function () {
         showEmpty();

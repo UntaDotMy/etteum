@@ -46,6 +46,12 @@ import {
   modelAllowed,
   recordKeyTokens,
 } from "./friend-keys";
+import { getActiveClientRequests, trackClientRequestStart } from "./live-clients";
+import {
+  averageSpeedMetrics,
+  isContentfulStreamChunk,
+  type SpeedSample,
+} from "./share-metrics";
 import type { ModelInfo } from "./providers/base";
 
 export const proxyRouter = new Hono();
@@ -511,6 +517,8 @@ function wrapStreamWithUsageFinalizer(
     skipPoolMutations?: boolean;
     /** Friend-key id whose token budget should be debited when the stream's usage is known. */
     apiKeyId?: number | null;
+    /** Optional client in-flight release (share board concurrent count). Idempotent. */
+    onClientComplete?: () => void;
   }
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -534,6 +542,8 @@ function wrapStreamWithUsageFinalizer(
   let reasoningTokens = 0;
   let finalized = false;
   let streamError = false;
+  // First contentful SSE chunk clock (request-relative ms). Captured once.
+  let firstContentAt: number | null = null;
 
   const observe = (chunk: Uint8Array) => {
     rawChunks.push(decoder.decode(chunk, { stream: true }));
@@ -563,6 +573,10 @@ function wrapStreamWithUsageFinalizer(
       if (parsed.type === "upstream_error") streamError = true;
       if (parsed.statusCodeValue && parsed.statusCodeValue >= 400) streamError = true;
       if (parsed.error && (typeof parsed.error === "object" || typeof parsed.error === "string")) streamError = true;
+
+      if (firstContentAt == null && isContentfulStreamChunk(parsed)) {
+        firstContentAt = Date.now();
+      }
 
       const usage = extractUsageFromParsed(parsed);
       // Only retain content when it will actually be consumed (token-estimate
@@ -594,6 +608,10 @@ function wrapStreamWithUsageFinalizer(
       upstreamCredits > 0 ? "upstream" : context.fallbackCreditSource
     );
     const durationMs = Math.max(0, Date.now() - context.startedAt);
+    const ttftMs =
+      firstContentAt != null
+        ? Math.max(0, firstContentAt - context.startedAt)
+        : null;
 
     void (async () => {
       try {
@@ -624,6 +642,7 @@ function wrapStreamWithUsageFinalizer(
                 status: "error",
                 errorMessage: "Upstream rate limit or quota exceeded",
                 durationMs,
+                ttftMs,
               })
               .where(eq(requestLogs.id, context.logId));
           }
@@ -704,6 +723,7 @@ function wrapStreamWithUsageFinalizer(
               creditsUsed,
               cost,
               durationMs,
+              ttftMs,
               accountQuotaAfter: quotaAfter,
               ...(streamResponseBody != null ? { responseBody: streamResponseBody } : {}),
             })
@@ -743,6 +763,7 @@ function wrapStreamWithUsageFinalizer(
             cost,
             status: "success",
             durationMs,
+            ttftMs,
             accountQuotaBefore: context.quotaBefore,
             accountQuotaAfter: quotaAfter,
             createdAt: new Date(context.startedAt).toISOString(),
@@ -773,6 +794,12 @@ function wrapStreamWithUsageFinalizer(
       } finally {
         if (!context.skipPoolMutations && context.accountId > 0) {
           pool.trackRequestEnd(context.accountId);
+        }
+        // Release share-board concurrent client count with the same lifetime as the stream.
+        try {
+          context.onClientComplete?.();
+        } catch {
+          /* ignore */
         }
       }
     })();
@@ -815,6 +842,11 @@ export async function handleChatCompletion(
   body: ChatCompletionRequest,
   opts?: { apiKeyId?: number | null; request?: Request | null },
 ) {
+  // Share-board concurrent clients: count every in-flight completion (stream + non-stream).
+  // Streams release in wrapStream finalize; non-streams release in the outer finally.
+  const endClient = trackClientRequestStart();
+  let shouldReleaseClient = true;
+
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
@@ -827,6 +859,8 @@ export async function handleChatCompletion(
   const preInst = preProviderName ? resolveProviderInstance(preProviderName) : null;
   const providerForceStream = !!(preInst as any)?.forceStream;
   const effectiveStream = isStream || providerForceStream;
+
+  try {
   const { result, account, provider, durationMs, compressionStats, compressedRequest } = await routeRequest(body, effectiveStream);
   const resolvedApiKeyId =
     opts?.apiKeyId ??
@@ -967,9 +1001,12 @@ export async function handleChatCompletion(
       useFreeCounter,
       skipPoolMutations: isStaticLogAccount,
       apiKeyId: resolvedApiKeyId,
+      onClientComplete: endClient,
     });
 
+      // Stream owns both pool tracking and share-board client count until finalize.
       shouldReleaseTracking = false;
+      shouldReleaseClient = false;
       return { result, isStream };
     }
 
@@ -1022,6 +1059,9 @@ export async function handleChatCompletion(
   } finally {
     if (shouldReleaseTracking && account.id > 0) pool.trackRequestEnd(account.id);
   }
+  } finally {
+    if (shouldReleaseClient) endClient();
+  }
 }
 
 /**
@@ -1070,6 +1110,7 @@ type ShareKeyRow = typeof apiKeys.$inferSelect;
 function shareKeyPublic(
   row: ShareKeyRow,
   activeModelIds: string[],
+  speed?: { ttftMs: number | null; tokensPerSecond: number | null; sampleSize: number },
 ): {
   id: number;
   name: string | null;
@@ -1086,6 +1127,9 @@ function shareKeyPublic(
   expiresAt: Date | null;
   models: string[];
   baseUrl: string;
+  ttftMs: number | null;
+  tokensPerSecond: number | null;
+  sampleSize: number;
 } {
   const allowlist = parseAllowedModels(row.allowedModels);
   const usable = activeModelIds.filter((id) => modelAllowed(allowlist, id));
@@ -1115,7 +1159,44 @@ function shareKeyPublic(
     expiresAt: row.expiresAt,
     models: usable,
     baseUrl: "/v1",
+    ttftMs: speed?.ttftMs ?? null,
+    tokensPerSecond: speed?.tokensPerSecond ?? null,
+    sampleSize: speed?.sampleSize ?? 0,
   };
+}
+
+/** Recent successful request samples used for share-board TTFT / tok/s. */
+async function loadShareSpeedSamples(windowMs = 15 * 60 * 1000, limit = 200): Promise<
+  Array<{ apiKeyId: number | null; completionTokens: number; durationMs: number; ttftMs: number | null }>
+> {
+  const since = new Date(Date.now() - windowMs);
+  try {
+    const rows = await db
+      .select({
+        apiKeyId: requestLogs.apiKeyId,
+        completionTokens: requestLogs.completionTokens,
+        durationMs: requestLogs.durationMs,
+        ttftMs: requestLogs.ttftMs,
+      })
+      .from(requestLogs)
+      .where(
+        sql`${requestLogs.status} = 'success'
+          AND ${requestLogs.createdAt} >= ${since}
+          AND ${requestLogs.durationMs} IS NOT NULL
+          AND ${requestLogs.durationMs} > 0`,
+      )
+      .orderBy(sql`${requestLogs.createdAt} DESC`)
+      .limit(limit);
+    return rows.map((r) => ({
+      apiKeyId: r.apiKeyId ?? null,
+      completionTokens: Number(r.completionTokens) || 0,
+      durationMs: Number(r.durationMs) || 0,
+      ttftMs: r.ttftMs == null ? null : Number(r.ttftMs),
+    }));
+  } catch (err) {
+    console.error("[Share] Failed to load speed samples:", err);
+    return [];
+  }
 }
 
 function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }): Response | null {
@@ -1147,8 +1228,36 @@ proxyRouter.get("/v1/share/board", async (c) => {
   const rows = await db.select().from(apiKeys);
   const activeModels = await getActiveModelsCached(true);
   const activeIds = activeModels.map((m) => m.id);
-  const keys = rows.map((row) => shareKeyPublic(row, activeIds));
-  return c.json({ keys, baseUrl: "/v1", count: keys.length });
+  const samples = await loadShareSpeedSamples();
+  const byKey = new Map<number, SpeedSample[]>();
+  const allSamples: SpeedSample[] = [];
+  for (const s of samples) {
+    const sample: SpeedSample = {
+      completionTokens: s.completionTokens,
+      durationMs: s.durationMs,
+      ttftMs: s.ttftMs,
+    };
+    allSamples.push(sample);
+    if (s.apiKeyId != null) {
+      const list = byKey.get(s.apiKeyId) || [];
+      list.push(sample);
+      byKey.set(s.apiKeyId, list);
+    }
+  }
+  const boardSpeed = averageSpeedMetrics(allSamples);
+  const keys = rows.map((row) =>
+    shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || [])),
+  );
+  return c.json({
+    keys,
+    baseUrl: "/v1",
+    count: keys.length,
+    // Concurrent in-flight chat completions (stream + non-stream), not "people".
+    activeClients: getActiveClientRequests(),
+    ttftMs: boardSpeed.ttftMs,
+    tokensPerSecond: boardSpeed.tokensPerSecond,
+    sampleSize: boardSpeed.sampleSize,
+  });
 });
 
 /**
@@ -1172,7 +1281,18 @@ proxyRouter.get("/v1/share", async (c) => {
   }
 
   const activeModels = await getActiveModelsCached(true);
-  return c.json(shareKeyPublic(row, activeModels.map((m) => m.id)));
+  const samples = await loadShareSpeedSamples();
+  const keySamples: SpeedSample[] = samples
+    .filter((s) => s.apiKeyId === row.id)
+    .map((s) => ({
+      completionTokens: s.completionTokens,
+      durationMs: s.durationMs,
+      ttftMs: s.ttftMs,
+    }));
+  return c.json({
+    ...shareKeyPublic(row, activeModels.map((m) => m.id), averageSpeedMetrics(keySamples)),
+    activeClients: getActiveClientRequests(),
+  });
 });
 
 /**
