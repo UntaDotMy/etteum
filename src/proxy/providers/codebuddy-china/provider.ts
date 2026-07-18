@@ -138,6 +138,15 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
   private baseUrl = "https://www.codebuddy.cn";
 
+  /**
+   * Model used for the chat-endpoint ban probe. Must be a model that is actually
+   * enabled on CodeBuddy-CN accounts, otherwise the endpoint returns 403 for a
+   * *model-availability* reason and the probe false-positives every account as
+   * banned. `hy3-preview` (Tencent Hunyuan) is the safest choice — deprecated
+   * models like the old `deepseek-v3` can 403 on healthy accounts.
+   */
+  private probeModel = "hy3-preview";
+
   supportedModels: ModelInfo[] = [
     // Claude
     { id: "cbc-haiku-4.5", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 200000, max_output: 8192, thinking: false, vision: false, creditUnit: "credit", creditRate: 0.11, creditSource: "upstream" },
@@ -696,7 +705,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
         signal: controller.signal,
         headers: this.buildHeaders(apiKey, true),
         body: JSON.stringify({
-          model: "deepseek-v3",
+          model: this.probeModel,
           messages: [{ role: "user", content: "hi" }],
           max_tokens: 5,
           stream: true,
