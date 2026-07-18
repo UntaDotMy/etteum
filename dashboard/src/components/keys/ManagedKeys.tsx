@@ -22,6 +22,7 @@ import {
   KeyRound,
   Infinity as InfinityIcon,
   Link2,
+  ExternalLink,
 } from "lucide-react";
 import { useApiCache } from "@/hooks/useApiCache";
 import {
@@ -64,6 +65,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   const [editing, setEditing] = useState<ManagedKey | null>(null);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedLink, setCopiedLink] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
   const [deleting, setDeleting] = useState<ManagedKey | null>(null);
@@ -126,7 +128,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
             </CardTitle>
             <CardDescription>
               Per-key model access, token quota, rate cap, and expiry. A managed key only ever
-              reaches <span className="font-mono">/v1/*</span> — never this dashboard.
+              reaches <span className="font-mono">/v1/*</span> — never this dashboard. The friend
+              status page only shows a key when opened via its <strong>share link</strong> (not by
+              listing keys from admin).
             </CardDescription>
           </div>
           <Button size="sm" onClick={openCreate}>
@@ -181,23 +185,73 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
         onError={onError}
       />
 
-      {/* Show-once dialog for a freshly created key */}
-      <Dialog open={createdKey != null} onOpenChange={(o) => !o && setCreatedKey(null)}>
+      {/* Show-once dialog for a freshly created key + share link */}
+      <Dialog
+        open={createdKey != null}
+        onOpenChange={(o) => {
+          if (!o) {
+            setCreatedKey(null);
+            setCopiedLink(false);
+          }
+        }}
+      >
         <DialogContent>
           <DialogHeader>
             <DialogTitle>Key created</DialogTitle>
             <DialogDescription>
-              This is the only time the full key is shown. Copy it now and share it — it can't be
-              retrieved later.
+              This is the only time the full key is shown. Send the <strong>share link</strong> to
+              your friend — opening that link is how the status card loads. Opening the bare share
+              page with no link will say &quot;No keys yet&quot;.
             </DialogDescription>
           </DialogHeader>
-          <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
-            <code className="flex-1 break-all font-mono text-sm text-[var(--primary)]">{createdKey}</code>
-            <Button variant="outline" size="icon" onClick={() => createdKey && copy(createdKey)}>
-              {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
-            </Button>
+          <div className="space-y-3">
+            <div>
+              <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">API key</div>
+              <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
+                <code className="flex-1 break-all font-mono text-sm text-[var(--primary)]">{createdKey}</code>
+                <Button variant="outline" size="icon" onClick={() => createdKey && copy(createdKey)}>
+                  {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
+                </Button>
+              </div>
+            </div>
+            {createdKey && (
+              <div>
+                <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">Share link (status page)</div>
+                <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
+                  <code className="flex-1 break-all font-mono text-xs text-[var(--foreground)]">
+                    {shareLink(createdKey)}
+                  </code>
+                  <Button
+                    variant="outline"
+                    size="icon"
+                    title="Copy share link"
+                    onClick={() => {
+                      navigator.clipboard.writeText(shareLink(createdKey)).then(
+                        () => {
+                          setCopiedLink(true);
+                          setTimeout(() => setCopiedLink(false), 1800);
+                          onInfo("Share link copied.");
+                        },
+                        () => onError("Could not copy link."),
+                      );
+                    }}
+                  >
+                    {copiedLink ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Link2 className="w-4 h-4" />}
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
-          <DialogFooter>
+          <DialogFooter className="gap-2 sm:gap-0">
+            {createdKey && (
+              <Button
+                variant="outline"
+                onClick={() => window.open(shareLink(createdKey), "_blank", "noopener,noreferrer")}
+              >
+                <ExternalLink className="w-4 h-4" />
+                Open status page
+              </Button>
+            )}
             <Button onClick={() => setCreatedKey(null)}>Done</Button>
           </DialogFooter>
         </DialogContent>
