@@ -1,6 +1,6 @@
 #!/usr/bin/env bun
 /**
- * Friend-key status server (the etteum key console).
+ * Friend-key status server (etteum pool share card).
  *
  * Serves a single self-contained page (share/index.html) on SHARE_PORT
  * (default 80). The page shows one key's usable models + token quota by calling
@@ -38,7 +38,7 @@ const SECURITY_HEADERS: Record<string, string> = {
   "X-Frame-Options": "DENY",
   "Referrer-Policy": "no-referrer",
   // The page is self-contained (inline script/style) and only fetches the
-  // backend's /v1/share + the JetBrains Mono font from Google Fonts.
+  // backend's /v1/share + Inter / JetBrains Mono from Google Fonts.
   "Content-Security-Policy":
     `default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src ${backendOrigin}; img-src data:`,
 };
@@ -64,4 +64,4 @@ Bun.serve({
   },
 });
 
-console.log(`[share] etteum key console on http://${host}:${sharePort}  →  backend ${backendOrigin}`);
+console.log(`[share] etteum pool share on http://${host}:${sharePort}  →  backend ${backendOrigin}`);
