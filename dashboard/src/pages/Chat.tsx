@@ -22,7 +22,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { MarkdownContent } from "@/components/chat/MarkdownContent";
 import { ThinkingBlock } from "@/components/chat/ThinkingBlock";
-import { getApiKey, API_BASE, generateImage } from "@/lib/api";
+import { getApiKey, API_BASE, generateImage, fetchModelsCatalog, fetchApiKey } from "@/lib/api";
 import { cn, formatDateTimeID } from "@/lib/utils";
 
 /** OpenAI-style multimodal content parts. */
@@ -245,18 +245,60 @@ function saveSystemPrompt(p: string) {
   localStorage.setItem(SYSTEM_PROMPT_KEY, p);
 }
 
-async function fetchModels(): Promise<ProviderModel[]> {
+/**
+ * Ensure the browser has the pool/install API key for /v1 chat.
+ * Clean installs often have no localStorage key — dashboard session alone
+ * cannot authenticate /v1/* (Bearer required).
+ */
+async function ensurePoolApiKey(): Promise<string> {
+  const existing = getApiKey();
+  if (existing) return existing;
   try {
+    const res = (await fetchApiKey()) as { key?: string };
+    if (res?.key) {
+      localStorage.setItem("api_key", res.key);
+      return res.key;
+    }
+  } catch {
+    /* not logged in or API error */
+  }
+  return "";
+}
+
+function mapModelRows(rows: Array<{ id?: string } | string>): ProviderModel[] {
+  return rows
+    .map((m) => {
+      const id = typeof m === "string" ? m : String(m.id || "");
+      if (!id) return null;
+      const prefix = id.includes("-") ? id.split("-")[0]! : "";
+      return { id, provider: providerFromPrefix(prefix), label: id };
+    })
+    .filter((m): m is ProviderModel => m != null);
+}
+
+/**
+ * Admin chat model list: use /api/models/all (dashboard session, full catalog).
+ * Never use a managed/friend key's filtered /v1/models list here.
+ */
+async function fetchModels(): Promise<ProviderModel[]> {
+  // 1) Preferred: dashboard-auth catalog (works on clean install after login).
+  try {
+    const catalog = await fetchModelsCatalog();
+    const list = mapModelRows((catalog.data || []) as Array<{ id?: string }>);
+    if (list.length > 0) return list;
+  } catch {
+    /* fall through */
+  }
+  // 2) Fallback: OpenAI-compatible surface with pool API key.
+  try {
+    const key = await ensurePoolApiKey();
     const res = await fetch(`${API_BASE}/v1/models`, {
-      headers: { Authorization: `Bearer ${getApiKey()}` },
+      headers: key ? { Authorization: `Bearer ${key}` } : {},
+      credentials: "include",
     });
     if (!res.ok) return [];
     const data = (await res.json()) as { data?: Array<{ id: string }> };
-    return (data.data || []).map((m) => {
-      const id = m.id;
-      const prefix = id.includes("-") ? id.split("-")[0]! : "";
-      return { id, provider: providerFromPrefix(prefix), label: id };
-    });
+    return mapModelRows(data.data || []);
   } catch {
     return [];
   }
@@ -290,11 +332,18 @@ async function streamChat(
   signal: AbortSignal,
 ): Promise<{ success: boolean; error?: string; content?: string; thinking?: string }> {
   try {
+    const key = (await ensurePoolApiKey()) || getApiKey();
+    if (!key) {
+      return {
+        success: false,
+        error: "No pool API key in browser. Open API Key page once, or re-login.",
+      };
+    }
     const res = await fetch(`${API_BASE}/v1/chat/completions`, {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${getApiKey()}`,
+        Authorization: `Bearer ${key}`,
       },
       body: JSON.stringify({ model, messages, stream: true }),
       signal,
@@ -423,10 +472,13 @@ export default function Chat() {
   const genKind = mediaGenKind(active?.model || models[0]?.id || "");
 
   useEffect(() => {
-    fetchModels().then((m) => {
+    void (async () => {
+      // Warm pool key for /v1 chat so clean installs don't fail silently.
+      await ensurePoolApiKey();
+      const m = await fetchModels();
       setModels(m);
       setModelsLoading(false);
-    });
+    })();
   }, []);
 
   /** Pin message list to bottom without scrolling the whole page (instant while streaming). */
@@ -898,7 +950,7 @@ export default function Chat() {
                 </div>
               ) : Object.keys(filteredModelsByProvider).length === 0 ? (
                 <p className="px-3 py-6 text-center text-xs text-[var(--muted-foreground)]">
-                  No models. Check accounts and pool.
+                  No models. Confirm you are logged in, then refresh.
                 </p>
               ) : (
                 Object.entries(filteredModelsByProvider).map(([provider, mods]) => (
