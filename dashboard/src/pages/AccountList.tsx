@@ -44,6 +44,27 @@ interface CodexQuotaMetadata {
   rate_limited?: boolean;
 }
 
+// CodeBuddy-CN per-package row persisted by warmup (metadata.packages).
+interface CbcPackageRow {
+  name: string;
+  packageCode?: string;
+  kind?: "refill" | "bonus";
+  used: number;
+  total: number;
+  remaining: number;
+  resetAt?: string | null;
+}
+
+// CodeBuddy-CN daily-checkin result persisted by warmup (metadata.dailyClaim).
+interface CbcDailyClaim {
+  attempted?: boolean;
+  claimed?: boolean;
+  already?: boolean;
+  credit?: number;
+  streakDays?: number;
+  error?: string;
+}
+
 interface Account {
   id: number;
   email: string;
@@ -66,6 +87,8 @@ interface Account {
     activityQuota?: QoderActivityQuota | null;
     activityQuotaError?: string | null;
     serverQuota?: QoderServerQuota | null;
+    packages?: CbcPackageRow[];
+    dailyClaim?: CbcDailyClaim | null;
   } | null;
 }
 
@@ -204,6 +227,97 @@ function CodexQuotaCell({ codex, fallbackRemaining, fallbackLimit }: { codex?: C
       {codex.plan_type && <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">Plan: {codex.plan_type}{codex.rate_limited && <span className="ml-2 text-[var(--error)]">RATE LIMITED</span>}</div>}
       {renderBar("Session", codex.primary)}
       {renderBar("Weekly", codex.secondary)}
+    </div>
+  );
+}
+
+// ── CodeBuddy-CN per-account package quota cell ─────────────────────
+// Renders metadata.packages (real API package names) like the 9router
+// quota table: refill packs show "in X" (recurring), bonus packs show
+// "expires in X" (one-shot). 10-per-page pagination. Falls back to the
+// aggregated credit figures when no package breakdown has been synced.
+
+function cbcSecondsUntil(resetAt?: string | null): number | null {
+  if (!resetAt) return null;
+  const ms = new Date(resetAt).getTime();
+  if (!Number.isFinite(ms)) return null;
+  const diff = Math.floor((ms - Date.now()) / 1000);
+  return diff > 0 ? diff : null;
+}
+
+function CodeBuddyCnQuotaCell({ packages, dailyClaim, fallbackRemaining, fallbackLimit }: { packages?: CbcPackageRow[]; dailyClaim?: CbcDailyClaim | null; fallbackRemaining?: number; fallbackLimit?: number }) {
+  const [expanded, setExpanded] = useState(false);
+  const [page, setPage] = useState(1);
+
+  const rows = Array.isArray(packages) ? packages.filter((p) => p && Number(p.total) > 0) : [];
+  if (rows.length === 0) {
+    return (
+      <span className="flex items-center gap-1.5">
+        {formatCredit(fallbackRemaining)}/{formatCredit(fallbackLimit)}
+        {dailyClaim?.claimed && !dailyClaim?.already && Number(dailyClaim.credit) > 0 && (
+          <Badge variant="success" className="text-[10px] px-1 py-0">+{formatCredit(dailyClaim.credit)}</Badge>
+        )}
+      </span>
+    );
+  }
+
+  const pageSize = 10;
+  const totalPages = Math.max(1, Math.ceil(rows.length / pageSize));
+  const currentPage = Math.min(page, totalPages);
+  const visible = expanded ? rows.slice((currentPage - 1) * pageSize, currentPage * pageSize) : rows.slice(0, 3);
+
+  const renderRow = (p: CbcPackageRow, key: number) => {
+    const total = Number(p.total) || 0;
+    const remaining = Math.max(0, Number(p.remaining) || 0);
+    const pct = total > 0 ? Math.min(100, (remaining / total) * 100) : 0;
+    const tone = pct <= 10 ? "bg-[var(--error)]" : pct <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
+    const secs = cbcSecondsUntil(p.resetAt);
+    const label = p.kind === "refill" ? "in" : "expires in";
+    return (
+      <div key={key} className="space-y-0.5">
+        <div className="flex items-center justify-between gap-2 text-[10px]">
+          <span className="font-medium text-[var(--foreground)] truncate" title={p.packageCode ? `${p.name} (${p.packageCode})` : p.name}>{p.name}</span>
+          <span className="shrink-0 text-[var(--muted-foreground)]">
+            {formatCredit(remaining)} / {formatCredit(total)}
+            <span className={`ml-1.5 ${pct <= 40 ? (pct <= 10 ? "text-[var(--error)]" : "text-[var(--warning)]") : "text-[var(--success)]"}`}>{pct.toFixed(0)}%</span>
+            {secs != null && <span className="ml-1.5">· {label} {formatResetIn(secs)}</span>}
+          </span>
+        </div>
+        <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+          <div className={`h-full ${tone}`} style={{ width: `${pct}%` }} />
+        </div>
+      </div>
+    );
+  };
+
+  return (
+    <div className="space-y-1.5 min-w-[240px]">
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setExpanded((e) => !e)}
+          className="text-[10px] font-medium text-[var(--primary)] hover:underline"
+        >
+          {expanded ? "Hide" : "Show"} {rows.length} quota{rows.length === 1 ? "" : "s"}
+        </button>
+        {dailyClaim?.claimed && !dailyClaim?.already && Number(dailyClaim.credit) > 0 && (
+          <Badge variant="success" className="text-[10px] px-1 py-0" title={dailyClaim.streakDays ? `Streak ${dailyClaim.streakDays}d` : "Daily gift claimed"}>+{formatCredit(dailyClaim.credit)} today</Badge>
+        )}
+      </div>
+      {visible.map(renderRow)}
+      {expanded && totalPages > 1 && (
+        <div className="mt-1 flex items-center justify-between text-[10px] text-[var(--muted-foreground)]">
+          <span>Showing {(currentPage - 1) * pageSize + 1}-{Math.min(currentPage * pageSize, rows.length)} of {rows.length}</span>
+          <span className="flex items-center gap-1">
+            <button type="button" onClick={() => setPage((c) => Math.max(1, c - 1))} disabled={currentPage === 1} className="flex h-5 items-center rounded border border-[var(--border)] px-1.5 hover:bg-[var(--secondary)] disabled:opacity-40">Prev</button>
+            <span>Page {currentPage}/{totalPages}</span>
+            <button type="button" onClick={() => setPage((c) => Math.min(totalPages, c + 1))} disabled={currentPage === totalPages} className="flex h-5 items-center rounded border border-[var(--border)] px-1.5 hover:bg-[var(--secondary)] disabled:opacity-40">Next</button>
+          </span>
+        </div>
+      )}
+      {!expanded && rows.length > 3 && (
+        <button type="button" onClick={() => setExpanded(true)} className="text-[10px] text-[var(--muted-foreground)] hover:text-[var(--foreground)]">+{rows.length - 3} more…</button>
+      )}
     </div>
   );
 }
@@ -850,6 +964,8 @@ export default function AccountList() {
                         ? <QoderQuotaCell account={account} />
                         : account.provider === "alibaba"
                         ? <AlibabaQuotaCell tokens={account.tokens as AlibabaQuotaTokens | null | undefined} />
+                        : account.provider === "codebuddy-china"
+                        ? <CodeBuddyCnQuotaCell packages={account.metadata?.packages} dailyClaim={account.metadata?.dailyClaim} fallbackRemaining={account.quotaRemaining} fallbackLimit={account.quotaLimit} />
                         : <span className="flex items-center gap-1.5">
                             {formatCredit(account.quotaRemaining)}/{formatCredit(account.quotaLimit)}
                             {account.metadata?.overage?.enabled && account.metadata.overage.remaining > 0 && (

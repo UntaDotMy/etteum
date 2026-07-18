@@ -44,6 +44,46 @@ const CBC_MODEL_MAP: Record<string, string> = {
 };
 
 /**
+ * Tencent billing "package" identifiers (ProductCode p_tcaca). The
+ * get-user-resource response returns one Accounts[] row per *active* package;
+ * asking for all known codes ensures gift / activity rows are included.
+ * Source: 9router CODEBUDDY_CONFIG.packageCodes / Kiro-Go codebuddy_quota.go.
+ */
+const CBC_PACKAGE_CODES: Array<{ code: string; label: string }> = [
+  { code: "TCACA_code_001_PqouKr6QWV", label: "free" },
+  { code: "TCACA_code_002_AkiJS3ZHF5", label: "pro monthly" },
+  { code: "TCACA_code_003_FAnt7lcmRT", label: "pro yearly" },
+  { code: "TCACA_code_006_DbXS0lrypC", label: "gift" },
+  { code: "TCACA_code_007_nzdH5h4Nl0", label: "activity" },
+  { code: "TCACA_code_008_cfWoLwvjU4", label: "free monthly" },
+  { code: "TCACA_code_009_0XmEQc2xOf", label: "extra" },
+];
+const CBC_PACKAGE_LABELS: Record<string, string> = Object.fromEntries(
+  CBC_PACKAGE_CODES.map((p) => [p.code, p.label])
+);
+
+/** One credit package owned by the account (refill allowance or one-shot bonus). */
+interface CbcPackage {
+  name: string;
+  packageCode: string;
+  kind: "refill" | "bonus";
+  used: number;
+  total: number;
+  remaining: number;
+  resetAt: string | null;
+}
+
+/** Result of a daily-checkin claim. `already` means it was claimed earlier today. */
+interface CbcDailyClaim {
+  attempted: boolean;
+  claimed: boolean;
+  already: boolean;
+  credit: number;
+  streakDays: number;
+  error?: string;
+}
+
+/**
  * CodeBuddy China Provider — codebuddy.cn region
  *
  * Same API format as CodeBuddy global (codebuddy.ai) but:
@@ -419,7 +459,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
   async fetchQuota(account: Account, signal?: AbortSignal): Promise<{
     success: boolean;
-    quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null };
+    quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null; packages?: CbcPackage[] };
     error?: string;
   }> {
     const tokens = this.getTokens(account);
@@ -458,7 +498,17 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
     // Primary check: fetch real billing data via /v2/billing/meter/get-user-resource
     // This endpoint works with API key and gives us both auth validation AND real credit data.
-    const quota = await this.fetchQuota(account, signal);
+    let quota = await this.fetchQuota(account, signal);
+    let dailyClaim: CbcDailyClaim | null = null;
+    if (quota.success && quota.quota) {
+      // Warmup hook: claim the daily-checkin gift for this account. Already-claimed
+      // is a normal no-op (never an error). On a fresh claim we re-read quota once
+      // so the new credits are reflected. A failed claim must never poison the account.
+      dailyClaim = await this.claimDailyGift(apiKey, signal);
+      if (dailyClaim.claimed && !dailyClaim.already) {
+        quota = (await this.fetchQuota(account, signal)) ?? quota;
+      }
+    }
     if (quota.success && quota.quota) {
       // Billing API succeeded — but billing success does NOT mean the chat API works.
       // CodeBuddy China can return 403 {"code":11140,"msg":"request illegal"} on the
@@ -484,6 +534,8 @@ export class CodeBuddyChinaProvider extends BaseProvider {
             credit_capacity_used: quota.quota.used,
             lastRealBillingSync: new Date().toISOString(),
             chatBanned: true,
+            packages: quota.quota.packages,
+            dailyClaim,
           },
         };
       }
@@ -500,6 +552,8 @@ export class CodeBuddyChinaProvider extends BaseProvider {
           credit_capacity_size: quota.quota.limit,
           lastRealBillingSync: new Date().toISOString(),
           chatProbe: chatStatus,
+          packages: quota.quota.packages,
+          dailyClaim,
         },
       };
     }
@@ -653,6 +707,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
       PageSize: 100,
       ProductCode: "p_tcaca",
       Status: [0, 3],
+      PackageCodes: CBC_PACKAGE_CODES.map((p) => p.code),
       PackageEndTimeRangeBegin: now.toISOString().replace("T", " ").slice(0, 19),
       PackageEndTimeRangeEnd: endDate.toISOString().replace("T", " ").slice(0, 19),
     };
@@ -674,10 +729,36 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     }, config.providerQuotaTimeoutMs, signal);
   }
 
-  private parseResourceQuota(data: any): { limit: number; remaining: number; used: number } {
+  private parseResourceQuota(data: any): { limit: number; remaining: number; used: number; resetAt?: Date | string | null; packages?: CbcPackage[] } {
+    return this.parseResourcePackages(data);
+  }
+
+  /**
+   * Parse the get-user-resource response into the aggregated quota PLUS the
+   * per-package breakdown.
+   *
+   * The response mixes two credit types that must NOT be merged (9router
+   * codebuddy-cn usage):
+   *  - Refill / base ("基础体验包"): a recurring allowance. Live numbers live in the
+   *    *Cycle* fields and it resets at CycleEndTime (monthly), long before the
+   *    resource itself expires (DeductionEndTime).
+   *  - Bonus ("活动赠送包"): one-shot credits that run a single cycle then expire for
+   *    good. Numbers live in the plain Capacity* fields; resetAt is the expiry.
+   *
+   * A pack is a refill when its cycle ends well before its validity (>2d gap),
+   * per the 9router heuristic. The aggregated limit/remaining/used still come
+   * from the plain Capacity* totals so existing columns keep their meaning.
+   */
+  private parseResourcePackages(data: any): {
+    limit: number;
+    remaining: number;
+    used: number;
+    resetAt?: Date | string | null;
+    packages?: CbcPackage[];
+  } {
     const responseData = data.data?.Response?.Data || {};
     const totalDosage = Number(responseData.TotalDosage || 0);
-    const resourceAccounts = Array.isArray(responseData.Accounts) ? responseData.Accounts : [];
+    const resourceAccounts: any[] = Array.isArray(responseData.Accounts) ? responseData.Accounts : [];
     let totalRemain = 0;
     let totalUsed = 0;
     let totalSize = 0;
@@ -691,7 +772,139 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     const limit = totalSize || totalDosage || totalRemain + totalUsed;
     const remaining = totalRemain;
     const used = totalUsed || Math.max(0, limit - remaining);
-    return { limit, remaining, used };
+
+    const packages = this.splitPackages(resourceAccounts);
+    return { limit, remaining, used, resetAt: this.nearestReset(packages), packages };
+  }
+
+  /** Split raw Accounts[] rows into labeled refill / bonus package rows. */
+  private splitPackages(accounts: any[]): CbcPackage[] {
+    const REFILL_GAP_MS = 2 * 24 * 60 * 60 * 1000;
+    const ts = (v: any): number => {
+      if (!v) return NaN;
+      const t = new Date(typeof v === "string" ? v.replace(" ", "T") : v).getTime();
+      return Number.isFinite(t) ? t : NaN;
+    };
+    const num = (...vals: any[]): number => {
+      for (const v of vals) {
+        if (v === undefined || v === null || v === "") continue;
+        const n = Number(v);
+        if (Number.isFinite(n)) return n;
+      }
+      return 0;
+    };
+    const iso = (v: any): string | null => {
+      const t = ts(v);
+      return Number.isFinite(t) ? new Date(t).toISOString() : null;
+    };
+    const isRefill = (acc: any): boolean => {
+      const ce = ts(acc.CycleEndTime);
+      const de = ts(acc.DeductionEndTime || acc.ExpiredTime);
+      return Number.isFinite(ce) && Number.isFinite(de) && de - ce > REFILL_GAP_MS;
+    };
+    const byExpiry = (a: any, b: any): number =>
+      ts(a.CycleEndTime || a.DeductionEndTime || a.ExpiredTime) -
+      ts(b.CycleEndTime || b.DeductionEndTime || b.ExpiredTime);
+
+    const refills = accounts.filter(isRefill).sort(byExpiry);
+    const bonuses = accounts.filter((a) => !isRefill(a)).sort(byExpiry);
+
+    const rows: CbcPackage[] = [];
+    const labelFor = (acc: any, kind: "refill" | "bonus", idx: number): string => {
+      const code = String(acc.PackageCode || "");
+      const known = CBC_PACKAGE_LABELS[code];
+      const name = String(acc.PackageName || acc.SubProductName || "").trim();
+      if (name) return name;
+      if (known) return `${known} pack`;
+      return kind === "refill" ? `Monthly${idx > 0 ? ` ${idx + 1}` : ""}` : `Bonus Pack ${idx + 1}`;
+    };
+
+    refills.forEach((acc, i) => {
+      rows.push({
+        name: labelFor(acc, "refill", i),
+        packageCode: String(acc.PackageCode || ""),
+        kind: "refill",
+        used: num(acc.CycleCapacityUsedPrecise, acc.CycleCapacityUsed),
+        total: num(acc.CycleCapacitySizePrecise, acc.CycleCapacitySize),
+        remaining: num(acc.CycleCapacityRemainPrecise, acc.CycleCapacityRemain),
+        resetAt: iso(acc.CycleEndTime),
+      });
+    });
+    bonuses.forEach((acc, i) => {
+      rows.push({
+        name: labelFor(acc, "bonus", i),
+        packageCode: String(acc.PackageCode || ""),
+        kind: "bonus",
+        used: num(acc.CapacityUsedPrecise, acc.CapacityUsed),
+        total: num(acc.CapacitySizePrecise, acc.CapacitySize),
+        remaining: num(acc.CapacityRemainPrecise, acc.CapacityRemain),
+        resetAt: iso(acc.DeductionEndTime || acc.ExpiredTime || acc.CycleEndTime),
+      });
+    });
+    return rows;
+  }
+
+  /** Earliest upcoming reset/expiry across packages (drives the account's resetAt). */
+  private nearestReset(packages: CbcPackage[]): string | null {
+    const future = packages
+      .map((p) => (p.resetAt ? new Date(p.resetAt).getTime() : NaN))
+      .filter((t) => Number.isFinite(t) && t > Date.now())
+      .sort((a, b) => a - b);
+    const first = future[0];
+    return first !== undefined ? new Date(first).toISOString() : null;
+  }
+
+  /**
+   * Claim the daily-checkin gift for this account (Kiro-Go daily-checkin port).
+   * POST /v2/billing/meter/daily-checkin {} with the account's ck_ Bearer key.
+   *
+   * "Already claimed" is a NORMAL no-op, never an error: the gateway returns
+   * HTTP 400 with a JSON business code (10001) or a message containing
+   * already / 已签 / 已领 / 重复签到 / 今日已. The 400 body must be read to see it.
+   */
+  private async claimDailyGift(apiKey: string, signal?: AbortSignal): Promise<CbcDailyClaim> {
+    try {
+      const headers: Record<string, string> = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Authorization": `Bearer ${apiKey}`,
+      };
+      const response = await this.fetchWithTimeout(
+        `${this.baseUrl}/v2/billing/meter/daily-checkin`,
+        { method: "POST", headers, body: JSON.stringify({}) },
+        config.providerQuotaTimeoutMs,
+        signal
+      );
+      const text = await response.text().catch(() => "");
+      let env: any = null;
+      try { env = text ? JSON.parse(text) : null; } catch { env = null; }
+      const code = Number(env?.code);
+      const msg = String(env?.msg || env?.message || text || "");
+
+      if (response.ok && code === 0) {
+        return {
+          attempted: true,
+          claimed: true,
+          already: false,
+          credit: Number(env?.data?.credit ?? env?.data?.Credit ?? 0),
+          streakDays: Number(env?.data?.streakDays ?? env?.data?.StreakDays ?? 0),
+        };
+      }
+      if (code === 10001 || this.isAlreadyCheckedIn(msg)) {
+        return { attempted: true, claimed: false, already: true, credit: 0, streakDays: 0 };
+      }
+      return { attempted: true, claimed: false, already: false, credit: 0, streakDays: 0, error: msg || `HTTP ${response.status}` };
+    } catch (error) {
+      return { attempted: true, claimed: false, already: false, credit: 0, streakDays: 0, error: error instanceof Error ? error.message : String(error) };
+    }
+  }
+
+  /** Report whether a checkin message is the documented "already signed" marker. */
+  private isAlreadyCheckedIn(msg: string): boolean {
+    const lower = msg.toLowerCase();
+    return ["already", "已签", "已领", "重复签到", "今日已"].some((m) => lower.includes(m.toLowerCase()));
   }
 
   private async makeRequest(
