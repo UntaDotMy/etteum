@@ -33,6 +33,7 @@ import {
   deleteManagedKey,
   type ManagedKey,
 } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 import KeyFormDialog from "./KeyFormDialog";
 
 /** Recently-connected window: a key whose lastUsedAt is within this is "connected". */
@@ -91,42 +92,42 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
     setFormOpen(true);
   }
 
-  function copy(text: string) {
-    navigator.clipboard.writeText(text).then(
-      () => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1800);
-      },
-      () => onError("Could not copy to clipboard."),
-    );
+  async function copy(text: string) {
+    const ok = await copyToClipboard(text);
+    if (!ok) {
+      onError("Could not copy to clipboard.");
+      return;
+    }
+    setCopied(true);
+    setTimeout(() => setCopied(false), 1800);
   }
 
   /** Always copy the full managed key, never the truncated preview. */
-  function copyFullKey(k: ManagedKey) {
+  async function copyFullKey(k: ManagedKey) {
     const full = k.key?.trim();
     if (!full) {
       onError("Full key unavailable for this row. Create a new key if you need the secret.");
       return;
     }
-    navigator.clipboard.writeText(full).then(
-      () => {
-        setCopiedKeyId(k.id);
-        setTimeout(() => setCopiedKeyId((c) => (c === k.id ? null : c)), 1800);
-        onInfo("Full API key copied.");
-      },
-      () => onError("Could not copy to clipboard."),
-    );
+    const ok = await copyToClipboard(full);
+    if (!ok) {
+      onError("Could not copy to clipboard.");
+      return;
+    }
+    setCopiedKeyId(k.id);
+    setTimeout(() => setCopiedKeyId((c) => (c === k.id ? null : c)), 1800);
+    onInfo("Full API key copied.");
   }
 
-  function copyStatusLink(k: ManagedKey) {
-    navigator.clipboard.writeText(statusPageUrl()).then(
-      () => {
-        setCopiedLinkId(k.id);
-        setTimeout(() => setCopiedLinkId((c) => (c === k.id ? null : c)), 1800);
-        onInfo("Status page link copied.");
-      },
-      () => onError("Could not copy link."),
-    );
+  async function copyStatusLink(k: ManagedKey) {
+    const ok = await copyToClipboard(statusPageUrl());
+    if (!ok) {
+      onError("Could not copy link.");
+      return;
+    }
+    setCopiedLinkId(k.id);
+    setTimeout(() => setCopiedLinkId((c) => (c === k.id ? null : c)), 1800);
+    onInfo("Status page link copied.");
   }
 
   return (
@@ -236,14 +237,15 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                   size="icon"
                   title="Copy status page URL"
                   onClick={() => {
-                    navigator.clipboard.writeText(statusPageUrl()).then(
-                      () => {
-                        setCopiedLink(true);
-                        setTimeout(() => setCopiedLink(false), 1800);
-                        onInfo("Status page link copied.");
-                      },
-                      () => onError("Could not copy link."),
-                    );
+                    void copyToClipboard(statusPageUrl()).then((ok) => {
+                      if (!ok) {
+                        onError("Could not copy link.");
+                        return;
+                      }
+                      setCopiedLink(true);
+                      setTimeout(() => setCopiedLink(false), 1800);
+                      onInfo("Status page link copied.");
+                    });
                   }}
                 >
                   {copiedLink ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Link2 className="w-4 h-4" />}

@@ -53,12 +53,15 @@ export const proxyRouter = new Hono();
 // ── Friend-key share / gating state ──────────────────────────────────────────
 // Short-TTL cache of the merged model catalog so /v1/share and /v1/models never
 // hammer the per-account pool lookup on every poll from the status page.
+// Separate entries for active-only vs full catalog so one never shadows the other.
 const MODELS_CACHE_TTL_MS = 60_000;
-let allModelsCache: { activeOnly: boolean; data: ModelInfo[]; expiresAt: number } | null = null;
+const modelsCache = new Map<"all" | "active", { data: ModelInfo[]; expiresAt: number }>();
 
 async function getActiveModelsCached(activeOnly: boolean): Promise<ModelInfo[]> {
-  if (allModelsCache && allModelsCache.expiresAt > Date.now() && allModelsCache.activeOnly === activeOnly) {
-    return allModelsCache.data;
+  const cacheKey = activeOnly ? "active" : "all";
+  const hit = modelsCache.get(cacheKey);
+  if (hit && hit.expiresAt > Date.now()) {
+    return hit.data;
   }
   await refreshByokModels();
   let models = getAllModels();
@@ -70,7 +73,7 @@ async function getActiveModelsCached(activeOnly: boolean): Promise<ModelInfo[]> 
     }));
     models = filtered;
   }
-  allModelsCache = { activeOnly, data: models, expiresAt: Date.now() + MODELS_CACHE_TTL_MS };
+  modelsCache.set(cacheKey, { data: models, expiresAt: Date.now() + MODELS_CACHE_TTL_MS });
   return models;
 }
 
@@ -1027,19 +1030,26 @@ export async function handleChatCompletion(
  *   caller doesn't fetch the entire catalog including models no account can
  *   serve). Useful for clients that want a lean, usable model list.
  *
- * Managed keys with an allowlist only see those models (same rule as chat).
- * The legacy env/settings key (no apiKeyId) still sees the full catalog.
+ * Pool/install key (env/settings, no apiKeyId): full catalog (or active subset).
+ * Managed key with allowlist: only those model ids (same rule as chat).
+ * Managed key without allowlist: same as pool key.
  */
 proxyRouter.get("/v1/models", async (c) => {
   // Ensure BYOK cache is fresh before listing models.
   // Without this, the sync getModels() returns stale/empty supportedModels.
   let models = await getActiveModelsCached(c.req.query("active") === "1");
 
+  // Allowlist applies ONLY to managed multi-keys. The install/pool key never
+  // sets apiKeyId (see resolveApiKey scope "pool"), so it always sees everything.
   const apiKeyId = (c.req.raw as { apiKeyId?: number }).apiKeyId;
-  if (apiKeyId) {
-    const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, apiKeyId)).limit(1);
+  if (typeof apiKeyId === "number" && apiKeyId > 0) {
+    const [row] = await db
+      .select({ allowedModels: apiKeys.allowedModels })
+      .from(apiKeys)
+      .where(eq(apiKeys.id, apiKeyId))
+      .limit(1);
     const allowlist = parseAllowedModels(row?.allowedModels);
-    if (allowlist) {
+    if (allowlist && allowlist.length > 0) {
       models = models.filter((m) => modelAllowed(allowlist, m.id));
     }
   }

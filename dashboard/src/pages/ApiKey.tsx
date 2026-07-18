@@ -4,6 +4,7 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Copy, Eye, EyeOff, RefreshCw, Check, Save, ShieldCheck } from "lucide-react";
 import { fetchApiKey, regenerateApiKey, setApiKey, testApiKey } from "@/lib/api";
+import { copyToClipboard } from "@/lib/clipboard";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
 import ManagedKeys from "@/components/keys/ManagedKeys";
@@ -67,8 +68,10 @@ export default function ApiKey() {
   }
 
   const handleCopy = () => {
-    navigator.clipboard.writeText(apiKey);
-    setCopiedTimed(true);
+    void copyToClipboard(apiKey).then((ok) => {
+      if (ok) setCopiedTimed(true);
+      else setError("Could not copy to clipboard (use HTTPS or select the key manually).");
+    });
   };
 
   async function handleSave() {

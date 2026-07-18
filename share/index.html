@@ -474,25 +474,62 @@
     setLive("idle");
     $("upd").textContent = "come back later";
   }
+  /** Works on http://public-ip (Clipboard API is blocked outside secure contexts). */
+  function copyText(text) {
+    if (!text) return Promise.resolve(false);
+    if (window.isSecureContext && navigator.clipboard && navigator.clipboard.writeText) {
+      return navigator.clipboard.writeText(text).then(
+        function () { return true; },
+        function () { return copyTextLegacy(text); }
+      );
+    }
+    return Promise.resolve(copyTextLegacy(text));
+  }
+  function copyTextLegacy(text) {
+    try {
+      var ta = document.createElement("textarea");
+      ta.value = text;
+      ta.setAttribute("readonly", "");
+      ta.setAttribute("aria-hidden", "true");
+      ta.style.position = "fixed";
+      ta.style.left = "-9999px";
+      ta.style.top = "0";
+      ta.style.opacity = "0";
+      document.body.appendChild(ta);
+      ta.focus();
+      ta.select();
+      ta.setSelectionRange(0, text.length);
+      var ok = document.execCommand("copy");
+      document.body.removeChild(ta);
+      return ok;
+    } catch (e) {
+      return false;
+    }
+  }
   function copy(text, btn) {
     if (!text) return;
-    if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(function () {
-        toast.textContent = "Copied";
+    copyText(text).then(function (ok) {
+      if (!ok) {
+        toast.textContent = "Copy failed — select text manually";
         toast.classList.add("show");
         if (toastT) clearTimeout(toastT);
-        toastT = setTimeout(function () { toast.classList.remove("show"); }, 1200);
-        if (btn) {
-          var old = btn.textContent;
-          btn.textContent = "Copied";
-          btn.classList.add("done");
-          setTimeout(function () {
-            btn.textContent = old;
-            btn.classList.remove("done");
-          }, 1200);
-        }
-      }, function () {});
-    }
+        toastT = setTimeout(function () { toast.classList.remove("show"); }, 2000);
+        return;
+      }
+      toast.textContent = "Copied";
+      toast.classList.add("show");
+      if (toastT) clearTimeout(toastT);
+      toastT = setTimeout(function () { toast.classList.remove("show"); }, 1200);
+      if (btn) {
+        var old = btn.textContent;
+        btn.textContent = "Copied";
+        btn.classList.add("done");
+        setTimeout(function () {
+          btn.textContent = old;
+          btn.classList.remove("done");
+        }, 1200);
+      }
+    });
   }
 
   function card(d, bu) {

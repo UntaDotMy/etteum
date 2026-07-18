@@ -29,8 +29,11 @@ export function parseAllowedModels(raw: string | null | undefined): string[] | n
 
 /** True when the parsed allowlist permits `model`. A null allowlist permits all. */
 export function modelAllowed(allowlist: string[] | null, model: string): boolean {
-  if (!allowlist) return true;
-  return allowlist.includes(model);
+  if (!allowlist || allowlist.length === 0) return true;
+  if (allowlist.includes(model)) return true;
+  // Case-insensitive match (clients sometimes send different casing).
+  const needle = model.toLowerCase();
+  return allowlist.some((entry) => entry.toLowerCase() === needle);
 }
 
 /** True when the key is past its expiry (no expiry configured = false). */

@@ -12,8 +12,13 @@ describe("managed key model allowlist", () => {
     const allowlist = parseAllowedModels(JSON.stringify(["grok-4.5"]));
     expect(allowlist).toEqual(["grok-4.5"]);
     expect(modelAllowed(allowlist, "grok-4.5")).toBe(true);
+    expect(modelAllowed(allowlist, "Grok-4.5")).toBe(true); // case-insensitive
     expect(modelAllowed(allowlist, "composer-2.5")).toBe(false);
     expect(modelAllowed(allowlist, "gpt-4")).toBe(false);
+  });
+
+  test("empty allowlist array is unrestricted (pool-like managed key)", () => {
+    expect(modelAllowed([], "anything")).toBe(true);
   });
 
   test("catalog filter matches GET /v1/models behavior for a restricted key", () => {

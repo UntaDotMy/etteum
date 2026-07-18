@@ -260,10 +260,17 @@ app.use("/v1/*", async (c, next) => {
       401
     );
   }
-  if (resolved.apiKeyId) {
+  // Pool/install key: no apiKeyId → full model catalog, no friend limits.
+  // Managed key: apiKeyId set → allowlist / quota / rate apply.
+  if (resolved.valid && resolved.scope === "managed") {
     (c.req.raw as any).apiKeyId = resolved.apiKeyId;
-    // Fire-and-forget: stamp last-used for the managed key (attribution).
-    void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, resolved.apiKeyId)).then(() => {}, () => {});
+    void db
+      .update(apiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(apiKeys.id, resolved.apiKeyId))
+      .then(() => {}, () => {});
+  } else {
+    delete (c.req.raw as any).apiKeyId;
   }
 
   await next();
@@ -293,9 +300,15 @@ app.use("/backend-api/*", async (c, next) => {
       401
     );
   }
-  if (resolved.apiKeyId) {
+  if (resolved.valid && resolved.scope === "managed") {
     (c.req.raw as any).apiKeyId = resolved.apiKeyId;
-    void db.update(apiKeys).set({ lastUsedAt: new Date() }).where(eq(apiKeys.id, resolved.apiKeyId)).then(() => {}, () => {});
+    void db
+      .update(apiKeys)
+      .set({ lastUsedAt: new Date() })
+      .where(eq(apiKeys.id, resolved.apiKeyId))
+      .then(() => {}, () => {});
+  } else {
+    delete (c.req.raw as any).apiKeyId;
   }
   await next();
 });
@@ -331,8 +344,10 @@ app.use("/api/*", async (c, next) => {
     const machineId = extractMachineId(c.req.raw.headers, new URL(c.req.url).searchParams);
     const resolved = await resolveApiKey(token, { machineId });
     if (resolved.valid) {
-      if (resolved.apiKeyId) {
+      if (resolved.scope === "managed") {
         (c.req.raw as any).apiKeyId = resolved.apiKeyId;
+      } else {
+        delete (c.req.raw as any).apiKeyId;
       }
       await next();
       return;

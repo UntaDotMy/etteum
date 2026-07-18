@@ -75,16 +75,26 @@ export async function getActiveApiKey(): Promise<string> {
  * When a managed key has machineId set, the request must present a matching
  * machine identity via x-machine-id / x-etteum-machine-id / ?machine_id=.
  */
+export type ResolvedApiKey =
+  | { valid: true; scope: "pool" }
+  | { valid: true; scope: "managed"; apiKeyId: number }
+  | { valid: false; reason?: string };
+
 export async function resolveApiKey(
   token: string,
   opts?: { machineId?: string | null },
-): Promise<{ valid: boolean; apiKeyId?: number; reason?: string }> {
+): Promise<ResolvedApiKey> {
   if (!token) return { valid: false };
-  // 1. Legacy single-key (env or settings) — not machine-bound.
-  if (config.apiKey && constantTimeEqual(token, config.apiKey)) return { valid: true };
+  // 1. Pool / install key (env or settings) — never limited by allowlist.
+  //    Checked FIRST so a managed row can never shadow the operator key.
+  if (config.apiKey && constantTimeEqual(token, config.apiKey)) {
+    return { valid: true, scope: "pool" };
+  }
   const active = await getActiveApiKey();
-  if (active && constantTimeEqual(token, active)) return { valid: true };
-  // 2. Multi-key table — cached (hit 5s / miss 2s), invalidated on mutation.
+  if (active && constantTimeEqual(token, active)) {
+    return { valid: true, scope: "pool" };
+  }
+  // 2. Managed keys table — optional allowlist / quota / rate / expiry.
   let resolved = resolveKeyCache.get(token);
   if (!resolved || resolved.expiresAt <= Date.now()) {
     const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
@@ -96,7 +106,7 @@ export async function resolveApiKey(
   }
   const row = resolved.value.row;
   if (!row || !row.isActive) return { valid: false };
-  // Friend-key expiry: a key past its expiresAt stops resolving entirely.
+  // Managed-key expiry: a key past its expiresAt stops resolving entirely.
   if (isExpired(row.expiresAt)) return { valid: false, reason: "expired" };
   // Enforce machine binding when configured on the key.
   if (row.machineId && row.machineId.trim()) {
@@ -105,7 +115,7 @@ export async function resolveApiKey(
       return { valid: false, reason: "machine_mismatch" };
     }
   }
-  return { valid: true, apiKeyId: row.id };
+  return { valid: true, scope: "managed", apiKeyId: row.id };
 }
 
 /** Extract optional machine id from headers / query for machine-bound keys. */
