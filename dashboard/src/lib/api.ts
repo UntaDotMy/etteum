@@ -1,22 +1,20 @@
 import { bulkTimeoutMs, BULK_API_TIMEOUT_MS } from "./bulkTimeout";
 export { bulkTimeoutMs, BULK_API_TIMEOUT_MS };
 
+/**
+ * Runtime env injected by scripts/serve-dashboard.ts into index.html so
+ * production works on custom ports without a special Vite rebuild.
+ */
+type PoolEnv = { backendPort?: number };
+function poolEnv(): PoolEnv {
+  if (typeof window === "undefined") return {};
+  return ((window as unknown as { __POOL_ENV__?: PoolEnv }).__POOL_ENV__) ?? {};
+}
+
 function resolveApiBase(): string {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
-  const { port, hostname, protocol } = window.location;
-  if (!port || port === "443" || port === "80") {
-    return window.location.origin;
-  }
-  const backendPort = import.meta.env.VITE_BACKEND_PORT;
-  if (backendPort) {
-    return `${protocol}//${hostname}:${backendPort}`;
-  }
-  // Standard layout: dashboard on 1931, backend on 1930.
-  // If we're on the dashboard port, target the backend port.
-  if (port === "1931") {
-    return `${protocol}//${hostname}:1930`;
-  }
-  // Dashboard is served by the backend itself — use same origin.
+  // Prefer same-origin: serve-dashboard proxies /api/* → backend (public admin,
+  // custom ports, cookies, no CORS). Override with VITE_API_BASE only if needed.
   return window.location.origin;
 }
 
@@ -27,13 +25,17 @@ export function getWsBase(): string {
   if (configured) return configured;
   const { port, hostname, protocol: httpProto } = window.location;
   const protocol = httpProto === "https:" ? "wss" : "ws";
-  if (!port || port === "443" || port === "80") {
-    return `${protocol}://${hostname}`;
-  }
-  const backendPort = import.meta.env.VITE_BACKEND_PORT;
+  // Live updates hit the backend WS port (not the static dashboard server).
+  const backendPort =
+    poolEnv().backendPort ??
+    (import.meta.env.VITE_BACKEND_PORT ? Number(import.meta.env.VITE_BACKEND_PORT) : undefined);
   if (backendPort) {
     return `${protocol}://${hostname}:${backendPort}`;
   }
+  if (!port || port === "443" || port === "80") {
+    return `${protocol}://${hostname}`;
+  }
+  // Legacy defaults when nothing is injected.
   if (port === "1931") {
     return `${protocol}://${hostname}:1930`;
   }
