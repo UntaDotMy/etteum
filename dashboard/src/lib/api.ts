@@ -1348,6 +1348,8 @@ export async function revealByokKey(
 // ── Managed / friend API keys ─────────────────────────────────────────────
 export interface ManagedKey {
   id: number;
+  /** Full secret — admin dashboard only (never on the public share board). */
+  key: string;
   keyPreview: string;
   name: string | null;
   machineId: string | null;

@@ -1044,6 +1044,7 @@ function shareKeyPublic(
   row: ShareKeyRow,
   activeModelIds: string[],
 ): {
+  id: number;
   name: string | null;
   keyPreview: string;
   status: string;
@@ -1071,6 +1072,7 @@ function shareKeyPublic(
         ? "exhausted"
         : "active";
   return {
+    id: row.id,
     name: row.name || null,
     keyPreview: row.key.slice(0, 12) + "…",
     status,

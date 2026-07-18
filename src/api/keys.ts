@@ -184,12 +184,17 @@ keysRouter.post("/test", async (c) => {
 
 // 
 
-/** List all managed API keys (never returns the key string — only a masked prefix). */
+/**
+ * List managed API keys for the admin dashboard.
+ * Returns the full key string so operators can re-copy it (this route is already
+ * behind dashboard session auth — not the public share board).
+ */
 keysRouter.get("/managed", async (c) => {
   const rows = await db.select().from(apiKeys).orderBy(apiKeys.id);
   return c.json({
     keys: rows.map((k) => ({
       id: k.id,
+      key: k.key,
       keyPreview: k.key.slice(0, 12) + "…",
       name: k.name,
       machineId: k.machineId,

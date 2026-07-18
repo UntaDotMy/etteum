@@ -64,6 +64,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   const [editing, setEditing] = useState<ManagedKey | null>(null);
   const [createdKey, setCreatedKey] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
+  const [copiedKeyId, setCopiedKeyId] = useState<number | null>(null);
   const [copiedLink, setCopiedLink] = useState(false);
   const [copiedLinkId, setCopiedLinkId] = useState<number | null>(null);
   const [busyId, setBusyId] = useState<number | null>(null);
@@ -97,7 +98,24 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
         setCopied(true);
         setTimeout(() => setCopied(false), 1800);
       },
-      () => {},
+      () => onError("Could not copy to clipboard."),
+    );
+  }
+
+  /** Always copy the full managed key, never the truncated preview. */
+  function copyFullKey(k: ManagedKey) {
+    const full = k.key?.trim();
+    if (!full) {
+      onError("Full key unavailable for this row. Create a new key if you need the secret.");
+      return;
+    }
+    navigator.clipboard.writeText(full).then(
+      () => {
+        setCopiedKeyId(k.id);
+        setTimeout(() => setCopiedKeyId((c) => (c === k.id ? null : c)), 1800);
+        onInfo("Full API key copied.");
+      },
+      () => onError("Could not copy to clipboard."),
     );
   }
 
@@ -157,7 +175,8 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                     )
                   }
                   onDelete={() => setDeleting(k)}
-                  onCopy={() => copy(k.keyPreview)}
+                  keyCopied={copiedKeyId === k.id}
+                  onCopy={() => copyFullKey(k)}
                 />
               ))}
             </div>
@@ -194,9 +213,9 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
           <DialogHeader>
             <DialogTitle>Key created</DialogTitle>
             <DialogDescription>
-              This is the only time the full API key is shown — copy it for the friend&apos;s
-              client. Status (quota / models) is public on the share page at{" "}
-              <span className="font-mono">{sharePageUrl()}</span> — no special hash needed.
+              Copy the full API key for the friend&apos;s client (you can re-copy it anytime from
+              the card). Status lives on the share page at{" "}
+              <span className="font-mono">{sharePageUrl()}</span>.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
@@ -291,6 +310,7 @@ function KeyCard(props: {
   k: ManagedKey;
   busy: boolean;
   linkCopied: boolean;
+  keyCopied: boolean;
   hasShareLink: boolean;
   onCopyLink: () => void;
   onEdit: () => void;
@@ -298,7 +318,7 @@ function KeyCard(props: {
   onDelete: () => void;
   onCopy: () => void;
 }) {
-  const { k, busy, linkCopied, hasShareLink, onCopyLink, onEdit, onToggle, onDelete, onCopy } = props;
+  const { k, busy, linkCopied, keyCopied, hasShareLink, onCopyLink, onEdit, onToggle, onDelete, onCopy } = props;
   const st = statusOf(k);
   const connected = k.isActive && k.lastUsedAt != null && Date.now() - new Date(k.lastUsedAt).getTime() < CONNECTED_WINDOW_MS;
   const hasQuota = k.tokenQuota != null && k.tokenQuota > 0;
@@ -311,11 +331,17 @@ function KeyCard(props: {
         <div className="min-w-0">
           <div className="font-medium text-[var(--foreground)] truncate">{k.name || "managed key"}</div>
           <button
+            type="button"
             onClick={onCopy}
-            title="copy preview"
-            className="font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] truncate block"
+            title="Copy full API key"
+            className="font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] truncate max-w-full inline-flex items-center gap-1.5"
           >
-            {k.keyPreview}
+            <span className="truncate">{k.keyPreview}</span>
+            {keyCopied ? (
+              <Check className="w-3 h-3 shrink-0 text-[var(--success)]" />
+            ) : (
+              <Copy className="w-3 h-3 shrink-0 opacity-60" />
+            )}
           </button>
         </div>
         <div className="flex items-center gap-1.5 shrink-0">
