@@ -168,14 +168,34 @@
   .go:hover { transform: translate(-1px, -1px); box-shadow: 3px 3px 0 var(--line); }
   .go:active { transform: none; box-shadow: 1px 1px 0 var(--line); }
   .go:disabled { opacity: .5; cursor: default; transform: none; }
-  .err {
-    color: var(--danger);
-    font-size: 13px;
-    font-weight: 600;
-    min-height: 18px;
-    margin-top: 10px;
+  .empty {
+    text-align: center;
+    padding: 42px 20px 36px;
   }
-  .err:not(:empty)::before { content: "✗ "; }
+  .empty .icon {
+    width: 56px; height: 56px;
+    margin: 0 auto 16px;
+    border: 2.5px solid var(--line);
+    border-radius: 16px;
+    background: var(--chip);
+    box-shadow: 2px 2px 0 var(--line);
+    display: grid; place-items: center;
+    font-size: 22px;
+  }
+  .empty h2 {
+    margin: 0 0 8px;
+    font-size: 22px;
+    font-weight: 800;
+    letter-spacing: -0.03em;
+  }
+  .empty p {
+    margin: 0;
+    color: var(--muted);
+    font-size: 14px;
+    line-height: 1.5;
+    max-width: 320px;
+    margin-inline: auto;
+  }
 
   .hidden { display: none !important; }
   .sess { animation: rise .32s ease; }
@@ -483,13 +503,11 @@
     </div>
   </header>
 
-  <!-- auth card (hidden when auto-connected via share link) -->
-  <section class="card" id="authcard">
-    <div class="prompt">
-      <input id="key" class="keyin" type="password" placeholder="paste friend key  sk-…" autocomplete="off" spellcheck="false" aria-label="API key" />
-      <button class="go" id="view" type="button">View status</button>
-    </div>
-    <div class="err" id="err" role="alert"></div>
+  <!-- shown when no share link / key is present or the key is invalid -->
+  <section class="card empty" id="empty" aria-live="polite">
+    <div class="icon" aria-hidden="true">🔑</div>
+    <h2 id="emptytitle">No keys yet</h2>
+    <p id="emptymsg">Nothing has been shared with you right now. Come back later.</p>
   </section>
 
   <div id="sess" class="sess hidden">
@@ -560,7 +578,7 @@
 
   <footer class="foot">
     <div class="tag">etteum pool · friend key</div>
-    <div class="upd"><i aria-hidden="true"></i><span id="upd">awaiting key</span></div>
+    <div class="upd"><i aria-hidden="true"></i><span id="upd">waiting</span></div>
   </footer>
 </div>
 <div class="toast" id="toast" role="status">copied</div>
@@ -569,17 +587,15 @@
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
-  var keyInput = $("key"), err = $("err"), sess = $("sess"), toast = $("toast");
-  var authcard = $("authcard");
+  var sess = $("sess"), empty = $("empty"), toast = $("toast");
   var currentKey = null, timer = null, toastT = null;
 
+  // Injected for BASE URL display only — status is fetched same-origin via the
+  // share server's /v1/share proxy (avoids localhost vs 127.0.0.1 CORS).
   var BACKEND = "__BACKEND_ORIGIN__";
-  // Optional absolute base URL for the pool's /v1 route (tunnel setups).
   var BASE_URL = "__SHARE_BASE_URL__";
-  // "1" = link-only: only keys embedded in the share link are accepted.
-  var LOCK = "__SHARE_LOCK__" === "1";
 
-  // Fragment-only key so it never hits this server's logs.
+  // Fragment-only key so it never hits this server's access logs.
   function keyFromHash() {
     var h = window.location.hash || "";
     if (h.charAt(0) === "#") h = h.slice(1);
@@ -629,10 +645,18 @@
     return (BACKEND && BACKEND !== "__BACKEND_ORIGIN__" ? BACKEND : "") + "/v1";
   }
 
+  function showEmpty(title, msg) {
+    sess.classList.add("hidden");
+    empty.classList.remove("hidden");
+    $("emptytitle").textContent = title || "No keys yet";
+    $("emptymsg").textContent = msg || "Nothing has been shared with you right now. Come back later.";
+    setLive("standby");
+    $("upd").textContent = "come back later";
+  }
+
   function render(d) {
+    empty.classList.add("hidden");
     sess.classList.remove("hidden");
-    // When connected via share link, collapse the paste box for a clean card view.
-    if (keyFromHash()) authcard.classList.add("hidden");
 
     var nm = d.name || "friend key";
     $("kname").textContent = nm;
@@ -648,11 +672,9 @@
     var used = d.tokensUsed || 0;
     var left = d.tokensLeft;
     var hasQuota = quota != null && quota > 0;
-    // % LEFT (remaining), matching the reference card.
     var pctLeft = hasQuota
       ? Math.max(0, Math.min(100, ((left != null ? left : 0) / quota) * 100))
       : 100;
-    // Bar fill = used fraction.
     var pctUsed = hasQuota
       ? Math.max(0, Math.min(100, (used / quota) * 100))
       : 0;
@@ -717,40 +739,27 @@
     toastT = setTimeout(function () { toast.classList.remove("show"); }, 1400);
   }
 
-  function fail(msg) {
-    sess.classList.add("hidden");
-    setLive("bad");
-    err.textContent = msg || "";
-    authcard.classList.remove("hidden");
-    $("upd").textContent = "awaiting key";
+  function fail() {
+    // No technical errors — friend-facing empty state only.
+    showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
   }
 
   function load() {
     if (!currentKey) return;
-    fetch(BACKEND + "/v1/share", { headers: { "Authorization": "Bearer " + currentKey } })
+    // Same-origin proxy on the share server — no cross-origin CORS.
+    fetch("/v1/share", { headers: { "Authorization": "Bearer " + currentKey } })
       .then(function (r) {
         return r.json().then(function (j) { return { ok: r.ok, j: j }; });
       })
       .then(function (res) {
-        if (!res.ok) {
-          fail((res.j && res.j.error && res.j.error.message) || "invalid key");
-          return;
-        }
-        err.textContent = "";
+        if (!res.ok) { fail(); return; }
         render(res.j);
       })
-      .catch(function () { fail("could not reach the pool backend"); });
-  }
-
-  function start() {
-    var k = keyInput.value.trim();
-    if (!k) { fail("paste a key first"); return; }
-    startWithKey(k);
+      .catch(function () { fail(); });
   }
 
   function startWithKey(k) {
     currentKey = k;
-    err.textContent = "";
     if (timer) clearInterval(timer);
     load();
     timer = setInterval(load, 10000);
@@ -758,20 +767,11 @@
 
   var urlKey = keyFromHash();
   if (urlKey) {
-    keyInput.value = urlKey;
     startWithKey(urlKey);
-  } else if (LOCK) {
-    authcard.classList.add("hidden");
-    setLive("bad");
-    err.textContent = "this page opens from a shared link. Ask for your link.";
-    // Keep err visible: put a minimal surface back
-    authcard.classList.remove("hidden");
-    var prompt = authcard.querySelector(".prompt");
-    if (prompt) prompt.classList.add("hidden");
+  } else {
+    showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
   }
 
-  $("view").addEventListener("click", start);
-  keyInput.addEventListener("keydown", function (e) { if (e.key === "Enter") start(); });
   $("copybase").addEventListener("click", function () { copy(baseUrl()); });
   $("copykey").addEventListener("click", function () {
     // Preview only — full key is never re-fetched after creation.

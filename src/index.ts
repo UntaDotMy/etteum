@@ -163,22 +163,42 @@ setTimeout(() => {
 const app = new Hono();
 
 // Middleware
-// CORS — allowlist the dashboard origin(s) rather than a blanket "*".
-  // Configurable via POOLPROX_CORS_ORIGINS (comma-separated). Defaults cover
-  // both localhost and 127.0.0.1 for the dashboard + API ports — browsers treat
-  // those as different origins, so only allowing "localhost" breaks dashboard
-  // calls when the user opens http://127.0.0.1:1931 (Failed to fetch / 401 UX).
+// CORS — allowlist the dashboard + friend-share origins rather than a blanket "*".
+  // Configurable via POOLPROX_CORS_ORIGINS (comma-separated, merged with defaults).
+  // Browsers treat localhost and 127.0.0.1 as different origins; port 80/443 omit
+  // the port in Origin (so http://localhost must be listed, not only :80).
   const corsOrigins = (process.env.POOLPROX_CORS_ORIGINS || "")
     .split(",")
     .map((s) => s.trim())
     .filter(Boolean);
+  const shareOrigins = [
+    `http://localhost:${config.sharePort}`,
+    `http://127.0.0.1:${config.sharePort}`,
+  ];
+  // Default HTTP/HTTPS origins without an explicit port (share on 80 / reverse proxy).
+  if (config.sharePort === 80) {
+    shareOrigins.push("http://localhost", "http://127.0.0.1");
+  }
+  if (config.sharePort === 443) {
+    shareOrigins.push("https://localhost", "https://127.0.0.1");
+  }
+  const sharePublic = process.env.SHARE_PUBLIC_URL?.trim();
+  if (sharePublic) {
+    try {
+      shareOrigins.push(new URL(sharePublic).origin);
+    } catch {
+      /* ignore malformed SHARE_PUBLIC_URL */
+    }
+  }
   const defaultOrigins = [
     `http://localhost:${config.dashboardPort}`,
     `http://127.0.0.1:${config.dashboardPort}`,
     `http://localhost:${config.port}`,
     `http://127.0.0.1:${config.port}`,
+    ...shareOrigins,
   ];
-  const allowedOrigins = corsOrigins.length > 0 ? corsOrigins : defaultOrigins;
+  // Env list extends defaults (does not replace) so share/dashboard keep working.
+  const allowedOrigins = [...new Set([...defaultOrigins, ...corsOrigins])];
   app.use(
     "*",
     cors({
@@ -203,6 +223,17 @@ app.use("*", logger());
 
 // API Key authentication middleware for proxy endpoints
 app.use("/v1/*", async (c, next) => {
+  // Preflight must not require a bearer token (browser sends OPTIONS without it).
+  if (c.req.method === "OPTIONS") {
+    return next();
+  }
+  // Friend status page does its own key lookup; skip the global gate so a
+  // missing/invalid key returns the share handler's 401 shape (and CORS works).
+  const path = new URL(c.req.url).pathname;
+  if (path === "/v1/share" || path === "/v1/share/") {
+    return next();
+  }
+
   const token = extractApiKey(c.req.raw.headers, null, { allowQuery: false });
 
   if (!token) {
