@@ -32,6 +32,7 @@ const CBC_MODEL_MAP: Record<string, string> = {
   "cbc-kimi-k2.5": "kimi-k2.5",
   "cbc-kimi-k2.6": "kimi-k2.6",
   "cbc-kimi-k2.7": "kimi-k2.7",
+  "cbc-kimi-k3": "kimi-k3",
   // GLM (Zhipu)
   "cbc-glm-5.1": "glm-5.1",
   "cbc-glm-5.2": "glm-5.2",
@@ -90,6 +91,9 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     { id: "cbc-kimi-k2.5", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 164000, max_output: 8192, thinking: false, vision: true, creditUnit: "credit", creditRate: 0.05, creditSource: "upstream" },
     { id: "cbc-kimi-k2.6", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 256000, max_output: 8192, thinking: false, vision: true, creditUnit: "credit", creditRate: 0.09, creditSource: "upstream" },
     { id: "cbc-kimi-k2.7", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 256000, max_output: 8192, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.07, creditSource: "upstream" },
+    // Kimi K3 flagship (July 2026) — 1M combined context; max_completion_tokens up to 1_048_576.
+    // creditRate estimated from k2.7 ratio × OpenRouter $3/$15
+    { id: "cbc-kimi-k3", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 1048576, max_output: 1048576, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.20, creditSource: "estimated" },
     // GLM — 5.1 / 5.2 / 5v-turbo all support vision (5v-turbo is the dedicated vision model)
     { id: "cbc-glm-5.1", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 200000, max_output: 8192, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02, creditSource: "upstream" },
     { id: "cbc-glm-5.2", object: "model", created: Date.now(), owned_by: "codebuddy-china", context_window: 1000000, max_output: 8192, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.02, creditSource: "upstream" },
@@ -742,11 +746,25 @@ export class CodeBuddyChinaProvider extends BaseProvider {
       // upstream testing on real screenshots.
     }
 
-    if (request.max_tokens && request.max_tokens > 0) {
-      body.max_tokens = request.max_tokens;
-    }
-    if (request.temperature !== undefined) {
-      body.temperature = request.temperature;
+    // Kimi K3: default max_completion/max_tokens to 1_048_576 when omitted
+    // (Moonshot platform default is only 131_072). Cap at the combined 1M window.
+    const isKimiK3 =
+      /^kimi-k3$/i.test(actualModel.replace(/-thinking$/i, "")) ||
+      /^cbc-kimi-k3$/i.test(String(request.model || "").replace(/-thinking$/i, ""));
+    if (isKimiK3) {
+      const requested = Number(request.max_tokens);
+      body.max_tokens =
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(Math.floor(requested), 1_048_576)
+          : 1_048_576;
+      // Kimi K3 locks sampling (temperature=1.0, top_p=0.95) — do not forward.
+    } else {
+      if (request.max_tokens && request.max_tokens > 0) {
+        body.max_tokens = request.max_tokens;
+      }
+      if (request.temperature !== undefined) {
+        body.temperature = request.temperature;
+      }
     }
 
     // Forward reasoning/thinking config to upstream using each model family's

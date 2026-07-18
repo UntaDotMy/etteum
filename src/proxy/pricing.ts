@@ -201,6 +201,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // cbc-kimi-k2.7 / bare kimi-k2.7 ≈ kimi-k2.7-code SKU
   "kimi-k2.7":                    { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
   "kimi-k2.7-code":               { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
+  // Kimi K3 (July 2026) — openrouter.ai/moonshotai/kimi-k3: $3 / $15 per M tokens.
+  // cached/cacheCreation estimated at 20%/125% of input (same family heuristic as k2.x).
+  "kimi-k3":                      { input: 3.00,  output: 15.00, cached: 0.60,   reasoning: 15.00, cacheCreation: 3.75  },
   "moonshot-v1-8k":               { input: 0.20,  output: 2.00,  cached: 0.02,   reasoning: 2.00,  cacheCreation: 0.25  },
   "moonshot-v1-32k":              { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.25  },
   "moonshot-v1-128k":             { input: 2.00,  output: 5.00,  cached: 0.20,   reasoning: 5.00,  cacheCreation: 2.50  },

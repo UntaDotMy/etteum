@@ -80,6 +80,10 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "kimi-k2.7-code":         { contextWindow: 262_144,   maxOutput: 98_304,  thinking: false, vision: false },
   "kimi-k2.6":              { contextWindow: 262_144,   maxOutput: 65_536,  thinking: false, vision: true },
   "kimi-k2.5":              { contextWindow: 164_000,   maxOutput: 8_192,   thinking: false, vision: true },
+  // Kimi K3 flagship (July 2026) — 1M combined context (input+output ≤ 1_048_576).
+  // Default max_completion_tokens is 131_072; hard max is 1_048_576 (remaining window).
+  // openrouter.ai/moonshotai/kimi-k3 · platform.kimi.ai
+  "kimi-k3":                { contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true,  vision: true },
 
   // ── MiniMax — platform.minimaxi.com (M3 is current flagship, June 2026) ──
   "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },

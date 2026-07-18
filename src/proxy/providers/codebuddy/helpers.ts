@@ -90,6 +90,7 @@ export const CB_MODEL_MAP: Record<string, string> = {
   "cb-deepseek-v3-2": "deepseek-v3-2-volc",
   // Kimi
   "cb-kimi-k2.5": "kimi-k2.5",
+  "cb-kimi-k3": "kimi-k3",
   // Other
   "cb-default": "codebuddy-default",
 };

@@ -92,6 +92,9 @@ export class CodeBuddyProvider extends BaseProvider {
     { id: "cb-gemini-3.5-flash", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.004 / 1000, creditSource: "estimated" },
     { id: "cb-deepseek-v3-2", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: false, creditUnit: "token", creditRate: 0.002 / 1000, creditSource: "estimated" },
     { id: "cb-kimi-k2.5", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: false, creditUnit: "token", creditRate: 0.005 / 1000, creditSource: "estimated" },
+    // Moonshot Kimi K3 flagship (OpenRouter $3/$15 per M; 1M context) — July 2026.
+    // creditRate ~0.020/1K estimated vs opus-4.6 ($5/$25 → 0.027) scaled by input price.
+    { id: "cb-kimi-k3", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: true, vision: true, creditUnit: "token", creditRate: 0.020 / 1000, creditSource: "estimated" },
     { id: "cb-default", object: "model", created: Date.now(), owned_by: "codebuddy", thinking: false, vision: true, creditUnit: "token", creditRate: 0.01 / 1000, creditSource: "estimated" },
   ], (m) => CodeBuddyProvider.toCanonical(m.id));
 
@@ -705,8 +708,19 @@ export class CodeBuddyProvider extends BaseProvider {
       stream,
     };
 
-    // Only add max_tokens if explicitly provided and reasonable
-    if (request.max_tokens && request.max_tokens > 0) {
+    // max_tokens: Kimi K3 defaults to the full 1_048_576 ceiling when the client
+    // omits it (Moonshot default is only 131_072). Other models keep the prior
+    // "only forward if set" + 32k clamp so we don't surprise older relays.
+    const isKimiK3 =
+      /^kimi-k3$/i.test(actualModel.replace(/-thinking$/i, "")) ||
+      /^cb-kimi-k3$/i.test(String(request.model || "").replace(/-thinking$/i, ""));
+    if (isKimiK3) {
+      const requested = Number(request.max_tokens);
+      body.max_tokens =
+        Number.isFinite(requested) && requested > 0
+          ? Math.min(Math.floor(requested), 1_048_576)
+          : 1_048_576;
+    } else if (request.max_tokens && request.max_tokens > 0) {
       body.max_tokens = Math.min(request.max_tokens, 32000);
     }
 

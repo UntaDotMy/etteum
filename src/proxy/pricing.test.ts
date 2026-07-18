@@ -172,6 +172,11 @@ describe("toCanonicalModelName — strip provider aliases", () => {
     expect(toCanonicalModelName("cbc-kimi-k2.7")).toBe("kimi-k2.7-code");
     expect(toCanonicalModelName("kimi-k2.7")).toBe("kimi-k2.7-code");
   });
+  test("maps cb-kimi-k3 / cbc-kimi-k3 → kimi-k3", () => {
+    expect(toCanonicalModelName("cb-kimi-k3")).toBe("kimi-k3");
+    expect(toCanonicalModelName("cbc-kimi-k3")).toBe("kimi-k3");
+    expect(toCanonicalModelName("kimi-k3")).toBe("kimi-k3");
+  });
   test("maps Kiro Pro (kp-) → claude- prefix for Anthropic short names only", () => {
     expect(toCanonicalModelName("kp-opus-4.8")).toBe("claude-opus-4.8");
     expect(toCanonicalModelName("kp-sonnet-4.6")).toBe("claude-sonnet-4.6");
@@ -287,11 +292,19 @@ describe("getPricingForModel — resolves via canonical name", () => {
   test("cbc kimi / glm-5v-turbo resolve catalog rates", async () => {
     const k25 = await getPricingForModel("cbc-kimi-k2.5");
     const k27 = await getPricingForModel("cbc-kimi-k2.7");
+    const k3 = await getPricingForModel("cb-kimi-k3");
+    const k3cn = await getPricingForModel("cbc-kimi-k3");
     const glm = await getPricingForModel("cbc-glm-5v-turbo");
     expect(k25).not.toBeNull();
     expect(k25!.input).toBe(MODEL_PRICING["kimi-k2.5"]!.input);
     expect(k27).not.toBeNull();
     expect(k27!.input).toBe(MODEL_PRICING["kimi-k2.7-code"]!.input);
+    expect(k3).not.toBeNull();
+    expect(k3!.input).toBe(MODEL_PRICING["kimi-k3"]!.input);
+    expect(k3!.output).toBe(15.00);
+    expect(k3cn).not.toBeNull();
+    expect(k3cn!.input).toBe(MODEL_PRICING["kimi-k3"]!.input);
+    expect(k3cn!.output).toBe(15.00);
     expect(glm).not.toBeNull();
     expect(glm!.input).toBe(1.20);
     expect(glm!.output).toBe(4.00);
