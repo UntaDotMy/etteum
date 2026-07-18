@@ -154,22 +154,25 @@ function Invoke-Stop {
   Write-Host "Stopping Etteum..."
   $killed = @()
 
-  # 1. Match by command line (launcher + server + dashboard). This is the
-  #    primary path. production.ts spawns src/index.ts as a child; both match.
+  # 1. Match by command line (launcher + backend + dashboard + friend-share).
+  #    production.ts spawns children; on Windows Stop-Process -Force does NOT
+  #    run production's SIGTERM shutdown, so children (esp. serve-share) can be
+  #    orphaned unless we kill them by name here too.
   Get-CimInstance Win32_Process -Filter "Name='bun.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
-    Where-Object { $_.CommandLine -match "scripts[\\/](production|start|serve-dashboard)\.ts|src[\\/]index\.ts" } |
+    Where-Object {
+      $_.CommandLine -match "scripts[\\/](production|start|serve-dashboard|serve-share)\.ts|src[\\/]index\.ts"
+    } |
     ForEach-Object {
       Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
       $killed += $_.ProcessId
     }
 
-  # 2. Kill whatever still owns the API/dashboard ports. The launcher
-  #    (production.ts) spawns src/index.ts detached, and killing the parent
-  #    can orphan the child — leaving the port held. This guarantees the ports
-  #    are actually freed, which is what 'stop' promises.
+  # 2. Kill whatever still owns the API / dashboard / share ports. The launcher
+  #    can be force-killed before it reaps children — this frees the ports.
   foreach ($port in @(
     [int](Get-EnvValue "PORT" "1930"),
-    [int](Get-EnvValue "DASHBOARD_PORT" "1931")
+    [int](Get-EnvValue "DASHBOARD_PORT" "1931"),
+    [int](Get-EnvValue "SHARE_PORT" "80")
   )) {
     try {
       Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |

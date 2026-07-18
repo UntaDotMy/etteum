@@ -52,10 +52,39 @@ if (-not (Have "git")) { Fail "git not found in PATH" }
 if (-not (Have "bun")) { Fail "bun not found in PATH — reinstall Bun" }
 Ok "Prerequisites OK"
 
-# 2. Stop server if running
+# 2. Stop server if running (including orphaned children — Windows -Force does
+#    not run production.ts SIGTERM, so serve-share can outlive the parent).
 Step "Stopping server..."
 $pidFile = Join-Path $ProjectDir ".etteum.pid"
 $serverWasRunning = $false
+$envFile = Join-Path $ProjectDir ".env"
+function Get-UpgradeEnv([string]$key, [string]$default) {
+    if (-not (Test-Path $envFile)) { return $default }
+    $line = Get-Content $envFile -ErrorAction SilentlyContinue | Where-Object { $_ -match "^\s*$key\s*=" } | Select-Object -Last 1
+    if (-not $line) { return $default }
+    return ($line -replace "^\s*$key\s*=\s*", "").Trim().Trim('"').Trim("'")
+}
+Get-CimInstance Win32_Process -Filter "Name='bun.exe' OR Name='node.exe'" -ErrorAction SilentlyContinue |
+    Where-Object {
+        $_.CommandLine -match "scripts[\\/](production|start|serve-dashboard|serve-share)\.ts|src[\\/]index\.ts"
+    } |
+    ForEach-Object {
+        Stop-Process -Id $_.ProcessId -Force -ErrorAction SilentlyContinue
+        $serverWasRunning = $true
+    }
+foreach ($port in @(
+    [int](Get-UpgradeEnv "PORT" "1930"),
+    [int](Get-UpgradeEnv "DASHBOARD_PORT" "1931"),
+    [int](Get-UpgradeEnv "SHARE_PORT" "80")
+)) {
+    try {
+        Get-NetTCPConnection -LocalPort $port -State Listen -ErrorAction Stop |
+            ForEach-Object {
+                Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+                $serverWasRunning = $true
+            }
+    } catch {}
+}
 if (Test-Path $pidFile) {
     $pid = Get-Content $pidFile -ErrorAction SilentlyContinue
     if ($pid -and (Get-Process -Id $pid -ErrorAction SilentlyContinue)) {
@@ -66,9 +95,12 @@ if (Test-Path $pidFile) {
         Info "No running server (stale PID file)"
     }
     Remove-Item $pidFile -ErrorAction SilentlyContinue
+} elseif ($serverWasRunning) {
+    Ok "Stopped etteum processes (by command line / ports)"
 } else {
     Info "No PID file found"
 }
+Start-Sleep -Milliseconds 500
 
 # 3. Backup database
 Step "Backing up database..."
