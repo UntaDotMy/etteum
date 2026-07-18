@@ -97,6 +97,13 @@ export interface ExecuteOptions {
   request: ChatCompletionRequest;
   stream: boolean;
   signal?: AbortSignal;
+  /**
+   * Cap on same-account retries. When undefined the full per-status RETRY_CONFIG
+   * / DEFAULT_MAX_ATTEMPTS budget applies (legacy behavior). The router passes 0
+   * when another account is available — rotating to a fresh account beats
+   * re-hitting a degraded one — and a positive cap to bound total hops.
+   */
+  maxRetries?: number;
 }
 
 /**
@@ -107,10 +114,16 @@ export interface ExecuteOptions {
  */
 export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
   const { provider, providerName, account, request, stream, signal } = opts;
+  // Cap on same-account retries. When the caller passes a cap, the effective
+  // per-status budget is min(configured, cap); the outer loop never exceeds
+  // cap+1 total attempts against this account.
+  const cap = opts.maxRetries;
+  const effectiveAttempts = (configured: number) => (cap === undefined ? configured : Math.min(configured, cap));
+  const maxAttempts = cap === undefined ? MAX_RETRY_ATTEMPTS : Math.min(MAX_RETRY_ATTEMPTS, cap);
 
   let lastResult: ProviderResult = { success: false, error: "No attempt made" };
 
-  for (let attempt = 0; attempt <= MAX_RETRY_ATTEMPTS; attempt++) {
+  for (let attempt = 0; attempt <= maxAttempts; attempt++) {
     if (attempt > 0) await sleep(DEFAULT_DELAY_MS);
     if (signal?.aborted) return { success: false, error: "aborted" };
 
@@ -127,7 +140,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
             // Reclassify as retryable 503.
             lastResult = { success: false, error: overload, rateLimited: false };
             const retry = RETRY_CONFIG[503];
-            if (retry && attempt < retry.attempts) {
+            if (retry && attempt < effectiveAttempts(retry.attempts)) {
               await sleep(retry.delayMs);
               continue;
             }
@@ -155,14 +168,14 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
       // Retryable status (502/503/504) → retry per config (soft overload only).
       if (status && RETRY_CONFIG[status]) {
         const retry = RETRY_CONFIG[status]!;
-        if (attempt < retry.attempts) {
+        if (attempt < effectiveAttempts(retry.attempts)) {
           await sleep(retry.delayMs);
           continue;
         }
       }
 
       // rateLimit / transient with backoff → retry up to default attempts.
-      if (rule && (rule.kind === "rateLimit" || rule.kind === "transient") && attempt < DEFAULT_MAX_ATTEMPTS) {
+      if (rule && (rule.kind === "rateLimit" || rule.kind === "transient") && attempt < effectiveAttempts(DEFAULT_MAX_ATTEMPTS)) {
         continue;
       }
 
@@ -173,7 +186,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
       if (isHardConnectFailure(lastResult.error)) return lastResult;
       const rule = classifyError(undefined, lastResult.error);
       if (rule && (rule.kind === "nonAccount" || rule.kind === "permanent")) return lastResult;
-      if (attempt < DEFAULT_MAX_ATTEMPTS) continue;
+      if (attempt < effectiveAttempts(DEFAULT_MAX_ATTEMPTS)) continue;
       return lastResult;
     }
   }

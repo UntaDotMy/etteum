@@ -24,6 +24,7 @@ import { expandComboRequest, routeCombo } from "./combo";
 import { detectRequiredCapabilities, stripUnsupportedCapabilities } from "./capabilities";
 import { coordinatedRefresh, invalidateRefreshDedup } from "../auth/refresh-coordinator";
 import { execute } from "./executor";
+import { getRetryBudget } from "./retry-config";
 
 export interface RouteResult {
   result: ProviderResult;
@@ -185,8 +186,10 @@ export async function routeRequest(
     throw new Error(`Provider not configured: ${providerName}`);
   }
 
-  // Try up to 3 accounts before giving up
-  const maxRetries = 3;
+  // Try up to N accounts before giving up. N is the retry budget's
+  // accountAttempts (dashboard-tunable, default 3).
+  const retryBudget = await getRetryBudget();
+  const maxRetries = retryBudget.accountAttempts;
   let lastError = "";
   // Exclude every attempted account id (all providers) so exhaustion/rate-limit
   // retries never re-select the same dead credential for another full upstream hop.
@@ -265,9 +268,18 @@ export async function routeRequest(
 
     try {
       if (!isStaticAccount) pool.trackRequestStart(account.id);
+      // Smarter retry (H5): when ANOTHER account is available for this model,
+      // don't burn same-account retries re-hitting a degraded credential —
+      // rotate to the fresh account instead (maxRetries: 0 → single hop here).
+      // When this is the last account left, keep the full same-account budget.
+      const moreAccountsAvailable = attempt < maxRetries - 1;
+      const innerRetries = moreAccountsAvailable ? 0 : retryBudget.innerRetries;
       // dispatch through the shared executor (per-status retry + Codex
       // SSE-peek for 200-OK overload errors + uniform reclassification).
-      const result = await execute({ provider, providerName, account, request: compressedRequest, stream });
+      const result = await execute({
+        provider, providerName, account, request: compressedRequest, stream,
+        maxRetries: innerRetries,
+      });
 
       const durationMs = Date.now() - startTime;
 

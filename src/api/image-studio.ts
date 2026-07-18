@@ -1,5 +1,6 @@
 import { Hono } from "hono";
 import { providers, routeRequest } from "../proxy/router";
+import { refreshGrokWeeklyPoolAfterRequest } from "../proxy/providers/grok";
 import { recordRequest } from "../proxy/index";
 import { prepareLogBody } from "../proxy/logging";
 import { pool } from "../proxy/pool";
@@ -201,6 +202,10 @@ imageStudioRouter.post("/assist", async (c) => {
     accountQuotaAfter: quotaAfter,
   });
 
+  // Grok weekly % (limit 0–100): mirror /v1 — re-probe real remaining so the
+  // pool bar drops visibly like a normal chat request (no local token debit).
+  if (skipGrokWeeklyDebit) void refreshGrokWeeklyPoolAfterRequest(account);
+
   return c.json({ reply: message, options, finalPrompt });
 });
 
@@ -336,6 +341,10 @@ imageStudioRouter.post("/generate", async (c) => {
     accountQuotaBefore: quotaBefore,
     accountQuotaAfter: quotaAfter,
   });
+
+  // Grok weekly % (limit 0–100): mirror /v1 — re-probe real remaining so the
+  // pool bar drops visibly like a normal chat request (no local token debit).
+  if (skipGrokWeeklyDebit) void refreshGrokWeeklyPoolAfterRequest(account);
 
   let savedResultId: number | undefined;
   if (urls.length > 0) {

@@ -815,6 +815,12 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
     const timeoutMs = stream ? 300_000 : config.providerRequestTimeoutMs;
 
+    if (config.codebuddyCnDebugLog) {
+      // why: code 11133 / invalid_parameter_value with param:"" gives no hint —
+      // capture the exact upstream body so the offending field is visible.
+      console.log(`[CodeBuddy China][debug] POST /v2/chat/completions model=${actualModel} body=${JSON.stringify(body)}`);
+    }
+
     return this.fetchWithTimeout(`${this.baseUrl}/v2/chat/completions`, {
       method: "POST",
       headers,

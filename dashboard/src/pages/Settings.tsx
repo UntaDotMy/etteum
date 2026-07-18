@@ -606,6 +606,55 @@ export default function Settings() {
           </CardContent>
         </Card>
 
+        {/* Retry Budget */}
+        <Card className="border-[var(--border)]">
+          <CardHeader>
+            <CardTitle className="text-base flex items-center gap-2">
+              <Zap className="w-4 h-4 text-[var(--primary)]" />
+              Retry Budget
+            </CardTitle>
+            <CardDescription>
+              Bound how many upstream attempts a single client request may make
+            </CardDescription>
+          </CardHeader>
+          <CardContent className="space-y-4">
+            <div>
+              <label className="text-sm text-[var(--foreground)]">Account Attempts</label>
+              <Input
+                type="number"
+                min={1}
+                max={10}
+                value={form.retry_max_account_attempts ?? ""}
+                onChange={(e) => setValue("retry_max_account_attempts", e.target.value)}
+                placeholder="3"
+                className="mt-1"
+              />
+              <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                How many different accounts a request may rotate across before failing.
+              </p>
+            </div>
+
+            <div>
+              <label className="text-sm text-[var(--foreground)]">Same-Account Retries</label>
+              <Input
+                type="number"
+                min={0}
+                max={5}
+                value={form.retry_max_inner_retries ?? ""}
+                onChange={(e) => setValue("retry_max_inner_retries", e.target.value)}
+                placeholder="3"
+                className="mt-1"
+              />
+              <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                Retries against the same account on a retryable status (502/503/504).
+                Total upstream hops ≈ Account Attempts × (Same-Account Retries + 1).
+                When another account is available the proxy rotates instead of re-hitting
+                the same one, so lower values fail faster with less latency.
+              </p>
+            </div>
+          </CardContent>
+        </Card>
+
         {/* Auto WarmUp */}
         <Card className="border-[var(--border)]">
           <CardHeader>
