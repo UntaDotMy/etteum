@@ -37,7 +37,12 @@ describe("getProviderForModel", () => {
     ["cb-gemini-3.5-flash", "codebuddy"],
     ["cb-deepseek-v3-2", "codebuddy"],
     ["cb-kimi-k2.5", "codebuddy"],
+    ["cb-kimi-k3", "codebuddy"],
     ["cb-default", "codebuddy"],
+    // codebuddy-china — owns cbc- prefixed models only
+    ["cbc-kimi-k2.7", "codebuddy-china"],
+    ["cbc-kimi-k3", "codebuddy-china"],
+    ["cbc-glm-5.2", "codebuddy-china"],
     // kiro (standard)
     ["auto", "kiro"],
     ["claude-haiku-4.5", "kiro"],
