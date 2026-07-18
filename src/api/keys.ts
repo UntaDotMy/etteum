@@ -8,8 +8,30 @@ import { constantTimeEqual, RateLimiter } from "../utils/security";
 const API_KEY_SETTING = "api_key";
 const API_KEY_CACHE_TTL_MS = 5_000;
 const MIN_KEY_LENGTH = 16;
+/** Negative-cache TTL for unknown/revoked keys — kept short so a newly-added
+ *  key or re-activated key is honored quickly even if it was just missed. */
+const RESOLVE_MISS_TTL_MS = 2_000;
+const RESOLVE_CACHE_MAX = 512;
 
 let activeApiKeyCache: { key: string; expiresAt: number } | null = null;
+
+// Per-request hot path: resolveApiKey ran a SQLite SELECT on EVERY /v1 call.
+// Cache the multi-key row lookup (hit and miss) keyed by the raw token, with a
+// short TTL and explicit invalidation on any managed-key mutation below.
+type ResolvedKey =
+  | { row: { id: number; isActive: boolean; machineId: string | null } }
+  | { row: null };
+const resolveKeyCache = new Map<string, { value: ResolvedKey; expiresAt: number }>();
+
+function cacheResolvedKey(token: string, value: ResolvedKey, ttlMs: number) {
+  if (resolveKeyCache.size >= RESOLVE_CACHE_MAX) resolveKeyCache.clear();
+  resolveKeyCache.set(token, { value, expiresAt: Date.now() + ttlMs });
+}
+
+/** Drop cached multi-key resolutions. Called on create/revoke/activate/delete. */
+export function invalidateResolvedApiKeys(): void {
+  resolveKeyCache.clear();
+}
 
 export const keysRouter = new Hono();
 
@@ -59,8 +81,17 @@ export async function resolveApiKey(
   if (config.apiKey && constantTimeEqual(token, config.apiKey)) return { valid: true };
   const active = await getActiveApiKey();
   if (active && constantTimeEqual(token, active)) return { valid: true };
-  // 2. Multi-key table.
-  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
+  // 2. Multi-key table — cached (hit 5s / miss 2s), invalidated on mutation.
+  let resolved = resolveKeyCache.get(token);
+  if (!resolved || resolved.expiresAt <= Date.now()) {
+    const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
+    const value: ResolvedKey = row
+      ? { row: { id: row.id, isActive: row.isActive, machineId: row.machineId } }
+      : { row: null };
+    cacheResolvedKey(token, value, row ? API_KEY_CACHE_TTL_MS : RESOLVE_MISS_TTL_MS);
+    resolved = resolveKeyCache.get(token)!;
+  }
+  const row = resolved.value.row;
   if (!row || !row.isActive) return { valid: false };
   // Enforce machine binding when configured on the key.
   if (row.machineId && row.machineId.trim()) {
@@ -177,6 +208,7 @@ keysRouter.post("/managed", async (c) => {
       isActive: true,
     })
     .returning();
+  invalidateResolvedApiKeys();
   return c.json({ id: row!.id, key, name: row!.name, machineId: row!.machineId });
 });
 
@@ -185,6 +217,7 @@ keysRouter.post("/managed", async (c) => {
 keysRouter.post("/managed/:id/revoke", async (c) => {
   const id = Number(c.req.param("id"));
   await db.update(apiKeys).set({ isActive: false }).where(eq(apiKeys.id, id));
+  invalidateResolvedApiKeys();
   return c.json({ success: true });
 });
 
@@ -192,6 +225,7 @@ keysRouter.post("/managed/:id/revoke", async (c) => {
 keysRouter.post("/managed/:id/activate", async (c) => {
   const id = Number(c.req.param("id"));
   await db.update(apiKeys).set({ isActive: true }).where(eq(apiKeys.id, id));
+  invalidateResolvedApiKeys();
   return c.json({ success: true });
 });
 
@@ -199,6 +233,7 @@ keysRouter.post("/managed/:id/activate", async (c) => {
 keysRouter.delete("/managed/:id", async (c) => {
   const id = Number(c.req.param("id"));
   await db.delete(apiKeys).where(eq(apiKeys.id, id));
+  invalidateResolvedApiKeys();
   return c.json({ success: true });
 });
 

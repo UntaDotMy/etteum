@@ -207,6 +207,11 @@ export const config = {
   // content lengths, 50-char previews) so we can verify upstream protocol
   // assumptions about log scope. Off by default — high-volume on long turns.
   gitlabDuoDebugLog: process.env.POOLPROX_DUO_DEBUG_LOG === "1",
+  // Diagnostic: dump the exact JSON body sent to the CodeBuddy China upstream
+  // plus the upstream error response, so an "invalid request parameters" (400,
+  // code 11133, param:"") can be traced to the precise offending field. Off by
+  // default — logs request bodies, enable only while debugging.
+  codebuddyCnDebugLog: process.env.POOLPROX_CBC_DEBUG_LOG === "1",
   // Kiro Pro upgrade settings
   kiroProUpgrade: process.env.KIRO_PRO_UPGRADE === "true",
   billingAddress: (() => {

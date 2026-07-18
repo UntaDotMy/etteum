@@ -244,40 +244,26 @@ function currentApiKeyId(req?: Request | null): number | null {
 function extractUsageFromSsePayload(payload: string) {
   if (!payload || payload === "[DONE]") return null;
   try {
-    const parsed = JSON.parse(payload);
-    const usage = parsed.usage;
-    const choice = parsed.choices?.[0];
-    const content = String(
-      choice?.delta?.content ??
-      choice?.message?.content ??
-      choice?.text ??
-      parsed?.delta?.content ??
-      parsed?.content ??
-      parsed?.text ??
-      ""
-    );
-
-    // Also extract reasoning_content so it's counted in token estimates
-    const reasoning = String(
-      choice?.delta?.reasoning_content ??
-      choice?.message?.reasoning_content ??
-      parsed?.delta?.reasoning_content ??
-      ""
-    );
-
-    return {
-      content: content + (reasoning ? reasoning : ""),
-      promptTokens: Number(usage?.prompt_tokens || usage?.input_tokens || 0),
-      completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
-      totalTokens: Number(usage?.total_tokens || 0),
-      creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || usage?.credit || parsed.credits_used || parsed.creditsUsed || 0),
-      cachedTokens: Number(usage?.cached_tokens || usage?.cache_read_input_tokens || 0),
-      cacheCreationTokens: Number(usage?.cache_creation_input_tokens || 0),
-      reasoningTokens: Number(usage?.reasoning_tokens || 0),
-    };
+    return extractUsageFromParsed(JSON.parse(payload));
   } catch {
     return null;
   }
+}
+
+/** Usage extraction from an ALREADY-parsed SSE chunk (no re-parse). */
+function extractUsageFromParsed(parsed: any) {
+  const usage = parsed?.usage;
+  const content = extractStreamContentFromParsed(parsed);
+  return {
+    content,
+    promptTokens: Number(usage?.prompt_tokens || usage?.input_tokens || 0),
+    completionTokens: Number(usage?.completion_tokens || usage?.output_tokens || 0),
+    totalTokens: Number(usage?.total_tokens || 0),
+    creditsUsed: Number(usage?.credits_used || usage?.creditsUsed || usage?.credit || parsed?.credits_used || parsed?.creditsUsed || 0),
+    cachedTokens: Number(usage?.cached_tokens || usage?.cache_read_input_tokens || 0),
+    cacheCreationTokens: Number(usage?.cache_creation_input_tokens || 0),
+    reasoningTokens: Number(usage?.reasoning_tokens || 0),
+  };
 }
 
 /**
@@ -303,29 +289,33 @@ function extractBreakdown(usage: any): TokenBreakdown {
 function extractStreamContent(payload: string): string {
   if (!payload || payload === "[DONE]") return "";
   try {
-    const parsed = JSON.parse(payload);
-    const choice = parsed.choices?.[0];
-    // Include reasoning_content in the accumulated text so token estimates
-    // account for thinking/reasoning output, not just visible text.
-    const text = String(
-      choice?.delta?.content ??
-      choice?.message?.content ??
-      choice?.text ??
-      parsed?.delta?.content ??
-      parsed?.content ??
-      parsed?.text ??
-      ""
-    );
-    const reasoning = String(
-      choice?.delta?.reasoning_content ??
-      choice?.message?.reasoning_content ??
-      parsed?.delta?.reasoning_content ??
-      ""
-    );
-    return text + (reasoning ? reasoning : "");
+    return extractStreamContentFromParsed(JSON.parse(payload));
   } catch {
     return "";
   }
+}
+
+/** Content extraction from an ALREADY-parsed SSE chunk (no re-parse). */
+function extractStreamContentFromParsed(parsed: any): string {
+  const choice = parsed?.choices?.[0];
+  // Include reasoning_content in the accumulated text so token estimates
+  // account for thinking/reasoning output, not just visible text.
+  const text = String(
+    choice?.delta?.content ??
+    choice?.message?.content ??
+    choice?.text ??
+    parsed?.delta?.content ??
+    parsed?.content ??
+    parsed?.text ??
+    ""
+  );
+  const reasoning = String(
+    choice?.delta?.reasoning_content ??
+    choice?.message?.reasoning_content ??
+    parsed?.delta?.reasoning_content ??
+    ""
+  );
+  return text + (reasoning ? reasoning : "");
 }
 
 function estimateTokensFromText(text: string): number {
@@ -424,6 +414,9 @@ function wrapStreamWithUsageFinalizer(
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
   let reader: ReturnType<ReadableStream<Uint8Array>["getReader"]> | undefined;
+  // H3: only buffer streamed text when it will be consumed — as a completion-
+  // token fallback (when the caller gave none) or for response-body logging.
+  const keepStreamedContent = context.fallbackCompletionTokens <= 0 || config.logBodyEnabled;
   // Accumulate raw bytes in an array, join once per chunk. Avoids O(n²) string
   // concatenation where each += re-allocates and copies the growing string.
   const rawChunks: string[] = [];
@@ -453,34 +446,28 @@ function wrapStreamWithUsageFinalizer(
       if (!trimmed.startsWith("data:")) continue;
       const payload = trimmed.startsWith("data: ") ? trimmed.slice(6) : trimmed.slice(5);
 
-      // Detect upstream errors in SSE stream (Qoder 403 in body, OpenAI error format)
+      // Parse each SSE payload ONCE and reuse the object for error detection,
+      // content extraction, and usage extraction (was: 3 separate JSON.parse
+      // calls per token). Non-JSON payloads are skipped.
       const trimmedPayload = payload.trim();
-      if (trimmedPayload && trimmedPayload !== "[DONE]") {
-        try {
-          const parsed = JSON.parse(trimmedPayload);
-          // Qoder upstream error: { type: "upstream_error", error: "message" }
-          if (parsed.type === "upstream_error") {
-            streamError = true;
-          }
-          // Qoder format: {"code":"112","statusCodeValue":403,"message":"..."}
-          if (parsed.statusCodeValue && parsed.statusCodeValue >= 400) {
-            streamError = true;
-          }
-          // OpenAI format: {"error": {"message": "...", "type": "..."}}
-          if (parsed.error && (typeof parsed.error === "object" || typeof parsed.error === "string")) {
-            streamError = true;
-          }
-        } catch {
-          // not JSON, skip
-        }
+      if (!trimmedPayload || trimmedPayload === "[DONE]") continue;
+      let parsed: any;
+      try {
+        parsed = JSON.parse(trimmedPayload);
+      } catch {
+        continue; // not JSON (shouldn't happen for well-formed SSE), skip
       }
 
-      // Always extract content for estimation, even if no usage field
-      const content = extractStreamContent(trimmedPayload);
-      if (content) streamedParts.push(content);
+      // Detect upstream errors in SSE stream (Qoder 403 in body, OpenAI error format)
+      if (parsed.type === "upstream_error") streamError = true;
+      if (parsed.statusCodeValue && parsed.statusCodeValue >= 400) streamError = true;
+      if (parsed.error && (typeof parsed.error === "object" || typeof parsed.error === "string")) streamError = true;
 
-      const usage = extractUsageFromSsePayload(trimmedPayload);
-      if (!usage) continue;
+      const usage = extractUsageFromParsed(parsed);
+      // Only retain content when it will actually be consumed (token-estimate
+      // fallback and/or response-body logging). Skipping this avoids buffering
+      // the entire stream for the common case where logging is off (H3).
+      if (keepStreamedContent && usage.content) streamedParts.push(usage.content);
       promptTokens = usage.promptTokens || promptTokens;
       completionTokens = usage.completionTokens || completionTokens;
       totalTokens = usage.totalTokens || totalTokens;

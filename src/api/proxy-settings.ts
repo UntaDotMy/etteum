@@ -11,6 +11,7 @@ import {
   isCompressionSettingKey,
   DEFAULT_COMPRESSION_CONFIG,
 } from "../proxy/compression";
+import { invalidateRetryConfigCache, isRetrySettingKey } from "../proxy/retry-config";
 
 function isProxyPoolSettingKey(key: string): boolean {
   return key === "proxy_pool_usage" || key === "proxy_pool_rotation";
@@ -44,6 +45,8 @@ proxySettingsRouter.get("/", async (c) => {
   const df = DEFAULT_COMPRESSION_CONFIG;
   const defaults: Record<string, string> = {
     load_balancing_method: "round_robin",
+    retry_max_account_attempts: "3",
+    retry_max_inner_retries: "3",
     auto_warmup_interval_minutes: "15",
     warmup_concurrency: "50",
     proxy_pool_usage: "all",
@@ -137,6 +140,10 @@ proxySettingsRouter.put("/:key", async (c) => {
     invalidateCompressionCache();
   }
 
+  if (isRetrySettingKey(key)) {
+    invalidateRetryConfigCache();
+  }
+
   return c.json({ key, value: body.value });
 });
 
@@ -167,6 +174,7 @@ proxySettingsRouter.put("/", async (c) => {
   let warmupTouched = false;
   let proxyPoolTouched = false;
   let compressionTouched = false;
+  let retryTouched = false;
   for (const [key, value] of Object.entries(body)) {
     const existing = await db
       .select()
@@ -194,12 +202,16 @@ proxySettingsRouter.put("/", async (c) => {
     if (isCompressionSettingKey(key)) {
       compressionTouched = true;
     }
+    if (isRetrySettingKey(key)) {
+      retryTouched = true;
+    }
   }
 
   if (lbCacheTouched) pool.invalidateLoadBalancingCache();
   if (proxyPoolTouched) invalidateProxySettingsCache();
   if (warmupTouched) void autoWarmupScheduler.reload();
   if (compressionTouched) invalidateCompressionCache();
+  if (retryTouched) invalidateRetryConfigCache();
 
   return c.json({ success: true, updated: Object.keys(body).length });
 });
