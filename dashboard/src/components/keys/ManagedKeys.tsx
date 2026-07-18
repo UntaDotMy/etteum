@@ -47,17 +47,16 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
   );
   const keys = data?.keys ?? [];
 
-  // Share-page public URL (for building copyable per-key links).
+  // Public status page URL (optional link for operators; not labeled as share/friend).
   const { data: info } = useApiCache<{ share?: { url: string | null } }>(
     "pool-info",
     () => fetchPoolInfo(),
     { staleTime: 60_000 },
   );
-  const shareBase = info?.share?.url ?? null;
+  const statusBase = info?.share?.url ?? null;
 
-  /** Public share status page — lists all managed keys (no #k= needed). */
-  function sharePageUrl(): string {
-    return (shareBase || window.location.origin).replace(/\/$/, "") || window.location.origin;
+  function statusPageUrl(): string {
+    return (statusBase || window.location.origin).replace(/\/$/, "") || window.location.origin;
   }
 
   const [formOpen, setFormOpen] = useState(false);
@@ -119,12 +118,12 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
     );
   }
 
-  function copyShareLink(k: ManagedKey) {
-    navigator.clipboard.writeText(sharePageUrl()).then(
+  function copyStatusLink(k: ManagedKey) {
+    navigator.clipboard.writeText(statusPageUrl()).then(
       () => {
         setCopiedLinkId(k.id);
         setTimeout(() => setCopiedLinkId((c) => (c === k.id ? null : c)), 1800);
-        onInfo("Share page link copied.");
+        onInfo("Status page link copied.");
       },
       () => onError("Could not copy link."),
     );
@@ -136,14 +135,12 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
         <CardHeader className="flex-row items-center justify-between space-y-0">
           <div>
             <CardTitle className="text-base flex items-center gap-2">
-              <KeyRound className="w-4 h-4" /> Friend &amp; Managed Keys
+              <KeyRound className="w-4 h-4" /> Managed keys
               {isValidating && <Loader2 className="w-3.5 h-3.5 animate-spin text-[var(--muted-foreground)]" />}
             </CardTitle>
             <CardDescription>
-              Per-key model access, token quota, rate cap, and expiry. A managed key only ever
-              reaches <span className="font-mono">/v1/*</span> — never this dashboard. Keys you
-              create appear on the public share page (<span className="font-mono">SHARE_PORT</span>
-              , e.g. :80) automatically.
+              Per-key models, quota, rate, and expiry. Use <strong>Copy API key</strong> for the
+              full secret. Keys only authenticate <span className="font-mono">/v1/*</span>.
             </CardDescription>
           </div>
           <Button size="sm" onClick={openCreate}>
@@ -154,7 +151,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
         <CardContent>
           {keys.length === 0 ? (
             <div className="rounded-md border border-dashed border-[var(--border)] p-8 text-center text-sm text-[var(--muted-foreground)]">
-              No managed keys yet. Create one to share access with limits.
+              No keys yet. Create one to set limits and access.
             </div>
           ) : (
             <div className="grid gap-3 md:grid-cols-2">
@@ -164,8 +161,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
                   k={k}
                   busy={busyId === k.id}
                   linkCopied={copiedLinkId === k.id}
-                  hasShareLink={true}
-                  onCopyLink={() => copyShareLink(k)}
+                  onCopyLink={() => copyStatusLink(k)}
                   onEdit={() => openEdit(k)}
                   onToggle={() =>
                     run(
@@ -199,7 +195,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
         onError={onError}
       />
 
-      {/* Show-once dialog for a freshly created key + share link */}
+      {/* Show-once dialog for a freshly created key */}
       <Dialog
         open={createdKey != null}
         onOpenChange={(o) => {
@@ -213,17 +209,18 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
           <DialogHeader>
             <DialogTitle>Key created</DialogTitle>
             <DialogDescription>
-              Copy the full API key for the friend&apos;s client (you can re-copy it anytime from
-              the card). Status lives on the share page at{" "}
-              <span className="font-mono">{sharePageUrl()}</span>.
+              Copy the full API key now (or anytime from the card). You can re-copy later from the
+              list.
             </DialogDescription>
           </DialogHeader>
           <div className="space-y-3">
             <div>
               <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">API key</div>
               <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
-                <code className="flex-1 break-all font-mono text-sm text-[var(--primary)]">{createdKey}</code>
-                <Button variant="outline" size="icon" onClick={() => createdKey && copy(createdKey)}>
+                <code className="flex-1 break-all font-mono text-sm text-[var(--primary)] select-all blur-[5px] hover:blur-none transition-[filter] duration-150">
+                  {createdKey}
+                </code>
+                <Button variant="outline" size="icon" onClick={() => createdKey && copy(createdKey)} title="Copy full API key">
                   {copied ? <Check className="w-4 h-4 text-[var(--success)]" /> : <Copy className="w-4 h-4" />}
                 </Button>
               </div>
@@ -232,14 +229,14 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
               <div className="text-xs font-medium text-[var(--muted-foreground)] mb-1">Status page</div>
               <div className="flex items-center gap-2 rounded-md border border-[var(--border)] bg-[var(--background)] px-3 py-2">
                 <code className="flex-1 break-all font-mono text-xs text-[var(--foreground)]">
-                  {sharePageUrl()}
+                  {statusPageUrl()}
                 </code>
                 <Button
                   variant="outline"
                   size="icon"
                   title="Copy status page URL"
                   onClick={() => {
-                    navigator.clipboard.writeText(sharePageUrl()).then(
+                    navigator.clipboard.writeText(statusPageUrl()).then(
                       () => {
                         setCopiedLink(true);
                         setTimeout(() => setCopiedLink(false), 1800);
@@ -257,7 +254,7 @@ export default function ManagedKeys(props: { onError: (msg: string) => void; onI
           <DialogFooter className="gap-2 sm:gap-0">
             <Button
               variant="outline"
-              onClick={() => window.open(sharePageUrl(), "_blank", "noopener,noreferrer")}
+              onClick={() => window.open(statusPageUrl(), "_blank", "noopener,noreferrer")}
             >
               <ExternalLink className="w-4 h-4" />
               Open status page
@@ -311,14 +308,13 @@ function KeyCard(props: {
   busy: boolean;
   linkCopied: boolean;
   keyCopied: boolean;
-  hasShareLink: boolean;
   onCopyLink: () => void;
   onEdit: () => void;
   onToggle: () => void;
   onDelete: () => void;
   onCopy: () => void;
 }) {
-  const { k, busy, linkCopied, keyCopied, hasShareLink, onCopyLink, onEdit, onToggle, onDelete, onCopy } = props;
+  const { k, busy, linkCopied, keyCopied, onCopyLink, onEdit, onToggle, onDelete, onCopy } = props;
   const st = statusOf(k);
   const connected = k.isActive && k.lastUsedAt != null && Date.now() - new Date(k.lastUsedAt).getTime() < CONNECTED_WINDOW_MS;
   const hasQuota = k.tokenQuota != null && k.tokenQuota > 0;
@@ -329,14 +325,16 @@ function KeyCard(props: {
     <div className="rounded-lg border border-[var(--border)] bg-[var(--card)] p-4 space-y-3">
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0">
-          <div className="font-medium text-[var(--foreground)] truncate">{k.name || "managed key"}</div>
+          <div className="font-medium text-[var(--foreground)] truncate">{k.name || "Key"}</div>
           <button
             type="button"
             onClick={onCopy}
             title="Copy full API key"
-            className="font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] truncate max-w-full inline-flex items-center gap-1.5"
+            className="font-mono text-xs text-[var(--muted-foreground)] hover:text-[var(--foreground)] max-w-full inline-flex items-center gap-1.5"
           >
-            <span className="truncate">{k.keyPreview}</span>
+            <span className="truncate max-w-[11rem] blur-[4px] hover:blur-none transition-[filter] duration-150 select-none">
+              {k.key || k.keyPreview}
+            </span>
             {keyCopied ? (
               <Check className="w-3 h-3 shrink-0 text-[var(--success)]" />
             ) : (
@@ -403,7 +401,19 @@ function KeyCard(props: {
         )}
       </div>
 
-      <div className="flex gap-1 pt-1 border-t border-[var(--border)]">
+      <div className="flex flex-wrap items-center gap-1.5 pt-1 border-t border-[var(--border)]">
+        <Button
+          type="button"
+          size="sm"
+          variant="outline"
+          className="h-8 gap-1.5 text-xs"
+          onClick={onCopy}
+          disabled={busy}
+          title="Copy full API key"
+        >
+          {keyCopied ? <Check className="w-3.5 h-3.5 text-[var(--success)]" /> : <Copy className="w-3.5 h-3.5" />}
+          {keyCopied ? "Copied" : "Copy API key"}
+        </Button>
         <IconBtn
           title="Copy status page URL"
           onClick={onCopyLink}

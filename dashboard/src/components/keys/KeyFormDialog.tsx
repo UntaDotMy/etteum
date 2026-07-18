@@ -21,7 +21,7 @@ import {
 import { rememberFullKey } from "./fullKeyStore";
 
 /**
- * Create / edit dialog for a managed (friend) API key. When `editing` is null it
+ * Create / edit dialog for a managed API key. When `editing` is null it
  * creates; otherwise it patches the given key. Only the fields present in the
  * form are sent, so editing never clobbers limits the admin didn't touch.
  */
@@ -145,7 +145,7 @@ export default function KeyFormDialog(props: {
     <Dialog open={open} onOpenChange={onOpenChange}>
       <DialogContent className="max-w-2xl max-h-[90vh] overflow-y-auto">
         <DialogHeader>
-          <DialogTitle>{isEdit ? "Edit friend key" : "New friend key"}</DialogTitle>
+          <DialogTitle>{isEdit ? "Edit key" : "New key"}</DialogTitle>
           <DialogDescription>
             Limit what this key can use: a model allowlist, token quota, rate cap, and
             expiry. All are optional — leave blank for unrestricted.

@@ -3,344 +3,414 @@
 <head>
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
-<title>etteum · live pool</title>
+<title>Keys</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=DM+Sans:ital,opsz,wght@0,9..40,400;0,9..40,500;0,9..40,600;0,9..40,700;0,9..40,800;1,9..40,500&family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600;700&display=swap" rel="stylesheet" />
 <style>
+  /*
+   * Tokens aligned with dashboard/src/index.css (keel/pool theme).
+   * Dark default; media prefers-color-scheme light switches to .light values.
+   */
   :root {
-    --bg0: #070b14;
-    --bg1: #0c1220;
-    --glass: rgba(16, 24, 40, 0.72);
-    --glass-edge: rgba(255, 255, 255, 0.08);
-    --ink: #e8eefc;
-    --muted: #8b9bb8;
-    --faint: #5a6a86;
-    --cyan: #22d3ee;
-    --violet: #a78bfa;
-    --green: #34d399;
-    --amber: #fbbf24;
-    --red: #f87171;
-    --red-hot: #ef4444;
-    --sans: "DM Sans", system-ui, -apple-system, sans-serif;
-    --mono: "JetBrains Mono", ui-monospace, Menlo, Consolas, monospace;
-    --r: 20px;
+    --background: #1e1e1e;
+    --foreground: #cccccc;
+    --card: #252526;
+    --card-foreground: #cccccc;
+    --primary: #00ff88;
+    --primary-foreground: #1e1e1e;
+    --muted: #3c3c3c;
+    --muted-foreground: #858585;
+    --border: #3c3c3c;
+    --success: #00ff88;
+    --warning: #ffb224;
+    --error: #ff5c5c;
+    --radius: 0.625rem;
+    --shadow-card: 0 2px 4px rgba(0, 0, 0, 0.3), 0 4px 8px rgba(0, 0, 0, 0.2);
+    --sans: "IBM Plex Sans", system-ui, sans-serif;
+    --mono: "IBM Plex Mono", ui-monospace, monospace;
   }
+  @media (prefers-color-scheme: light) {
+    :root {
+      --background: #f3f7f4;
+      --foreground: #0a1610;
+      --card: #ffffff;
+      --card-foreground: #0a1610;
+      --primary: #00a857;
+      --primary-foreground: #ffffff;
+      --muted: #eef3f0;
+      --muted-foreground: #5e6f66;
+      --border: #dbe4df;
+      --success: #15a34a;
+      --warning: #c2710c;
+      --error: #dc2626;
+      --shadow-card: 0 1px 2px rgba(16, 24, 20, 0.06), 0 1px 3px rgba(16, 24, 20, 0.08);
+    }
+  }
+
   * { box-sizing: border-box; }
   html, body { min-height: 100%; }
   body {
     margin: 0;
     font-family: var(--sans);
-    color: var(--ink);
-    background:
-      radial-gradient(900px 520px at 8% -10%, rgba(34, 211, 238, 0.14), transparent 55%),
-      radial-gradient(700px 480px at 95% 5%, rgba(167, 139, 250, 0.16), transparent 50%),
-      radial-gradient(600px 400px at 50% 110%, rgba(52, 211, 153, 0.08), transparent 45%),
-      linear-gradient(165deg, var(--bg0), var(--bg1));
-    background-attachment: fixed;
+    color: var(--foreground);
+    background: var(--background);
     -webkit-font-smoothing: antialiased;
-    padding: 28px 16px 56px;
+    padding: 28px 16px 48px;
   }
-  body::before {
-    content: "";
-    position: fixed; inset: 0; pointer-events: none; z-index: 0;
-    background-image:
-      linear-gradient(rgba(255,255,255,0.02) 1px, transparent 1px),
-      linear-gradient(90deg, rgba(255,255,255,0.02) 1px, transparent 1px);
-    background-size: 48px 48px;
-    mask-image: radial-gradient(ellipse at center, #000 20%, transparent 75%);
-  }
-  .wrap { position: relative; z-index: 1; max-width: 760px; margin: 0 auto; }
+  .wrap { max-width: 640px; margin: 0 auto; }
 
-  .top {
-    display: flex; align-items: center; justify-content: space-between;
-    gap: 12px; margin-bottom: 22px;
+  header {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 24px;
   }
-  .brand { display: flex; align-items: center; gap: 12px; min-width: 0; }
-  .mark {
-    width: 40px; height: 40px; border-radius: 14px;
-    background: linear-gradient(135deg, rgba(34,211,238,.25), rgba(167,139,250,.3));
-    border: 1px solid var(--glass-edge);
-    display: grid; place-items: center;
-    font-family: var(--mono); font-weight: 700; font-size: 13px; color: var(--cyan);
-    box-shadow: 0 0 24px rgba(34,211,238,.15);
-  }
-  .brand-name { font-weight: 800; font-size: 1.15rem; letter-spacing: -0.03em; }
-  .brand-name span {
-    display: block; font-weight: 500; font-size: 0.72rem;
-    color: var(--muted); letter-spacing: 0.06em; text-transform: uppercase; margin-top: 2px;
+  .title {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    color: var(--foreground);
   }
   .live {
-    display: inline-flex; align-items: center; gap: 8px;
-    padding: 8px 14px; border-radius: 999px;
-    font-size: 11px; font-weight: 700; letter-spacing: 0.1em;
-    background: rgba(52,211,153,.12); color: var(--green);
-    border: 1px solid rgba(52,211,153,.28);
+    font-family: var(--mono);
+    font-size: 11px;
+    color: var(--muted-foreground);
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
   }
-  .live.standby { background: rgba(90,106,134,.15); color: var(--muted); border-color: var(--glass-edge); }
-  .live.bad { background: rgba(248,113,113,.12); color: var(--red); border-color: rgba(248,113,113,.3); }
-  .live .dot {
-    width: 8px; height: 8px; border-radius: 50%; background: currentColor;
+  .live i {
+    width: 6px; height: 6px; border-radius: 50%;
+    background: var(--muted-foreground);
   }
-  .live.on .dot { animation: pulse 1.5s ease infinite; }
-  @keyframes pulse {
-    0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1; }
-    50% { box-shadow: 0 0 0 6px transparent; opacity: .75; }
-  }
+  .live.on i { background: var(--success); }
+  .live.off i { background: var(--error); }
 
   .empty {
-    text-align: center; padding: 56px 24px;
-    background: var(--glass); backdrop-filter: blur(16px);
-    border: 1px solid var(--glass-edge); border-radius: var(--r);
+    background: var(--card);
+    color: var(--card-foreground);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 48px 24px;
+    text-align: center;
   }
-  .empty .icon {
-    width: 56px; height: 56px; margin: 0 auto 16px; border-radius: 16px;
-    background: rgba(34,211,238,.08); border: 1px solid var(--glass-edge);
-    display: grid; place-items: center; font-size: 22px;
+  .empty h1 {
+    margin: 0 0 8px;
+    font-size: 16px;
+    font-weight: 600;
   }
-  .empty h2 { margin: 0 0 8px; font-size: 1.35rem; font-weight: 800; letter-spacing: -0.03em; }
-  .empty p { margin: 0 auto; max-width: 300px; color: var(--muted); font-size: 0.95rem; line-height: 1.5; }
+  .empty p {
+    margin: 0;
+    font-size: 13px;
+    color: var(--muted-foreground);
+    line-height: 1.5;
+  }
 
-  #board { display: flex; flex-direction: column; gap: 18px; }
+  #board { display: flex; flex-direction: column; gap: 12px; }
   .hidden { display: none !important; }
 
-  .panel {
-    background: var(--glass);
-    backdrop-filter: blur(18px) saturate(1.2);
-    border: 1px solid var(--glass-edge);
-    border-radius: var(--r);
-    padding: 22px;
-    box-shadow: 0 20px 50px -24px rgba(0,0,0,.65), inset 0 1px 0 rgba(255,255,255,.04);
-    animation: rise .35s ease;
-  }
-  @keyframes rise {
-    from { opacity: 0; transform: translateY(10px); }
-    to { opacity: 1; transform: none; }
+  .card {
+    background: var(--card);
+    color: var(--card-foreground);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    box-shadow: var(--shadow-card);
+    padding: 18px;
   }
 
-  .khead {
-    display: flex; align-items: flex-start; justify-content: space-between;
-    gap: 12px; flex-wrap: wrap; margin-bottom: 6px;
+  .row-top {
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 14px;
   }
-  .ktitle {
-    margin: 0; font-size: 1.45rem; font-weight: 800; letter-spacing: -0.035em;
+  .name {
+    margin: 0;
+    font-size: 15px;
+    font-weight: 600;
+    letter-spacing: -0.02em;
   }
-  .kactions { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
-  .pill {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 6px 11px; border-radius: 999px;
-    background: rgba(255,255,255,.04); border: 1px solid var(--glass-edge);
-    font-family: var(--mono); font-size: 11px; font-weight: 600; color: var(--muted);
-    max-width: 100%;
+  .tags { display: flex; flex-wrap: wrap; gap: 6px; justify-content: flex-end; }
+  .tag {
+    font-family: var(--mono);
+    font-size: 10px;
+    font-weight: 500;
+    padding: 2px 8px;
+    border-radius: calc(var(--radius) - 4px);
+    border: 1px solid var(--border);
+    color: var(--muted-foreground);
+    text-transform: lowercase;
   }
-  .pill span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 160px; }
-  .iconbtn {
-    background: none; border: 0; padding: 0; cursor: pointer; color: var(--faint);
-    display: inline-flex; align-items: center;
+  .tag.ok {
+    color: var(--success);
+    border-color: color-mix(in srgb, var(--success) 35%, var(--border));
+    background: color-mix(in srgb, var(--success) 12%, transparent);
   }
-  .iconbtn:hover { color: var(--cyan); }
-  .badge {
-    display: inline-flex; align-items: center; gap: 6px;
-    padding: 5px 11px; border-radius: 999px;
-    font-size: 10px; font-weight: 800; letter-spacing: .1em;
+  .tag.warn {
+    color: var(--warning);
+    border-color: color-mix(in srgb, var(--warning) 35%, var(--border));
+    background: color-mix(in srgb, var(--warning) 12%, transparent);
   }
-  .badge.active { background: rgba(52,211,153,.15); color: var(--green); border: 1px solid rgba(52,211,153,.3); }
-  .badge.exhausted { background: rgba(251,191,36,.12); color: var(--amber); border: 1px solid rgba(251,191,36,.28); }
-  .badge.expired, .badge.inactive { background: rgba(248,113,113,.12); color: var(--red); border: 1px solid rgba(248,113,113,.28); }
-  .badge.connected {
-    background: rgba(34,211,238,.12); color: var(--cyan);
-    border: 1px solid rgba(34,211,238,.35);
+  .tag.bad {
+    color: var(--error);
+    border-color: color-mix(in srgb, var(--error) 35%, var(--border));
+    background: color-mix(in srgb, var(--error) 12%, transparent);
   }
-  .badge.connected .dot {
-    width: 6px; height: 6px; border-radius: 50%; background: currentColor;
-    animation: pulse 1.2s ease infinite;
+  .tag.conn {
+    color: var(--primary);
+    border-color: color-mix(in srgb, var(--primary) 35%, var(--border));
+    background: color-mix(in srgb, var(--primary) 12%, transparent);
+  }
+  .tag.conn::before {
+    content: "";
+    display: inline-block;
+    width: 5px; height: 5px;
+    border-radius: 50%;
+    background: currentColor;
+    margin-right: 5px;
+    vertical-align: 1px;
   }
 
+  .keybox {
+    display: flex;
+    align-items: stretch;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 2px);
+    overflow: hidden;
+    background: color-mix(in srgb, var(--muted) 45%, var(--card));
+    margin-bottom: 16px;
+  }
+  .keybox code {
+    flex: 1;
+    min-width: 0;
+    padding: 10px 12px;
+    font-family: var(--mono);
+    font-size: 12px;
+    font-weight: 500;
+    word-break: break-all;
+    line-height: 1.45;
+    color: var(--foreground);
+    /* Secret stays visually blurred; copy still uses the full string. */
+    filter: blur(5px);
+    user-select: none;
+    transition: filter 0.15s ease;
+  }
+  .keybox:focus-within code,
+  .keybox:hover code {
+    filter: blur(5px); /* stay blurred even on hover — reveal only via copy */
+  }
+  .keybox button {
+    flex: 0 0 auto;
+    border: 0;
+    border-left: 1px solid var(--border);
+    background: var(--card);
+    color: var(--foreground);
+    font-family: var(--sans);
+    font-size: 12px;
+    font-weight: 600;
+    padding: 0 14px;
+    cursor: pointer;
+  }
+  .keybox button:hover {
+    background: color-mix(in srgb, var(--primary) 12%, var(--card));
+    color: var(--primary);
+  }
+  .keybox button:focus-visible {
+    outline: 2px solid var(--primary);
+    outline-offset: -2px;
+  }
+  .keybox button.done { color: var(--success); }
+
+  .metric {
+    display: flex;
+    align-items: baseline;
+    justify-content: space-between;
+    gap: 12px;
+    margin-bottom: 8px;
+  }
+  .left {
+    font-size: 26px;
+    font-weight: 600;
+    letter-spacing: -0.03em;
+    font-variant-numeric: tabular-nums;
+    color: var(--foreground);
+  }
+  .left.ok { color: var(--success); }
+  .left.mid { color: var(--warning); }
+  .left.low { color: var(--error); }
+  .left-label {
+    font-size: 12px;
+    color: var(--muted-foreground);
+    margin-top: 2px;
+  }
   .delta {
-    display: inline-flex; align-items: center; gap: 4px;
-    font-family: var(--mono); font-size: 12px; font-weight: 700;
-    padding: 4px 10px; border-radius: 999px;
-    opacity: 0; transform: translateY(4px);
-    transition: opacity .25s, transform .25s;
+    font-family: var(--mono);
+    font-size: 11px;
+    font-weight: 500;
+    opacity: 0;
+    transition: opacity 0.2s;
   }
-  .delta.show { opacity: 1; transform: none; }
-  .delta.down { color: var(--red); background: rgba(248,113,113,.12); }
-  .delta.up { color: var(--green); background: rgba(52,211,153,.12); }
+  .delta.show { opacity: 1; }
+  .delta.down { color: var(--error); }
+  .delta.up { color: var(--success); }
 
-  .credit-row {
-    display: flex; align-items: baseline; gap: 12px; flex-wrap: wrap;
-    margin: 16px 0 4px;
+  .track {
+    height: 6px;
+    background: var(--muted);
+    border-radius: 3px;
+    overflow: hidden;
   }
-  .credit {
-    font-size: clamp(2.6rem, 8vw, 3.6rem);
-    font-weight: 800; letter-spacing: -0.05em; line-height: 1;
-    background: linear-gradient(120deg, #fff 20%, var(--cyan) 90%);
-    -webkit-background-clip: text; background-clip: text; color: transparent;
-    transition: transform .25s ease;
+  .track > i {
+    display: block;
+    height: 100%;
+    width: 0;
+    border-radius: 3px;
+    transition: width 0.55s ease, background-color 0.3s ease;
   }
-  .credit.tick { transform: scale(1.04); }
-  .credit-sub { color: var(--muted); font-size: 0.9rem; font-weight: 500; }
+  .track.ok > i { background: var(--success); }
+  .track.mid > i { background: var(--warning); }
+  .track.low > i { background: var(--error); }
 
-  .bar-meta {
-    display: flex; justify-content: space-between; align-items: center;
-    margin-top: 14px; font-size: 12px; font-weight: 700; color: var(--muted);
-  }
-  .bar-meta .pct { font-family: var(--mono); }
-  .bar-meta .pct.ok { color: var(--green); }
-  .bar-meta .pct.mid { color: var(--amber); }
-  .bar-meta .pct.low { color: var(--red-hot); }
-  .bar-meta .side { letter-spacing: .14em; font-size: 10px; color: var(--faint); }
-
-  .bar {
-    margin-top: 8px; height: 12px; border-radius: 999px;
-    background: rgba(255,255,255,.06);
-    border: 1px solid var(--glass-edge);
-    overflow: hidden; position: relative;
-  }
-  .bar > i {
-    display: block; height: 100%; width: 0;
-    border-radius: 999px;
-    transition: width .7s cubic-bezier(.22,1,.36,1), background .4s ease, box-shadow .4s;
-  }
-  .bar.ok > i {
-    background: linear-gradient(90deg, #059669, var(--green), var(--cyan));
-    box-shadow: 0 0 16px rgba(52,211,153,.35);
-  }
-  .bar.mid > i {
-    background: linear-gradient(90deg, #d97706, var(--amber));
-    box-shadow: 0 0 16px rgba(251,191,36,.3);
-  }
-  .bar.low > i {
-    background: linear-gradient(90deg, #b91c1c, var(--red-hot), #fb7185);
-    box-shadow: 0 0 18px rgba(239,68,68,.45);
-    animation: barPulse 1.4s ease infinite;
-  }
-  @keyframes barPulse {
-    0%, 100% { filter: brightness(1); }
-    50% { filter: brightness(1.15); }
-  }
-  .bar-ends {
-    display: flex; justify-content: space-between; margin-top: 8px;
-    font-size: 12px; color: var(--faint); font-family: var(--mono);
+  .bar-foot {
+    display: flex;
+    justify-content: space-between;
+    margin-top: 6px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted-foreground);
   }
 
   .meta {
-    display: grid; grid-template-columns: repeat(4, 1fr);
-    gap: 1px; margin-top: 20px;
-    background: var(--glass-edge);
-    border: 1px solid var(--glass-edge);
-    border-radius: 14px; overflow: hidden;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 12px 16px;
+    margin-top: 16px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
-  .cell {
-    background: rgba(0,0,0,.2); padding: 12px 12px 11px; min-width: 0;
+  @media (min-width: 560px) {
+    .meta { grid-template-columns: repeat(4, 1fr); }
   }
-  .cell .k {
-    font-size: 9px; font-weight: 700; letter-spacing: .14em;
-    color: var(--faint); margin-bottom: 5px; text-transform: uppercase;
+  .meta dt {
+    margin: 0;
+    font-size: 11px;
+    color: var(--muted-foreground);
+    font-weight: 500;
   }
-  .cell .v {
-    font-size: 13px; font-weight: 700; color: var(--ink);
-    display: flex; align-items: center; gap: 6px; min-width: 0;
+  .meta dd {
+    margin: 3px 0 0;
+    font-size: 12px;
+    font-weight: 500;
+    font-family: var(--mono);
+    word-break: break-all;
   }
-  .cell .v span { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-  .cell .v.accent { color: var(--cyan); }
+  .meta dd button {
+    border: 0;
+    background: none;
+    padding: 0;
+    margin-left: 6px;
+    font: inherit;
+    color: var(--muted-foreground);
+    cursor: pointer;
+    text-decoration: underline;
+    text-underline-offset: 2px;
+  }
+  .meta dd button:hover { color: var(--primary); }
 
-  .mhead {
-    display: flex; justify-content: space-between; align-items: baseline;
-    margin: 18px 0 10px;
+  .models {
+    margin-top: 14px;
+    padding-top: 14px;
+    border-top: 1px solid var(--border);
   }
-  .mhead .t { font-size: 0.85rem; font-weight: 700; letter-spacing: .04em; color: var(--muted); text-transform: uppercase; }
-  .mhead .c { font-size: 11px; font-weight: 700; letter-spacing: .1em; color: var(--faint); font-family: var(--mono); }
-  .models { display: flex; flex-wrap: wrap; gap: 8px; }
-  .m {
-    font-family: var(--mono); font-size: 11.5px; font-weight: 600;
-    color: var(--ink); background: rgba(255,255,255,.04);
-    border: 1px solid var(--glass-edge); padding: 7px 11px; border-radius: 999px;
-    cursor: pointer; display: inline-flex; align-items: center; gap: 6px;
-    transition: border-color .15s, background .15s, transform .08s;
+  .models h2 {
+    margin: 0 0 8px;
+    font-size: 11px;
+    font-weight: 500;
+    color: var(--muted-foreground);
+    letter-spacing: 0.02em;
   }
-  .m:hover {
-    border-color: rgba(34,211,238,.4); background: rgba(34,211,238,.08); color: var(--cyan);
+  .chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .chip {
+    font-family: var(--mono);
+    font-size: 11px;
+    padding: 4px 8px;
+    border: 1px solid var(--border);
+    border-radius: calc(var(--radius) - 4px);
+    background: transparent;
+    color: var(--foreground);
+    cursor: pointer;
   }
-  .m:active { transform: scale(.97); }
-  .m svg { opacity: .45; }
-  .none { color: var(--faint); font-size: 13px; }
+  .chip:hover {
+    border-color: color-mix(in srgb, var(--primary) 40%, var(--border));
+    color: var(--primary);
+  }
+  .none { font-size: 13px; color: var(--muted-foreground); }
 
-  .foot {
-    margin-top: 22px; display: flex; justify-content: space-between;
-    align-items: center; gap: 10px; flex-wrap: wrap;
-    color: var(--faint); font-size: 12px;
-  }
-  .foot .tag { font-family: var(--mono); font-size: 11px; letter-spacing: .04em; }
-  .foot .upd { display: inline-flex; align-items: center; gap: 7px; }
-  .foot .upd i {
-    width: 7px; height: 7px; border-radius: 50%; background: var(--cyan);
-    box-shadow: 0 0 8px rgba(34,211,238,.5);
+  footer {
+    margin-top: 20px;
+    font-size: 11px;
+    font-family: var(--mono);
+    color: var(--muted-foreground);
+    text-align: right;
   }
 
   .toast {
-    position: fixed; left: 50%; bottom: 24px; transform: translateX(-50%);
-    background: rgba(12,18,32,.95); color: var(--ink);
-    padding: 10px 16px; border-radius: 12px; font-size: 13px; font-weight: 600;
-    opacity: 0; pointer-events: none; transition: opacity .2s; z-index: 9;
-    border: 1px solid var(--glass-edge);
-    box-shadow: 0 12px 40px rgba(0,0,0,.4);
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%);
+    background: var(--foreground);
+    color: var(--background);
+    font-size: 12px;
+    font-weight: 500;
+    padding: 8px 14px;
+    border-radius: calc(var(--radius) - 2px);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity 0.15s;
+    z-index: 20;
   }
   .toast.show { opacity: 1; }
 
-  @media (max-width: 640px) {
-    .meta { grid-template-columns: repeat(2, 1fr); }
-    .panel { padding: 18px 16px; }
-    .ktitle { font-size: 1.2rem; }
-  }
   @media (prefers-reduced-motion: reduce) {
-    .panel, .live.on .dot, .bar > i, .badge.connected .dot, .bar.low > i { animation: none; transition: none; }
+    .track > i, .keybox code, .delta { transition: none; }
   }
 </style>
 </head>
 <body>
 <div class="wrap">
-  <header class="top">
-    <div class="brand">
-      <div class="mark" aria-hidden="true">e·</div>
-      <div class="brand-name">etteum<span>live pool status</span></div>
-    </div>
-    <div class="live standby" id="live" aria-live="polite">
-      <span class="dot"></span>
-      <span id="livetxt">STANDBY</span>
-    </div>
+  <header>
+    <h1 class="title">Keys</h1>
+    <div class="live" id="live"><i></i><span id="livetxt">idle</span></div>
   </header>
 
-  <section class="empty" id="empty" aria-live="polite">
-    <div class="icon" aria-hidden="true">◈</div>
-    <h2 id="emptytitle">No keys yet</h2>
-    <p id="emptymsg">Nothing has been shared with you right now. Come back later.</p>
+  <section class="empty" id="empty">
+    <h1>No keys yet</h1>
+    <p>Come back later.</p>
   </section>
 
-  <div id="board" class="hidden" aria-live="polite"></div>
+  <div id="board" class="hidden"></div>
 
-  <footer class="foot">
-    <div class="tag">etteum · live board</div>
-    <div class="upd"><i aria-hidden="true"></i><span id="upd">waiting</span></div>
-  </footer>
+  <footer><span id="upd">—</span></footer>
 </div>
-<div class="toast" id="toast" role="status">copied</div>
+<div class="toast" id="toast">Copied</div>
 
 <script>
 (function () {
   "use strict";
   var $ = function (id) { return document.getElementById(id); };
   var board = $("board"), empty = $("empty"), toast = $("toast");
-  var timer = null, toastT = null;
-  /** @type {Record<string, { left: number|null, used: number }>} */
   var prev = {};
-  var CONNECTED_MS = 60_000;
+  var toastT = null;
+  var CONNECTED_MS = 60000;
   var POLL_MS = 3000;
-
   var BACKEND = "__BACKEND_ORIGIN__";
   var BASE_URL = "__SHARE_BASE_URL__";
-  var COPY_SVG =
-    '<svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 
   function fmt(n) {
     if (n == null) return "∞";
@@ -362,9 +432,9 @@
     if (isNaN(t)) return "—";
     var s = Math.max(0, (Date.now() - t) / 1000);
     if (s < 45) return "just now";
-    if (s < 3600) return Math.floor(s / 60) + " mins ago";
-    if (s < 86400) return Math.floor(s / 3600) + " hours ago";
-    return Math.floor(s / 86400) + " days ago";
+    if (s < 3600) return Math.floor(s / 60) + "m ago";
+    if (s < 86400) return Math.floor(s / 3600) + "h ago";
+    return Math.floor(s / 86400) + "d ago";
   }
   function dte(iso) {
     if (!iso) return "—";
@@ -373,246 +443,227 @@
     return d.toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" });
   }
   function esc(s) {
-    return String(s).replace(/[&<>"]/g, function (c) {
-      return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c];
+    return String(s).replace(/[&<>"']/g, function (c) {
+      return ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c];
     });
   }
-  function isConnected(iso) {
+  function connected(iso) {
     if (!iso) return false;
     var t = new Date(iso).getTime();
-    if (isNaN(t)) return false;
-    return Date.now() - t < CONNECTED_MS;
+    return !isNaN(t) && Date.now() - t < CONNECTED_MS;
   }
-  /** Remaining-credit bar tone: green healthy → amber warning → red critical. */
-  function barTone(pctLeft, hasQuota) {
+  function tone(pctLeft, hasQuota) {
     if (!hasQuota) return "ok";
     if (pctLeft <= 12) return "low";
     if (pctLeft <= 35) return "mid";
     return "ok";
   }
-  function setLive(state) {
-    var el = $("live"), txt = $("livetxt");
-    el.className = "live" + (state === "on" ? " on" : state === "bad" ? " bad" : " standby");
-    txt.textContent = state === "on" ? "LIVE" : state === "bad" ? "OFFLINE" : "STANDBY";
-  }
   function baseUrl() {
     if (BASE_URL && BASE_URL !== "__SHARE_BASE_URL__") return BASE_URL;
     return (BACKEND && BACKEND !== "__BACKEND_ORIGIN__" ? BACKEND : "") + "/v1";
   }
-  function showEmpty(title, msg) {
+  function setLive(mode) {
+    var el = $("live");
+    el.className = "live" + (mode === "on" ? " on" : mode === "off" ? " off" : "");
+    $("livetxt").textContent = mode === "on" ? "live" : mode === "off" ? "offline" : "idle";
+  }
+  function showEmpty() {
     board.classList.add("hidden");
     board.innerHTML = "";
     empty.classList.remove("hidden");
-    $("emptytitle").textContent = title || "No keys yet";
-    $("emptymsg").textContent = msg || "Nothing has been shared with you right now. Come back later.";
-    setLive("standby");
+    setLive("idle");
     $("upd").textContent = "come back later";
   }
-  function copy(text) {
+  function copy(text, btn) {
+    if (!text) return;
     if (navigator.clipboard && navigator.clipboard.writeText) {
-      navigator.clipboard.writeText(text).then(showToast, function () {});
+      navigator.clipboard.writeText(text).then(function () {
+        toast.textContent = "Copied";
+        toast.classList.add("show");
+        if (toastT) clearTimeout(toastT);
+        toastT = setTimeout(function () { toast.classList.remove("show"); }, 1200);
+        if (btn) {
+          var old = btn.textContent;
+          btn.textContent = "Copied";
+          btn.classList.add("done");
+          setTimeout(function () {
+            btn.textContent = old;
+            btn.classList.remove("done");
+          }, 1200);
+        }
+      }, function () {});
     }
   }
-  function showToast() {
-    toast.classList.add("show");
-    if (toastT) clearTimeout(toastT);
-    toastT = setTimeout(function () { toast.classList.remove("show"); }, 1400);
-  }
 
-  function cardHtml(d, bu) {
-    var id = String(d.id != null ? d.id : d.keyPreview || "");
-    var nm = d.name || "friend key";
+  function card(d, bu) {
+    var id = String(d.id != null ? d.id : "");
+    var fullKey = d.key || "";
     var st = d.status || "active";
     var quota = d.tokenQuota;
     var used = d.tokensUsed || 0;
     var left = d.tokensLeft;
     var hasQuota = quota != null && quota > 0;
-    // Bar = remaining fraction so it shrinks as credit is spent.
     var pctLeft = hasQuota
       ? Math.max(0, Math.min(100, ((left != null ? left : 0) / quota) * 100))
       : 100;
-    var tone = barTone(pctLeft, hasQuota);
-    var credit = hasQuota ? fmt(left) : "∞";
-    var creditSub = hasQuota ? "credit left · " + full(left) : "credit left · unlimited";
-    var connected = isConnected(d.lastUsedAt);
+    var t = tone(pctLeft, hasQuota);
+    var stClass = st === "active" ? "ok" : st === "exhausted" ? "warn" : "bad";
+    var isOn = connected(d.lastUsedAt);
     var models = Array.isArray(d.models) ? d.models : [];
-    var modelsHtml = models.length
+    var chips = models.length
       ? models
-          .map(function (mid) {
+          .map(function (m) {
             return (
-              '<button type="button" class="m" data-copy="' +
-              esc(mid) +
-              '" title="Copy model id">' +
-              esc(mid) +
-              " " +
-              COPY_SVG +
+              '<button type="button" class="chip" data-copy="' +
+              esc(m) +
+              '">' +
+              esc(m) +
               "</button>"
             );
           })
           .join("")
-      : '<div class="none">No models available for this key</div>';
-
-    var deltaHtml = '<span class="delta" data-delta="' + esc(id) + '" aria-live="polite"></span>';
+      : '<span class="none">No models</span>';
 
     return (
-      '<article class="panel" data-key-id="' +
+      '<article class="card" data-id="' +
       esc(id) +
       '">' +
-      '<div class="khead">' +
-      "<div><h1 class=\"ktitle\">" +
-      esc(nm) +
-      "</h1></div>" +
-      '<div class="kactions">' +
-      (connected
-        ? '<span class="badge connected"><span class="dot"></span>CLIENT</span>'
-        : "") +
-      '<div class="pill" title="Key preview (secret not shown here)">' +
-      "<span>" +
-      esc(d.keyPreview || "sk-…") +
-      "</span></div>" +
-      '<span class="badge ' +
+      '<div class="row-top">' +
+      '<h2 class="name">' +
+      esc(d.name || "Key") +
+      "</h2>" +
+      '<div class="tags">' +
+      (isOn ? '<span class="tag conn">client</span>' : "") +
+      '<span class="tag ' +
+      stClass +
+      '">' +
       esc(st) +
+      "</span></div></div>" +
+      '<div class="keybox">' +
+      "<code aria-hidden=\"true\">" +
+      esc(fullKey || d.keyPreview || "—") +
+      "</code>" +
+      '<button type="button" data-copy="' +
+      esc(fullKey) +
+      '" title="Copy full API key">Copy key</button></div>' +
+      '<div class="metric">' +
+      "<div><div class=\"left " +
+      t +
       '">' +
-      esc(String(st).toUpperCase()) +
-      "</span>" +
-      "</div></div>" +
-      '<div class="credit-row">' +
-      '<div class="credit" data-credit="' +
+      esc(hasQuota ? fmt(left) : "∞") +
+      '</div><div class="left-label">credit left' +
+      (hasQuota ? " · " + Math.round(pctLeft) + "%" : "") +
+      '</div></div><span class="delta" data-delta="' +
       esc(id) +
-      '">' +
-      esc(credit) +
-      "</div>" +
-      '<div class="credit-sub">' +
-      esc(creditSub) +
-      "</div>" +
-      deltaHtml +
-      "</div>" +
-      '<div class="bar-meta">' +
-      '<span class="pct ' +
-      tone +
-      '">' +
-      (hasQuota ? Math.round(pctLeft) + "% left" : "∞ left") +
-      "</span>" +
-      '<span class="side">REMAINING</span></div>' +
-      '<div class="bar ' +
-      tone +
-      '" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="' +
+      '"></span></div>' +
+      '<div class="track ' +
+      t +
+      '" role="progressbar" aria-valuenow="' +
       Math.round(pctLeft) +
-      '"><i style="width:' +
+      '" aria-valuemin="0" aria-valuemax="100"><i style="width:' +
       pctLeft +
       '%"></i></div>' +
-      '<div class="bar-ends"><span>' +
+      '<div class="bar-foot"><span>' +
       esc(fmt(used)) +
       " used</span><span>" +
       esc(hasQuota ? fmt(quota) : "∞") +
       " total</span></div>" +
-      '<div class="meta">' +
-      '<div class="cell"><div class="k">Quota</div><div class="v"><span>' +
-      esc(hasQuota ? full(quota) : "∞") +
-      "</span></div></div>" +
-      '<div class="cell"><div class="k">Created</div><div class="v"><span>' +
+      '<dl class="meta">' +
+      "<div><dt>Created</dt><dd>" +
       esc(dte(d.createdAt)) +
-      "</span></div></div>" +
-      '<div class="cell"><div class="k">Last used</div><div class="v"><span>' +
+      "</dd></div>" +
+      "<div><dt>Last used</dt><dd>" +
       esc(rel(d.lastUsedAt)) +
-      "</span></div></div>" +
-      '<div class="cell"><div class="k">Base URL</div><div class="v accent"><span>' +
+      "</dd></div>" +
+      "<div><dt>Quota</dt><dd>" +
+      esc(hasQuota ? full(quota) : "∞") +
+      "</dd></div>" +
+      "<div><dt>Base URL</dt><dd>" +
       esc(bu) +
-      '</span><button type="button" class="iconbtn" data-copy="' +
+      ' <button type="button" data-copy="' +
       esc(bu) +
-      '" title="Copy base URL">' +
-      COPY_SVG +
-      "</button></div></div>" +
-      "</div>" +
-      '<div class="mhead"><div class="t">Models</div><div class="c">' +
+      '">copy</button></dd></div>' +
+      "</dl>" +
+      '<div class="models"><h2>Models · ' +
       models.length +
-      " ready</div></div>" +
-      '<div class="models">' +
-      modelsHtml +
-      "</div></article>"
+      '</h2><div class="chips">' +
+      chips +
+      "</div></div></article>"
     );
   }
 
   function flashDeltas(keys) {
     keys.forEach(function (d) {
-      var id = String(d.id != null ? d.id : d.keyPreview || "");
+      var id = String(d.id != null ? d.id : "");
       var left = d.tokensLeft;
       var used = d.tokensUsed || 0;
       var p = prev[id];
       prev[id] = { left: left, used: used };
       if (!p) return;
       var el = board.querySelector('[data-delta="' + id + '"]');
-      var creditEl = board.querySelector('[data-credit="' + id + '"]');
       if (!el) return;
       var delta = null;
-      if (p.left != null && left != null && left !== p.left) {
-        delta = left - p.left;
-      } else if (used !== p.used) {
-        // used up → remaining effectively down
-        delta = p.used - used;
-      }
+      if (p.left != null && left != null && left !== p.left) delta = left - p.left;
+      else if (used !== p.used) delta = p.used - used;
       if (delta == null || delta === 0) return;
       el.className = "delta show " + (delta < 0 ? "down" : "up");
       el.textContent = (delta > 0 ? "+" : "") + fmt(delta);
-      if (creditEl) {
-        creditEl.classList.add("tick");
-        setTimeout(function () { creditEl.classList.remove("tick"); }, 280);
-      }
-      setTimeout(function () {
-        el.classList.remove("show");
-      }, 2200);
+      setTimeout(function () { el.classList.remove("show"); }, 2000);
     });
   }
 
-  function renderBoard(keys) {
-    if (!keys || !keys.length) {
-      showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+  function render(keys) {
+    if (!keys.length) {
+      showEmpty();
       return;
     }
     empty.classList.add("hidden");
     board.classList.remove("hidden");
     var bu = baseUrl();
-    board.innerHTML = keys.map(function (k) { return cardHtml(k, bu); }).join("");
+    board.innerHTML = keys.map(function (k) { return card(k, bu); }).join("");
     flashDeltas(keys);
-    var anyLive = keys.some(function (k) {
-      return k.status === "active" || isConnected(k.lastUsedAt);
+    var any = keys.some(function (k) {
+      return k.status === "active" || connected(k.lastUsedAt);
     });
-    var anyClient = keys.some(function (k) { return isConnected(k.lastUsedAt); });
-    setLive(anyLive ? "on" : "bad");
+    setLive(any ? "on" : "off");
+    var clients = keys.filter(function (k) { return connected(k.lastUsedAt); }).length;
     $("upd").textContent =
-      "live · " +
       keys.length +
       " key" +
       (keys.length === 1 ? "" : "s") +
-      (anyClient ? " · client connected" : "");
+      (clients ? " · " + clients + " client" + (clients === 1 ? "" : "s") : "") +
+      " · just now";
   }
 
   function load() {
     fetch("/v1/share/board", { cache: "no-store" })
       .then(function (r) {
-        return r.json().then(function (j) { return { ok: r.ok, j: j }; });
+        return r.json().then(function (j) {
+          return { ok: r.ok, j: j };
+        });
       })
       .then(function (res) {
         if (!res.ok) {
-          showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+          showEmpty();
           return;
         }
-        renderBoard(Array.isArray(res.j.keys) ? res.j.keys : []);
+        render(Array.isArray(res.j.keys) ? res.j.keys : []);
       })
       .catch(function () {
-        showEmpty("No keys yet", "Nothing has been shared with you right now. Come back later.");
+        showEmpty();
       });
   }
 
-  board.addEventListener("click", function (e) {
+  document.addEventListener("click", function (e) {
     var t = e.target;
-    if (!t) return;
-    var btn = t.closest ? t.closest("[data-copy]") : null;
-    if (btn && btn.getAttribute) copy(btn.getAttribute("data-copy") || "");
+    if (!t || !t.closest) return;
+    var btn = t.closest("[data-copy]");
+    if (!btn) return;
+    copy(btn.getAttribute("data-copy") || "", btn.tagName === "BUTTON" ? btn : null);
   });
 
   load();
-  timer = setInterval(load, POLL_MS);
+  setInterval(load, POLL_MS);
 })();
 </script>
 </body>

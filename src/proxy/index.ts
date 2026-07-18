@@ -1026,11 +1026,24 @@ export async function handleChatCompletion(
  * ?active=1 — return ONLY models backed by an active+enabled account (so the
  *   caller doesn't fetch the entire catalog including models no account can
  *   serve). Useful for clients that want a lean, usable model list.
+ *
+ * Managed keys with an allowlist only see those models (same rule as chat).
+ * The legacy env/settings key (no apiKeyId) still sees the full catalog.
  */
 proxyRouter.get("/v1/models", async (c) => {
   // Ensure BYOK cache is fresh before listing models.
   // Without this, the sync getModels() returns stale/empty supportedModels.
-  const models = await getActiveModelsCached(c.req.query("active") === "1");
+  let models = await getActiveModelsCached(c.req.query("active") === "1");
+
+  const apiKeyId = (c.req.raw as { apiKeyId?: number }).apiKeyId;
+  if (apiKeyId) {
+    const [row] = await db.select().from(apiKeys).where(eq(apiKeys.id, apiKeyId)).limit(1);
+    const allowlist = parseAllowedModels(row?.allowedModels);
+    if (allowlist) {
+      models = models.filter((m) => modelAllowed(allowlist, m.id));
+    }
+  }
+
   return c.json({
     object: "list",
     data: models,
@@ -1039,13 +1052,18 @@ proxyRouter.get("/v1/models", async (c) => {
 
 type ShareKeyRow = typeof apiKeys.$inferSelect;
 
-/** Public status payload for one managed key (never includes the full secret). */
+/**
+ * Friend share-board payload for one managed key.
+ * Includes the full key so friends can copy it from the share page — treat
+ * SHARE_PORT as a trusted surface (not the public internet without a firewall).
+ */
 function shareKeyPublic(
   row: ShareKeyRow,
   activeModelIds: string[],
 ): {
   id: number;
   name: string | null;
+  key: string;
   keyPreview: string;
   status: string;
   isActive: boolean;
@@ -1074,6 +1092,7 @@ function shareKeyPublic(
   return {
     id: row.id,
     name: row.name || null,
+    key: row.key,
     keyPreview: row.key.slice(0, 12) + "…",
     status,
     isActive: row.isActive,
@@ -1104,11 +1123,11 @@ function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }
 }
 
 /**
- * GET /v1/share/board — public status board for ALL managed friend keys.
+ * GET /v1/share/board — friend status board for ALL managed keys.
  *
- * Powers the bare share page (open :SHARE_PORT with no #k=). Returns name,
- * masked preview, quota, models, status — never full secrets, accounts, or
- * admin settings. Rate-limited per IP.
+ * Powers the bare share page (open :SHARE_PORT). Returns status + full key for
+ * copy (friends need the secret for their client). No accounts / admin settings.
+ * Rate-limited per IP. Keep SHARE_PORT off the open internet if keys are sensitive.
  */
 proxyRouter.get("/v1/share/board", async (c) => {
   const blocked = shareRateLimited(c);
