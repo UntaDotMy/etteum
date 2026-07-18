@@ -380,15 +380,24 @@ async function streamChat(
       if (done) break;
 
       buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split("\n\n");
-      buffer = parts.pop() || "";
+      // Prefer blank-line SSE framing; fall back to line-by-line if needed.
+      let events: string[];
+      if (buffer.includes("\n\n")) {
+        const parts = buffer.split("\n\n");
+        buffer = parts.pop() || "";
+        events = parts;
+      } else {
+        const lines = buffer.split("\n");
+        buffer = lines.pop() || "";
+        events = lines;
+      }
 
-      for (const part of parts) {
-        const dataLine = part.split("\n").find((l) => l.startsWith("data: "));
+      for (const part of events) {
+        const dataLine = part.split("\n").find((l) => l.startsWith("data:") );
         if (!dataLine) continue;
 
-        const payload = dataLine.slice(6).trim();
-        if (payload === "[DONE]") continue;
+        const payload = dataLine.replace(/^data:\s?/, "").trim();
+        if (!payload || payload === "[DONE]") continue;
 
         try {
           const chunk = JSON.parse(payload);
@@ -398,6 +407,7 @@ async function streamChat(
 
           const contentPiece =
             deltaTextPiece(delta.content) ||
+            deltaTextPiece(delta.text) ||
             (typeof message.content === "string" ? message.content : "") ||
             deltaTextPiece(message.content);
 
@@ -836,17 +846,23 @@ export default function Chat() {
     abortRef.current = null;
 
     if (result.success) {
-      const finalContent = (result.content ?? latestText) || "(empty response)";
+      const finalContent = (result.content ?? latestText) || "";
       const finalThinking = (result.thinking ?? latestThinking) || undefined;
-      const media = extractMediaUrlsFromText(finalContent);
+      // Some Grok/reasoning streams fill reasoning only — still show something useful.
+      const displayContent = finalContent.trim()
+        ? finalContent
+        : finalThinking
+          ? finalThinking
+          : "(empty response)";
+      const media = extractMediaUrlsFromText(displayContent);
       updateConversation(conv.id, (c) => ({
         ...c,
         messages: [
           ...c.messages,
           {
             role: "assistant",
-            content: finalContent,
-            ...(finalThinking ? { thinking: finalThinking } : {}),
+            content: displayContent,
+            ...(finalThinking && finalContent.trim() ? { thinking: finalThinking } : {}),
             ...(media.length ? { media } : {}),
             id: generateId(),
             model,

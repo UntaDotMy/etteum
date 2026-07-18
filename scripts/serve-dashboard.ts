@@ -2,11 +2,16 @@
 /**
  * Lightweight static file server for dashboard/dist + same-origin API proxy.
  *
- * The browser only talks to DASHBOARD_PORT. /api/* is forwarded to the backend
- * on this machine (BACKEND_ORIGIN or http://127.0.0.1:PORT) so:
- *   - custom ports (e.g. 2891 → 2890) work without a special Vite build
- *   - public admin access needs only the dashboard port open for REST
- *   - session cookies stay on the dashboard origin
+ * The browser only talks to DASHBOARD_PORT. These paths are forwarded to the
+ * backend on this machine (BACKEND_ORIGIN or http://127.0.0.1:PORT):
+ *   /api/*           management + dashboard session
+ *   /v1/*            OpenAI-compatible chat/models (admin Chat uses this)
+ *   /backend-api/*   Codex HTTP alias
+ *
+ * So:
+ *   - custom ports (e.g. 8443 → 8880) work without a special Vite build
+ *   - public admin Chat works without opening the backend port for REST
+ *   - session cookies stay on the dashboard origin for /api/*
  *
  * WebSocket live updates still go to the backend port (injected as
  * window.__POOL_ENV__.backendPort) — open PORT in the firewall for WS.
@@ -92,8 +97,17 @@ Bun.serve({
     const url = new URL(req.url);
     const pathname = url.pathname;
 
-    // Same-origin API proxy → backend (public admin without CORS pain).
-    if (pathname === "/api" || pathname.startsWith("/api/")) {
+    // Same-origin proxy → backend (public admin without CORS pain).
+    // /v1/* is required for admin Chat streaming; without it the SPA fallback
+    // returns index.html and the client shows "(empty response)".
+    if (
+      pathname === "/api" ||
+      pathname.startsWith("/api/") ||
+      pathname === "/v1" ||
+      pathname.startsWith("/v1/") ||
+      pathname === "/backend-api" ||
+      pathname.startsWith("/backend-api/")
+    ) {
       return proxyToBackend(req, pathname);
     }
 

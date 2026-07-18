@@ -459,7 +459,11 @@
     return "ok";
   }
   function baseUrl() {
-    if (BASE_URL && BASE_URL !== "__SHARE_BASE_URL__") return BASE_URL;
+    // Prefer injected SHARE_BASE_URL; else same-origin /v1 (public share proxy).
+    if (BASE_URL && BASE_URL !== "__SHARE_BASE_URL__" && BASE_URL.trim()) return BASE_URL.replace(/\/$/, "");
+    if (typeof window !== "undefined" && window.location && window.location.origin) {
+      return window.location.origin.replace(/\/$/, "") + "/v1";
+    }
     return (BACKEND && BACKEND !== "__BACKEND_ORIGIN__" ? BACKEND : "") + "/v1";
   }
   function setLive(mode) {

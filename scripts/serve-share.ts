@@ -1,12 +1,12 @@
 #!/usr/bin/env bun
 /**
- * Friend-key status server (etteum pool share card).
+ * Public entry on SHARE_PORT (default 80):
+ *   GET  /  or /index.html     → status board HTML
+ *   *    /v1/*                 → backend (OpenAI + Anthropic + media + share board)
+ *   *    /backend-api/*        → backend (Codex alias)
  *
- * Serves share/index.html on SHARE_PORT (default 80) and same-origin proxies:
- *   GET /v1/share/board  → all managed keys' public status (open :80, no #k=)
- *   GET /v1/share        → single-key status (optional Bearer / ?key=)
- *
- * Never touches /api/*. Holds no DB, no provider tokens, no admin session.
+ * This is the public API base for friends/clients when the cloud firewall only
+ * allows 80/443. Admin /api/* is intentionally NOT proxied here.
  *
  * Env:
  *   SHARE_PORT, HOST, BACKEND_ORIGIN, SHARE_BASE_URL, SHARE_LOCK
@@ -31,57 +31,79 @@ const PAGE_HEADERS: Record<string, string> = {
     "default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline' https://fonts.googleapis.com; font-src https://fonts.gstatic.com; connect-src 'self'; img-src data:",
 };
 
-const PROXY_HEADERS: Record<string, string> = {
-  "Cache-Control": "no-store",
-  "X-Content-Type-Options": "nosniff",
-  "Referrer-Policy": "no-referrer",
-};
-
 if (!(await Bun.file(htmlFile).exists())) {
   console.error("[share] share/index.html not found.");
   process.exit(1);
 }
 
-/** Forward GET /v1/share* to the pool backend (same-origin for the browser). */
-async function proxyShareApi(req: Request, backendPath: string): Promise<Response> {
-  if (req.method !== "GET" && req.method !== "HEAD" && req.method !== "OPTIONS") {
-    return new Response(JSON.stringify({ error: { message: "Method not allowed", type: "invalid_request_error" } }), {
-      status: 405,
-      headers: { ...PROXY_HEADERS, "Content-Type": "application/json" },
-    });
-  }
+function isClientApiPath(pathname: string): boolean {
+  return (
+    pathname === "/v1" ||
+    pathname.startsWith("/v1/") ||
+    pathname === "/backend-api" ||
+    pathname.startsWith("/backend-api/")
+  );
+}
+
+/**
+ * Full reverse proxy to the pool backend for OpenAI/Anthropic/media/Codex routes.
+ * Streams request/response bodies (required for chat SSE).
+ */
+async function proxyToBackend(req: Request, pathname: string): Promise<Response> {
+  const incoming = new URL(req.url);
+  const target = new URL(pathname + incoming.search, backendOrigin);
+  const headers = new Headers(req.headers);
+  headers.delete("host");
+
+  // CORS preflight for browser clients hitting this public origin.
   if (req.method === "OPTIONS") {
     return new Response(null, {
       status: 204,
       headers: {
-        ...PROXY_HEADERS,
-        "Access-Control-Allow-Methods": "GET, HEAD, OPTIONS",
-        "Access-Control-Allow-Headers": "Authorization, Content-Type",
+        "Access-Control-Allow-Origin": req.headers.get("origin") || "*",
+        "Access-Control-Allow-Methods": "GET, POST, PUT, PATCH, DELETE, OPTIONS, HEAD",
+        "Access-Control-Allow-Headers":
+          req.headers.get("access-control-request-headers") ||
+          "Authorization, Content-Type, x-api-key, anthropic-version, anthropic-beta, x-machine-id",
+        "Access-Control-Max-Age": "86400",
+        "Cache-Control": "no-store",
       },
     });
   }
 
-  const incoming = new URL(req.url);
-  const target = new URL(backendPath + incoming.search, backendOrigin);
-  const headers = new Headers();
-  const auth = req.headers.get("authorization");
-  if (auth) headers.set("Authorization", auth);
-  headers.set("X-Forwarded-For", "127.0.0.1");
-
   try {
-    const upstream = await fetch(target.toString(), {
-      method: "GET",
+    const init: RequestInit & { duplex?: "half" } = {
+      method: req.method,
       headers,
-      cache: "no-store",
-    });
-    const body = await upstream.arrayBuffer();
-    const out = new Headers(PROXY_HEADERS);
-    out.set("Content-Type", upstream.headers.get("Content-Type") || "application/json");
-    return new Response(body, { status: upstream.status, headers: out });
-  } catch {
+      redirect: "manual",
+    };
+    if (req.method !== "GET" && req.method !== "HEAD") {
+      init.body = req.body;
+      init.duplex = "half";
+    }
+    const upstream = await fetch(target.toString(), init);
+    const out = new Headers(upstream.headers);
+    // Allow browser tools from other origins when using the public status host as API base.
+    const origin = req.headers.get("origin");
+    if (origin) {
+      out.set("Access-Control-Allow-Origin", origin);
+      out.set("Vary", "Origin");
+    } else if (!out.has("Access-Control-Allow-Origin")) {
+      out.set("Access-Control-Allow-Origin", "*");
+    }
+    return new Response(upstream.body, { status: upstream.status, headers: out });
+  } catch (err) {
+    console.error("[share] proxy to backend failed:", err);
     return new Response(
       JSON.stringify({ error: { message: "Could not reach the pool backend", type: "server_error" } }),
-      { status: 502, headers: { ...PROXY_HEADERS, "Content-Type": "application/json" } },
+      {
+        status: 502,
+        headers: {
+          "Content-Type": "application/json",
+          "Access-Control-Allow-Origin": "*",
+          "Cache-Control": "no-store",
+        },
+      },
     );
   }
 }
@@ -89,18 +111,27 @@ async function proxyShareApi(req: Request, backendPath: string): Promise<Respons
 Bun.serve({
   port: sharePort,
   hostname: host,
+  idleTimeout: 255,
   async fetch(req) {
     const url = new URL(req.url);
+    const pathname = url.pathname;
 
-    if (url.pathname === "/v1/share/board") {
-      return proxyShareApi(req, "/v1/share/board");
-    }
-    if (url.pathname === "/v1/share" || url.pathname === "/v1/share/") {
-      return proxyShareApi(req, "/v1/share");
+    // Full client API surface (same routes as backend).
+    if (isClientApiPath(pathname)) {
+      return proxyToBackend(req, pathname);
     }
 
-    if (url.pathname !== "/" && url.pathname !== "/index.html") {
-      return new Response("not found", { status: 404 });
+    // Status board UI only — never expose admin /api/* here.
+    if (pathname !== "/" && pathname !== "/index.html") {
+      return new Response(
+        JSON.stringify({
+          error: {
+            message: "Not found. Client API lives under /v1/* (and /backend-api/*).",
+            type: "invalid_request_error",
+          },
+        }),
+        { status: 404, headers: { "Content-Type": "application/json" } },
+      );
     }
 
     const html = (await Bun.file(htmlFile).text())
@@ -112,5 +143,5 @@ Bun.serve({
 });
 
 console.log(
-  `[share] etteum pool share on http://${host}:${sharePort}  →  backend ${backendOrigin} (proxies /v1/share/board + /v1/share)`,
+  `[share] public entry http://${host}:${sharePort}  →  backend ${backendOrigin} (proxies /v1/* + /backend-api/*; status UI on /)`,
 );
