@@ -31,6 +31,12 @@ const IDEMPOTENT_COLUMNS: Array<{ table: string; column: string; ddl: string }> 
   { table: "request_logs", column: "response_id", ddl: "ALTER TABLE request_logs ADD COLUMN response_id TEXT" },
   // 2026-07-09 — sticky round-robin persisted pick counter
   { table: "accounts", column: "consecutive_use_count", ddl: "ALTER TABLE accounts ADD COLUMN consecutive_use_count INTEGER NOT NULL DEFAULT 0" },
+  // 2026-07-18 — friend-key limits (model allowlist, token quota, rate cap, expiry).
+  { table: "api_keys", column: "allowed_models", ddl: "ALTER TABLE api_keys ADD COLUMN allowed_models TEXT" },
+  { table: "api_keys", column: "token_quota",    ddl: "ALTER TABLE api_keys ADD COLUMN token_quota INTEGER" },
+  { table: "api_keys", column: "tokens_used",    ddl: "ALTER TABLE api_keys ADD COLUMN tokens_used INTEGER NOT NULL DEFAULT 0" },
+  { table: "api_keys", column: "rate_limit",     ddl: "ALTER TABLE api_keys ADD COLUMN rate_limit INTEGER" },
+  { table: "api_keys", column: "expires_at",     ddl: "ALTER TABLE api_keys ADD COLUMN expires_at INTEGER" },
 ];
 
 function tableHasColumn(table: string, column: string): boolean {

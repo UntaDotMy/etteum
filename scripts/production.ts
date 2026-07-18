@@ -41,6 +41,7 @@ const bunCmd = bunExe || (isWindows ? "bun.exe" : "bun");
 
 const port = process.env.PORT || "1930";
 const dashboardPort = process.env.DASHBOARD_PORT || "1931";
+const sharePort = process.env.SHARE_PORT || "80";
 
 async function buildDashboard() {
   const distExists = await Bun.file(dashboardDist).exists();
@@ -103,6 +104,28 @@ const dashboard = Bun.spawn([bunCmd, "run", "scripts/serve-dashboard.ts"], {
   },
 });
 
+// Start the friend-key status server (dudul-style card). Failure to bind (e.g.
+// port 80 needs privileges) is logged but does NOT take down the proxy/dashboard.
+let share: ReturnType<typeof Bun.spawn> | null = null;
+if (process.env.SHARE_ENABLED !== "0") {
+  share = Bun.spawn([bunCmd, "run", "scripts/serve-share.ts"], {
+    cwd: root,
+    stdout: "inherit",
+    stderr: "inherit",
+    env: {
+      ...process.env,
+      SHARE_PORT: sharePort,
+      PORT: port,
+      NODE_ENV: "production",
+    },
+  });
+  share.exited.then((code) => {
+    if (!shuttingDown) {
+      console.error(`[production] Share server exited with code ${code} (port ${sharePort}). Continuing without it.`);
+    }
+  });
+}
+
 let shuttingDown = false;
 
 function shutdown(code = 0) {
@@ -110,6 +133,7 @@ function shutdown(code = 0) {
   shuttingDown = true;
   backend.kill();
   dashboard.kill();
+  share?.kill();
   setTimeout(() => process.exit(code), 300).unref();
 }
 

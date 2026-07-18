@@ -83,6 +83,11 @@ function resolvePythonPath(): string {
 export const config = {
   port: Number(process.env.PORT) || 1930,
   dashboardPort: Number(process.env.DASHBOARD_PORT) || 1931,
+  /** Port for the standalone friend-key status page (dudul-style card). */
+  sharePort: Number(process.env.SHARE_PORT) || 80,
+  /** Bind host. Defaults to loopback so the proxy/dashboard are NOT LAN-exposed
+   *  unless the operator explicitly opts in (0.0.0.0) or tunnels out. */
+  host: process.env.HOST || "127.0.0.1",
   apiKey: process.env.API_KEY || "",
   databasePath: (() => {
     const p = process.env.DATABASE_PATH || path.join(projectRoot, "data/poolprox3.db");

@@ -10,6 +10,7 @@
     "start:fast": "bun scripts/production.ts --skip-build",
     "dev": "bun scripts/start.ts",
     "build": "cd dashboard && bun run build",
+    "share": "bun run scripts/serve-share.ts",
     "migrate": "bun src/db/migrate.ts",
     "doctor": "bun scripts/doctor.ts",
     "setup": "bash install.sh",

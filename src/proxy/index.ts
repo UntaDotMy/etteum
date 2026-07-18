@@ -1,7 +1,7 @@
 import { Hono } from "hono";
 import { routeRequest, getAllModels, providers } from "./router";
 import { db } from "../db/index";
-import { requestLogs, usageSummary, accounts, type NewRequestLog } from "../db/schema";
+import { requestLogs, usageSummary, accounts, apiKeys, type NewRequestLog } from "../db/schema";
 import { pool } from "./pool";
 import { broadcast } from "../ws/index";
 import type { ChatCompletionRequest, CreditSource, ProviderResult } from "./providers/base";
@@ -39,8 +39,104 @@ import {
   isGrokWeeklyPercentQuotaLimit,
   refreshGrokWeeklyPoolAfterRequest,
 } from "./providers/grok";
+import { RateLimiter } from "../utils/security";
+import {
+  checkKeyAccess,
+  parseAllowedModels,
+  modelAllowed,
+  recordKeyTokens,
+} from "./friend-keys";
+import type { ModelInfo } from "./providers/base";
 
 export const proxyRouter = new Hono();
+
+// ── Friend-key share / gating state ──────────────────────────────────────────
+// Short-TTL cache of the merged model catalog so /v1/share and /v1/models never
+// hammer the per-account pool lookup on every poll from the status page.
+const MODELS_CACHE_TTL_MS = 60_000;
+let allModelsCache: { activeOnly: boolean; data: ModelInfo[]; expiresAt: number } | null = null;
+
+async function getActiveModelsCached(activeOnly: boolean): Promise<ModelInfo[]> {
+  if (allModelsCache && allModelsCache.expiresAt > Date.now() && allModelsCache.activeOnly === activeOnly) {
+    return allModelsCache.data;
+  }
+  await refreshByokModels();
+  let models = getAllModels();
+  if (activeOnly) {
+    const filtered: ModelInfo[] = [];
+    await Promise.all(models.map(async (m) => {
+      const acct = await pool.getAccountForModel(m.id).catch(() => null);
+      if (acct) filtered.push(m);
+    }));
+    models = filtered;
+  }
+  allModelsCache = { activeOnly, data: models, expiresAt: Date.now() + MODELS_CACHE_TTL_MS };
+  return models;
+}
+
+// Per-key request buckets + a brute-force limiter for the authless /v1/share.
+const keyRequestLimiters = new Map<number, RateLimiter>();
+const shareLimiter = new RateLimiter(30, 30);
+
+function getClientIpFromHeaders(h: Headers): string {
+  return (h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown");
+}
+
+function isLocalRequest(headers: Headers, hostname: string): boolean {
+  const xf = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+  const xr = headers.get("x-real-ip");
+  const ip = xf || xr || "";
+  const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost", ""]);
+  const host = (hostname || "").toLowerCase();
+  return LOCAL.has(ip) || host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+}
+
+/**
+ * Enforce friend-key limits for a /v1 request. Returns null when the request may
+ * proceed (unlimited legacy key, or a managed key within all its limits), else a
+ * ready-to-send 4xx Response describing the breach.
+ */
+async function enforceFriendKeyLimits(apiKeyId: number | null, model: string): Promise<Response | null> {
+  if (!apiKeyId) return null; // legacy single env/settings key is never limited
+  const access = await checkKeyAccess(apiKeyId);
+  if (!access.allowed) {
+    const body =
+      access.reason === "expired"
+        ? { error: { message: "This API key has expired.", type: "auth_error", code: "key_expired" } }
+        : access.reason === "quota_exhausted"
+          ? { error: { message: "This API key's token quota is exhausted.", type: "insufficient_quota", code: "quota_exhausted" } }
+          : { error: { message: "This API key is not active.", type: "auth_error", code: "key_inactive" } };
+    return Response.json(body, { status: 403 });
+  }
+  const allowlist = parseAllowedModels(access.row.allowedModels);
+  if (!modelAllowed(allowlist, model)) {
+    return Response.json(
+      { error: { message: `Model '${model}' is not allowed for this API key.`, type: "invalid_request_error", code: "model_not_allowed" } },
+      403,
+    );
+  }
+  if (access.row.rateLimit && access.row.rateLimit > 0) {
+    let limiter = keyRequestLimiters.get(apiKeyId);
+    if (!limiter) {
+      limiter = new RateLimiter(access.row.rateLimit, access.row.rateLimit);
+      keyRequestLimiters.set(apiKeyId, limiter);
+    }
+    const rl = limiter.check(`key:${apiKeyId}`);
+    if (!rl.allowed) {
+      return new Response(
+        JSON.stringify({ error: { message: "Rate limit exceeded for this API key.", type: "rate_limit_error", code: "rate_limited" } }),
+        {
+          status: 429,
+          headers: {
+            "Content-Type": "application/json",
+            "Retry-After": String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+          },
+        },
+      );
+    }
+  }
+  return null;
+}
 
 /**
  * Reject oversized request bodies before parsing JSON. Prevents a single
@@ -410,6 +506,8 @@ function wrapStreamWithUsageFinalizer(
     useFreeCounter: boolean;
     /** Synthetic node accounts (id<=0) — skip pool mutators / trackRequestEnd. */
     skipPoolMutations?: boolean;
+    /** Friend-key id whose token budget should be debited when the stream's usage is known. */
+    apiKeyId?: number | null;
   }
 ): ReadableStream<Uint8Array> {
   const decoder = new TextDecoder();
@@ -622,6 +720,9 @@ function wrapStreamWithUsageFinalizer(
           cost,
           durationMs,
         });
+
+        // Friend-key token quota: debit the stream's actual tokens against the key's budget.
+        await recordKeyTokens(context.apiKeyId, finalTotalTokens);
 
         broadcast({
           type: "request_log",
@@ -862,6 +963,7 @@ export async function handleChatCompletion(
       fallbackCreditSource: creditSource,
       useFreeCounter,
       skipPoolMutations: isStaticLogAccount,
+      apiKeyId: resolvedApiKeyId,
     });
 
       shouldReleaseTracking = false;
@@ -886,6 +988,9 @@ export async function handleChatCompletion(
     cost,
     durationMs,
   });
+
+  // Friend-key token quota: debit the consumed tokens against the key's budget.
+  await recordKeyTokens(resolvedApiKeyId, totalTokens);
 
   // Broadcast lightweight event — strip heavy fields (requestBody/responseBody)
   // that can be 10s of KB each. Clients fetch detail on demand via /api/stats/requests/:id.
@@ -925,21 +1030,74 @@ export async function handleChatCompletion(
 proxyRouter.get("/v1/models", async (c) => {
   // Ensure BYOK cache is fresh before listing models.
   // Without this, the sync getModels() returns stale/empty supportedModels.
-  await refreshByokModels();
-  let models = getAllModels();
-  if (c.req.query("active") === "1") {
-    // Filter to models that have at least one active+enabled account that can
-    // serve them. This is per-model, parallelizable but bounded by model count.
-    const filtered: typeof models = [];
-    await Promise.all(models.map(async (m) => {
-      const acct = await pool.getAccountForModel(m.id).catch(() => null);
-      if (acct) filtered.push(m);
-    }));
-    models = filtered;
-  }
+  const models = await getActiveModelsCached(c.req.query("active") === "1");
   return c.json({
     object: "list",
     data: models,
+  });
+});
+
+/**
+ * GET /v1/share — friend-key status (powers the dudul-style card on the share page).
+ *
+ * Authless-by-design: the caller presents their own managed key as
+ * `Authorization: Bearer <key>` or `?key=`. The key is resolved against the
+ * api_keys table (NOT the legacy env/settings key) and the response exposes ONLY
+ * what that one key can see: its allowlisted models, its token quota/usage, its
+ * rate cap, and its expiry. No other keys, accounts, providers, or admin data.
+ *
+ * Hardening: per-IP rate limit (brute-force), Cache-Control: no-store (the key
+ * is in the query string), and localhost bypass for your own testing.
+ */
+proxyRouter.get("/v1/share", async (c) => {
+  const ip = getClientIpFromHeaders(c.req.raw.headers);
+  if (!isLocalRequest(c.req.raw.headers, new URL(c.req.url).hostname)) {
+    const rl = shareLimiter.check(`share:${ip}`);
+    if (!rl.allowed) {
+      return c.json({ error: { message: "Too many attempts. Try again later.", type: "rate_limit_error" } }, 429);
+    }
+  }
+  c.header("Cache-Control", "no-store");
+
+  const token = c.req.query("key") || c.req.header("authorization")?.replace(/^Bearer\s+/i, "") || "";
+  if (!token) {
+    return c.json({ error: { message: "Missing key", type: "auth_error" } }, 401);
+  }
+  const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
+  if (!row) {
+    return c.json({ error: { message: "Invalid key", type: "auth_error" } }, 401);
+  }
+
+  // Usable models = the key's allowlist ∩ models an active account can serve.
+  const allowlist = parseAllowedModels(row.allowedModels);
+  const activeModels = await getActiveModelsCached(true);
+  const usable = activeModels.filter((m) => modelAllowed(allowlist, m.id)).map((m) => m.id);
+
+  const tokenQuota = row.tokenQuota ?? null;
+  const tokensUsed = row.tokensUsed ?? 0;
+  const tokensLeft = tokenQuota != null ? Math.max(0, tokenQuota - tokensUsed) : null;
+  const status = !row.isActive
+    ? "inactive"
+    : (row.expiresAt && row.expiresAt.getTime() <= Date.now())
+      ? "expired"
+      : (tokenQuota != null && tokensLeft === 0)
+        ? "exhausted"
+        : "active";
+
+  return c.json({
+    name: row.name || null,
+    keyPreview: row.key.slice(0, 12) + "…",
+    status,
+    isActive: row.isActive,
+    createdAt: row.createdAt,
+    lastUsedAt: row.lastUsedAt,
+    tokenQuota,
+    tokensUsed,
+    tokensLeft,
+    rateLimit: row.rateLimit ?? null,
+    expiresAt: row.expiresAt,
+    models: usable,
+    baseUrl: "/v1",
   });
 });
 
@@ -991,6 +1149,14 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   // messages to the /v1/chat/completions endpoint.
   body = normalizeRequestToOpenAI(body);
   const isStream = body.stream === true;
+
+  // Friend-key gating: enforce model allowlist, token quota, expiry, and the
+  // per-key rate cap BEFORE any upstream account is touched. The resolved model
+  // alias is checked (not the raw client id) so mapping rules can't smuggle a
+  // blocked model through.
+  const apiKeyId = currentApiKeyId(c.req.raw);
+  const gate = await enforceFriendKeyLimits(apiKeyId, resolveModelAlias(body.model));
+  if (gate) return gate;
 
   try {
     const { result } = await handleChatCompletion(body, {

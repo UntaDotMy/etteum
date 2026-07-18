@@ -4,6 +4,9 @@ import { settings, apiKeys } from "../db/schema";
 import { eq } from "drizzle-orm";
 import { config } from "../config";
 import { constantTimeEqual, RateLimiter } from "../utils/security";
+import { refreshByokModels } from "../proxy/providers/registry";
+import { getAllModels } from "../proxy/router";
+import { parseAllowedModels, isExpired } from "../proxy/friend-keys";
 
 const API_KEY_SETTING = "api_key";
 const API_KEY_CACHE_TTL_MS = 5_000;
@@ -19,7 +22,7 @@ let activeApiKeyCache: { key: string; expiresAt: number } | null = null;
 // Cache the multi-key row lookup (hit and miss) keyed by the raw token, with a
 // short TTL and explicit invalidation on any managed-key mutation below.
 type ResolvedKey =
-  | { row: { id: number; isActive: boolean; machineId: string | null } }
+  | { row: { id: number; isActive: boolean; machineId: string | null; expiresAt: Date | null } }
   | { row: null };
 const resolveKeyCache = new Map<string, { value: ResolvedKey; expiresAt: number }>();
 
@@ -86,13 +89,15 @@ export async function resolveApiKey(
   if (!resolved || resolved.expiresAt <= Date.now()) {
     const [row] = await db.select().from(apiKeys).where(eq(apiKeys.key, token)).limit(1);
     const value: ResolvedKey = row
-      ? { row: { id: row.id, isActive: row.isActive, machineId: row.machineId } }
+      ? { row: { id: row.id, isActive: row.isActive, machineId: row.machineId, expiresAt: row.expiresAt } }
       : { row: null };
     cacheResolvedKey(token, value, row ? API_KEY_CACHE_TTL_MS : RESOLVE_MISS_TTL_MS);
     resolved = resolveKeyCache.get(token)!;
   }
   const row = resolved.value.row;
   if (!row || !row.isActive) return { valid: false };
+  // Friend-key expiry: a key past its expiresAt stops resolving entirely.
+  if (isExpired(row.expiresAt)) return { valid: false, reason: "expired" };
   // Enforce machine binding when configured on the key.
   if (row.machineId && row.machineId.trim()) {
     const presented = (opts?.machineId || "").trim();
@@ -191,14 +196,56 @@ keysRouter.get("/managed", async (c) => {
       isActive: k.isActive,
       createdAt: k.createdAt,
       lastUsedAt: k.lastUsedAt,
+      // Friend-key limits
+      allowedModels: parseAllowedModels(k.allowedModels),
+      tokenQuota: k.tokenQuota,
+      tokensUsed: k.tokensUsed ?? 0,
+      rateLimit: k.rateLimit,
+      expiresAt: k.expiresAt,
     })),
   });
 });
 
+/**
+ * Full model catalog for the admin "pick which models this key can use" picker.
+ * Admin-session only (this router is behind the /api dashboard guard).
+ */
+keysRouter.get("/available-models", async (c) => {
+  await refreshByokModels();
+  const models = getAllModels().map((m) => ({ id: m.id, owned_by: m.owned_by }));
+  return c.json({ models });
+});
+
 /** Create a new managed key. Returns the full key ONCE (not retrievable later). */
 keysRouter.post("/managed", async (c) => {
-  const body = await c.req.json<{ name?: string; machineId?: string }>().catch(() => ({ name: undefined, machineId: undefined }));
+  const body = await c.req.json<{
+    name?: string;
+    machineId?: string;
+    allowedModels?: string[] | null;
+    tokenQuota?: number | null;
+    rateLimit?: number | null;
+    expiresAt?: string | null;
+  }>().catch(() => ({} as {
+    name?: string;
+    machineId?: string;
+    allowedModels?: string[] | null;
+    tokenQuota?: number | null;
+    rateLimit?: number | null;
+    expiresAt?: string | null;
+  }));
   const key = generateApiKey();
+  const allowedModels = Array.isArray(body.allowedModels) && body.allowedModels.length > 0
+    ? JSON.stringify(body.allowedModels)
+    : null;
+  const tokenQuota = Number.isFinite(body.tokenQuota) && (body.tokenQuota as number) > 0
+    ? Math.round(body.tokenQuota as number)
+    : null;
+  const rateLimit = Number.isFinite(body.rateLimit) && (body.rateLimit as number) > 0
+    ? Math.round(body.rateLimit as number)
+    : null;
+  const expiresAt = body.expiresAt && !Number.isNaN(Date.parse(body.expiresAt))
+    ? new Date(body.expiresAt)
+    : null;
   const [row] = await db
     .insert(apiKeys)
     .values({
@@ -206,10 +253,58 @@ keysRouter.post("/managed", async (c) => {
       name: body.name || null,
       machineId: body.machineId || null,
       isActive: true,
+      allowedModels,
+      tokenQuota,
+      rateLimit,
+      expiresAt,
     })
     .returning();
   invalidateResolvedApiKeys();
   return c.json({ id: row!.id, key, name: row!.name, machineId: row!.machineId });
+});
+
+/** Update a managed key's limits. Only the provided fields are changed. */
+keysRouter.patch("/managed/:id", async (c) => {
+  const id = Number(c.req.param("id"));
+  const body = await c.req.json<{
+    name?: string | null;
+    allowedModels?: string[] | null;
+    tokenQuota?: number | null;
+    rateLimit?: number | null;
+    expiresAt?: string | null;
+  }>().catch(() => ({} as {
+    name?: string | null;
+    allowedModels?: string[] | null;
+    tokenQuota?: number | null;
+    rateLimit?: number | null;
+    expiresAt?: string | null;
+  }));
+  const patch: Record<string, unknown> = {};
+  if ("name" in body) patch.name = body.name || null;
+  if ("allowedModels" in body) {
+    patch.allowedModels = Array.isArray(body.allowedModels) && body.allowedModels.length > 0
+      ? JSON.stringify(body.allowedModels)
+      : null;
+  }
+  if ("tokenQuota" in body) {
+    patch.tokenQuota = Number.isFinite(body.tokenQuota) && (body.tokenQuota as number) > 0
+      ? Math.round(body.tokenQuota as number)
+      : null;
+  }
+  if ("rateLimit" in body) {
+    patch.rateLimit = Number.isFinite(body.rateLimit) && (body.rateLimit as number) > 0
+      ? Math.round(body.rateLimit as number)
+      : null;
+  }
+  if ("expiresAt" in body) {
+    patch.expiresAt = body.expiresAt && !Number.isNaN(Date.parse(body.expiresAt))
+      ? new Date(body.expiresAt)
+      : null;
+  }
+  if (Object.keys(patch).length === 0) return c.json({ error: "Nothing to update" }, 400);
+  await db.update(apiKeys).set(patch).where(eq(apiKeys.id, id));
+  invalidateResolvedApiKeys();
+  return c.json({ success: true });
 });
 
 /** Revoke (deactivate) a managed key by id. The key string stays unique but is

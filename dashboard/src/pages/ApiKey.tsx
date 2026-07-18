@@ -6,6 +6,7 @@ import { Copy, Eye, EyeOff, RefreshCw, Check, Save, ShieldCheck } from "lucide-r
 import { fetchApiKey, regenerateApiKey, setApiKey, testApiKey } from "@/lib/api";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
+import ManagedKeys from "@/components/keys/ManagedKeys";
 
 export default function ApiKey() {
   // Load API key with SWR cache - instant from cache, revalidate in background
@@ -187,6 +188,11 @@ export default function ApiKey() {
           </div>
         </CardContent>
       </Card>
+
+      <ManagedKeys
+        onError={(msg) => setError(msg)}
+        onInfo={(msg) => notify(msg)}
+      />
     </div>
   );
 }

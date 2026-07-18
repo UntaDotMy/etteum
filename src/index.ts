@@ -359,6 +359,7 @@ const dashboardIndex = `${dashboardDist}/index.html`;
 // Start server with WebSocket support
 const server = Bun.serve({
   port: config.port,
+  hostname: config.host,
   idleTimeout: 255,
   async fetch(req, server) {
     // Handle WebSocket upgrade

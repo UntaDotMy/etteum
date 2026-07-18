@@ -284,6 +284,17 @@ export const apiKeys = sqliteTable("api_keys", {
   isActive: integer("is_active", { mode: "boolean" }).notNull().default(true),
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   lastUsedAt: integer("last_used_at", { mode: "timestamp" }),
+  // ── Friend-key limits (all optional; null/absent = unrestricted) ──────────
+  // JSON array of allowed model ids. null/empty = every model in the catalog.
+  allowedModels: text("allowed_models"),
+  // Total token budget for the key. null = unlimited.
+  tokenQuota: integer("token_quota"),
+  // Tokens consumed so far (decremented from request_logs attribution on each request).
+  tokensUsed: integer("tokens_used").notNull().default(0),
+  // Per-key requests/minute cap (token bucket). null = no extra cap.
+  rateLimit: integer("rate_limit"),
+  // Optional expiry timestamp; key stops working after this instant.
+  expiresAt: integer("expires_at", { mode: "timestamp" }),
 }, (table) => [
   index("api_keys_key_idx").on(table.key),
   index("api_keys_active_idx").on(table.isActive),

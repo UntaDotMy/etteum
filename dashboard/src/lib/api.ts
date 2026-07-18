@@ -1345,6 +1345,59 @@ export async function revealByokKey(
   return fetchApi(`/api/accounts/byok/${id}/reveal`, { method: "POST" });
 }
 
+// ── Managed / friend API keys ─────────────────────────────────────────────
+export interface ManagedKey {
+  id: number;
+  keyPreview: string;
+  name: string | null;
+  machineId: string | null;
+  isActive: boolean;
+  createdAt: string | null;
+  lastUsedAt: string | null;
+  allowedModels: string[] | null;
+  tokenQuota: number | null;
+  tokensUsed: number;
+  rateLimit: number | null;
+  expiresAt: string | null;
+}
+
+export interface ManagedKeyInput {
+  name?: string | null;
+  machineId?: string | null;
+  allowedModels?: string[] | null;
+  tokenQuota?: number | null;
+  rateLimit?: number | null;
+  expiresAt?: string | null;
+}
+
+export async function fetchManagedKeys(): Promise<{ keys: ManagedKey[] }> {
+  return fetchApi("/api/keys/managed");
+}
+
+export async function fetchAvailableModels(): Promise<{ models: Array<{ id: string; owned_by: string }> }> {
+  return fetchApi("/api/keys/available-models");
+}
+
+export async function createManagedKey(input: ManagedKeyInput): Promise<{ id: number; key: string }> {
+  return fetchApi("/api/keys/managed", { method: "POST", body: JSON.stringify(input) });
+}
+
+export async function updateManagedKey(id: number, input: ManagedKeyInput): Promise<{ success: boolean }> {
+  return fetchApi(`/api/keys/managed/${id}`, { method: "PATCH", body: JSON.stringify(input) });
+}
+
+export async function revokeManagedKey(id: number): Promise<{ success: boolean }> {
+  return fetchApi(`/api/keys/managed/${id}/revoke`, { method: "POST" });
+}
+
+export async function activateManagedKey(id: number): Promise<{ success: boolean }> {
+  return fetchApi(`/api/keys/managed/${id}/activate`, { method: "POST" });
+}
+
+export async function deleteManagedKey(id: number): Promise<{ success: boolean }> {
+  return fetchApi(`/api/keys/managed/${id}`, { method: "DELETE" });
+}
+
 export async function testByokProvider(
   id: number,
   model?: string
