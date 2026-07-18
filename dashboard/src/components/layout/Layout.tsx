@@ -21,6 +21,14 @@ export default function Layout({ onLogout }: LayoutProps) {
     try {
       localStorage.setItem("sidebar-collapsed", collapsed ? "true" : "false");
     } catch {}
+    // Expose main content left offset so fixed UI (Image Studio composer, etc.)
+    // can center within the content pane instead of the full viewport.
+    try {
+      document.documentElement.style.setProperty(
+        "--main-offset",
+        collapsed ? "64px" : "240px",
+      );
+    } catch {}
   }, [collapsed]);
 
   return (
