@@ -65,6 +65,14 @@ interface CbcDailyClaim {
   error?: string;
 }
 
+// CodeBuddy-CN one-time activation result persisted by warmup (metadata.activation).
+interface CbcActivation {
+  status?: "activated" | "already_active" | "unverified";
+  method?: string | null;
+  attemptedAt?: string;
+  error?: string;
+}
+
 interface Account {
   id: number;
   email: string;
@@ -89,6 +97,7 @@ interface Account {
     serverQuota?: QoderServerQuota | null;
     packages?: CbcPackageRow[];
     dailyClaim?: CbcDailyClaim | null;
+    activation?: CbcActivation | null;
   } | null;
 }
 
@@ -245,9 +254,15 @@ function cbcSecondsUntil(resetAt?: string | null): number | null {
   return diff > 0 ? diff : null;
 }
 
-function CodeBuddyCnQuotaCell({ packages, dailyClaim, fallbackRemaining, fallbackLimit }: { packages?: CbcPackageRow[]; dailyClaim?: CbcDailyClaim | null; fallbackRemaining?: number; fallbackLimit?: number }) {
+function CodeBuddyCnQuotaCell({ packages, dailyClaim, activation, fallbackRemaining, fallbackLimit }: { packages?: CbcPackageRow[]; dailyClaim?: CbcDailyClaim | null; activation?: CbcActivation | null; fallbackRemaining?: number; fallbackLimit?: number }) {
   const [expanded, setExpanded] = useState(false);
   const [page, setPage] = useState(1);
+
+  const activationBadge = activation?.status === "activated"
+    ? <Badge variant="success" className="text-[10px] px-1 py-0" title={`First-activation gift claimed ${activation.attemptedAt ? `at ${activation.attemptedAt}` : ""}`}>activated</Badge>
+    : activation?.status === "already_active"
+    ? <Badge variant="secondary" className="text-[10px] px-1 py-0" title="Account was already activated">active</Badge>
+    : null;
 
   const rows = Array.isArray(packages) ? packages.filter((p) => p && Number(p.total) > 0) : [];
   if (rows.length === 0) {
@@ -257,6 +272,7 @@ function CodeBuddyCnQuotaCell({ packages, dailyClaim, fallbackRemaining, fallbac
         {dailyClaim?.claimed && !dailyClaim?.already && Number(dailyClaim.credit) > 0 && (
           <Badge variant="success" className="text-[10px] px-1 py-0">+{formatCredit(dailyClaim.credit)}</Badge>
         )}
+        {activationBadge}
       </span>
     );
   }
@@ -303,6 +319,7 @@ function CodeBuddyCnQuotaCell({ packages, dailyClaim, fallbackRemaining, fallbac
         {dailyClaim?.claimed && !dailyClaim?.already && Number(dailyClaim.credit) > 0 && (
           <Badge variant="success" className="text-[10px] px-1 py-0" title={dailyClaim.streakDays ? `Streak ${dailyClaim.streakDays}d` : "Daily gift claimed"}>+{formatCredit(dailyClaim.credit)} today</Badge>
         )}
+        {activationBadge}
       </div>
       {visible.map(renderRow)}
       {expanded && totalPages > 1 && (
@@ -965,7 +982,7 @@ export default function AccountList() {
                         : account.provider === "alibaba"
                         ? <AlibabaQuotaCell tokens={account.tokens as AlibabaQuotaTokens | null | undefined} />
                         : account.provider === "codebuddy-china"
-                        ? <CodeBuddyCnQuotaCell packages={account.metadata?.packages} dailyClaim={account.metadata?.dailyClaim} fallbackRemaining={account.quotaRemaining} fallbackLimit={account.quotaLimit} />
+                        ? <CodeBuddyCnQuotaCell packages={account.metadata?.packages} dailyClaim={account.metadata?.dailyClaim} activation={account.metadata?.activation} fallbackRemaining={account.quotaRemaining} fallbackLimit={account.quotaLimit} />
                         : <span className="flex items-center gap-1.5">
                             {formatCredit(account.quotaRemaining)}/{formatCredit(account.quotaLimit)}
                             {account.metadata?.overage?.enabled && account.metadata.overage.remaining > 0 && (

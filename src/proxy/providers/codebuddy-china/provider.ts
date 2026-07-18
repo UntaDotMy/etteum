@@ -84,6 +84,26 @@ interface CbcDailyClaim {
 }
 
 /**
+ * Default CodeBuddy-CN growth invite code (9router enow CN_DEFAULT_INVITE_CODE).
+ * Only used for the one-time first-activation gift.
+ */
+const CBC_DEFAULT_INVITE_CODE = "yro4ic1m1pc";
+
+/**
+ * One-time first-activation outcome, persisted at metadata.activation. The
+ * presence of `status` is the once-per-account guard: warmup only attempts
+ * activation when no prior status exists, so it fires at most once per account.
+ * `unverified` = the raw API shape could not be confirmed (best-effort, matches
+ * 9router's activation_skipped) — still terminal, never retried.
+ */
+interface CbcActivation {
+  status: "activated" | "already_active" | "unverified";
+  method: "api" | null;
+  attemptedAt: string;
+  error?: string;
+}
+
+/**
  * CodeBuddy China Provider — codebuddy.cn region
  *
  * Same API format as CodeBuddy global (codebuddy.ai) but:
@@ -162,6 +182,25 @@ export class CodeBuddyChinaProvider extends BaseProvider {
 
   private getApiKey(tokens: CodeBuddyChinaTokens): string | null {
     return tokens.api_key || tokens.access_token || tokens.session_token || null;
+  }
+
+  /**
+   * Read a previously-persisted activation result from account.metadata.activation.
+   * Returns null when absent or malformed — which is exactly what triggers the
+   * one-time attempt. Any well-formed prior result (even `unverified`) is returned
+   * so warmup never re-fires activation for that account.
+   */
+  private getPriorActivation(account: Account): CbcActivation | null {
+    try {
+      const meta = typeof account.metadata === "string" ? JSON.parse(account.metadata) : account.metadata;
+      const a = (meta as Record<string, unknown> | null)?.activation as CbcActivation | undefined;
+      if (a && typeof a === "object" && typeof a.status === "string" && a.status.length > 0) {
+        return a;
+      }
+      return null;
+    } catch {
+      return null;
+    }
   }
 
   private buildHeaders(apiKey: string, stream = false): Record<string, string> {
@@ -500,6 +539,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
     // This endpoint works with API key and gives us both auth validation AND real credit data.
     let quota = await this.fetchQuota(account, signal);
     let dailyClaim: CbcDailyClaim | null = null;
+    let activation: CbcActivation | null = null;
     if (quota.success && quota.quota) {
       // Warmup hook: claim the daily-checkin gift for this account. Already-claimed
       // is a normal no-op (never an error). On a fresh claim we re-read quota once
@@ -507,6 +547,20 @@ export class CodeBuddyChinaProvider extends BaseProvider {
       dailyClaim = await this.claimDailyGift(apiKey, signal);
       if (dailyClaim.claimed && !dailyClaim.already) {
         quota = (await this.fetchQuota(account, signal)) ?? quota;
+      }
+
+      // One-time first-activation gift. Once-per-account guard: only attempt when
+      // metadata.activation has no prior status. Whatever we get back (activated /
+      // already_active / unverified) is persisted, so it never fires twice. A newly
+      // activated account re-reads quota once to surface the granted credits.
+      const priorActivation = this.getPriorActivation(account);
+      if (priorActivation) {
+        activation = priorActivation;
+      } else {
+        activation = await this.claimActivation(apiKey, CBC_DEFAULT_INVITE_CODE, signal);
+        if (activation.status === "activated") {
+          quota = (await this.fetchQuota(account, signal)) ?? quota;
+        }
       }
     }
     if (quota.success && quota.quota) {
@@ -536,6 +590,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
             chatBanned: true,
             packages: quota.quota.packages,
             dailyClaim,
+            activation,
           },
         };
       }
@@ -554,6 +609,7 @@ export class CodeBuddyChinaProvider extends BaseProvider {
           chatProbe: chatStatus,
           packages: quota.quota.packages,
           dailyClaim,
+          activation,
         },
       };
     }
@@ -905,6 +961,55 @@ export class CodeBuddyChinaProvider extends BaseProvider {
   private isAlreadyCheckedIn(msg: string): boolean {
     const lower = msg.toLowerCase();
     return ["already", "已签", "已领", "重复签到", "今日已"].some((m) => lower.includes(m.toLowerCase()));
+  }
+
+  /**
+   * One-time first-activation gift (9router enow API-fallback port).
+   * POST {baseUrl}/activity/growth/buddy/first/v1/user/buy/activation with the
+   * account's ck_ Bearer key, body { invite_code, plan: "free", platform: "IDE" }.
+   *
+   * This fires ONCE per account — the caller gates it on metadata.activation.status
+   * being absent, so a persisted terminal result (activated / already_active /
+   * unverified) is never re-attempted. Best-effort: any failure is data, never a
+   * throw, and never affects account status.
+   */
+  private async claimActivation(apiKey: string, inviteCode: string, signal?: AbortSignal): Promise<CbcActivation> {
+    try {
+      const headers: Record<string, string> = {
+        "Accept": "application/json, text/plain, */*",
+        "Content-Type": "application/json",
+        "X-Requested-With": "XMLHttpRequest",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Authorization": `Bearer ${apiKey}`,
+      };
+      const response = await this.fetchWithTimeout(
+        `${this.baseUrl}/activity/growth/buddy/first/v1/user/buy/activation`,
+        {
+          method: "POST",
+          headers,
+          body: JSON.stringify({ invite_code: inviteCode, plan: "free", platform: "IDE" }),
+        },
+        config.providerQuotaTimeoutMs,
+        signal
+      );
+      const text = await response.text().catch(() => "");
+      let env: any = null;
+      try { env = text ? JSON.parse(text) : null; } catch { env = null; }
+      const code = Number(env?.code);
+      const msg = String(env?.msg || env?.message || text || "");
+
+      if (response.ok && code === 0) {
+        return { status: "activated", method: "api", attemptedAt: new Date().toISOString() };
+      }
+      // Already activated / already claimed is a terminal success-state, not an error.
+      const lower = msg.toLowerCase();
+      if (["already", "已激活", "已领取", "activated"].some((m) => lower.includes(m))) {
+        return { status: "already_active", method: "api", attemptedAt: new Date().toISOString() };
+      }
+      return { status: "unverified", method: "api", attemptedAt: new Date().toISOString(), error: msg || `HTTP ${response.status}` };
+    } catch (error) {
+      return { status: "unverified", method: "api", attemptedAt: new Date().toISOString(), error: error instanceof Error ? error.message : String(error) };
+    }
   }
 
   private async makeRequest(
