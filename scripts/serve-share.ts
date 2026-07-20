@@ -48,12 +48,18 @@ function isClientApiPath(pathname: string): boolean {
 /**
  * Full reverse proxy to the pool backend for OpenAI/Anthropic/media/Codex routes.
  * Streams request/response bodies (required for chat SSE).
+ *
+ * Stamps X-Forwarded-For with the REAL TCP peer so the backend's IP-ban /
+ * friend-key tripwire sees the actual caller instead of this proxy's loopback.
+ * OVERWRITES any client-supplied XFF — a spoofed header must not get someone
+ * else banned.
  */
-async function proxyToBackend(req: Request, pathname: string): Promise<Response> {
+async function proxyToBackend(req: Request, pathname: string, peerIp: string | null): Promise<Response> {
   const incoming = new URL(req.url);
   const target = new URL(pathname + incoming.search, backendOrigin);
   const headers = new Headers(req.headers);
   headers.delete("host");
+  if (peerIp) headers.set("x-forwarded-for", peerIp);
 
   // CORS preflight for browser clients hitting this public origin.
   if (req.method === "OPTIONS") {
@@ -112,13 +118,18 @@ Bun.serve({
   port: sharePort,
   hostname: host,
   idleTimeout: 255,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const pathname = url.pathname;
 
     // Full client API surface (same routes as backend).
     if (isClientApiPath(pathname)) {
-      return proxyToBackend(req, pathname);
+      const sock = server.requestIP(req);
+      const peerIp =
+        typeof sock === "string"
+          ? sock
+          : ((sock as { address?: string } | null)?.address ?? null);
+      return proxyToBackend(req, pathname, peerIp);
     }
 
     // Status board UI only — never expose admin /api/* here.

@@ -1,9 +1,10 @@
 /**
- * Share-board secret hygiene + admin scope gate:
- *  - /v1/share/board (authless) must NEVER emit full managed keys — previews only.
- *    Anyone who can reach SHARE_PORT could otherwise harvest every friend key.
- *  - The single-key deep link (/v1/share?key=…) may return the full key because
- *    the caller already presented it.
+ * Share-board payload + admin scope gate (operator threat model):
+ *  - The board intentionally serves FULL friend keys (page blurs them; friends
+ *    copy). Secrecy is NOT the defense — scope + tripwire is: friend keys are
+ *    request-only, and presenting one on an admin surface revokes it and bans
+ *    the caller's IP (src/utils/ip-ban.ts).
+ *  - includeFullKey:false remains available for callers that want previews.
  *  - Managed (friend) keys are /v1 client credentials, never admin (/api/*, /ws).
  */
 import { describe, test, expect } from "bun:test";
@@ -32,28 +33,21 @@ function row(partial: Partial<ShareKeyRow> = {}): ShareKeyRow {
 
 const ACTIVE_MODELS = ["grok-4.5", "composer-2.5", "cbc-kimi-k3"];
 
-describe("shareKeyPublic secret hygiene", () => {
-  test("board mode (no opts) omits the full key, keeps preview + status fields", () => {
-    const p = shareKeyPublic(row(), ACTIVE_MODELS);
-    expect(p.key).toBeUndefined();
-    expect("key" in p).toBe(false);
+describe("shareKeyPublic payload", () => {
+  test("board mode includes the full key (operator decision; tripwire is the mitigation)", () => {
+    const p = shareKeyPublic(row(), ACTIVE_MODELS, undefined, { includeFullKey: true });
+    expect(p.key).toBe(FULL_KEY);
     expect(p.keyPreview).toBe(FULL_KEY.slice(0, 12) + "…");
-    expect(p.keyPreview).not.toBe(FULL_KEY);
     expect(p.status).toBe("active");
     expect(p.tokensLeft).toBe(750);
     expect(p.models).toEqual(["grok-4.5"]); // allowlist filters catalog
     expect(p.baseUrl).toBe("/v1");
   });
 
-  test("explicit includeFullKey:false also omits the secret", () => {
+  test("includeFullKey:false omits the secret (preview-only callers)", () => {
     const p = shareKeyPublic(row(), ACTIVE_MODELS, undefined, { includeFullKey: false });
     expect(p.key).toBeUndefined();
     expect(JSON.stringify(p)).not.toContain(FULL_KEY);
-  });
-
-  test("deep-link mode returns the full key (caller already presented it)", () => {
-    const p = shareKeyPublic(row(), ACTIVE_MODELS, undefined, { includeFullKey: true });
-    expect(p.key).toBe(FULL_KEY);
   });
 
   test("status: inactive / expired / exhausted", () => {

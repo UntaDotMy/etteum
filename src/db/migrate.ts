@@ -96,6 +96,36 @@ export async function runMigrations() {
     console.error("[DB] provider_nodes table creation skipped:", err);
   }
 
+  // 2026-07-20 — friend-key tripwire: banned IPs + security audit trail.
+  try {
+    await db.run(sql.raw(`
+      CREATE TABLE IF NOT EXISTS ip_bans (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        ip TEXT NOT NULL UNIQUE,
+        reason TEXT NOT NULL,
+        detail TEXT,
+        created_at INTEGER NOT NULL,
+        expires_at INTEGER NOT NULL
+      )
+    `));
+    await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS ip_bans_expires_idx ON ip_bans (expires_at)`));
+    await db.run(sql.raw(`
+      CREATE TABLE IF NOT EXISTS security_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        created_at INTEGER NOT NULL,
+        ip TEXT,
+        surface TEXT NOT NULL,
+        path TEXT,
+        key_preview TEXT,
+        action TEXT NOT NULL,
+        detail TEXT
+      )
+    `));
+    await db.run(sql.raw(`CREATE INDEX IF NOT EXISTS security_events_created_idx ON security_events (created_at)`));
+  } catch (err) {
+    console.error("[DB] ip_bans/security_events table creation skipped:", err);
+  }
+
   // 2026-07-11 — encrypt legacy plaintext VCC card rows at rest (AES-256-GCM).
   // Skips rows already encrypted. PCI DSS Req 3.4. Safe & idempotent.
   try {

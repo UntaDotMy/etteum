@@ -1,11 +1,13 @@
 /**
  * Friend share-board payload builder (side-effect-free for testability).
  *
- * The full secret is included ONLY when `includeFullKey` is set — i.e. the
- * single-key deep link (/v1/share?key=…) where the caller already presented
- * the secret. The authless multi-key board (/v1/share/board) must never emit
- * full keys: anyone who can reach SHARE_PORT could harvest every friend key
- * and spend pool quota with them.
+ * `includeFullKey` controls whether the full secret is emitted. Both the
+ * multi-key board (/v1/share/board) and the single-key deep link
+ * (/v1/share?key=…) include it BY OPERATOR DECISION: friend keys are
+ * request-scoped credentials (no admin surface), the page renders them
+ * blurred, and the admin-surface tripwire (src/utils/ip-ban.ts) revokes a
+ * friend key + bans the caller's IP the moment one is presented where it
+ * doesn't belong. Defense is scope + tripwire, not secrecy of the board.
  */
 
 import type { apiKeys } from "../db/schema";

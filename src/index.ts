@@ -10,7 +10,13 @@ import { mediaRouter } from "./proxy/media/router";
 import { mcpRouter } from "./proxy/mcp/router";
 import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { extractApiKey, isAdminApiScope } from "./utils/security";
+import { extractApiKey } from "./utils/security";
+import {
+  effectiveClientIp,
+  effectiveClientIpFromParts,
+  isIpBanned,
+  triggerFriendKeyTripwire,
+} from "./utils/ip-ban";
 import { resolveApiKey, extractMachineId, isValidApiKey } from "./api/keys";
 import { getCookie } from "hono/cookie";
 import { verifyDashboardAuthToken, SESSION_COOKIE } from "./auth/dashboardSecurity";
@@ -221,6 +227,19 @@ const app = new Hono();
   );
 app.use("*", logger());
 
+// IP ban gate — friend-key tripwire bans block EVERY service (requests
+// included). Runs before any auth check so a banned address gets nothing.
+app.use("*", async (c, next) => {
+  const ip = effectiveClientIp(c);
+  if (await isIpBanned(ip)) {
+    return c.json(
+      { error: { message: "This address is banned from using the service.", type: "auth_error" } },
+      403
+    );
+  }
+  return next();
+});
+
 // API Key authentication middleware for proxy endpoints
 app.use("/v1/*", async (c, next) => {
   // Preflight must not require a bearer token (browser sends OPTIONS without it).
@@ -344,12 +363,19 @@ app.use("/api/*", async (c, next) => {
     const machineId = extractMachineId(c.req.raw.headers, new URL(c.req.url).searchParams);
     const resolved = await resolveApiKey(token, { machineId });
     if (resolved.valid) {
-      // Managed (friend) keys are /v1 client credentials ONLY — never admin.
-      // A leaked friend key must not enumerate /api/keys/managed (full key
-      // list) or any other admin surface.
-      if (!isAdminApiScope(resolved.scope)) {
+      // TRIPWIRE: a managed (friend) key presented on an admin surface —
+      // revoke the key AND ban the caller's IP from every service.
+      if (resolved.scope === "managed") {
+        const ip = effectiveClientIp(c);
+        await triggerFriendKeyTripwire({
+          token,
+          apiKeyId: resolved.apiKeyId,
+          surface: "api",
+          path: c.req.path,
+          ip,
+        });
         return c.json(
-          { error: { message: "Managed keys cannot access the admin API", type: "auth_error" } },
+          { error: { message: "This key cannot be used here. The key has been revoked.", type: "auth_error" } },
           403
         );
       }
@@ -426,12 +452,31 @@ const server = Bun.serve({
       // Dashboard WebSocket — authenticate via ?api_key= query (browsers cannot
       // set Authorization headers on WS upgrades). Mirrors the /v1/responses
       // WS auth gate so unauthenticated clients cannot read live request
-      // metadata (provider, model, account email, errors). Managed (friend)
-      // keys are rejected too — this is an admin feed, not a client surface.
+      // metadata (provider, model, account email, errors).
+      const wsSockAddr = server.requestIP(req);
+      const wsPeerIp =
+        typeof wsSockAddr === "string"
+          ? wsSockAddr
+          : ((wsSockAddr as { address?: string } | null)?.address ?? null);
+      const wsIp = effectiveClientIpFromParts(wsPeerIp, req.headers);
+      if (await isIpBanned(wsIp)) {
+        return new Response("Banned", { status: 403 });
+      }
       const wsToken = url.searchParams.get("api_key");
       const wsResolved = wsToken ? await resolveApiKey(wsToken, {}) : null;
-      if (!wsResolved?.valid || !isAdminApiScope(wsResolved.scope)) {
+      if (!wsResolved?.valid) {
         return new Response("Unauthorized", { status: 401 });
+      }
+      // TRIPWIRE: friend key on the admin feed → revoke key + ban IP.
+      if (wsResolved.scope === "managed") {
+        await triggerFriendKeyTripwire({
+          token: wsToken!,
+          apiKeyId: wsResolved.apiKeyId,
+          surface: "ws",
+          path: "/ws",
+          ip: wsIp,
+        });
+        return new Response("This key cannot be used here. The key has been revoked.", { status: 403 });
       }
       const upgraded = server.upgrade(req, { data: {} });
       if (upgraded) return undefined;
@@ -455,6 +500,15 @@ const server = Bun.serve({
       req.method === "GET" &&
       req.headers.get("upgrade")?.toLowerCase() === "websocket";
     if (isResponsesWsPath && wantsWebSocket) {
+      // Client request surface — ban gate applies (no tripwire: managed keys OK).
+      const rwSockAddr = server.requestIP(req);
+      const rwPeerIp =
+        typeof rwSockAddr === "string"
+          ? rwSockAddr
+          : ((rwSockAddr as { address?: string } | null)?.address ?? null);
+      if (await isIpBanned(effectiveClientIpFromParts(rwPeerIp, req.headers))) {
+        return new Response("Banned", { status: 403 });
+      }
       const token = extractApiKey(req.headers, null, { allowQuery: false });
       if (!token || !(await isValidApiKey(token))) {
         return new Response("Unauthorized", { status: 401 });

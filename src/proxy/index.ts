@@ -1341,11 +1341,10 @@ function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }
 /**
  * GET /v1/share/board — friend status board for ALL managed keys.
  *
- * Powers the bare share page (open :SHARE_PORT). Returns status + key PREVIEW
- * only — never the full secret (authless surface; previews let friends match
- * their own card, secrets don't leak to anyone who can reach SHARE_PORT).
- * Friends receive the full key from the operator directly, or via the
- * single-key deep link (/v1/share?key=…) which requires presenting it.
+ * Powers the bare share page (open :SHARE_PORT). Returns status + full key
+ * for copy — the page renders it blurred (CSS) with a copy button. Operator
+ * accepted this exposure: friend keys are REQUEST-scoped only, and presenting
+ * one on any admin surface trips the wire (key revoked + caller IP banned).
  * Rate-limited per IP.
  */
 proxyRouter.get("/v1/share/board", async (c) => {
@@ -1374,9 +1373,10 @@ proxyRouter.get("/v1/share/board", async (c) => {
   }
   const boardSpeed = averageSpeedMetrics(allSamples);
   const keys = rows.map((row) =>
-    // Authless board: previews only, never the full secret.
+    // Full key on the board (blurred in the page; copy for friends). Scope
+    // enforcement + the admin-surface tripwire are the mitigation, not secrecy.
     shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || []), {
-      includeFullKey: false,
+      includeFullKey: true,
     }),
   );
   return c.json({
