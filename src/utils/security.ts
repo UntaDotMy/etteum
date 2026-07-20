@@ -301,6 +301,17 @@ export function extractCliAdminToken(headers: Headers, query?: URLSearchParams |
 }
 
 /**
+ * Admin-surface scope gate. Managed (friend) keys are CLIENT credentials for
+ * /v1 completions only — never admin. Enforced on /api/* and the dashboard WS
+ * (index.ts): a leaked friend key must not enumerate /api/keys/managed (full
+ * key list), read account/settings data, or watch the live admin feed.
+ * Pool key and dashboard sessions are admin-scoped; managed is not.
+ */
+export function isAdminApiScope(scope: string | null | undefined): boolean {
+  return scope !== "managed";
+}
+
+/**
  * Guard for spawn-capable / secret-reading management routes (update.ts,
  * management.ts, dashboardAuth reset-password, oauth.ts).
  *

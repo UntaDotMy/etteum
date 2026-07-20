@@ -47,6 +47,7 @@ import {
   modelAllowed,
   recordKeyTokens,
 } from "./friend-keys";
+import { shareKeyPublic } from "./share-key-public";
 import { getActiveClientRequests, trackClientRequestStart } from "./live-clients";
 import {
   averageSpeedMetrics,
@@ -1248,71 +1249,6 @@ proxyRouter.get("/v1/models", async (c) => {
   });
 });
 
-type ShareKeyRow = typeof apiKeys.$inferSelect;
-
-/**
- * Friend share-board payload for one managed key.
- * Includes the full key so friends can copy it from the share page — treat
- * SHARE_PORT as a trusted surface (not the public internet without a firewall).
- */
-function shareKeyPublic(
-  row: ShareKeyRow,
-  activeModelIds: string[],
-  speed?: { ttftMs: number | null; tokensPerSecond: number | null; sampleSize: number },
-): {
-  id: number;
-  name: string | null;
-  key: string;
-  keyPreview: string;
-  status: string;
-  isActive: boolean;
-  createdAt: Date | null;
-  lastUsedAt: Date | null;
-  tokenQuota: number | null;
-  tokensUsed: number;
-  tokensLeft: number | null;
-  rateLimit: number | null;
-  expiresAt: Date | null;
-  models: string[];
-  baseUrl: string;
-  ttftMs: number | null;
-  tokensPerSecond: number | null;
-  sampleSize: number;
-} {
-  const allowlist = parseAllowedModels(row.allowedModels);
-  const usable = activeModelIds.filter((id) => modelAllowed(allowlist, id));
-  const tokenQuota = row.tokenQuota ?? null;
-  const tokensUsed = row.tokensUsed ?? 0;
-  const tokensLeft = tokenQuota != null ? Math.max(0, tokenQuota - tokensUsed) : null;
-  const status = !row.isActive
-    ? "inactive"
-    : (row.expiresAt && row.expiresAt.getTime() <= Date.now())
-      ? "expired"
-      : (tokenQuota != null && tokensLeft === 0)
-        ? "exhausted"
-        : "active";
-  return {
-    id: row.id,
-    name: row.name || null,
-    key: row.key,
-    keyPreview: row.key.slice(0, 12) + "…",
-    status,
-    isActive: row.isActive,
-    createdAt: row.createdAt,
-    lastUsedAt: row.lastUsedAt,
-    tokenQuota,
-    tokensUsed,
-    tokensLeft,
-    rateLimit: row.rateLimit ?? null,
-    expiresAt: row.expiresAt,
-    models: usable,
-    baseUrl: "/v1",
-    ttftMs: speed?.ttftMs ?? null,
-    tokensPerSecond: speed?.tokensPerSecond ?? null,
-    sampleSize: speed?.sampleSize ?? 0,
-  };
-}
-
 /** Recent successful request samples used for share-board TTFT / tok/s. */
 async function loadShareSpeedSamples(windowMs = 15 * 60 * 1000, limit = 200): Promise<
   Array<{ apiKeyId: number | null; completionTokens: number; durationMs: number; ttftMs: number | null }>
@@ -1405,9 +1341,12 @@ function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }
 /**
  * GET /v1/share/board — friend status board for ALL managed keys.
  *
- * Powers the bare share page (open :SHARE_PORT). Returns status + full key for
- * copy (friends need the secret for their client). No accounts / admin settings.
- * Rate-limited per IP. Keep SHARE_PORT off the open internet if keys are sensitive.
+ * Powers the bare share page (open :SHARE_PORT). Returns status + key PREVIEW
+ * only — never the full secret (authless surface; previews let friends match
+ * their own card, secrets don't leak to anyone who can reach SHARE_PORT).
+ * Friends receive the full key from the operator directly, or via the
+ * single-key deep link (/v1/share?key=…) which requires presenting it.
+ * Rate-limited per IP.
  */
 proxyRouter.get("/v1/share/board", async (c) => {
   const blocked = shareRateLimited(c);
@@ -1435,7 +1374,10 @@ proxyRouter.get("/v1/share/board", async (c) => {
   }
   const boardSpeed = averageSpeedMetrics(allSamples);
   const keys = rows.map((row) =>
-    shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || [])),
+    // Authless board: previews only, never the full secret.
+    shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || []), {
+      includeFullKey: false,
+    }),
   );
   return c.json({
     keys,
@@ -1452,8 +1394,9 @@ proxyRouter.get("/v1/share/board", async (c) => {
 /**
  * GET /v1/share — single friend-key status (optional deep link with Bearer/?key=).
  *
- * Authless-by-design for one presented managed key. Prefer /v1/share/board for
- * the public multi-key status page.
+ * Authless-by-design for one PRESENTED managed key: the caller already proved
+ * possession, so this is the one surface that returns the full secret (for
+ * copy). Prefer /v1/share/board (previews only) for the public status page.
  */
 proxyRouter.get("/v1/share", async (c) => {
   const blocked = shareRateLimited(c);
@@ -1479,7 +1422,10 @@ proxyRouter.get("/v1/share", async (c) => {
       ttftMs: s.ttftMs,
     }));
   return c.json({
-    ...shareKeyPublic(row, activeModels.map((m) => m.id), averageSpeedMetrics(keySamples)),
+    // Deep link: the caller presented the secret — returning it is safe.
+    ...shareKeyPublic(row, activeModels.map((m) => m.id), averageSpeedMetrics(keySamples), {
+      includeFullKey: true,
+    }),
     activeClients: getActiveClientRequests(),
   });
 });

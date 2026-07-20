@@ -10,7 +10,7 @@ import { mediaRouter } from "./proxy/media/router";
 import { mcpRouter } from "./proxy/mcp/router";
 import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
-import { extractApiKey } from "./utils/security";
+import { extractApiKey, isAdminApiScope } from "./utils/security";
 import { resolveApiKey, extractMachineId, isValidApiKey } from "./api/keys";
 import { getCookie } from "hono/cookie";
 import { verifyDashboardAuthToken, SESSION_COOKIE } from "./auth/dashboardSecurity";
@@ -344,11 +344,16 @@ app.use("/api/*", async (c, next) => {
     const machineId = extractMachineId(c.req.raw.headers, new URL(c.req.url).searchParams);
     const resolved = await resolveApiKey(token, { machineId });
     if (resolved.valid) {
-      if (resolved.scope === "managed") {
-        (c.req.raw as any).apiKeyId = resolved.apiKeyId;
-      } else {
-        delete (c.req.raw as any).apiKeyId;
+      // Managed (friend) keys are /v1 client credentials ONLY — never admin.
+      // A leaked friend key must not enumerate /api/keys/managed (full key
+      // list) or any other admin surface.
+      if (!isAdminApiScope(resolved.scope)) {
+        return c.json(
+          { error: { message: "Managed keys cannot access the admin API", type: "auth_error" } },
+          403
+        );
       }
+      delete (c.req.raw as any).apiKeyId;
       await next();
       return;
     }
@@ -421,9 +426,11 @@ const server = Bun.serve({
       // Dashboard WebSocket — authenticate via ?api_key= query (browsers cannot
       // set Authorization headers on WS upgrades). Mirrors the /v1/responses
       // WS auth gate so unauthenticated clients cannot read live request
-      // metadata (provider, model, account email, errors).
+      // metadata (provider, model, account email, errors). Managed (friend)
+      // keys are rejected too — this is an admin feed, not a client surface.
       const wsToken = url.searchParams.get("api_key");
-      if (!wsToken || !(await isValidApiKey(wsToken))) {
+      const wsResolved = wsToken ? await resolveApiKey(wsToken, {}) : null;
+      if (!wsResolved?.valid || !isAdminApiScope(wsResolved.scope)) {
         return new Response("Unauthorized", { status: 401 });
       }
       const upgraded = server.upgrade(req, { data: {} });

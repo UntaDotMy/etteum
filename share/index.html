@@ -615,9 +615,12 @@
       "<code aria-hidden=\"true\">" +
       esc(fullKey || d.keyPreview || "—") +
       "</code>" +
-      '<button type="button" data-copy="' +
-      esc(fullKey) +
-      '" title="Copy full API key">Copy key</button></div>' +
+      (fullKey
+        ? '<button type="button" data-copy="' +
+          esc(fullKey) +
+          '" title="Copy full API key">Copy key</button>'
+        : "") +
+      "</div>" +
       '<div class="metric">' +
       "<div><div class=\"left " +
       t +
