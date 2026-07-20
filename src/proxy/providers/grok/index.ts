@@ -55,6 +55,7 @@ import {
   shouldRunGrokChatLivenessProbe,
   mapGrokChatLivenessToHealthPatch,
   getGrokLastChatProbeAtMs,
+  isGrokFreeTierQuotaShape,
   probeOAuthChatLiveness,
   withDeadlineSignal,
   GROK_CHAT_PROBE_DEADLINE_MS,
@@ -71,7 +72,10 @@ export {
   classifyGrokChatLiveness,
   mapGrokChatLivenessToHealthPatch,
   getGrokLastChatProbeAtMs,
+  isGrokFreeTierQuotaShape,
   GROK_CHAT_PROBE_THROTTLE_MS,
+  GROK_CHAT_PROBE_FREE_TIER_THROTTLE_MS,
+  GROK_CHAT_PROBE_EXHAUSTED_THROTTLE_MS,
 } from "./oauth";
 import {
   GROK_IMAGE_MODEL,
@@ -1082,10 +1086,12 @@ export class GrokProvider extends BaseProvider {
   }
 
   /**
-   * After credits already marked the row healthy, optionally prove chat works.
-   * Skipped when throttle says a recent probe is still good. Transient chat
-   * blips keep healthy (credits proved the bearer); access denied / 401 /
-   * free-usage-exhausted remove the account from the dispatch pool.
+   * After credits already marked the row healthy, prove chat still works.
+   * GetGrokCreditsConfig / billing alone miss free Build package drain
+   * (`subscription:free-usage-exhausted` only on real /v1/responses). Free-tier
+   * accounts re-probe every few minutes so warmup benches them before a user
+   * request is interrupted. Transient chat blips keep healthy; access denied /
+   * 401 / free-usage-exhausted remove the account from the dispatch pool.
    */
   private async withOptionalChatLiveness(
     account: Account,
@@ -1102,6 +1108,7 @@ export class GrokProvider extends BaseProvider {
         metadata: {
           ...(base.metadata || {}),
           chatProbe: "throttled",
+          freeTierShape: isGrokFreeTierQuotaShape(account),
           ...(lastMs != null
             ? { lastChatProbeAt: new Date(lastMs).toISOString() }
             : {}),
@@ -1139,25 +1146,30 @@ export class GrokProvider extends BaseProvider {
 
     if (patch.kind === "exhausted") {
       const q = patch.quota;
+      // Prefer absolute free-Build package size when credits only had weekly %.
+      const limit =
+        q && q.limit > 0
+          ? q.limit
+          : base.quota && base.quota.limit > 100
+            ? base.quota.limit
+            : q?.limit || base.quota?.limit || 0;
       return {
         kind: "exhausted",
         success: true,
         message: patch.message || "chat probe: free usage exhausted",
-        quota: q
-          ? {
-              limit: q.limit,
-              remaining: 0,
-              used: q.used ?? q.limit,
-              resetAt: q.resetAt,
-              source: q.source,
-            }
-          : base.quota
-            ? { ...base.quota, remaining: 0, used: base.quota.limit }
-            : undefined,
+        quota: {
+          limit,
+          remaining: 0,
+          used: limit > 0 ? limit : (q?.used ?? base.quota?.used ?? 0),
+          resetAt: q?.resetAt ?? base.quota?.resetAt ?? null,
+          source: q?.source || "cli-chat-proxy/free-usage-exhausted",
+        },
         ...(base.tokens ? { tokens: base.tokens } : {}),
         metadata: {
           ...(base.metadata || {}),
           chatProbe: "exhausted",
+          // Align with Qoder-style probe tag (and future policy readers).
+          inferenceProbe: "quota_exhausted",
           lastChatProbeAt: nowIso,
         },
       };

@@ -1119,14 +1119,42 @@ export async function probeOAuthChatCredits(
 // ---------------------------------------------------------------------------
 
 /**
- * How often a healthy account must re-prove chat via POST /v1/responses.
- * Credit probes still run every warmup tick; this hop is slower and was
- * known to hang fleet WarmUp when run unconditionally on every account.
+ * Default how often a healthy account must re-prove chat via POST /v1/responses.
+ * Credit APIs alone do NOT surface free Build package drain
+ * (`subscription:free-usage-exhausted` only appears on real chat/responses).
+ * A 2h window left dead free accounts in the active pool and user traffic hit
+ * "All accounts failed … free-usage-exhausted". Keep this moderate for paid.
  */
-export const GROK_CHAT_PROBE_THROTTLE_MS = 2 * 60 * 60 * 1000; // 2 hours
+export const GROK_CHAT_PROBE_THROTTLE_MS = 30 * 60 * 1000; // 30 minutes
+
+/**
+ * Free Build / weekly-percent accounts: free usage is a rolling ~24h window and
+ * drains only on inference. Re-probe often so warmup marks exhausted *before*
+ * a user request is interrupted.
+ */
+export const GROK_CHAT_PROBE_FREE_TIER_THROTTLE_MS = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Exhausted free accounts: re-check sooner so rolling-window reset reactivates
+ * them without waiting a full paid-tier interval.
+ */
+export const GROK_CHAT_PROBE_EXHAUSTED_THROTTLE_MS = 15 * 60 * 1000; // 15 minutes
 
 /** Hard deadline for one chat liveness hop (parent abort still wins). */
 export const GROK_CHAT_PROBE_DEADLINE_MS = 15_000;
+
+/**
+ * Free-tier shape that needs frequent chat probes (not paid 53M packages).
+ * Weekly CLI pool is 0–100; free Build absolute package is ~1–2M tokens.
+ */
+export function isGrokFreeTierQuotaShape(account: Account): boolean {
+  const limit = Number(account.quotaLimit ?? 0);
+  if (Number.isFinite(limit) && limit > 0 && limit <= 100) return true; // weekly %
+  if (Number.isFinite(limit) && limit >= 500_000 && limit <= 2_500_000) return true; // free Build
+  // Unknown / unset limit on OAuth rows is treated as free until proven paid.
+  if (!Number.isFinite(limit) || limit <= 0) return true;
+  return false;
+}
 
 export type GrokChatLivenessReason =
   | "ok"
@@ -1169,15 +1197,26 @@ export function getGrokLastChatProbeAtMs(account: Account): number | null {
  * Whether warmup should run the expensive POST /v1/responses chat probe.
  *
  * Always when: never probed, throttle elapsed, healing error/pending, or
- * last error looks like chat auth (Access denied / 401).
- * Skip when: recent ok/exhaustion probe still inside the throttle window.
+ * last error looks like chat auth / free-usage exhaustion (must re-verify).
+ * Free-tier uses a shorter throttle so free-usage-exhausted is caught in
+ * warmup instead of mid-request for the user.
+ * Skip when: recent successful probe is still inside the applicable window.
  */
 export function shouldRunGrokChatLivenessProbe(
   account: Account,
-  opts?: { now?: number; throttleMs?: number },
+  opts?: {
+    now?: number;
+    throttleMs?: number;
+    freeTierThrottleMs?: number;
+    exhaustedThrottleMs?: number;
+  },
 ): boolean {
   const now = opts?.now ?? Date.now();
-  const throttleMs = opts?.throttleMs ?? GROK_CHAT_PROBE_THROTTLE_MS;
+  const paidThrottleMs = opts?.throttleMs ?? GROK_CHAT_PROBE_THROTTLE_MS;
+  const freeThrottleMs =
+    opts?.freeTierThrottleMs ?? GROK_CHAT_PROBE_FREE_TIER_THROTTLE_MS;
+  const exhaustedThrottleMs =
+    opts?.exhaustedThrottleMs ?? GROK_CHAT_PROBE_EXHAUSTED_THROTTLE_MS;
 
   const status = String(account.status || "").toLowerCase();
   if (status === "error" || status === "pending") return true;
@@ -1188,13 +1227,26 @@ export function shouldRunGrokChatLivenessProbe(
     err.includes("unauthorized") ||
     err.includes("(401)") ||
     err.includes("session expired") ||
-    err.includes("banned")
+    err.includes("banned") ||
+    // Request-path free-usage failures leave this message — force chat re-probe
+    // so status/remaining stay aligned and recovery after the rolling window works.
+    err.includes("free-usage-exhausted") ||
+    err.includes("you've used all") ||
+    err.includes("you have used all") ||
+    err.includes("included free usage")
   ) {
     return true;
   }
 
   const last = getGrokLastChatProbeAtMs(account);
   if (last == null) return true;
+
+  // Exhausted free Build: re-check for rolling-window reset more often than paid.
+  if (status === "exhausted") {
+    return now - last >= exhaustedThrottleMs;
+  }
+
+  const throttleMs = isGrokFreeTierQuotaShape(account) ? freeThrottleMs : paidThrottleMs;
   return now - last >= throttleMs;
 }
 

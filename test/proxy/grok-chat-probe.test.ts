@@ -11,7 +11,10 @@ import {
   classifyGrokChatLiveness,
   mapGrokChatLivenessToHealthPatch,
   getGrokLastChatProbeAtMs,
+  isGrokFreeTierQuotaShape,
   GROK_CHAT_PROBE_THROTTLE_MS,
+  GROK_CHAT_PROBE_FREE_TIER_THROTTLE_MS,
+  GROK_CHAT_PROBE_EXHAUSTED_THROTTLE_MS,
   GrokProvider,
 } from "../../src/proxy/providers/grok/index";
 import { mapHealthToAccountUpdate } from "../../src/auth/warmup-runner";
@@ -65,21 +68,63 @@ describe("shouldRunGrokChatLivenessProbe", () => {
     expect(shouldRunGrokChatLivenessProbe(makeOAuthAccount(), { now })).toBe(true);
   });
 
-  test("recent lastChatProbeAt → skip", () => {
+  test("free-tier account is free-tier shape (weekly 0–100)", () => {
+    expect(isGrokFreeTierQuotaShape(makeOAuthAccount({ quotaLimit: 100 }))).toBe(true);
+    expect(isGrokFreeTierQuotaShape(makeOAuthAccount({ quotaLimit: 2_000_000 }))).toBe(true);
+    expect(isGrokFreeTierQuotaShape(makeOAuthAccount({ quotaLimit: 53_000_000 }))).toBe(false);
+  });
+
+  test("recent free-tier lastChatProbeAt → skip (inside 5m window)", () => {
     const account = makeOAuthAccount({
+      quotaLimit: 100,
       metadata: {
         warmup: {
-          lastChatProbeAt: new Date(now - 30 * 60 * 1000).toISOString(),
+          lastChatProbeAt: new Date(now - 60_000).toISOString(), // 1m ago
           chatProbe: "ok",
         },
       },
     });
     expect(shouldRunGrokChatLivenessProbe(account, { now })).toBe(false);
-    expect(getGrokLastChatProbeAtMs(account)).toBe(now - 30 * 60 * 1000);
+    expect(getGrokLastChatProbeAtMs(account)).toBe(now - 60_000);
   });
 
-  test("stale lastChatProbeAt past throttle → run", () => {
+  test("free-tier past 5m free throttle → run (catch free-usage before user traffic)", () => {
     const account = makeOAuthAccount({
+      quotaLimit: 2_000_000,
+      metadata: {
+        warmup: {
+          lastChatProbeAt: new Date(now - GROK_CHAT_PROBE_FREE_TIER_THROTTLE_MS - 1).toISOString(),
+          chatProbe: "ok",
+        },
+      },
+    });
+    expect(shouldRunGrokChatLivenessProbe(account, { now })).toBe(true);
+  });
+
+  test("paid-tier still skips under paid throttle when free would re-probe", () => {
+    // 10 minutes ago: free would re-probe (5m), paid (30m) still skips.
+    const account = makeOAuthAccount({
+      quotaLimit: 53_000_000,
+      metadata: {
+        warmup: {
+          lastChatProbeAt: new Date(now - 10 * 60 * 1000).toISOString(),
+          chatProbe: "ok",
+        },
+      },
+    });
+    expect(isGrokFreeTierQuotaShape(account)).toBe(false);
+    expect(shouldRunGrokChatLivenessProbe(account, { now })).toBe(false);
+    expect(
+      shouldRunGrokChatLivenessProbe(account, {
+        now,
+        throttleMs: GROK_CHAT_PROBE_THROTTLE_MS,
+      }),
+    ).toBe(false);
+  });
+
+  test("stale paid lastChatProbeAt past paid throttle → run", () => {
+    const account = makeOAuthAccount({
+      quotaLimit: 53_000_000,
       metadata: {
         warmup: {
           lastChatProbeAt: new Date(now - GROK_CHAT_PROBE_THROTTLE_MS - 1).toISOString(),
@@ -114,6 +159,49 @@ describe("shouldRunGrokChatLivenessProbe", () => {
       },
     });
     expect(shouldRunGrokChatLivenessProbe(account, { now })).toBe(true);
+  });
+
+  test("free-usage-exhausted errorMessage forces re-probe", () => {
+    const account = makeOAuthAccount({
+      status: "active",
+      errorMessage:
+        'quota_exhausted: cli-chat-proxy error 429: {"code":"subscription:free-usage-exhausted"}',
+      metadata: {
+        warmup: {
+          lastChatProbeAt: new Date(now - 30_000).toISOString(),
+          chatProbe: "ok",
+        },
+      },
+    });
+    expect(shouldRunGrokChatLivenessProbe(account, { now })).toBe(true);
+  });
+
+  test("exhausted status re-probes after exhausted throttle (rolling window recovery)", () => {
+    const recent = makeOAuthAccount({
+      status: "exhausted",
+      quotaLimit: 2_000_000,
+      metadata: {
+        warmup: {
+          lastChatProbeAt: new Date(now - 60_000).toISOString(),
+          chatProbe: "exhausted",
+        },
+      },
+    });
+    expect(shouldRunGrokChatLivenessProbe(recent, { now })).toBe(false);
+
+    const stale = makeOAuthAccount({
+      status: "exhausted",
+      quotaLimit: 2_000_000,
+      metadata: {
+        warmup: {
+          lastChatProbeAt: new Date(
+            now - GROK_CHAT_PROBE_EXHAUSTED_THROTTLE_MS - 1,
+          ).toISOString(),
+          chatProbe: "exhausted",
+        },
+      },
+    });
+    expect(shouldRunGrokChatLivenessProbe(stale, { now })).toBe(true);
   });
 });
 
@@ -212,9 +300,10 @@ describe("GrokProvider.healthCheck — throttled chat probe", () => {
       }
     }
     const account = makeOAuthAccount({
+      // free-tier shape: 1 minute ago is still inside 5m free throttle
       metadata: {
         warmup: {
-          lastChatProbeAt: new Date().toISOString(),
+          lastChatProbeAt: new Date(Date.now() - 60_000).toISOString(),
           chatProbe: "ok",
         },
       },
@@ -223,6 +312,34 @@ describe("GrokProvider.healthCheck — throttled chat probe", () => {
     expect(called).toBe(0);
     expect(health.kind).toBe("healthy");
     expect(health.metadata?.chatProbe).toBe("throttled");
+  });
+
+  test("weekly healthy + free-usage chat 429 → exhausted before user traffic", async () => {
+    // Credits alone would leave the account active; chat probe must bench it.
+    class Stub extends WeeklyCreditsGrok {
+      protected override async runChatLivenessProbe(): Promise<GrokChatLivenessResult> {
+        return {
+          reason: "exhausted",
+          status: 429,
+          quota: {
+            limit: 1_000_000,
+            remaining: 0,
+            used: 1_000_000,
+            resetAt: null,
+            source: "cli-chat-proxy/free-usage-exhausted",
+            percentScale: false,
+          },
+        };
+      }
+    }
+    const health = await new Stub().healthCheck(makeOAuthAccount({ metadata: null }));
+    expect(health.kind).toBe("exhausted");
+    expect(health.quota?.remaining).toBe(0);
+    expect(health.metadata?.chatProbe).toBe("exhausted");
+    expect(health.metadata?.inferenceProbe).toBe("quota_exhausted");
+    const update = mapHealthToAccountUpdate(makeOAuthAccount({ metadata: null }), health);
+    expect(update.status).toBe("exhausted");
+    expect(update.quotaRemaining).toBe(0);
   });
 
   test("chat Access denied → banned → status error", async () => {
