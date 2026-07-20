@@ -1,13 +1,15 @@
 /**
- * Friend-key tripwire: managed key on an admin surface → key revoked +
- * caller IP banned (9999d) from every service. Loopback/unknown IPs are
- * never banned (self-lockout guard). IP identity is peer-first with the
- * share proxy's stamped XFF trusted only when the peer is loopback.
+ * Admin-surface tripwire: managed key or invalid dashboard login →
+ * caller IP banned (9999d). Key is NEVER revoked. Loopback/unknown IPs
+ * are never banned (self-lockout guard). IP identity is peer-first with
+ * the share proxy's stamped XFF trusted only when the peer is loopback.
  */
 import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { runMigrations } from "../../src/db/migrate";
 import {
+  banInvalidLoginIp,
   banIp,
+  clientIdentityFromHeaders,
   effectiveClientIpFromParts,
   FRIEND_KEY_BAN_DAYS,
   isBannableIp,
@@ -73,6 +75,18 @@ describe("pure helpers", () => {
   test("effectiveClientIpFromParts: loopback peer without XFF stays loopback (exempt)", () => {
     expect(effectiveClientIpFromParts("127.0.0.1", new Headers())).toBe("127.0.0.1");
   });
+
+  test("clientIdentityFromHeaders: captures ua / machine / host when sent", () => {
+    const h = new Headers({
+      "user-agent": "TestAgent/1.0",
+      "x-machine-id": "machine-abc",
+      "x-client-hostname": "DESKTOP-FOO",
+    });
+    const id = clientIdentityFromHeaders(h);
+    expect(id.userAgent).toBe("TestAgent/1.0");
+    expect(id.machineId).toBe("machine-abc");
+    expect(id.clientHost).toBe("DESKTOP-FOO");
+  });
 });
 
 describe("ban store", () => {
@@ -129,42 +143,51 @@ describe("triggerFriendKeyTripwire", () => {
     return row!.id;
   }
 
-  test("revokes the key (stops resolving) AND bans the IP AND audits (no secret in detail)", async () => {
+  test("bans the IP AND audits but NEVER revokes the key (other IPs keep working)", async () => {
     const id = await insertFriendKey();
-    // Key resolves as managed before the trip.
     const before = await resolveApiKey(TEST_KEY, {});
     expect(before.valid).toBe(true);
     expect(before.valid && before.scope).toBe("managed");
 
+    const headers = new Headers({
+      "user-agent": "curl/8.0",
+      "x-machine-id": "box-1",
+      "x-client-hostname": "PC-ABUSER",
+    });
     const r = await triggerFriendKeyTripwire({
       token: TEST_KEY,
       apiKeyId: id,
       surface: "api",
       path: "/api/keys/managed",
       ip: IP_A,
+      headers,
     });
-    expect(r.revoked).toBe(true);
+    expect(r.revoked).toBe(false);
     expect(r.banned).toBe(true);
 
-    // Key is deactivated in the DB and no longer resolves at all.
+    // Key remains active and still resolves for other callers.
     const [krow] = await db.select().from(apiKeys).where(eq(apiKeys.id, id));
-    expect(krow!.isActive).toBe(false);
-    expect((await resolveApiKey(TEST_KEY, {})).valid).toBe(false);
+    expect(krow!.isActive).toBe(true);
+    expect((await resolveApiKey(TEST_KEY, {})).valid).toBe(true);
 
-    // IP is banned (~9999 days).
+    // Abuser IP is banned (~9999 days); other IP is fine.
     expect(await isIpBanned(IP_A)).toBe(true);
+    expect(await isIpBanned(IP_B)).toBe(false);
 
-    // Audit event: action + preview, NEVER the full key.
+    // Audit event: action + preview + identity, NEVER the full key.
     const events = await listSecurityEvents(50);
-    const evt = events.find((e) => e.action === "tripwire_revoke_ban" && e.ip === IP_A);
+    const evt = events.find((e) => e.action === "tripwire_ip_ban" && e.ip === IP_A);
     expect(evt).toBeDefined();
     expect(evt!.keyPreview).toBe(TEST_KEY.slice(0, 12) + "…");
     expect(JSON.stringify(evt)).not.toContain(TEST_KEY);
     expect(evt!.surface).toBe("api");
     expect(evt!.path).toBe("/api/keys/managed");
+    expect(String(evt!.detail)).toContain("ua=curl/8.0");
+    expect(String(evt!.detail)).toContain("machine=box-1");
+    expect(String(evt!.detail)).toContain("host=PC-ABUSER");
   });
 
-  test("loopback caller: key is still revoked but IP is NOT banned (operator safe)", async () => {
+  test("loopback caller: key stays active and IP is NOT banned (operator safe)", async () => {
     const id = await insertFriendKey();
     const r = await triggerFriendKeyTripwire({
       token: TEST_KEY,
@@ -173,11 +196,39 @@ describe("triggerFriendKeyTripwire", () => {
       path: "/api/dashboard-auth/login",
       ip: "127.0.0.1",
     });
-    expect(r.revoked).toBe(true);
+    expect(r.revoked).toBe(false);
     expect(r.banned).toBe(false);
     expect(await isIpBanned("127.0.0.1")).toBe(false);
     const [krow] = await db.select().from(apiKeys).where(eq(apiKeys.id, id));
-    expect(krow!.isActive).toBe(false);
+    expect(krow!.isActive).toBe(true);
+  });
+});
+
+describe("banInvalidLoginIp", () => {
+  beforeEach(cleanup);
+  afterEach(cleanup);
+
+  test("wrong password bans only that IP and does not touch keys", async () => {
+    const [row] = await db
+      .insert(apiKeys)
+      .values({ key: TEST_KEY, name: "Stay Alive", isActive: true })
+      .returning({ id: apiKeys.id });
+
+    const r = await banInvalidLoginIp({
+      ip: IP_A,
+      keyPreview: "wrong_secret…",
+      headers: new Headers({ "user-agent": "Browser/1.0" }),
+      detail: "unresolved credential presented at dashboard login",
+    });
+    expect(r.banned).toBe(true);
+    expect(await isIpBanned(IP_A)).toBe(true);
+    expect(await isIpBanned(IP_B)).toBe(false);
+
+    const [krow] = await db.select().from(apiKeys).where(eq(apiKeys.id, row!.id));
+    expect(krow!.isActive).toBe(true);
+
+    const events = await listSecurityEvents(20);
+    expect(events.some((e) => e.action === "login_invalid_ban" && e.ip === IP_A)).toBe(true);
   });
 });
 

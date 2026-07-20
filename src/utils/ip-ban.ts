@@ -1,11 +1,11 @@
 /**
- * Friend-key tripwire + IP ban store.
+ * Admin-surface tripwire + IP ban store.
  *
- * Threat model: managed (friend) keys are /v1 client credentials. Presenting
- * one on an ADMIN surface (/api/*, dashboard login, dashboard WS) means the
- * key is being used by someone probing where it doesn't belong — so the key
- * is revoked on the spot and the caller's IP is banned from EVERY service
- * (requests included) for FRIEND_KEY_BAN_DAYS.
+ * Threat model: managed (friend) keys and wrong credentials on ADMIN surfaces
+ * (/api/*, dashboard login, dashboard WS) mean the caller is probing where
+ * they do not belong. Punish THAT IP only — ban for FRIEND_KEY_BAN_DAYS.
+ * Never revoke the key: other IPs must keep using it on /v1 (models, anthropic
+ * messages, chat completions, etc.).
  *
  * IP identity: the unspoofable TCP peer (peerIpFromHonoContext) wins. When
  * the peer is loopback, the request arrived via the local share proxy — use
@@ -18,8 +18,7 @@
 
 import { desc, eq, gt, lt } from "drizzle-orm";
 import { db } from "../db/index";
-import { apiKeys, ipBans, securityEvents } from "../db/schema";
-import { invalidateResolvedApiKeys } from "../api/keys";
+import { ipBans, securityEvents } from "../db/schema";
 import {
   isLoopbackIp,
   peerIpFromHonoContext,
@@ -64,6 +63,47 @@ export function effectiveClientIp(c: any): string {
     peerIpFromHonoContext(c),
     c?.req?.raw?.headers ?? new Headers(),
   );
+}
+
+/**
+ * Best-effort client identity from request headers.
+ * True PC hostname is only available if the client sends it (browsers usually
+ * do not). Machine-id is present for managed-key clients that bind to a machine.
+ */
+export function clientIdentityFromHeaders(headers: Headers | null | undefined): {
+  userAgent: string | null;
+  machineId: string | null;
+  clientHost: string | null;
+} {
+  if (!headers) {
+    return { userAgent: null, machineId: null, clientHost: null };
+  }
+  const userAgent = headers.get("user-agent")?.trim() || null;
+  const machineId =
+    headers.get("x-machine-id")?.trim() ||
+    headers.get("x-etteum-machine-id")?.trim() ||
+    headers.get("x-9r-machine-id")?.trim() ||
+    headers.get("x-client-machine-id")?.trim() ||
+    null;
+  // Optional client-supplied hostnames — never invent one.
+  const clientHost =
+    headers.get("x-client-hostname")?.trim() ||
+    headers.get("x-hostname")?.trim() ||
+    headers.get("x-pc-name")?.trim() ||
+    headers.get("x-computer-name")?.trim() ||
+    null;
+  return { userAgent, machineId, clientHost };
+}
+
+function appendIdentityToDetail(
+  base: string,
+  identity: { userAgent: string | null; machineId: string | null; clientHost: string | null },
+): string {
+  const parts = [base];
+  if (identity.userAgent) parts.push(`ua=${identity.userAgent.slice(0, 240)}`);
+  if (identity.machineId) parts.push(`machine=${identity.machineId.slice(0, 120)}`);
+  if (identity.clientHost) parts.push(`host=${identity.clientHost.slice(0, 120)}`);
+  return parts.join(" | ");
 }
 
 // ── Ban cache (small table; 10s TTL, writes update in-process immediately) ──
@@ -152,14 +192,31 @@ export async function listBans(): Promise<Array<{ ip: string; reason: string; de
 }
 
 // ── Security audit trail (previews only, never secrets) ────────────────────
+export type SecuritySurface = "api" | "ws" | "dashboard-login";
+export type SecurityAction =
+  | "tripwire_ip_ban"
+  | "tripwire_revoke_ban" // legacy label kept for old rows only
+  | "login_pool_success"
+  | "login_invalid"
+  | "login_invalid_ban"
+  | "unban";
+
 export async function logSecurityEvent(entry: {
   ip?: string | null;
-  surface: "api" | "ws" | "dashboard-login";
+  surface: SecuritySurface;
   path?: string | null;
   keyPreview?: string | null;
-  action: "tripwire_revoke_ban" | "login_pool_success" | "login_invalid" | "unban";
+  action: SecurityAction;
   detail?: string | null;
+  userAgent?: string | null;
+  machineId?: string | null;
+  clientHost?: string | null;
 }): Promise<void> {
+  const detail = appendIdentityToDetail(entry.detail ?? "", {
+    userAgent: entry.userAgent ?? null,
+    machineId: entry.machineId ?? null,
+    clientHost: entry.clientHost ?? null,
+  }).replace(/^\s*\|\s*/, "").trim() || null;
   try {
     await db.insert(securityEvents).values({
       ip: entry.ip ?? null,
@@ -167,13 +224,13 @@ export async function logSecurityEvent(entry: {
       path: entry.path ?? null,
       keyPreview: entry.keyPreview ?? null,
       action: entry.action,
-      detail: entry.detail ?? null,
+      detail,
     });
   } catch (err) {
     console.error("[Security] failed to log event:", err);
   }
   console.warn(
-    `[Security] ${entry.action} surface=${entry.surface} ip=${entry.ip ?? "?"} path=${entry.path ?? "-"} key=${entry.keyPreview ?? "-"}`,
+    `[Security] ${entry.action} surface=${entry.surface} ip=${entry.ip ?? "?"} path=${entry.path ?? "-"} key=${entry.keyPreview ?? "-"} host=${entry.clientHost ?? "-"} machine=${entry.machineId ?? "-"}`,
   );
 }
 
@@ -197,35 +254,66 @@ export async function listSecurityEvents(limit = 100): Promise<Array<Record<stri
 }
 
 /**
- * THE tripwire: a managed key touched an admin surface.
- * 1. Revoke the key (is_active=false + resolution-cache flush).
- * 2. Ban the caller's IP for FRIEND_KEY_BAN_DAYS (loopback/unknown exempt).
- * 3. Write the audit event (key preview only).
+ * Friend-key tripwire: a managed key touched an admin surface.
+ * 1. Ban the caller's IP for FRIEND_KEY_BAN_DAYS (loopback/unknown exempt).
+ * 2. Write the audit event (key preview + client identity only).
+ * 3. NEVER revoke the key — other IPs must keep using it on /v1.
  */
 export async function triggerFriendKeyTripwire(args: {
   token: string;
   apiKeyId: number;
-  surface: "api" | "ws" | "dashboard-login";
+  surface: SecuritySurface;
   path?: string | null;
   ip: string;
-}): Promise<{ revoked: boolean; banned: boolean; ip: string }> {
+  headers?: Headers | null;
+}): Promise<{ revoked: false; banned: boolean; ip: string }> {
   const keyPreview = args.token.slice(0, 12) + "…";
-
-  await db
-    .update(apiKeys)
-    .set({ isActive: false })
-    .where(eq(apiKeys.id, args.apiKeyId));
-  invalidateResolvedApiKeys();
-
-  const detail = `managed key #${args.apiKeyId} (${keyPreview}) presented on ${args.surface}${args.path ? ` ${args.path}` : ""}`;
-  const { banned } = await banIp(args.ip, FRIEND_KEY_BAN_DAYS, "friend-key-on-admin-surface", detail);
+  const identity = clientIdentityFromHeaders(args.headers ?? null);
+  const detail = `managed key #${args.apiKeyId} (${keyPreview}) presented on ${args.surface}${args.path ? ` ${args.path}` : ""} — key left active; IP banned`;
+  const { banned } = await banIp(args.ip, FRIEND_KEY_BAN_DAYS, "friend-key-on-admin-surface", appendIdentityToDetail(detail, identity));
   await logSecurityEvent({
     ip: args.ip,
     surface: args.surface,
     path: args.path ?? null,
     keyPreview,
-    action: "tripwire_revoke_ban",
+    action: "tripwire_ip_ban",
     detail,
+    userAgent: identity.userAgent,
+    machineId: identity.machineId,
+    clientHost: identity.clientHost,
   });
-  return { revoked: true, banned, ip: args.ip };
+  return { revoked: false, banned, ip: args.ip };
+}
+
+/**
+ * Wrong credential on dashboard login: ban that IP only.
+ * No key is touched (there may not even be a valid key).
+ */
+export async function banInvalidLoginIp(args: {
+  ip: string;
+  path?: string | null;
+  keyPreview?: string | null;
+  headers?: Headers | null;
+  detail?: string | null;
+}): Promise<{ banned: boolean }> {
+  const identity = clientIdentityFromHeaders(args.headers ?? null);
+  const detail = args.detail ?? "invalid credential presented at dashboard login";
+  const { banned } = await banIp(
+    args.ip,
+    FRIEND_KEY_BAN_DAYS,
+    "invalid-dashboard-login",
+    appendIdentityToDetail(detail, identity),
+  );
+  await logSecurityEvent({
+    ip: args.ip,
+    surface: "dashboard-login",
+    path: args.path ?? "/api/dashboard-auth/login",
+    keyPreview: args.keyPreview ?? null,
+    action: banned ? "login_invalid_ban" : "login_invalid",
+    detail,
+    userAgent: identity.userAgent,
+    machineId: identity.machineId,
+    clientHost: identity.clientHost,
+  });
+  return { banned };
 }

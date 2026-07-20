@@ -49,7 +49,7 @@ apiRouter.route("/mitm", mitmRouter); // F10: MITM intercepting server control
 apiRouter.route("/playground", playgroundRouter); // F14: basic-chat + skills + translator-live
 apiRouter.route("/provider-nodes", providerNodesRouter); // F13: dynamic compatible-node providers
 apiRouter.route("/update", updateRouter);
-apiRouter.route("/security", securityRouter); // friend-key tripwire: IP bans + audit trail
+apiRouter.route("/security", securityRouter); // IP bans (friend-key / bad login) + audit trail
 apiRouter.route("/browser-sessions", browserSessionRouter);
 // Singular alias — the dashboard's browserApi.ts calls per-session routes as
 // /api/browser-session/:sessionId/{frames,input,captcha,cancel} (singular),
