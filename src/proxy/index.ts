@@ -100,12 +100,42 @@ function isLocalRequest(headers: Headers, hostname: string): boolean {
   return LOCAL.has(ip) || host === "localhost" || host === "127.0.0.1" || host === "[::1]";
 }
 
+/** Structured friend-key gate rejection (OpenAI error envelope). */
+type FriendKeyGateDenial = {
+  status: number;
+  body: { error: { message: string; type: string; code: string } };
+  retryAfterSec?: number;
+};
+
 /**
- * Enforce friend-key limits for a /v1 request. Returns null when the request may
- * proceed (unlimited legacy key, or a managed key within all its limits), else a
- * ready-to-send 4xx Response describing the breach.
+ * Thrown when a managed friend key may not serve a completion (quota, allowlist,
+ * expiry/inactive, or per-key rate cap). Thrown from handleChatCompletion so
+ * every entrypoint (/v1/chat/completions, /v1/messages, /v1/responses, Codex
+ * alias) is gated once — route handlers must not re-call the limiter or the
+ * RPM bucket is double-debited.
  */
-async function enforceFriendKeyLimits(apiKeyId: number | null, model: string): Promise<Response | null> {
+export class FriendKeyLimitError extends Error {
+  readonly status: number;
+  readonly body: FriendKeyGateDenial["body"];
+  readonly retryAfterSec?: number;
+
+  constructor(denial: FriendKeyGateDenial) {
+    super(denial.body.error.message);
+    this.name = "FriendKeyLimitError";
+    this.status = denial.status;
+    this.body = denial.body;
+    this.retryAfterSec = denial.retryAfterSec;
+  }
+}
+
+/**
+ * Evaluate friend-key limits for a managed key. Returns null when the request
+ * may proceed (no apiKeyId / unlimited legacy key, or within all limits).
+ */
+async function evaluateFriendKeyLimits(
+  apiKeyId: number | null,
+  model: string,
+): Promise<FriendKeyGateDenial | null> {
   if (!apiKeyId) return null; // legacy single env/settings key is never limited
   const access = await checkKeyAccess(apiKeyId);
   if (!access.allowed) {
@@ -113,16 +143,28 @@ async function enforceFriendKeyLimits(apiKeyId: number | null, model: string): P
       access.reason === "expired"
         ? { error: { message: "This API key has expired.", type: "auth_error", code: "key_expired" } }
         : access.reason === "quota_exhausted"
-          ? { error: { message: "This API key's token quota is exhausted.", type: "insufficient_quota", code: "quota_exhausted" } }
+          ? {
+              error: {
+                message: "This API key's token quota is exhausted.",
+                type: "insufficient_quota",
+                code: "quota_exhausted",
+              },
+            }
           : { error: { message: "This API key is not active.", type: "auth_error", code: "key_inactive" } };
-    return Response.json(body, { status: 403 });
+    return { status: 403, body };
   }
   const allowlist = parseAllowedModels(access.row.allowedModels);
   if (!modelAllowed(allowlist, model)) {
-    return Response.json(
-      { error: { message: `Model '${model}' is not allowed for this API key.`, type: "invalid_request_error", code: "model_not_allowed" } },
-      403,
-    );
+    return {
+      status: 403,
+      body: {
+        error: {
+          message: `Model '${model}' is not allowed for this API key.`,
+          type: "invalid_request_error",
+          code: "model_not_allowed",
+        },
+      },
+    };
   }
   if (access.row.rateLimit && access.row.rateLimit > 0) {
     let limiter = keyRequestLimiters.get(apiKeyId);
@@ -132,19 +174,49 @@ async function enforceFriendKeyLimits(apiKeyId: number | null, model: string): P
     }
     const rl = limiter.check(`key:${apiKeyId}`);
     if (!rl.allowed) {
-      return new Response(
-        JSON.stringify({ error: { message: "Rate limit exceeded for this API key.", type: "rate_limit_error", code: "rate_limited" } }),
-        {
-          status: 429,
-          headers: {
-            "Content-Type": "application/json",
-            "Retry-After": String(Math.ceil((rl.retryAfterMs ?? 60_000) / 1000)),
+      return {
+        status: 429,
+        body: {
+          error: {
+            message: "Rate limit exceeded for this API key.",
+            type: "rate_limit_error",
+            code: "rate_limited",
           },
         },
-      );
+        retryAfterSec: Math.ceil((rl.retryAfterMs ?? 60_000) / 1000),
+      };
     }
   }
   return null;
+}
+
+/** Fail closed for managed friend keys; no-op for pool/legacy keys. */
+async function assertFriendKeyLimits(apiKeyId: number | null, model: string): Promise<void> {
+  const denial = await evaluateFriendKeyLimits(apiKeyId, model);
+  if (denial) throw new FriendKeyLimitError(denial);
+}
+
+/** Map FriendKeyLimitError to an HTTP response (OpenAI or Anthropic envelope). */
+function friendKeyLimitResponse(
+  c: { json: (body: unknown, status?: number, headers?: Record<string, string>) => Response },
+  err: FriendKeyLimitError,
+  format: "openai" | "anthropic" = "openai",
+): Response {
+  const headers =
+    err.retryAfterSec != null ? { "Retry-After": String(err.retryAfterSec) } : undefined;
+  if (format === "anthropic") {
+    // Anthropic Messages clients expect { type: "error", error: { type, message } }.
+    const t = err.body.error.type;
+    const anthropicType =
+      t === "insufficient_quota" || t === "rate_limit_error"
+        ? "rate_limit_error"
+        : t === "invalid_request_error"
+          ? "invalid_request_error"
+          : "authentication_error";
+    const body = { type: "error", error: { type: anthropicType, message: err.body.error.message } };
+    return headers ? c.json(body, err.status, headers) : c.json(body, err.status);
+  }
+  return headers ? c.json(err.body, err.status, headers) : c.json(err.body, err.status);
 }
 
 /**
@@ -850,6 +922,18 @@ export async function handleChatCompletion(
   // Rewrite the incoming model id to its mapped target (CLI integration, e.g.
   // Claude Code's hardcoded haiku/sonnet/opus ids -> a model in the pool).
   body = { ...body, model: resolveModelAlias(normalizeModelId(body.model)) };
+
+  // Friend-key gating (quota / allowlist / expiry / RPM) — single owner for all
+  // completion entrypoints so /v1/messages and /v1/responses cannot bypass the
+  // chat-only check that previously left exhausted keys queryable.
+  const gateApiKeyId = opts?.apiKeyId ?? currentApiKeyId(opts?.request ?? null);
+  try {
+    await assertFriendKeyLimits(gateApiKeyId, body.model);
+  } catch (err) {
+    endClient();
+    throw err;
+  }
+
   const isStream = body.stream === true;
   // if the client wants non-stream but the provider is streaming-only,
   // fetch the stream upstream and assemble it into a single JSON response.
@@ -1385,13 +1469,8 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
   body = normalizeRequestToOpenAI(body);
   const isStream = body.stream === true;
 
-  // Friend-key gating: enforce model allowlist, token quota, expiry, and the
-  // per-key rate cap BEFORE any upstream account is touched. The resolved model
-  // alias is checked (not the raw client id) so mapping rules can't smuggle a
-  // blocked model through.
-  const apiKeyId = currentApiKeyId(c.req.raw);
-  const gate = await enforceFriendKeyLimits(apiKeyId, resolveModelAlias(body.model));
-  if (gate) return gate;
+  // Friend-key limits (quota/allowlist/rate) are enforced inside handleChatCompletion
+  // so every completion route shares one gate.
 
   try {
     const { result } = await handleChatCompletion(body, {
@@ -1414,6 +1493,9 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
     // Return JSON response
     return c.json(result.response);
   } catch (error) {
+    if (error instanceof FriendKeyLimitError) {
+      return friendKeyLimitResponse(c, error, "openai");
+    }
     const errorMessage =
       error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
@@ -1590,6 +1672,9 @@ proxyRouter.post("/v1/messages", async (c) => {
       const response = await runWebSearchLoopNonStreaming(body, openAIRequest, runners);
       return c.json(response);
     } catch (error) {
+      if (error instanceof FriendKeyLimitError) {
+        return friendKeyLimitResponse(c, error, "anthropic");
+      }
       const errorMessage = error instanceof Error ? error.message : String(error);
       const mappedModel = resolveModelAlias(normalizeModelId(body.model));
       const provider = pool.getProviderForModel(mappedModel) || "unknown";
@@ -1638,6 +1723,9 @@ proxyRouter.post("/v1/messages", async (c) => {
 
     return c.json(openAIToAnthropic(result.response, body));
   } catch (error) {
+    if (error instanceof FriendKeyLimitError) {
+      return friendKeyLimitResponse(c, error, "anthropic");
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
     const provider = pool.getProviderForModel(mappedModel) || "unknown";
@@ -1741,6 +1829,9 @@ async function handleResponsesHttp(c: any) {
     const response = chatResponseToResponses(result.response, chatRequest.model);
     return c.json(response);
   } catch (error) {
+    if (error instanceof FriendKeyLimitError) {
+      return friendKeyLimitResponse(c, error, "openai");
+    }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
     const provider = pool.getProviderForModel(mappedModel) || "unknown";

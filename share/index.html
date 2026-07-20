@@ -706,15 +706,13 @@
     var clients = Number(payload.activeClients) || 0;
     var any = clients > 0 || keys.some(function (k) { return k.status === "active"; });
     setLive(any ? "on" : "off");
+    // Speed (TTFT / tok/s) lives only on each key card — do not also stamp
+    // board-level averages into this status line (that was a visible duplicate).
     var parts = [
       keys.length + " key" + (keys.length === 1 ? "" : "s"),
       clients + " in flight",
+      "just now",
     ];
-    var boardTtft = fmtMs(payload.ttftMs);
-    var boardTps = fmtTps(payload.tokensPerSecond);
-    if (boardTtft !== "—") parts.push("TTFT " + boardTtft);
-    if (boardTps !== "—") parts.push(boardTps);
-    parts.push("just now");
     $("upd").textContent = parts.join(" · ");
   }
 
