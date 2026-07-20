@@ -382,7 +382,12 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
 
       // Sentinel `-1` means "unknown / unlimited" — preserve whatever the
       // provider already wrote into the DB instead of clobbering it.
-      if (Number.isFinite(rawLimit) && rawLimit >= 0 && !isGrokFreeBuildAbsolute) {
+      // Free-Build absolute package size must not land in quota_limit, but
+      // free-usage-exhausted chat probes still must zero remaining so the
+      // account leaves the active pool before user traffic hits it.
+      if (health.kind === "exhausted" && isGrokFreeBuildAbsolute) {
+        update.quotaRemaining = 0;
+      } else if (Number.isFinite(rawLimit) && rawLimit >= 0 && !isGrokFreeBuildAbsolute) {
         update.quotaLimit = rawLimit;
 
         // Compute the safe remaining: never let warmup increase

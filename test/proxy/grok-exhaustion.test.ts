@@ -259,9 +259,10 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.status).toBe("exhausted");
-    // Free-Build absolute exhausted must not reintroduce 2M package size.
+    // Free-Build absolute exhausted must not reintroduce 2M package size,
+    // but remaining must still zero so the row leaves the active pool.
     expect(update.quotaLimit).toBeUndefined();
-    expect(update.quotaRemaining).toBeUndefined();
+    expect(update.quotaRemaining).toBe(0);
   });
 
   test("weekly exhausted health zeros remaining on 0–100 scale", () => {
@@ -317,8 +318,9 @@ describe("Grok warmup live credit probe policy", () => {
     });
 
     expect(update.status).toBe("exhausted");
-    // Free-Build 2M package must not replace weekly columns.
+    // Free-Build 2M package must not replace weekly limit columns,
+    // but remaining still zeros so dispatch skips the account.
     expect(update.quotaLimit).toBeUndefined();
-    expect(update.quotaRemaining).toBeUndefined();
+    expect(update.quotaRemaining).toBe(0);
   });
 });
