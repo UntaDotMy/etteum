@@ -2,10 +2,10 @@
  * Dashboard authentication routes.
  *
  * Establishes a server-side session via an httpOnly JWT cookie. The primary
- * credential is the POOL API KEY (the login form labels it "password");
- * the old password-hash login was removed. Optional OIDC SSO remains.
- * Progressive brute-force lockout protects the login endpoint, and the
- * friend-key tripwire revokes managed keys presented here.
+ * credential is the pool key (login form is labeled only "Password" — never
+ * advertise that it is an API key). Optional OIDC SSO remains.
+ * Progressive brute-force lockout still applies; wrong credentials and
+ * friend keys ban the caller's IP for 9999 days without revoking any key.
  */
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
@@ -34,6 +34,8 @@ import {
 } from "../auth/dashboardSecurity";
 import { resolveApiKey } from "./keys";
 import {
+  banInvalidLoginIp,
+  clientIdentityFromHeaders,
   effectiveClientIp,
   logSecurityEvent,
   triggerFriendKeyTripwire,
@@ -57,13 +59,14 @@ dashboardAuthRouter.get("/status", async (c) => {
 });
 
 /**
- * POST /api/dashboard-auth/login — API-KEY login → httpOnly session cookie.
- * The form field stays named "password" (per operator UX), but the value is
- * an API key: the POOL key signs in; a managed (friend) key trips the wire
- * (revoked + caller IP banned); anything else is a normal 401 with lockout.
+ * POST /api/dashboard-auth/login — pool credential → httpOnly session cookie.
+ * Field name stays "password". Pool key signs in; managed (friend) key bans
+ * the caller IP only (key stays active for /v1); anything else bans the IP
+ * for invalid login. Never advertise "API key" in client-facing errors.
  */
 dashboardAuthRouter.post("/login", async (c) => {
-  const headerIp = getClientIp(c.req.raw.headers);
+  const headers = c.req.raw.headers;
+  const headerIp = getClientIp(headers);
   const lock = checkLock(headerIp);
   if (lock.locked) {
     return c.json({ error: `Too many attempts. Locked. Retry in ${lock.retryAfter}s.` }, 429, { "Retry-After": String(lock.retryAfter) });
@@ -71,13 +74,20 @@ dashboardAuthRouter.post("/login", async (c) => {
   const body = await c.req.json<{ password?: string }>().catch(() => ({ password: "" }));
   const presented = (body.password || "").trim();
   const ip = effectiveClientIp(c);
+  const identity = clientIdentityFromHeaders(headers);
   if (!presented) {
     recordFail(headerIp);
+    await banInvalidLoginIp({
+      ip,
+      path: "/api/dashboard-auth/login",
+      headers,
+      detail: "empty password at dashboard login",
+    });
     return c.json({ error: "Invalid password" }, 401);
   }
 
   const resolved = await resolveApiKey(presented, {});
-  // TRIPWIRE — a friend key has no business on the dashboard login.
+  // TRIPWIRE — friend key on dashboard: ban this IP only; keep the key alive.
   if (resolved.valid && resolved.scope === "managed") {
     await triggerFriendKeyTripwire({
       token: presented,
@@ -85,17 +95,17 @@ dashboardAuthRouter.post("/login", async (c) => {
       surface: "dashboard-login",
       path: "/api/dashboard-auth/login",
       ip,
+      headers,
     });
-    return c.json({ error: "This key cannot be used here. The key has been revoked." }, 403);
+    return c.json({ error: "Access denied." }, 403);
   }
   if (!resolved.valid) {
     recordFail(headerIp);
-    await logSecurityEvent({
+    await banInvalidLoginIp({
       ip,
-      surface: "dashboard-login",
       path: "/api/dashboard-auth/login",
       keyPreview: presented.slice(0, 12) + "…",
-      action: "login_invalid",
+      headers,
       detail: "unresolved credential presented at dashboard login",
     });
     return c.json({ error: "Invalid password" }, 401);
@@ -108,9 +118,12 @@ dashboardAuthRouter.post("/login", async (c) => {
     path: "/api/dashboard-auth/login",
     keyPreview: presented.slice(0, 12) + "…",
     action: "login_pool_success",
+    userAgent: identity.userAgent,
+    machineId: identity.machineId,
+    clientHost: identity.clientHost,
   });
   const token = await createDashboardAuthToken({ email: "admin", method: "api_key" });
-  setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(c.req.raw.headers) as any);
+  setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(headers) as any);
   return c.json({ success: true, user: { email: "admin", method: "api_key" } });
 });
 

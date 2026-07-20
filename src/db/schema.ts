@@ -338,11 +338,10 @@ export const providerNodes = sqliteTable("provider_nodes", {
 });
 
 /**
- * Banned source IPs (friend-key tripwire). A managed key presented on an
- * admin surface (/api/*, dashboard login, dashboard WS) revokes the key and
- * bans the caller's IP from EVERY service (/v1 requests included) until
- * expiresAt — default 9999 days, effectively permanent. Rows are also the
- * audit record; unbanning deletes the row.
+ * Banned source IPs (admin-surface abuse). A managed key or wrong password
+ * on dashboard/admin bans the caller's IP from EVERY service until expiresAt
+ * (default 9999 days). The key itself is never revoked — other IPs keep
+ * working. Unbanning deletes the row.
  */
 export const ipBans = sqliteTable("ip_bans", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -356,9 +355,9 @@ export const ipBans = sqliteTable("ip_bans", {
 ]);
 
 /**
- * Security audit trail: login-path key presentations (pool ok / managed
- * tripwire / invalid), tripwire revocations, bans, unbans. Never stores
- * secrets — key previews only.
+ * Security audit trail: login successes, invalid-login bans, friend-key
+ * IP bans, unbans. Never stores secrets — key previews + optional client
+ * identity (ua/machine/host) in detail only.
  */
 export const securityEvents = sqliteTable("security_events", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -367,7 +366,7 @@ export const securityEvents = sqliteTable("security_events", {
   surface: text("surface").notNull(), // "api" | "ws" | "dashboard-login"
   path: text("path"),
   keyPreview: text("key_preview"),
-  action: text("action").notNull(), // "tripwire_revoke_ban" | "login_pool_success" | "login_invalid" | "unban"
+  action: text("action").notNull(), // "tripwire_ip_ban" | "login_pool_success" | "login_invalid_ban" | "unban" (+ legacy)
   detail: text("detail"),
 }, (table) => [
   index("security_events_created_idx").on(table.createdAt),

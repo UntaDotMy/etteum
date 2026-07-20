@@ -14,13 +14,13 @@ interface LoginProps {
 }
 
 /**
- * Single-credential login: the POOL API key, entered into a field labeled
- * "password" (operator convention). The backend resolves it as an API key —
- * friend keys presented here are revoked and the caller IP banned.
+ * Single-credential login. UI only says "Password" — never advertise that
+ * the value is an API key. Backend still resolves the pool credential;
+ * friend keys / wrong passwords ban the caller IP without revoking keys.
  */
 export default function Login({ onLogin }: LoginProps) {
   const [password, setPassword] = useState("");
-  const [showKey, setShowKey] = useState(false);
+  const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
@@ -44,7 +44,7 @@ export default function Login({ onLogin }: LoginProps) {
 
     try {
       if (!password.trim()) {
-        setError("Please enter your password (API key)");
+        setError("Please enter your password");
         setLoading(false);
         return;
       }
@@ -55,7 +55,7 @@ export default function Login({ onLogin }: LoginProps) {
         return;
       }
       localStorage.setItem("dashboard_session", "1");
-      // Clear any stale API key so subsequent requests use the session cookie.
+      // Clear any stale bearer so subsequent requests use the session cookie.
       localStorage.removeItem("api_key");
       onLogin();
     } catch (err: any) {
@@ -73,26 +73,27 @@ export default function Login({ onLogin }: LoginProps) {
           </div>
           <CardTitle className="text-xl">Etteum</CardTitle>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            Sign in with your password (API key)
+            Sign in with your password
           </p>
         </CardHeader>
         <CardContent>
           <form onSubmit={handleSubmit} className="space-y-4">
             <div className="relative">
               <Input
-                type={showKey ? "text" : "password"}
+                type={showPassword ? "text" : "password"}
                 value={password}
                 onChange={(e) => { setPassword(e.target.value); setError(null); }}
-                placeholder="Password (your API key)"
-                className="pr-10 font-mono text-sm"
+                placeholder="Password"
+                className="pr-10 text-sm"
                 autoFocus
+                autoComplete="current-password"
               />
               <button
                 type="button"
-                onClick={() => setShowKey(!showKey)}
+                onClick={() => setShowPassword(!showPassword)}
                 className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
               >
-                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+                {showPassword ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
               </button>
             </div>
 

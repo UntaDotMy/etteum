@@ -1,5 +1,5 @@
 /**
- * Operator security console: IP bans (friend-key tripwire) + audit trail.
+ * Operator security console: IP bans (friend-key / invalid-login) + audit trail.
  * Mounted under /api — the global /api middleware already requires the pool
  * key or a dashboard session, so no friend key can reach these routes.
  */

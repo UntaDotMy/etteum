@@ -227,8 +227,8 @@ const app = new Hono();
   );
 app.use("*", logger());
 
-// IP ban gate — friend-key tripwire bans block EVERY service (requests
-// included). Runs before any auth check so a banned address gets nothing.
+// IP ban gate — abuser IPs (friend-key on admin / wrong dashboard login)
+// are blocked from EVERY service. Keys stay active for other IPs.
 app.use("*", async (c, next) => {
   const ip = effectiveClientIp(c);
   if (await isIpBanned(ip)) {
@@ -363,8 +363,8 @@ app.use("/api/*", async (c, next) => {
     const machineId = extractMachineId(c.req.raw.headers, new URL(c.req.url).searchParams);
     const resolved = await resolveApiKey(token, { machineId });
     if (resolved.valid) {
-      // TRIPWIRE: a managed (friend) key presented on an admin surface —
-      // revoke the key AND ban the caller's IP from every service.
+      // TRIPWIRE: managed (friend) key on an admin surface — ban this IP only.
+      // Key stays active so other IPs can keep using /v1.
       if (resolved.scope === "managed") {
         const ip = effectiveClientIp(c);
         await triggerFriendKeyTripwire({
@@ -373,9 +373,10 @@ app.use("/api/*", async (c, next) => {
           surface: "api",
           path: c.req.path,
           ip,
+          headers: c.req.raw.headers,
         });
         return c.json(
-          { error: { message: "This key cannot be used here. The key has been revoked.", type: "auth_error" } },
+          { error: { message: "Access denied.", type: "auth_error" } },
           403
         );
       }
@@ -467,7 +468,7 @@ const server = Bun.serve({
       if (!wsResolved?.valid) {
         return new Response("Unauthorized", { status: 401 });
       }
-      // TRIPWIRE: friend key on the admin feed → revoke key + ban IP.
+      // TRIPWIRE: friend key on the admin feed → ban this IP only; key stays live.
       if (wsResolved.scope === "managed") {
         await triggerFriendKeyTripwire({
           token: wsToken!,
@@ -475,8 +476,9 @@ const server = Bun.serve({
           surface: "ws",
           path: "/ws",
           ip: wsIp,
+          headers: req.headers,
         });
-        return new Response("This key cannot be used here. The key has been revoked.", { status: 403 });
+        return new Response("Access denied.", { status: 403 });
       }
       const upgraded = server.upgrade(req, { data: {} });
       if (upgraded) return undefined;
