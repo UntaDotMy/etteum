@@ -139,6 +139,36 @@ export function isGrokCreditExhaustedError(msg: string): boolean {
 }
 
 /**
+ * Parse xAI's free-usage usage detail from the 429 body:
+ *   "… tokens (actual/limit): 2,012,345/2,000,000, requests (actual/limit): 101/100"
+ * Returns the first (tokens) pair, falling back to requests. Null when absent.
+ * Kept for diagnostics/classification — the numbers describe the free-Build
+ * absolute budget, which must NOT be written into weekly-percent quota columns.
+ */
+export function parseGrokFreeUsageActualLimit(
+  text: string,
+): { kind: "tokens" | "requests"; actual: number; limit: number } | null {
+  if (!text) return null;
+  const toNum = (s: string) => {
+    const n = Number(s.replace(/[,\s]/g, ""));
+    return Number.isFinite(n) ? n : null;
+  };
+  const tokens = text.match(/tokens\s*\(actual\/limit\)\s*:\s*([\d,]+)\s*\/\s*([\d,]+)/i);
+  if (tokens) {
+    const actual = toNum(tokens[1]!);
+    const limit = toNum(tokens[2]!);
+    if (actual !== null && limit !== null) return { kind: "tokens", actual, limit };
+  }
+  const requests = text.match(/requests\s*\(actual\/limit\)\s*:\s*([\d,]+)\s*\/\s*([\d,]+)/i);
+  if (requests) {
+    const actual = toNum(requests[1]!);
+    const limit = toNum(requests[2]!);
+    if (actual !== null && limit !== null) return { kind: "requests", actual, limit };
+  }
+  return null;
+}
+
+/**
  * Classify a Grok upstream failure into a ProviderResult.
  * Exhaustion checks run **before** the generic 429/rate-limit branch so
  * free-usage-exhausted is never treated as a temporary throttle.
@@ -157,10 +187,14 @@ export function classifyGrokUpstreamError(err: unknown): ProviderResult {
   // Credit declined / free usage exhausted — mark account exhausted (router
   // → pool.markExhausted). Must run before the bare "429" rate-limit match.
   if (isGrokCreditExhaustedError(msg)) {
+    // Surface the parsed free-usage actual/limit pair for diagnostics (rides
+    // ProviderResult.metadata into request_logs; never shown to clients).
+    const freeUsage = parseGrokFreeUsageActualLimit(msg);
     return {
       success: false,
       error: `quota_exhausted: ${msg}`,
       quotaExhausted: true,
+      ...(freeUsage ? { metadata: { freeUsage } } : {}),
     };
   }
   // xAI "permission-denied" / "Access denied" on chat is NOT an expired token —
@@ -564,7 +598,10 @@ export class GrokProvider extends BaseProvider {
 
     if (!upstream.ok || !upstream.body) {
       const text = await upstream.text().catch(() => "");
-      throw new Error(`cli-chat-proxy error ${upstream.status}: ${text.slice(0, 200)}`);
+      // Keep the full body (bounded 2KB): free-usage-exhausted carries the
+      // "tokens (actual/limit): X/Y" detail past the old 200-char cut, which
+      // clipped exactly before the only machine-useful part.
+      throw new Error(`cli-chat-proxy error ${upstream.status}: ${text.slice(0, 2000)}`);
     }
 
     return responsesSseToChatCompletionStream(upstream.body, {
@@ -634,11 +671,11 @@ export class GrokProvider extends BaseProvider {
     if (response.status === 429) {
       // Include body so free-usage-exhausted can be classified as quotaExhausted.
       const body = await response.text().catch(() => "");
-      throw new Error(`rate_limited: HTTP 429 ${body.slice(0, 200)}`);
+      throw new Error(`rate_limited: HTTP 429 ${body.slice(0, 2000)}`);
     }
     if (!response.ok || !response.body) {
       const body = await response.text().catch(() => "");
-      throw new Error(`error: HTTP ${response.status} ${body.slice(0, 200)}`);
+      throw new Error(`error: HTTP ${response.status} ${body.slice(0, 2000)}`);
     }
 
     const upstream = response.body;
