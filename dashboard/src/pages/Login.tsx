@@ -4,7 +4,6 @@ import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Eye, EyeOff, Lock } from "lucide-react";
 import {
-  validateApiKey,
   API_BASE,
   getDashboardAuthStatus,
   loginWithPassword,
@@ -14,25 +13,22 @@ interface LoginProps {
   onLogin: () => void;
 }
 
-type Mode = "api_key" | "password";
-
+/**
+ * Single-credential login: the POOL API key, entered into a field labeled
+ * "password" (operator convention). The backend resolves it as an API key —
+ * friend keys presented here are revoked and the caller IP banned.
+ */
 export default function Login({ onLogin }: LoginProps) {
-  const [mode, setMode] = useState<Mode>("api_key");
-  const [key, setKey] = useState("");
   const [password, setPassword] = useState("");
   const [showKey, setShowKey] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [oidcEnabled, setOidcEnabled] = useState(false);
-  const [passwordConfigured, setPasswordConfigured] = useState(false);
 
   useEffect(() => {
     getDashboardAuthStatus().then((s) => {
       if (!s) return;
       setOidcEnabled(!!s.oidcEnabled);
-      setPasswordConfigured(!!s.passwordConfigured);
-      // Prefer password mode when a dashboard password is configured.
-      if (s.passwordConfigured) setMode("password");
       // Already have a valid session cookie.
       if (s.authenticated) {
         localStorage.setItem("dashboard_session", "1");
@@ -47,39 +43,21 @@ export default function Login({ onLogin }: LoginProps) {
     setError(null);
 
     try {
-      if (mode === "password") {
-        if (!password.trim()) {
-          setError("Please enter the dashboard password");
-          setLoading(false);
-          return;
-        }
-        const result = await loginWithPassword(password);
-        if (!result.ok) {
-          setError(result.error || "Invalid password");
-          setLoading(false);
-          return;
-        }
-        localStorage.setItem("dashboard_session", "1");
-        // Clear any stale API key so subsequent requests use the session cookie.
-        // Operator can still paste a key later on the API Key page.
-        onLogin();
+      if (!password.trim()) {
+        setError("Please enter your password (API key)");
         setLoading(false);
         return;
       }
-
-      if (!key.trim()) {
-        setError("Please enter an API key");
+      const result = await loginWithPassword(password.trim());
+      if (!result.ok) {
+        setError(result.error || "Invalid password");
         setLoading(false);
         return;
       }
-      const valid = await validateApiKey(key.trim());
-      if (valid) {
-        localStorage.setItem("api_key", key.trim());
-        localStorage.removeItem("dashboard_session");
-        onLogin();
-      } else {
-        setError("Invalid API key");
-      }
+      localStorage.setItem("dashboard_session", "1");
+      // Clear any stale API key so subsequent requests use the session cookie.
+      localStorage.removeItem("api_key");
+      onLogin();
     } catch (err: any) {
       setError(err?.message || "Login failed");
     }
@@ -95,60 +73,28 @@ export default function Login({ onLogin }: LoginProps) {
           </div>
           <CardTitle className="text-xl">Etteum</CardTitle>
           <p className="text-sm text-[var(--muted-foreground)] mt-1">
-            {mode === "password"
-              ? "Sign in with your dashboard password"
-              : "Enter your API key to access the dashboard"}
+            Sign in with your password (API key)
           </p>
         </CardHeader>
         <CardContent>
-          <div className="flex gap-2 mb-4">
-            <Button
-              type="button"
-              variant={mode === "password" ? "default" : "outline"}
-              className="flex-1"
-              onClick={() => { setMode("password"); setError(null); }}
-            >
-              Password
-            </Button>
-            <Button
-              type="button"
-              variant={mode === "api_key" ? "default" : "outline"}
-              className="flex-1"
-              onClick={() => { setMode("api_key"); setError(null); }}
-            >
-              API key
-            </Button>
-          </div>
-
           <form onSubmit={handleSubmit} className="space-y-4">
-            {mode === "api_key" ? (
-              <div className="relative">
-                <Input
-                  type={showKey ? "text" : "password"}
-                  value={key}
-                  onChange={(e) => { setKey(e.target.value); setError(null); }}
-                  placeholder="sk-pool-..."
-                  className="pr-10 font-mono text-sm"
-                  autoFocus
-                />
-                <button
-                  type="button"
-                  onClick={() => setShowKey(!showKey)}
-                  className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
-                >
-                  {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
-                </button>
-              </div>
-            ) : (
+            <div className="relative">
               <Input
-                type="password"
+                type={showKey ? "text" : "password"}
                 value={password}
                 onChange={(e) => { setPassword(e.target.value); setError(null); }}
-                placeholder={passwordConfigured ? "Dashboard password" : "Set password first (Security page) or use API key"}
-                className="text-sm"
+                placeholder="Password (your API key)"
+                className="pr-10 font-mono text-sm"
                 autoFocus
               />
-            )}
+              <button
+                type="button"
+                onClick={() => setShowKey(!showKey)}
+                className="absolute right-3 top-1/2 -translate-y-1/2 text-[var(--muted-foreground)] hover:text-[var(--foreground)]"
+              >
+                {showKey ? <EyeOff className="w-4 h-4" /> : <Eye className="w-4 h-4" />}
+              </button>
+            </div>
 
             {error && (
               <div className="rounded-md bg-[var(--error)]/10 p-3 text-sm text-[var(--error)]">

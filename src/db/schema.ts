@@ -337,6 +337,42 @@ export const providerNodes = sqliteTable("provider_nodes", {
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });
 
+/**
+ * Banned source IPs (friend-key tripwire). A managed key presented on an
+ * admin surface (/api/*, dashboard login, dashboard WS) revokes the key and
+ * bans the caller's IP from EVERY service (/v1 requests included) until
+ * expiresAt — default 9999 days, effectively permanent. Rows are also the
+ * audit record; unbanning deletes the row.
+ */
+export const ipBans = sqliteTable("ip_bans", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  ip: text("ip").notNull().unique(),
+  reason: text("reason").notNull(), // e.g. "friend-key-on-admin-surface"
+  detail: text("detail"), // key preview + surface + path (no secrets)
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  expiresAt: integer("expires_at", { mode: "timestamp" }).notNull(),
+}, (table) => [
+  index("ip_bans_expires_idx").on(table.expiresAt),
+]);
+
+/**
+ * Security audit trail: login-path key presentations (pool ok / managed
+ * tripwire / invalid), tripwire revocations, bans, unbans. Never stores
+ * secrets — key previews only.
+ */
+export const securityEvents = sqliteTable("security_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
+  ip: text("ip"),
+  surface: text("surface").notNull(), // "api" | "ws" | "dashboard-login"
+  path: text("path"),
+  keyPreview: text("key_preview"),
+  action: text("action").notNull(), // "tripwire_revoke_ban" | "login_pool_success" | "login_invalid" | "unban"
+  detail: text("detail"),
+}, (table) => [
+  index("security_events_created_idx").on(table.createdAt),
+]);
+
 // Type exports
 export type Combo = typeof combos.$inferSelect;
 export type NewCombo = typeof combos.$inferInsert;

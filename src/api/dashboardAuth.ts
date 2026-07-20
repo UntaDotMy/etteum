@@ -1,25 +1,17 @@
 /**
- * Dashboard authentication routes — TS port of the reference proxy's
- * src/app/api/auth/{login,logout,status,oidc/*,reset-password}/route.js.
+ * Dashboard authentication routes.
  *
- * Establishes a server-side session via an httpOnly JWT cookie (replaces the
- * raw-api-key-in-localStorage model). Supports password login + optional OIDC
- * SSO. Progressive brute-force lockout protects the password endpoint.
- *
- * Closes the security/multi-tenancy HIGH gaps .
+ * Establishes a server-side session via an httpOnly JWT cookie. The primary
+ * credential is the POOL API KEY (the login form labels it "password");
+ * the old password-hash login was removed. Optional OIDC SSO remains.
+ * Progressive brute-force lockout protects the login endpoint, and the
+ * friend-key tripwire revokes managed keys presented here.
  */
 import { Hono } from "hono";
 import { getCookie, setCookie, deleteCookie } from "hono/cookie";
-import { db } from "../db/index";
-import { settings } from "../db/schema";
-import { eq } from "drizzle-orm";
-import { adminGuard } from "../utils/security";
 import {
   createDashboardAuthToken,
   verifyDashboardAuthToken,
-  verifyDashboardPassword,
-  hashDashboardPassword,
-  getStoredPasswordHash,
   sessionCookieOptions,
   SESSION_COOKIE,
   getOidcRuntimeConfig,
@@ -40,6 +32,12 @@ import {
   recordSuccess,
   getClientIp,
 } from "../auth/dashboardSecurity";
+import { resolveApiKey } from "./keys";
+import {
+  effectiveClientIp,
+  logSecurityEvent,
+  triggerFriendKeyTripwire,
+} from "../utils/ip-ban";
 
 export const dashboardAuthRouter = new Hono();
 
@@ -48,66 +46,77 @@ dashboardAuthRouter.get("/status", async (c) => {
   const token = getCookie(c, SESSION_COOKIE);
   const payload = await verifyDashboardAuthToken(token);
   const oidc = await getOidcRuntimeConfig();
-  // Reflects real DB state — no `|| true`. When no password hash is stored yet,
-  // the dashboard shows its first-run / initial-password setup flow.
-  const hasPassword = !!(await getStoredPasswordHash());
   return c.json({
     authenticated: !!payload,
-    user: payload ? { email: payload.email || "admin", method: payload.method || "password" } : null,
+    user: payload ? { email: payload.email || "admin", method: payload.method || "api_key" } : null,
     oidcEnabled: oidc.enabled,
-    passwordConfigured: hasPassword,
+    // Password login was removed — the dashboard signs in with the pool API
+    // key (field still labeled "password" in the UI).
+    passwordConfigured: false,
   });
 });
 
-/** POST /api/dashboard-auth/login — password login → httpOnly session cookie. */
+/**
+ * POST /api/dashboard-auth/login — API-KEY login → httpOnly session cookie.
+ * The form field stays named "password" (per operator UX), but the value is
+ * an API key: the POOL key signs in; a managed (friend) key trips the wire
+ * (revoked + caller IP banned); anything else is a normal 401 with lockout.
+ */
 dashboardAuthRouter.post("/login", async (c) => {
-  const ip = getClientIp(c.req.raw.headers);
-  const lock = checkLock(ip);
+  const headerIp = getClientIp(c.req.raw.headers);
+  const lock = checkLock(headerIp);
   if (lock.locked) {
     return c.json({ error: `Too many attempts. Locked. Retry in ${lock.retryAfter}s.` }, 429, { "Retry-After": String(lock.retryAfter) });
   }
   const body = await c.req.json<{ password?: string }>().catch(() => ({ password: "" }));
-  const password = body.password || "";
-  const stored = await getStoredPasswordHash();
-  if (!verifyDashboardPassword(password, stored || "")) {
-    recordFail(ip);
+  const presented = (body.password || "").trim();
+  const ip = effectiveClientIp(c);
+  if (!presented) {
+    recordFail(headerIp);
     return c.json({ error: "Invalid password" }, 401);
   }
-  recordSuccess(ip);
-  const token = await createDashboardAuthToken({ email: "admin", method: "password" });
+
+  const resolved = await resolveApiKey(presented, {});
+  // TRIPWIRE — a friend key has no business on the dashboard login.
+  if (resolved.valid && resolved.scope === "managed") {
+    await triggerFriendKeyTripwire({
+      token: presented,
+      apiKeyId: resolved.apiKeyId,
+      surface: "dashboard-login",
+      path: "/api/dashboard-auth/login",
+      ip,
+    });
+    return c.json({ error: "This key cannot be used here. The key has been revoked." }, 403);
+  }
+  if (!resolved.valid) {
+    recordFail(headerIp);
+    await logSecurityEvent({
+      ip,
+      surface: "dashboard-login",
+      path: "/api/dashboard-auth/login",
+      keyPreview: presented.slice(0, 12) + "…",
+      action: "login_invalid",
+      detail: "unresolved credential presented at dashboard login",
+    });
+    return c.json({ error: "Invalid password" }, 401);
+  }
+
+  recordSuccess(headerIp);
+  await logSecurityEvent({
+    ip,
+    surface: "dashboard-login",
+    path: "/api/dashboard-auth/login",
+    keyPreview: presented.slice(0, 12) + "…",
+    action: "login_pool_success",
+  });
+  const token = await createDashboardAuthToken({ email: "admin", method: "api_key" });
   setCookie(c, SESSION_COOKIE, token, sessionCookieOptions(c.req.raw.headers) as any);
-  return c.json({ success: true, user: { email: "admin", method: "password" } });
+  return c.json({ success: true, user: { email: "admin", method: "api_key" } });
 });
 
 /** POST /api/dashboard-auth/logout — clear the session cookie. */
 dashboardAuthRouter.post("/logout", (c) => {
   deleteCookie(c, SESSION_COOKIE, { path: "/" });
-  return c.json({ success: true });
-});
-
-/** POST /api/dashboard-auth/reset-password — set a new password (requires active session). */
-dashboardAuthRouter.post("/reset-password", async (c) => {
-  const token = getCookie(c, SESSION_COOKIE);
-  const payload = await verifyDashboardAuthToken(token);
-  if (!payload) return c.json({ error: "Not authenticated" }, 401);
-  // Privilege escalation: require local origin or CLI token even with a session.
-  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
-  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
-  const body = await c.req.json<{ current?: string; newPassword?: string }>().catch(() => ({ current: "", newPassword: "" }));
-  const stored = await getStoredPasswordHash();
-  if (stored && !verifyDashboardPassword(body.current || "", stored)) {
-    return c.json({ error: "Current password incorrect" }, 401);
-  }
-  if (!body.newPassword || body.newPassword.length < 6) {
-    return c.json({ error: "New password must be at least 6 characters" }, 400);
-  }
-  const hash = await hashDashboardPassword(body.newPassword);
-  const [existing] = await db.select().from(settings).where(eq(settings.key, "password"));
-  if (existing) {
-    await db.update(settings).set({ value: hash }).where(eq(settings.key, "password"));
-  } else {
-    await db.insert(settings).values({ key: "password", value: hash });
-  }
   return c.json({ success: true });
 });
 
