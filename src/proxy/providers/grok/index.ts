@@ -10,11 +10,12 @@
  *      Auth: same SSO token as Bearer, OR an xAI API key.
  *      Separate console quota (free for basic accounts).
  *   3. cli-chat-proxy.grok.com — POST /v1/responses (OpenAI Responses API, SSE)
- *      Auth: OAuth2/OIDC access token from auth.x.ai (Bearer).
- *      Used by the official Grok CLI. Auto-refreshed via refresh_token.
+ *      Auth: OAuth2/OIDC access token from auth.x.ai (Bearer) + CLI headers.
+ *      Official Grok CLI 0.2.106+ catalog sets api_backend:"responses" for
+ *      grok-4.5. Auto-refreshed via refresh_token. Version header is dynamic.
  *
  * Model routing:
- *   - OAuth accounts (auth_method:"oauth")  → cli-chat-proxy Responses API
+ *   - OAuth accounts (auth_method:"oauth")  → cli-chat-proxy /v1/responses
  *   - Models with modeId CONSOLE            → console.x.ai API
  *   - All other (SSO) models                → grok.com web app-chat
  */
@@ -46,7 +47,6 @@ import {
   validateOAuthToken,
   probeOAuthModelsLiveness,
   classifyGrokOAuthFallbackFromModels,
-  getGrokCliVersion,
   fetchOAuthBillingQuota,
   isAbsoluteGrokOAuthQuota,
   isTrustedGrokAbsoluteRemaining,
@@ -78,6 +78,11 @@ import {
   grokGenerateImage,
   isGrokImageModel,
 } from "./image";
+import {
+  buildCliProxyHeaders,
+  chatToCliResponsesBody,
+  responsesSseToChatCompletionStream,
+} from "./cli-proxy-wire";
 
 export { isGrokWeeklyPercentQuotaLimit } from "./oauth";
 export { isGrokImageModel, GROK_IMAGE_MODEL } from "./image";
@@ -498,35 +503,19 @@ export class GrokProvider extends BaseProvider {
   }
 
   // -------------------------------------------------------------------------
-  // cli-chat-proxy.grok.com chat/completions → ReadableStream<Uint8Array> (SSE)
-  // OAuth surface used by the official Grok CLI. OpenAI-compatible SSE.
+  // cli-chat-proxy.grok.com /v1/responses → chat.completion.chunk SSE
+  // OAuth surface used by the official Grok CLI (api_backend: "responses").
   // -------------------------------------------------------------------------
 
   /**
-   * Stream a chat completion from the cli-chat-proxy chat/completions endpoint.
-   * Auth: OAuth access token (auto-refreshed before expiry).
+   * Stream a chat completion from the cli-chat-proxy Responses endpoint.
    *
-   * Verified against the official Grok CLI v0.2.93 (binary strings + debug log
-   * + live endpoint testing):
-   *   - Endpoint: POST /v1/chat/completions (OpenAI-compatible; returns SSE
-   *     in standard chat.completion.chunk format WITH usage).
-   *   - Required header: x-grok-client-version (version gate; without it the
-   *     proxy returns 426 "version (none) is outdated"). Resolved dynamically.
-   *   - Model routing: x-grok-model-override header.
-   *   - Model: "grok-4.5" (free tier works, returns model "grok-4.5-build-free").
-   *     The "grok-build" alias 402s on free accounts (spending-limit).
-   *   - Usage: real token accounting from the final chunk's `usage` field —
-   *     prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
-   *     cost_in_usd_ticks (0 on free tier).
+   * CLI 0.2.106+ catalog sets api_backend:"responses" for grok-4.5. We POST
+   * /v1/responses with CLI-parity headers (X-XAI-Token-Auth, version, surface,
+   * identifier, model-override) and adapt Responses SSE into OpenAI
+   * chat.completion.chunk for the rest of the proxy pipeline.
    *
-   * Verified live: cli-chat-proxy /chat/completions accepts the OAuth bearer
-   * + x-grok-client-version header and returns OpenAI-format SSE WITH usage
-   * (prompt_tokens, completion_tokens, reasoning_tokens, cached_tokens,
-   * cost_in_usd_ticks). Model must be "grok-4.5" (free tier works); the
-   * "grok-build" alias 402s on free accounts.
-   *
-   * @param onUsage optional callback receiving the upstream usage object when
-   *                the stream completes (used for real token/credit accounting).
+   * @param onUsage optional callback when response.completed carries usage
    */
   private async makeCliProxyStream(
     account: Account,
@@ -547,41 +536,25 @@ export class GrokProvider extends BaseProvider {
     });
     if (!bearer) throw new Error("expired: OAuth access token could not be refreshed");
 
-
-    // Resolve the CLI version dynamically (rot-proof against CLI updates).
-    const cliVersion = await getGrokCliVersion();
-
     // Map catalog slug → upstream Build model id (composer-2.5 vs grok-4.5).
     // "grok-build" alias 402s on free accounts; confirmed by CLI debug + probes.
     const upstreamModel = this.mapConsoleModel(request.model);
     const effort = resolveGrokReasoningEffort(request);
-
-    const body: Record<string, unknown> = {
-      model: upstreamModel,
-      messages: request.messages,
+    const body = chatToCliResponsesBody(request, upstreamModel, {
       stream: true,
-      // xAI: reasoning_effort low|medium|high (default high). Cannot disable.
-      reasoning_effort: effort,
-    };
-    if (request.temperature != null) body.temperature = request.temperature;
-    if (request.max_tokens != null) body.max_tokens = request.max_tokens;
-    if (request.top_p != null) body.top_p = request.top_p;
-    // xAI docs: presence/frequency penalty + stop cannot be used with reasoning models.
-    if (request.tools) body.tools = request.tools;
-    if (request.tool_choice) body.tool_choice = request.tool_choice;
+      reasoningEffort: effort,
+    });
 
-    const upstream = await fetch(`${GROK_OAUTH.apiBaseUrl}/chat/completions`, {
+    const headers = await buildCliProxyHeaders(bearer, {
+      modelOverride: upstreamModel,
+      accept: "text/event-stream",
+      surface: "grok-shell",
+      identifier: "grok-build",
+    });
+
+    const upstream = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "Authorization": `Bearer ${bearer}`,
-        "Accept": "text/event-stream",
-        // Required version gate — resolved dynamically so it never rots.
-        "x-grok-client-version": cliVersion,
-        "x-grok-client-surface": "grok-shell",
-        // Route to the requested model's cluster.
-        "x-grok-model-override": upstreamModel,
-      },
+      headers,
       body: JSON.stringify(body),
     });
 
@@ -590,69 +563,11 @@ export class GrokProvider extends BaseProvider {
       throw new Error(`cli-chat-proxy error ${upstream.status}: ${text.slice(0, 200)}`);
     }
 
-    const reader = upstream.body.getReader();
-    const encoder = new TextEncoder();
-    let buffer = "";
-
-    return new ReadableStream<Uint8Array>({
-      async start(controller) {
-        try {
-          for (;;) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += new TextDecoder().decode(value, { stream: true });
-
-            // Process complete SSE events (separated by blank lines).
-            let boundary: number;
-            while ((boundary = buffer.indexOf("\n\n")) !== -1) {
-              const rawEvent = buffer.slice(0, boundary);
-              buffer = buffer.slice(boundary + 2);
-              const dataLine = rawEvent.split("\n").find((l) => l.startsWith("data: "));
-              if (!dataLine) continue;
-              const payload = dataLine.slice(6).trim();
-              if (payload === "[DONE]") continue;
-
-              try {
-                const chunk = JSON.parse(payload);
-
-                // Capture upstream usage when present (final chunk or a
-                // usage-only chunk). Real token accounting:
-                //   prompt_tokens / completion_tokens / total_tokens
-                //   + reasoning_tokens + cached_tokens + cost_in_usd_ticks
-                const usage = chunk.usage;
-                if (usage && typeof usage.prompt_tokens === "number") {
-                  onUsage?.({
-                    prompt_tokens: usage.prompt_tokens,
-                    completion_tokens: usage.completion_tokens ?? 0,
-                  });
-                }
-
-                // Pass the OpenAI-format chunk straight through (re-tagged
-                // with our id/created/model for consistency). MUST include
-                // `usage` so proxy stream finalizer can debit quota per request.
-                const out: Record<string, unknown> = {
-                  id,
-                  object: "chat.completion.chunk",
-                  created,
-                  model: request.model,
-                  choices: chunk.choices ?? [],
-                };
-                if (usage) out.usage = usage;
-                controller.enqueue(encoder.encode(`data: ${JSON.stringify(out)}\n\n`));
-              } catch {
-                /* skip malformed chunk */
-              }
-            }
-          }
-        } catch (err) {
-          controller.error(err);
-          return;
-        } finally {
-          try { reader.releaseLock(); } catch { /* ignore */ }
-        }
-        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
-        controller.close();
-      },
+    return responsesSseToChatCompletionStream(upstream.body, {
+      id,
+      created,
+      model: request.model,
+      onUsage,
     });
   }
 
