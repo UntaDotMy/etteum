@@ -101,6 +101,48 @@ export function buildPoolExhaustedError(args: {
 }
 
 /**
+ * Tool/tool_choice consistency for every client family. Anthropic clients
+ * (Claude Code), OpenAI clients (OpenCode/Cline), and Responses clients
+ * (Codex) can all send `tool_choice` with no tools attached — tolerant
+ * upstreams ignore it, strict ones (xAI cli-chat-proxy) reject the whole
+ * request: "A tool_choice was set on the request but no tools were specified."
+ * The web_search server-tool strip (agent-loop) can also empty the tools list
+ * while tool_choice survives the Anthropic→OpenAI conversion. Normalize once
+ * here so every provider benefits:
+ *   - no tools → drop tool_choice + parallel_tool_calls (nothing to choose);
+ *   - tool_choice naming a tool that isn't in the list → degrade to "auto"
+ *     (a specific-but-missing choice 400s the same way on strict upstreams).
+ */
+export function normalizeToolChoiceConsistency(
+  request: ChatCompletionRequest,
+): ChatCompletionRequest {
+  const tools = Array.isArray(request.tools) ? request.tools.filter(Boolean) : [];
+  if (tools.length === 0) {
+    if (
+      (request as any).tool_choice === undefined &&
+      (request as any).parallel_tool_calls === undefined
+    ) {
+      return request;
+    }
+    const { tool_choice: _tc, parallel_tool_calls: _ptc, ...rest } = request as any;
+    return rest;
+  }
+  const tc = (request as any).tool_choice;
+  if (tc && typeof tc === "object") {
+    const named = tc.type === "function" ? tc.function?.name : undefined;
+    if (typeof named === "string" && named) {
+      const names = new Set(
+        tools.map((t: any) => t?.function?.name ?? t?.name).filter(Boolean),
+      );
+      if (!names.has(named)) {
+        return { ...request, tool_choice: "auto" };
+      }
+    }
+  }
+  return request;
+}
+
+/**
  * Sanitize request by applying pudidil filters to all text content.
  * Strips Claude Code identity, billing headers, and other patterns
  * that trigger content moderation on upstream providers.
@@ -161,7 +203,8 @@ function sanitizeRequest(request: ChatCompletionRequest, providerName?: string):
     });
   }
 
-  return sanitized;
+  // Tool/tool_choice consistency last — after every text mutation above.
+  return normalizeToolChoiceConsistency(sanitized);
 }
 
 /**

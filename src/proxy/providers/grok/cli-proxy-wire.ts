@@ -66,6 +66,27 @@ function mapToolsToResponses(tools: ChatCompletionRequest["tools"]): unknown[] |
   });
 }
 
+/**
+ * Map an internal (OpenAI chat-shaped) tool_choice to the Responses wire
+ * shape. Chat shape nests the name ({type:"function", function:{name}});
+ * Responses expects it flat ({type:"function", name}). Anthropic remnants
+ * ({type:"tool", name}) map to the same flat function choice. Strings
+ * ("auto"/"required"/"none") pass through.
+ */
+export function normalizeToolChoiceForResponses(toolChoice: unknown): unknown {
+  if (toolChoice == null) return undefined;
+  if (typeof toolChoice !== "object") return toolChoice;
+  const tc = toolChoice as any;
+  if (tc.type === "function") {
+    const name = tc.function?.name ?? tc.name;
+    return typeof name === "string" && name ? { type: "function", name } : "auto";
+  }
+  if (tc.type === "tool" && typeof tc.name === "string" && tc.name) {
+    return { type: "function", name: tc.name };
+  }
+  return tc;
+}
+
 function contentToInputBlocks(content: ChatMessage["content"]): unknown {
   if (typeof content === "string") {
     return [{ type: "input_text", text: content }];
@@ -203,7 +224,12 @@ export function chatToCliResponsesBody(
 
   const tools = mapToolsToResponses(request.tools);
   if (tools) body.tools = tools;
-  if (request.tool_choice != null) body.tool_choice = request.tool_choice;
+  // tool_choice is only valid WITH tools — xAI rejects the request otherwise:
+  // 400 invalid-argument "A tool_choice was set on the request but no tools
+  // were specified." Attach it only when tools exist, in Responses shape.
+  if (tools && request.tool_choice != null) {
+    body.tool_choice = normalizeToolChoiceForResponses(request.tool_choice);
+  }
 
   return body;
 }
