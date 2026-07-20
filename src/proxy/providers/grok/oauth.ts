@@ -1,7 +1,9 @@
 /**
  * Grok OAuth2/OIDC token lifecycle.
  *
- * Reverse-engineered from the official Grok CLI v0.2.93 (installed at ~/.grok).
+ * Reverse-engineered from the official Grok CLI (live install at ~/.grok).
+ * Version is resolved automatically (version.json / models_cache / x.ai/cli/stable)
+ * — do not hardcode a CLI release number in request paths.
  * Source artifacts:
  *   - ~/.grok/auth.json        → credential shape (access JWT + opaque refresh)
  *   - ~/.grok/models_cache.json → upstream base URL (cli-chat-proxy.grok.com/v1)
@@ -18,6 +20,9 @@
  */
 
 import type { Account } from "../../../db/schema";
+// buildCliProxyHeaders is defined in cli-proxy-wire.ts and imports getGrokCliVersion
+// from this file — avoid a circular import at module load by lazy-importing
+// headers only inside the probe/billing helpers that need them.
 
 // ---------------------------------------------------------------------------
 // Verified constants (from CLI files + OIDC discovery — do not change blindly)
@@ -50,34 +55,42 @@ export const GROK_OAUTH = {
   /** Scopes observed in the CLI's auth.json token request. */
   scopes: "openid profile email offline_access grok-cli:access api:access conversations:read conversations:write",
   /** CLI version gate. The cli-chat-proxy requires an x-grok-client-version
-   *  header >= its internal floor (ratchets upward over time). A hardcoded
-   *  value rots; resolve dynamically via getGrokCliVersion(). */
+   *  header >= its internal floor (ratchets upward over time). Never hardcode
+   *  the live version in call sites — use getGrokCliVersion() (fully automatic). */
   cliVersionUrl: "https://x.ai/cli/stable",
-  /** Last-resort boot fallback if no dynamic source is reachable. */
-  cliVersionFallback: "0.2.93",
+  /**
+   * Boot-only emergency string when disk + network are both unreachable.
+   * Prefer dynamic sources; this is NOT meant to be bumped on every CLI release.
+   */
+  cliVersionFallback: "0.0.0",
 } as const;
 
 // ---------------------------------------------------------------------------
-// CLI version resolution — rot-proof against CLI updates
+// CLI version resolution — fully automatic (no manual bumps)
 // ---------------------------------------------------------------------------
 
 /**
- * The cli-chat-proxy version gate ratchets upward over time. A hardcoded
- * version rots. This resolver picks a valid version from the best available
- * source, in priority order:
+ * Resolve x-grok-client-version without anyone bumping constants in PRs.
  *
- *   1. ~/.grok/version.json  — auto-current if the CLI is installed (it
- *      rewrites this file on every run / self-update). Zero network cost.
- *   2. GROK_CLI_VERSION env  — manual override for locked-down deployments.
- *   3. https://x.ai/cli/stable — the installer's own "latest stable" feed.
- *      Works WITHOUT the CLI installed. Cached 24h to avoid hammering it.
- *   4. cliVersionFallback    — hardcoded boot constant (last resort).
+ * Priority:
+ *   1. ~/.grok/version.json          — CLI rewrites on every run / self-update
+ *   2. ~/.grok/models_cache.json     — grok_version field (also auto-refreshed)
+ *   3. GROK_CLI_VERSION env          — optional lock for air-gapped deploys only
+ *   4. https://x.ai/cli/stable       — installer's latest stable feed (24h cache;
+ *                                      stale cache still reused forever on offline)
+ *   5. cliVersionFallback            — last resort so requests still leave the box
  *
- * As long as EITHER the CLI is installed OR the machine has internet, the
- * version stays current automatically. No code change needed on CLI updates.
+ * No code change is required when the official CLI ships a new version.
  */
 let _cachedRemoteVersion: { value: string; fetchedAt: number } | null = null;
 const REMOTE_VERSION_TTL_MS = 24 * 60 * 60 * 1000; // 24h
+const SEMVER_RE = /^\d+\.\d+\.\d+$/;
+
+function asSemver(v: unknown): string | null {
+  if (typeof v !== "string") return null;
+  const t = v.trim();
+  return SEMVER_RE.test(t) ? t : null;
+}
 
 async function readCliVersionFile(): Promise<string | null> {
   try {
@@ -87,48 +100,68 @@ async function readCliVersionFile(): Promise<string | null> {
     const path = join(homedir(), ".grok", "version.json");
     const raw = readFileSync(path, "utf-8");
     const parsed = JSON.parse(raw) as { version?: string; stable_version?: string };
-    return parsed.stable_version || parsed.version || null;
+    return asSemver(parsed.stable_version) || asSemver(parsed.version);
+  } catch {
+    return null;
+  }
+}
+
+/** models_cache.json is refreshed whenever the CLI hits /v1/models. */
+async function readCliModelsCacheVersion(): Promise<string | null> {
+  try {
+    const { readFileSync } = await import("fs");
+    const { homedir } = await import("os");
+    const { join } = await import("path");
+    const path = join(homedir(), ".grok", "models_cache.json");
+    const raw = readFileSync(path, "utf-8");
+    const parsed = JSON.parse(raw) as { grok_version?: string };
+    return asSemver(parsed.grok_version);
   } catch {
     return null;
   }
 }
 
 async function fetchLatestStableVersion(): Promise<string | null> {
-  // Return cached if fresh.
-  if (_cachedRemoteVersion && Date.now() - _cachedRemoteVersion.fetchedAt < REMOTE_VERSION_TTL_MS) {
+  // Fresh cache hit.
+  if (
+    _cachedRemoteVersion &&
+    Date.now() - _cachedRemoteVersion.fetchedAt < REMOTE_VERSION_TTL_MS
+  ) {
     return _cachedRemoteVersion.value;
   }
   try {
-    const response = await fetch(GROK_OAUTH.cliVersionUrl, { headers: { Accept: "text/plain" } });
+    const response = await fetch(GROK_OAUTH.cliVersionUrl, {
+      headers: { Accept: "text/plain" },
+    });
     if (!response.ok) return _cachedRemoteVersion?.value ?? null;
-    const version = (await response.text()).trim();
-    if (!/^\d+\.\d+\.\d+$/.test(version)) return _cachedRemoteVersion?.value ?? null;
+    const version = asSemver(await response.text());
+    if (!version) return _cachedRemoteVersion?.value ?? null;
     _cachedRemoteVersion = { value: version, fetchedAt: Date.now() };
     return version;
   } catch {
+    // Offline: keep serving the last remote value forever (still better than
+    // a hardcoded fallback that drifts from the live floor).
     return _cachedRemoteVersion?.value ?? null;
   }
 }
 
 /**
  * Resolve the current Grok CLI version for the x-grok-client-version header.
- * Synchronous-safe: callers should `await` it, but it never throws — on any
- * failure it returns the hardcoded fallback so inference still works.
+ * Never throws. Fully automatic when the CLI is installed or the host has net.
  */
 export async function getGrokCliVersion(): Promise<string> {
-  // 1. CLI install on disk (best — auto-current, no network).
   const fromFile = await readCliVersionFile();
   if (fromFile) return fromFile;
 
-  // 2. Manual env override.
-  const fromEnv = process.env.GROK_CLI_VERSION;
-  if (fromEnv && /^\d+\.\d+\.\d+$/.test(fromEnv)) return fromEnv;
+  const fromModelsCache = await readCliModelsCacheVersion();
+  if (fromModelsCache) return fromModelsCache;
 
-  // 3. Remote latest-stable feed (works without CLI installed).
+  const fromEnv = asSemver(process.env.GROK_CLI_VERSION);
+  if (fromEnv) return fromEnv;
+
   const fromRemote = await fetchLatestStableVersion();
   if (fromRemote) return fromRemote;
 
-  // 4. Last-resort fallback.
   return GROK_OAUTH.cliVersionFallback;
 }
 
@@ -881,7 +914,6 @@ export async function fetchOAuthBillingQuota(
   bearer: string,
   signal?: AbortSignal,
 ): Promise<GrokOAuthQuota | null> {
-  const cliVersion = await getGrokCliVersion();
   // Cap each upstream hop so one dead connection cannot park a warmup slot forever.
   const hop = (ms = 12_000) => withDeadlineSignal(signal, ms);
 
@@ -891,13 +923,17 @@ export async function fetchOAuthBillingQuota(
 
   // 1) JSON billing (paid monthly pool).
   try {
+    const { buildCliProxyHeaders } = await import("./cli-proxy-wire");
+    const billHeaders = await buildCliProxyHeaders(bearer, {
+      accept: "application/json",
+      surface: "grok-shell",
+      identifier: "grok-build",
+    });
+    // GET — no model override / body.
+    delete billHeaders["Content-Type"];
     const response = await fetch(GROK_OAUTH.billingEndpoint, {
       method: "GET",
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        Accept: "application/json",
-        "x-grok-client-version": cliVersion,
-      },
+      headers: billHeaders,
       signal: hop(10_000),
     });
     if (response.ok) {
@@ -994,17 +1030,16 @@ export async function probeOAuthChatCredits(
   bearer: string,
   signal?: AbortSignal,
 ): Promise<GrokOAuthQuota | null> {
-  const cliVersion = await getGrokCliVersion();
+  const { buildCliProxyHeaders } = await import("./cli-proxy-wire");
+  const headers = await buildCliProxyHeaders(bearer, {
+    modelOverride: "grok-4.5",
+    surface: "grok-shell",
+    identifier: "grok-build",
+    accept: "application/json",
+  });
   const response = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${bearer}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-      "x-grok-client-version": cliVersion,
-      "x-grok-client-identifier": "grok-build",
-      "x-grok-client-surface": "grok-build",
-    },
+    headers,
     body: JSON.stringify({
       model: "grok-4.5",
       input: "Reply with exactly: OK",
@@ -1332,17 +1367,16 @@ export async function probeOAuthChatLiveness(
   signal?: AbortSignal,
 ): Promise<GrokChatLivenessResult> {
   try {
-    const cliVersion = await getGrokCliVersion();
+    const { buildCliProxyHeaders } = await import("./cli-proxy-wire");
+    const headers = await buildCliProxyHeaders(bearer, {
+      modelOverride: "grok-4.5",
+      surface: "grok-shell",
+      identifier: "grok-build",
+      accept: "application/json",
+    });
     const response = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses`, {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        "Content-Type": "application/json",
-        Accept: "application/json",
-        "x-grok-client-version": cliVersion,
-        "x-grok-client-identifier": "grok-build",
-        "x-grok-client-surface": "grok-build",
-      },
+      headers,
       body: JSON.stringify({
         model: "grok-4.5",
         input: "Reply with exactly: OK",
@@ -1446,12 +1480,13 @@ export async function fetchModelsCatalog(
   bearer: string,
   etag?: string
 ): Promise<{ models: Record<string, unknown>; etag?: string } | null> {
-  const cliVersion = await getGrokCliVersion();
-  const headers: Record<string, string> = {
-    Authorization: `Bearer ${bearer}`,
-    Accept: "application/json",
-    "x-grok-client-version": cliVersion,
-  };
+  const { buildCliProxyHeaders } = await import("./cli-proxy-wire");
+  const headers = await buildCliProxyHeaders(bearer, {
+    accept: "application/json",
+    surface: "grok-shell",
+    identifier: "grok-build",
+  });
+  delete headers["Content-Type"];
   if (etag) headers["If-None-Match"] = etag;
 
   try {
@@ -1637,14 +1672,14 @@ export async function probeOAuthModelsLiveness(
   })();
 
   try {
-    const cliVersion = await getGrokCliVersion();
-    const response = await fetch(GROK_OAUTH.modelsEndpoint, {
-      headers: {
-        Authorization: `Bearer ${bearer}`,
-        Accept: "application/json",
-        "x-grok-client-version": cliVersion,
-      },
+    const { buildCliProxyHeaders } = await import("./cli-proxy-wire");
+    const headers = await buildCliProxyHeaders(bearer, {
+      accept: "application/json",
+      surface: "grok-shell",
+      identifier: "grok-build",
     });
+    delete headers["Content-Type"];
+    const response = await fetch(GROK_OAUTH.modelsEndpoint, { headers });
     const bodySnippet =
       response.ok || response.status === 304
         ? ""

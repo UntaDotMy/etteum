@@ -18,11 +18,11 @@
 import type { Account } from "../../../db/schema";
 import {
   ensureFreshAccessToken,
-  getGrokCliVersion,
   getOAuthTokens,
   GROK_OAUTH,
   isOAuthAccount,
 } from "./oauth";
+import { buildCliProxyHeaders } from "./cli-proxy-wire";
 
 /** Catalog model id for Image Studio / Chat media generation. */
 export const GROK_IMAGE_MODEL = "grok-image";
@@ -72,17 +72,12 @@ async function resolveBearer(account: Account): Promise<string | null> {
 }
 
 async function cliProxyHeaders(bearer: string): Promise<Record<string, string>> {
-  const cliVersion = await getGrokCliVersion();
-  return {
-    Authorization: `Bearer ${bearer}`,
-    "Content-Type": "application/json",
-    Accept: "application/json",
-    "x-grok-client-version": cliVersion,
-    "x-grok-client-surface": "grok-shell",
-    // Matches grok-cli / ronin-proxy style auth when present on the proxy.
-    "xai-token-auth": "xai-grok-cli",
-    "x-grok-client-identifier": "grok-build",
-  };
+  return buildCliProxyHeaders(bearer, {
+    modelOverride: GROK_IMAGE_UPSTREAM_MODEL,
+    accept: "application/json",
+    surface: "grok-shell",
+    identifier: "grok-build",
+  });
 }
 
 function looksLikeBase64Image(s: string): boolean {
