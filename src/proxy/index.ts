@@ -22,6 +22,7 @@ import {
 } from "./transforms/openai-responses";
 import { forcedSseToJson } from "./transforms/forced-sse-to-json";
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
+import { confirmLedgerExhaustion } from "./ledger-exhaustion";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias } from "./model-mapping";
 import { estimateRequestTokens } from "./compression";
@@ -560,6 +561,61 @@ async function logProxyError(entry: NewRequestLog, label: string) {
   }
 }
 
+/**
+ * Typed pool-exhaustion error → clean 429 + Retry-After on every completion
+ * surface. The client message carries provider/count/retry hint only; the raw
+ * upstream detail (rawDetail) is what lands in request_logs. Returns null
+ * when the error is not a pool-exhaustion error so callers fall through to
+ * their generic mapping.
+ */
+async function respondPoolExhausted(
+  c: any,
+  error: unknown,
+  info: {
+    model: string;
+    shape: "chat" | "responses" | "anthropic";
+    logLabel: string;
+    requestBody: unknown;
+  },
+): Promise<Response | null> {
+  if (!error || typeof error !== "object" || (error as any).quotaExhausted !== true) {
+    return null;
+  }
+  const errorMessage = error instanceof Error ? error.message : String(error);
+  const rawDetail =
+    typeof (error as any).rawDetail === "string" ? (error as any).rawDetail : undefined;
+  const retryMsRaw = Number((error as any).retryAfterMs);
+  const retryMs = Number.isFinite(retryMsRaw) && retryMsRaw > 0 ? retryMsRaw : 15 * 60_000;
+  const provider = pool.getProviderForModel(info.model) || "unknown";
+
+  await logProxyError({
+    provider,
+    model: info.model,
+    status: "error",
+    errorMessage: rawDetail || errorMessage,
+    requestBody: prepareLogBody(info.requestBody),
+    responseBody: prepareLogBody({ error: rawDetail || errorMessage }),
+    durationMs: 0,
+  }, info.logLabel);
+  broadcast({ type: "request_error", data: { model: info.model, error: errorMessage } });
+
+  const headers = { "Retry-After": String(Math.ceil(retryMs / 1000)) };
+  if (info.shape === "chat") {
+    return c.json(
+      { error: { message: errorMessage, type: "rate_limit_error", code: "quota_exhausted" } },
+      429,
+      headers,
+    );
+  }
+  // Anthropic Messages + OpenAI Responses share the { type: "error", error }
+  // envelope; rate_limit_error is the type both client families retry.
+  return c.json(
+    { type: "error", error: { type: "rate_limit_error", message: errorMessage } },
+    429,
+    headers,
+  );
+}
+
 // Prune request_logs periodically (every 5 min) instead of inline on the hot
 // path. The DELETE-with-subquery pattern competes with other writes for
 // SQLite's single-writer lock — moving it to a background timer avoids that.
@@ -738,9 +794,11 @@ function wrapStreamWithUsageFinalizer(
               Number(context.quotaLimit) <= 100;
             if (!skipGrokWeeklyDebit) {
               quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
-              // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+              // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when
+              // spent — but confirm ledger-zero against upstream before parking
+              // (local accounting drifts from the provider's real remaining).
               if (quotaAfter <= 0) {
-                await pool.markExhaustedIfQuotaDepleted(context.accountId);
+                await confirmLedgerExhaustion(context.provider, context.accountId);
               }
             }
           }
@@ -965,7 +1023,10 @@ export async function handleChatCompletion(
         };
       }
     }
-    const promptTokens = result.promptTokens || result.response?.usage?.prompt_tokens || estimateMessagesTokens(body.messages);
+    // Fallback estimate counts the COMPRESSED request (what was actually sent
+    // upstream), not the original client body — upstream usage always wins
+    // when present; the estimate only fills providers that report nothing.
+    const promptTokens = result.promptTokens || result.response?.usage?.prompt_tokens || estimateMessagesTokens((compressedRequest ?? body).messages);
     const completionTokens = result.completionTokens || result.response?.usage?.completion_tokens || 0;
     const totalTokens = result.tokensUsed || result.response?.usage?.total_tokens || promptTokens + completionTokens;
     // Full token breakdown (cached/reasoning/cache-creation) for USD cost.
@@ -1016,9 +1077,12 @@ export async function handleChatCompletion(
           Number(account.quotaLimit) <= 100;
         if (!skipGrokWeeklyDebit) {
           quotaAfter = await pool.decrementQuota(account.id, creditsUsed);
-          // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when spent.
+          // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when
+          // spent — confirmed against upstream inside confirmLedgerExhaustion.
+          // Fire-and-forget: the debit already made the row dispatch-ineligible,
+          // and the probe must not add latency to this response.
           if (quotaAfter <= 0) {
-            await pool.markExhaustedIfQuotaDepleted(account.id);
+            void confirmLedgerExhaustion(provider, account.id);
           }
         }
       }
@@ -1500,6 +1564,16 @@ proxyRouter.post("/v1/chat/completions", async (c) => {
       error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
 
+    // Pool quota-exhausted (all accounts): clean 429 + Retry-After, raw
+    // upstream detail goes to request_logs only — never to the client.
+    const poolExhausted = await respondPoolExhausted(c, error, {
+      model: mappedModel,
+      shape: "chat",
+      logLabel: "chat completion pool exhausted",
+      requestBody: { ...body, model: mappedModel, _poolprox: { originalModel: body.model } },
+    });
+    if (poolExhausted) return poolExhausted;
+
     // Graceful 429: when every account was rate-limited, the router throws a
     // typed error carrying retryAfterMs. Map it to a real 429 + Retry-After so
     // well-behaved clients back off correctly instead of getting a 503.
@@ -1677,6 +1751,13 @@ proxyRouter.post("/v1/messages", async (c) => {
       }
       const errorMessage = error instanceof Error ? error.message : String(error);
       const mappedModel = resolveModelAlias(normalizeModelId(body.model));
+      const poolExhausted = await respondPoolExhausted(c, error, {
+        model: mappedModel,
+        shape: "anthropic",
+        logLabel: "messages web_search pool exhausted",
+        requestBody: body,
+      });
+      if (poolExhausted) return poolExhausted;
       const provider = pool.getProviderForModel(mappedModel) || "unknown";
       await logProxyError({
         provider, model: mappedModel, status: "error", errorMessage,
@@ -1728,6 +1809,13 @@ proxyRouter.post("/v1/messages", async (c) => {
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
+    const poolExhausted = await respondPoolExhausted(c, error, {
+      model: mappedModel,
+      shape: "anthropic",
+      logLabel: "messages pool exhausted",
+      requestBody: { ...body, model: mappedModel, _poolprox: { originalModel: body.model } },
+    });
+    if (poolExhausted) return poolExhausted;
     const provider = pool.getProviderForModel(mappedModel) || "unknown";
     await logProxyError({
       provider,
@@ -1834,6 +1922,13 @@ async function handleResponsesHttp(c: any) {
     }
     const errorMessage = error instanceof Error ? error.message : String(error);
     const mappedModel = resolveModelAlias(normalizeModelId(body.model));
+    const poolExhausted = await respondPoolExhausted(c, error, {
+      model: mappedModel,
+      shape: "responses",
+      logLabel: "responses pool exhausted",
+      requestBody: { ...body, model: mappedModel, _poolprox: { originalModel: body.model } },
+    });
+    if (poolExhausted) return poolExhausted;
     const provider = pool.getProviderForModel(mappedModel) || "unknown";
     await logProxyError({
       provider,

@@ -36,6 +36,70 @@ export interface RouteResult {
   compressedRequest?: ChatCompletionRequest;
 }
 
+// ── Pool-exhaustion (typed 429) ─────────────────────────────────────────────
+/**
+ * Quota-exhaustion walk budget. Exhaustion hops are "free" — they do not
+ * consume the account-attempt budget — because a quota 429 comes back fast
+ * and the alternative is failing the request while healthy accounts sit
+ * untried. Still bounded by hop count AND wall-clock so a whole fleet of
+ * dead accounts cannot stall the client past the frontend timeout.
+ */
+const MAX_EXHAUSTION_HOPS = Math.max(
+  1,
+  Number(process.env.POOLPROX_MAX_EXHAUSTION_HOPS) || 25,
+);
+const EXHAUSTION_WALK_MS = Math.max(
+  1_000,
+  Number(process.env.POOLPROX_EXHAUSTION_WALK_MS) || 6_000,
+);
+/** xAI free usage resets over a rolling 24-hour window (per the 429 body). */
+const GROK_FREE_USAGE_ROLLING_WINDOW_MS = 24 * 60 * 60 * 1000;
+/** Default Retry-After when no reset hint exists: matches the exhausted-probe
+ * re-check cadence so a retry lands after the pool had a chance to revive. */
+const DEFAULT_EXHAUSTED_RETRY_AFTER_MS = 15 * 60_000;
+
+export interface PoolExhaustedError extends Error {
+  quotaExhausted: true;
+  retryAfterMs: number;
+  /** Raw upstream detail — written to request_logs, NEVER sent to the client. */
+  rawDetail?: string;
+}
+
+function formatRetryAfter(ms: number): string {
+  const s = Math.ceil(ms / 1000);
+  if (s < 120) return `${s}s`;
+  const m = Math.ceil(s / 60);
+  if (m < 120) return `${m}m`;
+  return `${Math.ceil(m / 60)}h`;
+}
+
+/**
+ * Build the typed "all accounts quota-exhausted" error. The client-facing
+ * message carries provider + count + retry hint ONLY — upstream JSON blobs
+ * go to rawDetail for request_logs.
+ */
+export function buildPoolExhaustedError(args: {
+  providerName: string;
+  exhaustedCount?: number | null;
+  resetAt?: Date | null;
+  rawDetail?: string;
+}): PoolExhaustedError {
+  const nowMs = Date.now();
+  const retryAfterMs =
+    args.resetAt && args.resetAt.getTime() > nowMs
+      ? args.resetAt.getTime() - nowMs
+      : DEFAULT_EXHAUSTED_RETRY_AFTER_MS;
+  const count =
+    args.exhaustedCount && args.exhaustedCount > 0 ? `${args.exhaustedCount} ` : "";
+  const err = new Error(
+    `All ${count}${args.providerName} accounts are quota-exhausted. Retry in ~${formatRetryAfter(retryAfterMs)}.`,
+  ) as PoolExhaustedError;
+  err.quotaExhausted = true;
+  err.retryAfterMs = retryAfterMs;
+  if (args.rawDetail) err.rawDetail = args.rawDetail;
+  return err;
+}
+
 /**
  * Sanitize request by applying pudidil filters to all text content.
  * Strips Claude Code identity, billing headers, and other patterns
@@ -221,12 +285,25 @@ export async function routeRequest(
   let allRateLimited = true;
   let attemptsMade = 0;
   let earliestReset: Date | null = null;
+  // Exhaustion walk state: quota-exhausted accounts are rotated through as
+  // FREE hops (attempt is not incremented) so a request never fails while an
+  // untried account exists — bounded by hop count + wall-clock deadline.
+  let exhaustionHops = 0;
+  let sawExhaustion = false;
+  let earliestExhaustedReset: Date | null = null;
+  const exhaustionWalkDeadline = Date.now() + EXHAUSTION_WALK_MS;
+  // Anything that is neither rate-limit nor quota-exhaustion (banned, auth,
+  // transient, unknown) — keeps the typed-429 responses pure.
+  let sawOtherFailure = false;
   // Provider-host is dead (connection refused / upstream connect) — do not walk
   // the whole fleet with multi-second TCP timeouts on every account.
   let hardConnectFailures = 0;
   const MAX_HARD_CONNECT_ACCOUNT_ATTEMPTS = 2;
 
-  for (let attempt = 0; attempt < maxRetries; attempt++) {
+  // `attempt` counts hops that consume the retry budget; quota-exhaustion
+  // hops are free (see above) so the loop is manual-increment, not a for.
+  let attempt = 0;
+  while (attempt < maxRetries) {
     // BYOK uses prefix-based account lookup (not the generic pool),
     // so it can also find error-status accounts and retry them.
     // For other providers, use model-aware routing with the same exclude set
@@ -248,6 +325,17 @@ export async function routeRequest(
     }
 
     if (!account) {
+      // Distinguish "pool empty because everything is exhausted" (typed 429 +
+      // Retry-After) from "nothing configured/active" (actionable 503).
+      const dep = await pool.getPoolDepletion(providerName).catch(() => null);
+      if (dep && dep.enabled > 0 && (dep.exhausted > 0 || sawExhaustion)) {
+        throw buildPoolExhaustedError({
+          providerName,
+          exhaustedCount: Math.max(dep.exhausted, exhaustionHops) || null,
+          resetAt: earliestExhaustedReset ?? dep.earliestResetAt,
+          rawDetail: lastError || undefined,
+        });
+      }
       throw new Error(
         `No active accounts available for provider: ${providerName}`
       );
@@ -314,6 +402,19 @@ export async function routeRequest(
 
       if (looksExhausted) {
         allRateLimited = false;
+        sawExhaustion = true;
+        // Reset hint drives both the typed 429's Retry-After and the row's
+        // self-revive timestamp. Grok's 429 body states a rolling 24h window
+        // and gives no timestamp, so default to it; other providers only get
+        // a hint when they surfaced resetsAt themselves.
+        const resetHint =
+          result.resetsAt ??
+          (providerName === "grok"
+            ? new Date(Date.now() + GROK_FREE_USAGE_ROLLING_WINDOW_MS)
+            : null);
+        if (resetHint && (!earliestExhaustedReset || resetHint < earliestExhaustedReset)) {
+          earliestExhaustedReset = resetHint;
+        }
         if (providerName === "alibaba") {
           // Alibaba: per-model exhaustion is already handled by the provider
           // (setModelQuotaToZero called in chatCompletion). Just invalidate
@@ -321,10 +422,22 @@ export async function routeRequest(
           // this model.
           pool.invalidate(providerName);
           lastError = errText || "Quota exhausted for this model";
-          continue;
+        } else {
+          if (!isStaticAccount) {
+            await pool.markExhausted(account.id, { resetAt: resetHint });
+          }
+          lastError = errText || "Quota exhausted";
         }
-        if (!isStaticAccount) await pool.markExhausted(account.id);
-        lastError = errText || "Quota exhausted";
+        // FREE hop: do not increment `attempt` — rotate through every
+        // dispatch-eligible account once rather than failing while untried
+        // accounts exist. Bounded so a dead fleet can't stall the client.
+        // Static single-credential nodes can't rotate — the exclusion set is
+        // ignored for them, so a free hop would re-hit the same key; count it.
+        exhaustionHops++;
+        if (isStaticAccount) attempt++;
+        if (exhaustionHops >= MAX_EXHAUSTION_HOPS || Date.now() >= exhaustionWalkDeadline) {
+          break;
+        }
         continue; // Try next account — exhausted accounts are excluded from selection
       }
 
@@ -353,6 +466,7 @@ export async function routeRequest(
           const waitMs = Math.min(result.retryAfterMs ?? 1500, 1500);
           await new Promise((r) => setTimeout(r, waitMs));
         }
+        attempt++;
         continue; // Try next account
       }
       // A non-rate-limit failure means not ALL accounts were rate-limited.
@@ -375,6 +489,8 @@ export async function routeRequest(
         }
         lastError = result.error || errText || "Account banned or restricted";
         allRateLimited = false;
+        sawOtherFailure = true;
+        attempt++;
         continue; // Try next account (excluded via attemptedAccountIds)
       }
 
@@ -382,6 +498,7 @@ export async function routeRequest(
       // same host for all Grok OAuth accounts. One failover attempt, then stop.
       if (isHardConnectFailure(errText)) {
         allRateLimited = false;
+        sawOtherFailure = true;
         hardConnectFailures++;
         if (!isStaticAccount) {
           await pool.markTransientFailure(account.id, errText);
@@ -390,6 +507,7 @@ export async function routeRequest(
         if (hardConnectFailures >= MAX_HARD_CONNECT_ACCOUNT_ATTEMPTS) {
           break;
         }
+        attempt++;
         continue;
       }
 
@@ -455,6 +573,8 @@ export async function routeRequest(
           }
         }
         lastError = result.error || "Auth failed";
+        sawOtherFailure = true;
+        attempt++;
         continue;
       }
 
@@ -477,6 +597,8 @@ export async function routeRequest(
         }
       }
       lastError = result.error || "Unknown error";
+      sawOtherFailure = true;
+      attempt++;
     } catch (error) {
       const errMsg =
         error instanceof Error ? error.message : String(error);
@@ -521,6 +643,8 @@ export async function routeRequest(
         await pool.markError(account.id, errMsg);
       }
       lastError = errMsg;
+      sawOtherFailure = true;
+      attempt++;
     } finally {
       // Only release here when we did NOT hand the stream to the caller.
       // (Successful streams are released by the stream finalizer in index.ts.)
@@ -533,7 +657,7 @@ export async function routeRequest(
   // one attempt was made), surface a rate-limit error carrying the earliest
   // reset time so the proxy layer can return 429 + Retry-After instead of a
   // generic 503. This lets well-behaved clients back off correctly.
-  if (allRateLimited && attemptsMade > 0) {
+  if (allRateLimited && attemptsMade > 0 && !sawExhaustion && !sawOtherFailure) {
     const resetMs = earliestReset ? Math.max(0, earliestReset.getTime() - Date.now()) : 60_000;
     const err = new Error(
       `All ${providerName} accounts rate-limited. Retry in ${Math.ceil(resetMs / 1000)}s.`
@@ -541,6 +665,25 @@ export async function routeRequest(
     err.rateLimited = true;
     err.retryAfterMs = resetMs;
     throw err;
+  }
+
+  // Typed "all quota-exhausted" path: every failure was exhaustion (pure), or
+  // exhaustion mixed with rate-limits (still client-retryable). Either way the
+  // client gets a clean 429 + Retry-After — never the raw upstream JSON blob.
+  if (sawExhaustion && !sawOtherFailure) {
+    const resetCandidates = [earliestExhaustedReset, earliestReset].filter(
+      (d): d is Date => d instanceof Date,
+    );
+    const earliest =
+      resetCandidates.length > 0
+        ? new Date(Math.min(...resetCandidates.map((d) => d.getTime())))
+        : null;
+    throw buildPoolExhaustedError({
+      providerName,
+      exhaustedCount: exhaustionHops || null,
+      resetAt: earliest,
+      rawDetail: lastError || undefined,
+    });
   }
 
   throw new Error(

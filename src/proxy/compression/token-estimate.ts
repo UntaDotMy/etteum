@@ -11,6 +11,16 @@ import type { ChatCompletionRequest, ChatMessage } from "../providers/base";
 
 const CHARS_PER_TOKEN = 4;
 
+/**
+ * Per-tool schema overhead, from OpenAI's tiktoken cookbook: func_init 7 +
+ * func_end 12 for the gpt-4o/o200k family (cl100k family: 10 + 12 = 22).
+ * Property-level costs (prop_init/prop_key 3 each) are approximated by the
+ * JSON character count of the schema itself. Anthropic's count_tokens bills
+ * tool definitions in the same order of magnitude. Without this, tool-heavy
+ * agent requests (dozens of tools) are systematically undercounted.
+ */
+const TOOL_SCHEMA_OVERHEAD_TOKENS = 19;
+
 export function estimateTokensFromString(s: string | undefined | null): number {
   if (!s) return 0;
   return Math.ceil(s.length / CHARS_PER_TOKEN);
@@ -63,7 +73,7 @@ export function estimateRequestTokens(req: ChatCompletionRequest): number {
   // Tool definitions
   if (Array.isArray(req.tools)) {
     for (const t of req.tools) {
-      total += estimateTokensFromString(JSON.stringify(t));
+      total += estimateTokensFromString(JSON.stringify(t)) + TOOL_SCHEMA_OVERHEAD_TOKENS;
     }
   }
   return total;

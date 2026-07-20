@@ -1,6 +1,6 @@
 import { db } from "../db/index";
 import { accounts, settings } from "../db/schema";
-import { eq, and, sql, or, isNull, lt, asc, desc } from "drizzle-orm";
+import { eq, and, sql, or, isNull, isNotNull, lt, lte, asc, desc } from "drizzle-orm";
 import type { Account } from "../db/schema";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
@@ -45,6 +45,55 @@ export function filterDispatchEligibleAccounts(
     if (excludeAccountIds?.has(a.id)) return false;
     return isAccountEligibleForDispatch(a);
   });
+}
+
+/**
+ * Pure: should an exhausted row whose quotaResetAt passed be reinstated, and
+ * with what remaining budget? Returns the patch, or null to stay exhausted.
+ *
+ * Optimistic refill to the package limit: a wrong revive costs one fast
+ * upstream 429 that re-parks the account with a fresh resetAt, and the next
+ * warmup probe corrects the ledger. limit<=0 means "unknown budget" — revive
+ * with remaining 0; the dispatch gate treats limit<=0 as eligible anyway.
+ */
+export function computeResetRevivePatch(
+  row: { status: string; quotaResetAt: Date | string | null; quotaLimit: number | null },
+  now: Date,
+): { quotaRemaining: number } | null {
+  if (row.status !== "exhausted") return null;
+  if (!row.quotaResetAt) return null;
+  const resetAt = row.quotaResetAt instanceof Date ? row.quotaResetAt : new Date(row.quotaResetAt);
+  if (Number.isNaN(resetAt.getTime()) || resetAt.getTime() > now.getTime()) return null;
+  const limit = Number(row.quotaLimit ?? 0);
+  return { quotaRemaining: Number.isFinite(limit) && limit > 0 ? limit : 0 };
+}
+
+/** Pool-wide depletion snapshot used to build the typed all-exhausted 429. */
+export interface PoolDepletion {
+  /** Enabled rows for the provider (any status). */
+  enabled: number;
+  /** Enabled rows currently status=exhausted. */
+  exhausted: number;
+  /** Earliest future quotaResetAt among exhausted enabled rows, if any. */
+  earliestResetAt: Date | null;
+}
+
+/** Pure: fold account rows into a PoolDepletion (DB wrapper below). */
+export function summarizePoolDepletion(
+  rows: Array<{ status: string; quotaResetAt: Date | string | null }>,
+  nowMs: number,
+): PoolDepletion {
+  let exhausted = 0;
+  let earliest: Date | null = null;
+  for (const r of rows) {
+    if (r.status !== "exhausted") continue;
+    exhausted++;
+    const t = r.quotaResetAt ? new Date(r.quotaResetAt) : null;
+    if (t && !Number.isNaN(t.getTime()) && t.getTime() > nowMs && (!earliest || t < earliest)) {
+      earliest = t;
+    }
+  }
+  return { enabled: rows.length, exhausted, earliestResetAt: earliest };
 }
 
 // --- Routing resilience constants  ---
@@ -616,6 +665,47 @@ class AccountPool {
   }
 
   private async fetchActiveAccounts(provider: ProviderName): Promise<Account[]> {
+    // Reset-window revive: exhausted rows whose quotaResetAt has passed come
+    // back automatically — the same self-reinstating pattern cooldownUntil
+    // uses, no cron and no manual re-enable. Refill is optimistic (limit);
+    // a premature revive costs one fast upstream 429 that re-parks the row
+    // with a fresh resetAt, and warmup probes true up the ledger.
+    const now = new Date();
+    const dueForRevive = await db
+      .select({
+        id: accounts.id,
+        status: accounts.status,
+        quotaLimit: accounts.quotaLimit,
+        quotaResetAt: accounts.quotaResetAt,
+      })
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.provider, provider),
+          eq(accounts.status, "exhausted"),
+          eq(accounts.enabled, true),
+          isNotNull(accounts.quotaResetAt),
+          lte(accounts.quotaResetAt, now),
+        ),
+      );
+    for (const row of dueForRevive) {
+      const patch = computeResetRevivePatch(row, now);
+      if (!patch) continue;
+      await db
+        .update(accounts)
+        .set({
+          status: "active",
+          quotaRemaining: patch.quotaRemaining,
+          errorMessage: null,
+          updatedAt: new Date(),
+        })
+        .where(eq(accounts.id, row.id));
+      broadcast({
+        type: "account_status",
+        data: { id: row.id, provider, status: "active", quotaRevived: true },
+      });
+    }
+
     // Cooldown reinstatement: an account with cooldownUntil in the future is
     // temporarily excluded. The moment that timestamp passes it is eligible
     // again automatically — no manual re-enable, no cron, no extra state.
@@ -761,14 +851,41 @@ class AccountPool {
   }
 
   /**
-   * Mark an account as exhausted (also zeroes out quota remaining)
+   * Mark an account as exhausted (also zeroes out quota remaining).
+   *
+   * `opts.resetAt` records when the upstream quota window rolls over so
+   * fetchActiveAccounts can self-revive the row (same pattern as
+   * cooldownUntil). Earlier-wins merge: a sooner reset is always more useful —
+   * an existing future resetAt is only overwritten by an EARLIER one, and a
+   * missing/past resetAt is always replaced. Never pass a value to push a
+   * known reset further out.
    */
-  async markExhausted(accountId: number): Promise<void> {
+  async markExhausted(accountId: number, opts?: { resetAt?: Date | null }): Promise<void> {
+    let nextResetAt: Date | undefined;
+    if (opts?.resetAt && !Number.isNaN(opts.resetAt.getTime())) {
+      const [cur] = await db
+        .select({ quotaResetAt: accounts.quotaResetAt })
+        .from(accounts)
+        .where(eq(accounts.id, accountId))
+        .limit(1);
+      const existing = cur?.quotaResetAt ? new Date(cur.quotaResetAt) : null;
+      const existingMs =
+        existing && !Number.isNaN(existing.getTime()) ? existing.getTime() : null;
+      if (
+        existingMs === null ||
+        existingMs <= Date.now() ||
+        opts.resetAt.getTime() < existingMs
+      ) {
+        nextResetAt = opts.resetAt;
+      }
+    }
+
     const [account] = await db
       .update(accounts)
       .set({
         status: "exhausted",
         quotaRemaining: 0,
+        ...(nextResetAt ? { quotaResetAt: nextResetAt } : {}),
         updatedAt: new Date(),
       })
       .where(eq(accounts.id, accountId))
@@ -784,9 +901,23 @@ class AccountPool {
           provider: account.provider,
           quotaRemaining: 0,
           quotaLimit: Number(account.quotaLimit || 0),
+          ...(nextResetAt ? { quotaResetAt: nextResetAt.toISOString() } : {}),
         },
       });
     }
+  }
+
+  /**
+   * Pool depletion snapshot for the typed all-exhausted 429: how many enabled
+   * rows the provider has, how many are exhausted, and the earliest reset
+   * hint across them (drives Retry-After).
+   */
+  async getPoolDepletion(provider: ProviderName): Promise<PoolDepletion> {
+    const rows = await db
+      .select({ status: accounts.status, quotaResetAt: accounts.quotaResetAt })
+      .from(accounts)
+      .where(and(eq(accounts.provider, provider), eq(accounts.enabled, true)));
+    return summarizePoolDepletion(rows, Date.now());
   }
 
   /**
