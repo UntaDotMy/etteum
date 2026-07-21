@@ -1,20 +1,19 @@
 #!/usr/bin/env bun
 /**
- * Lightweight static file server for dashboard/dist + same-origin API proxy.
+ * Lightweight static file server for dashboard/dist + same-origin API/WS proxy.
  *
  * The browser only talks to DASHBOARD_PORT. These paths are forwarded to the
  * backend on this machine (BACKEND_ORIGIN or http://127.0.0.1:PORT):
  *   /api/*           management + dashboard session
  *   /v1/*            OpenAI-compatible chat/models (admin Chat uses this)
  *   /backend-api/*   Codex HTTP alias
+ *   /ws              live dashboard WebSocket (session cookie or ?api_key=)
  *
  * So:
  *   - custom ports (e.g. 8443 → 8880) work without a special Vite build
  *   - public admin Chat works without opening the backend port for REST
- *   - session cookies stay on the dashboard origin for /api/*
- *
- * WebSocket live updates still go to the backend port (injected as
- * window.__POOL_ENV__.backendPort) — open PORT in the firewall for WS.
+ *   - session cookies stay on the dashboard origin for /api/* and /ws
+ *   - only DASHBOARD_PORT needs to be public for the admin UI (optional)
  *
  * Env:
  *   DASHBOARD_PORT  (default: 1931)
@@ -23,6 +22,7 @@
  *   HOST            (bind address, default: 0.0.0.0 for public access)
  */
 
+import type { ServerWebSocket } from "bun";
 import {
   dashboardAssetCacheHeaders,
   dashboardAssetNotFoundResponse,
@@ -35,6 +35,7 @@ const backendPort = Number(process.env.PORT) || 1930;
 const host = process.env.HOST || "0.0.0.0";
 const backendOrigin =
   process.env.BACKEND_ORIGIN || `http://127.0.0.1:${backendPort}`;
+const backendWsOrigin = backendOrigin.replace(/^http/i, "ws");
 
 const distDir = new URL("../dashboard/dist", import.meta.url).pathname.replace(/^\/([A-Z]:)/i, "$1");
 const indexFile = `${distDir}/index.html`;
@@ -44,9 +45,18 @@ if (!(await Bun.file(indexFile).exists())) {
   process.exit(1);
 }
 
+// Kept for older dashboard builds that still read backendPort; new clients use
+// same-origin /ws which this process proxies.
 const ENV_SNIPPET = `<script>window.__POOL_ENV__=${JSON.stringify({
   backendPort,
 })};</script>`;
+
+type WsProxyData = {
+  cookie: string;
+  search: string;
+  upstream: WebSocket | null;
+  queue: Array<string | Buffer>;
+};
 
 async function loadIndexHtml(): Promise<string> {
   const html = await Bun.file(indexFile).text();
@@ -90,12 +100,90 @@ async function proxyToBackend(req: Request, pathname: string): Promise<Response>
   }
 }
 
-Bun.serve({
+function attachUpstream(ws: ServerWebSocket<WsProxyData>) {
+  const target = `${backendWsOrigin}/ws${ws.data.search || ""}`;
+  const headers: Record<string, string> = {};
+  if (ws.data.cookie) headers.Cookie = ws.data.cookie;
+
+  let upstream: WebSocket;
+  try {
+    // Bun supports custom headers on the client WebSocket (needed for session cookie).
+    upstream = new WebSocket(target, { headers } as any);
+  } catch (err) {
+    console.error("[dashboard] WS upstream open failed:", err);
+    try {
+      ws.close(1011, "upstream failed");
+    } catch {
+      /* ignore */
+    }
+    return;
+  }
+
+  ws.data.upstream = upstream;
+
+  upstream.addEventListener("open", () => {
+    const q = ws.data.queue;
+    ws.data.queue = [];
+    for (const msg of q) {
+      try {
+        upstream.send(msg);
+      } catch {
+        /* ignore */
+      }
+    }
+  });
+
+  upstream.addEventListener("message", (ev) => {
+    try {
+      if (typeof ev.data === "string") {
+        ws.send(ev.data);
+      } else if (ev.data instanceof ArrayBuffer) {
+        ws.send(ev.data);
+      } else {
+        ws.send(ev.data as any);
+      }
+    } catch {
+      /* client gone */
+    }
+  });
+
+  upstream.addEventListener("close", () => {
+    try {
+      ws.close();
+    } catch {
+      /* ignore */
+    }
+  });
+
+  upstream.addEventListener("error", () => {
+    try {
+      ws.close(1011, "upstream error");
+    } catch {
+      /* ignore */
+    }
+  });
+}
+
+Bun.serve<WsProxyData>({
   port,
   hostname: host,
-  async fetch(req) {
+  async fetch(req, server) {
     const url = new URL(req.url);
     const pathname = url.pathname;
+
+    // Same-origin WebSocket → backend /ws (forwards Cookie + query for auth).
+    if (pathname === "/ws") {
+      const upgraded = server.upgrade(req, {
+        data: {
+          cookie: req.headers.get("cookie") || "",
+          search: url.search,
+          upstream: null,
+          queue: [],
+        },
+      });
+      if (upgraded) return undefined;
+      return new Response("WebSocket upgrade failed", { status: 400 });
+    }
 
     // Same-origin proxy → backend (public admin without CORS pain).
     // /v1/* is required for admin Chat streaming; without it the SPA fallback
@@ -144,8 +232,36 @@ Bun.serve({
       headers: dashboardIndexHeaders(),
     });
   },
+  websocket: {
+    open(ws) {
+      attachUpstream(ws);
+    },
+    message(ws, message) {
+      const up = ws.data.upstream;
+      if (up && up.readyState === WebSocket.OPEN) {
+        try {
+          up.send(message);
+        } catch {
+          /* ignore */
+        }
+        return;
+      }
+      ws.data.queue.push(message as string | Buffer);
+    },
+    close(ws) {
+      const up = ws.data.upstream;
+      ws.data.upstream = null;
+      if (up) {
+        try {
+          up.close();
+        } catch {
+          /* ignore */
+        }
+      }
+    },
+  },
 });
 
 console.log(
-  `[dashboard] http://${host}:${port}  →  API proxy ${backendOrigin}  (WS clients use public host:${backendPort})`,
+  `[dashboard] http://${host}:${port}  →  API+WS proxy ${backendOrigin}`,
 );
