@@ -1,16 +1,6 @@
 import { bulkTimeoutMs, BULK_API_TIMEOUT_MS } from "./bulkTimeout";
 export { bulkTimeoutMs, BULK_API_TIMEOUT_MS };
 
-/**
- * Runtime env injected by scripts/serve-dashboard.ts into index.html so
- * production works on custom ports without a special Vite rebuild.
- */
-type PoolEnv = { backendPort?: number };
-function poolEnv(): PoolEnv {
-  if (typeof window === "undefined") return {};
-  return ((window as unknown as { __POOL_ENV__?: PoolEnv }).__POOL_ENV__) ?? {};
-}
-
 function resolveApiBase(): string {
   if (import.meta.env.VITE_API_BASE) return import.meta.env.VITE_API_BASE;
   // Prefer same-origin: serve-dashboard proxies /api/* → backend (public admin,
@@ -25,19 +15,11 @@ export function getWsBase(): string {
   if (configured) return configured;
   const { port, hostname, protocol: httpProto } = window.location;
   const protocol = httpProto === "https:" ? "wss" : "ws";
-  // Live updates hit the backend WS port (not the static dashboard server).
-  const backendPort =
-    poolEnv().backendPort ??
-    (import.meta.env.VITE_BACKEND_PORT ? Number(import.meta.env.VITE_BACKEND_PORT) : undefined);
-  if (backendPort) {
-    return `${protocol}://${hostname}:${backendPort}`;
-  }
+  // Same-origin WebSocket so the dashboard session cookie is sent on upgrade.
+  // serve-dashboard proxies /ws → backend; backend also serves /ws when the UI
+  // is opened on PORT directly. Override with VITE_WS_BASE only if needed.
   if (!port || port === "443" || port === "80") {
     return `${protocol}://${hostname}`;
-  }
-  // Legacy defaults when nothing is injected.
-  if (port === "1931") {
-    return `${protocol}://${hostname}:1930`;
   }
   return `${protocol}://${hostname}:${port}`;
 }

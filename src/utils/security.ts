@@ -57,6 +57,25 @@ export function extractApiKey(
   return "";
 }
 
+/**
+ * Read one cookie value from a raw Cookie header (Bun.serve / non-Hono paths).
+ * Returns "" when missing. Does not decode URI components (JWT cookies are raw).
+ */
+export function getCookieValue(
+  cookieHeader: string | null | undefined,
+  name: string,
+): string {
+  if (!cookieHeader || !name) return "";
+  const parts = cookieHeader.split(";");
+  for (const part of parts) {
+    const idx = part.indexOf("=");
+    if (idx === -1) continue;
+    const key = part.slice(0, idx).trim();
+    if (key === name) return part.slice(idx + 1).trim();
+  }
+  return "";
+}
+
 /** Result of a rate-limit check. */
 export interface RateLimitResult {
   allowed: boolean;

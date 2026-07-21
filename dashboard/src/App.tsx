@@ -4,6 +4,7 @@ import Layout from "./components/layout/Layout";
 import Login from "./pages/Login";
 import { AntigravityChallengeModal } from "./components/auth/AntigravityChallengeModal";
 import { validateApiKey, logout, getDashboardAuthStatus } from "./lib/api";
+import { WebSocketProvider } from "./hooks/useWebSocket";
 
 /** Lazy import with one reload retry when a deploy invalidated chunk hashes. */
 function lazyPage<T extends ComponentType<unknown>>(
@@ -113,7 +114,10 @@ export default function App() {
     return <Login onLogin={handleLogin} />;
   }
 
+  // Mount WS only after auth so the session cookie exists before the first
+  // upgrade (password login clears localStorage api_key on purpose).
   return (
+    <WebSocketProvider>
     <Suspense fallback={<RouteFallback />}>
       <AntigravityChallengeModal />
       <Routes>
@@ -146,5 +150,6 @@ export default function App() {
         </Route>
       </Routes>
     </Suspense>
+    </WebSocketProvider>
   );
 }

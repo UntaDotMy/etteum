@@ -10,6 +10,7 @@ import { mediaRouter } from "./proxy/media/router";
 import { mcpRouter } from "./proxy/mcp/router";
 import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
+import { authorizeDashboardWebSocket } from "./ws/dashboard-auth";
 import { extractApiKey } from "./utils/security";
 import {
   effectiveClientIp,
@@ -450,10 +451,10 @@ const server = Bun.serve({
     // Handle WebSocket upgrade
     const url = new URL(req.url);
     if (url.pathname === "/ws") {
-      // Dashboard WebSocket — authenticate via ?api_key= query (browsers cannot
-      // set Authorization headers on WS upgrades). Mirrors the /v1/responses
-      // WS auth gate so unauthenticated clients cannot read live request
-      // metadata (provider, model, account email, errors).
+      // Dashboard live feed — dual auth like /api/*:
+      //   ?api_key= (pool admin key) OR httpOnly session cookie (password/OIDC).
+      // Browsers cannot set Authorization on WS upgrades. After password login
+      // the SPA clears localStorage api_key and relies on the session cookie.
       const wsSockAddr = server.requestIP(req);
       const wsPeerIp =
         typeof wsSockAddr === "string"
@@ -463,22 +464,14 @@ const server = Bun.serve({
       if (await isIpBanned(wsIp)) {
         return new Response("Banned", { status: 403 });
       }
-      const wsToken = url.searchParams.get("api_key");
-      const wsResolved = wsToken ? await resolveApiKey(wsToken, {}) : null;
-      if (!wsResolved?.valid) {
-        return new Response("Unauthorized", { status: 401 });
-      }
-      // TRIPWIRE: friend key on the admin feed → ban this IP only; key stays live.
-      if (wsResolved.scope === "managed") {
-        await triggerFriendKeyTripwire({
-          token: wsToken!,
-          apiKeyId: wsResolved.apiKeyId,
-          surface: "ws",
-          path: "/ws",
-          ip: wsIp,
-          headers: req.headers,
-        });
-        return new Response("Access denied.", { status: 403 });
+      const wsAuth = await authorizeDashboardWebSocket({
+        apiKeyQuery: url.searchParams.get("api_key"),
+        cookieHeader: req.headers.get("cookie"),
+        ip: wsIp,
+        headers: req.headers,
+      });
+      if (!wsAuth.ok) {
+        return new Response(wsAuth.body, { status: wsAuth.status });
       }
       const upgraded = server.upgrade(req, { data: {} });
       if (upgraded) return undefined;

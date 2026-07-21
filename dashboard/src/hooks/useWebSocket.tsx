@@ -83,10 +83,13 @@ export function WebSocketProvider({ children }: { children: ReactNode }) {
 
     let ws: WebSocket;
     try {
-      // The /ws endpoint requires ?api_key= query auth (browsers can't set
-      // Authorization headers on WebSocket). Without it the upgrade returns 401
-      // and the connection fails immediately, causing a reconnect loop.
-      ws = new WebSocket(`${getWsBase()}/ws?api_key=${encodeURIComponent(getApiKey())}`);
+      // Dual auth on /ws: optional ?api_key= (localStorage API-key mode) OR the
+      // httpOnly session cookie from password/OIDC login (sent automatically on
+      // same-origin upgrade). Empty api_key must not be appended — that used to
+      // 401 forever after login cleared localStorage.
+      const key = getApiKey();
+      const qs = key ? `?api_key=${encodeURIComponent(key)}` : "";
+      ws = new WebSocket(`${getWsBase()}/ws${qs}`);
     } catch {
       scheduleReconnect();
       return;

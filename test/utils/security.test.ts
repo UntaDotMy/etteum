@@ -2,7 +2,7 @@
  * Tests for shared security utilities (audit fixes H1, C4, H4).
  */
 import { describe, test, expect, beforeEach } from "bun:test";
-import { constantTimeEqual, extractApiKey, RateLimiter } from "../../src/utils/security";
+import { constantTimeEqual, extractApiKey, getCookieValue, RateLimiter } from "../../src/utils/security";
 
 describe("constantTimeEqual (H1)", () => {
   test("returns true for equal strings", () => {
@@ -68,6 +68,22 @@ describe("extractApiKey (H2 dedup)", () => {
 
   test("returns empty string when no auth present", () => {
     expect(extractApiKey(baseHeaders(), null)).toBe("");
+  });
+});
+
+describe("getCookieValue", () => {
+  test("reads a single cookie by name", () => {
+    expect(getCookieValue("auth_token=abc.def.ghi", "auth_token")).toBe("abc.def.ghi");
+  });
+
+  test("reads among multiple cookies", () => {
+    expect(getCookieValue("a=1; auth_token=tok; b=2", "auth_token")).toBe("tok");
+  });
+
+  test("returns empty when missing or empty header", () => {
+    expect(getCookieValue(null, "auth_token")).toBe("");
+    expect(getCookieValue("", "auth_token")).toBe("");
+    expect(getCookieValue("a=1", "auth_token")).toBe("");
   });
 });
 
