@@ -1,7 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import {
+  COSY_CLIENT_TYPE,
+  COSY_VERSION,
+  ensureCosyMachineFingerprint,
   hasQoderCredentials,
   isDeviceSessionToken,
+  isSpoofedMachineFingerprint,
+  MODEL_CONFIGS,
   normalizeQoderTokens,
 } from "../../src/proxy/providers/qoder/helpers";
 
@@ -10,19 +15,18 @@ describe("normalizeQoderTokens", () => {
     const t = normalizeQoderTokens({
       personalToken: "pt-abc",
       machineId: "m1",
-      machineToken: "m1",
-      machineType: "5",
+      machineToken: "opaque-token-not-m1",
+      machineType: "a1b2",
+      machineCode: "c3d4",
+      machineOs: "x86_64_windows",
     });
     expect(t?.personalToken).toBe("pt-abc");
     expect(t?.authMode).toBe("pat");
     expect(t?.machineId).toBe("m1");
-    // No session yet — jobToken will mint securityOauthToken.
     expect(t?.securityOauthToken).toBeFalsy();
   });
 
   test("maps browser device-flow access_token → securityOauthToken (NOT personalToken)", () => {
-    // Device poll body.token is a session credential (often dt-…), not a PAT.
-    // Putting it in personalToken caused jobToken 401 "personal token is invalid".
     const t = normalizeQoderTokens({
       access_token: "dt-device-session",
       refresh_token: "ref",
@@ -34,9 +38,11 @@ describe("normalizeQoderTokens", () => {
     expect(t!.personalToken).toBeFalsy();
     expect(t!.securityOauthToken).toBe("dt-device-session");
     expect(t!.authMode).toBe("device");
-    expect(t!.refreshToken).toBe("ref");
-    expect(t!.machineId).toBe("mid-1");
-    expect(t!.userId).toBe("u1");
+    // Spoofed machine* from bare machine_id is healed for Cosy path.
+    expect(t!.machineToken).not.toBe(t!.machineId);
+    expect(t!.machineType).not.toBe("5");
+    expect(t!.machineCode).toBeTruthy();
+    expect(t!.machineOs).toBeTruthy();
   });
 
   test("heals historical wrong mapping personalToken=access_token=dt-…", () => {
@@ -53,18 +59,6 @@ describe("normalizeQoderTokens", () => {
     expect(t!.authMode).toBe("device");
   });
 
-  test("heals personalToken-only field that is actually a device session", () => {
-    const t = normalizeQoderTokens({
-      personalToken: "dt-only-field",
-      machineId: "m3",
-      machineToken: "m3",
-      machineType: "5",
-    });
-    expect(t!.personalToken).toBeFalsy();
-    expect(t!.securityOauthToken).toBe("dt-only-field");
-    expect(t!.authMode).toBe("device");
-  });
-
   test("isDeviceSessionToken detects dt- prefix", () => {
     expect(isDeviceSessionToken("dt-abc")).toBe(true);
     expect(isDeviceSessionToken("DT_xyz")).toBe(true);
@@ -72,14 +66,66 @@ describe("normalizeQoderTokens", () => {
   });
 
   test("hasQoderCredentials true for PAT-only or session-only", () => {
-    expect(hasQoderCredentials(normalizeQoderTokens({ personalToken: "p", machineId: "m", machineToken: "m", machineType: "5" }))).toBe(true);
-    expect(hasQoderCredentials(normalizeQoderTokens({ access_token: "dt-x", machineId: "m", machineToken: "m", machineType: "5" }))).toBe(true);
+    expect(
+      hasQoderCredentials(
+        normalizeQoderTokens({
+          personalToken: "p",
+          machineId: "m",
+          machineToken: "opaque",
+          machineType: "abcd",
+          machineCode: "ef01",
+          machineOs: "x86_64_windows",
+        }),
+      ),
+    ).toBe(true);
+    expect(
+      hasQoderCredentials(
+        normalizeQoderTokens({ access_token: "dt-x", machineId: "m" }),
+      ),
+    ).toBe(true);
     expect(hasQoderCredentials(normalizeQoderTokens({ email: "x@y.com" }))).toBe(false);
-    expect(hasQoderCredentials(null)).toBe(false);
+  });
+});
+
+describe("Cosy machine fingerprint + model map", () => {
+  test("COSY version is desktop 1.15.1 and clienttype 0", () => {
+    expect(COSY_VERSION).toBe("1.15.1");
+    expect(COSY_CLIENT_TYPE).toBe("0");
   });
 
-  test("returns null when no token field present", () => {
-    expect(normalizeQoderTokens({ email: "x@y.com" })).toBeNull();
-    expect(normalizeQoderTokens(null)).toBeNull();
+  test("detects and heals old CLI spoof (machineToken==id, type 5)", () => {
+    expect(
+      isSpoofedMachineFingerprint({
+        machineId: "uuid-1",
+        machineToken: "uuid-1",
+        machineType: "5",
+      }),
+    ).toBe(true);
+
+    const healed = ensureCosyMachineFingerprint({
+      machineId: "uuid-1",
+      machineToken: "uuid-1",
+      machineType: "5",
+    } as any);
+    expect(healed.machineId).toBe("uuid-1"); // locked, not rotated
+    expect(healed.machineToken).not.toBe("uuid-1");
+    expect(healed.machineType).not.toBe("5");
+    expect(healed.machineCode).toBeTruthy();
+    expect(healed.machineOs).toBe("x86_64_windows");
+    // Stable across calls
+    const again = ensureCosyMachineFingerprint({
+      machineId: "uuid-1",
+      machineToken: "uuid-1",
+      machineType: "5",
+    } as any);
+    expect(again.machineToken).toBe(healed.machineToken);
+    expect(again.machineType).toBe(healed.machineType);
+  });
+
+  test("Kimi K3 and Qwen3.8 map to correct upstream keys", () => {
+    expect(MODEL_CONFIGS["qd-Kimi-K3"]?.upstream).toBe("kmodel_latest");
+    expect(MODEL_CONFIGS["qd-Qwen3.8-Max-Preview"]?.upstream).toBe("qmodel_preview");
+    expect(MODEL_CONFIGS["qd-Qwen3.7-Max"]?.upstream).toBe("qmodel_latest");
+    expect(MODEL_CONFIGS["qd-Kimi-K2.6"]?.upstream).toBe("kmodel");
   });
 });

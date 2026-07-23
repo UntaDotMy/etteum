@@ -15,15 +15,17 @@ import { applyModelSpecs } from "../../model-specs";
 import { getUpstreamNameOverride } from "../custom-models";
 
 // ============================================================================
-// Qoder CLI port — auth + chat (PAT/COSY flow, no browser cookie)
-// Reverse-engineered from github.com/cubk1/qoder2api (Java) + qodercli bundle.
+// Qoder Cosy call path — chat / quota / activity
+// Desktop Cosy 1.15.1-style headers (not old qodercli 1.0.22 spoof).
+// Auth/login stays separate; this file owns the request shape that reaches Qoder.
 // ============================================================================
 
-// Updated to match qodercli 1.0.22 capture (api2.qoder.sh host, new headers,
-// new business object, top-level `system` field). The earlier api3 host was
-// the qoder2api reverse-engineered fallback that the server still served but
-// did NOT charge against the qmodel_latest free-quota bucket.
-export const COSY_VERSION = "1.0.22";
+// Cosy desktop capture: version 1.15.1 + clienttype 0. Old CLI spoof (1.0.22 +
+// clienttype "5" + machineType "5" + machineToken===machineId) lets Lite work
+// but often 403s kmodel_latest / qmodel_preview on free accounts.
+export const COSY_VERSION = "1.15.1";
+/** Desktop Cosy client type. Old CLI used "5" — wrong for K3/Qwen3.8 path. */
+export const COSY_CLIENT_TYPE = "0";
 export const APPCODE = "cosy";
 export const SIG_SECRET = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw=="; // base64("war, war never changes")
 export const JOB_TOKEN_URL = "https://center.qoder.sh/algo/api/v3/user/jobToken?Encode=1";
@@ -38,14 +40,15 @@ export const ACTIVITY_URL = "https://openapi.qoder.sh/algo/api/v2/activity";
 // the request to the right billing/promo bucket.
 export const BUSINESS_PRODUCT = "cli";
 export const BUSINESS_TYPE = "agent";
-export const BUSINESS_VERSION = "1.0.22"; // matches Cosy-Version
+export const BUSINESS_VERSION = COSY_VERSION; // keep in lockstep with Cosy-Version
 export const COSY_SCENE = "assistant";
+export const DEFAULT_MACHINE_OS = "x86_64_windows";
 
 export function openApiHeaders(securityOauthToken: string): Record<string, string> {
   return {
     Accept: "application/json",
     Authorization: `Bearer ${securityOauthToken}`,
-    "Cosy-ClientType": "5",
+    "Cosy-ClientType": COSY_CLIENT_TYPE,
     "Cosy-Version": COSY_VERSION,
     "User-Agent": "qoder/" + COSY_VERSION,
   };
@@ -192,9 +195,16 @@ export interface QoderTokens {
   plan?: string;
   expireTime?: number;
   email?: string;
+  /** Locked at device/PAT bind — never rotate per request. */
   machineId: string;
+  /** Opaque hex; must NOT equal machineId (old CLI spoof set them equal). */
   machineToken: string;
+  /** Short hex fingerprint; must NOT be the literal "5". */
   machineType: string;
+  /** Short hex device code (Cosy 1.15.1 desktop capture). */
+  machineCode?: string;
+  /** e.g. x86_64_windows */
+  machineOs?: string;
   authMode?: QoderAuthMode;
 }
 
@@ -255,14 +265,22 @@ export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
     (typeof t.machineId === "string" && t.machineId) ||
     (typeof t.machine_id === "string" && t.machine_id) ||
     crypto.randomUUID();
-  const machineToken =
+  const machineTokenRaw =
     (typeof t.machineToken === "string" && t.machineToken) ||
     (typeof t.machine_token === "string" && t.machine_token) ||
-    machineId;
-  const machineType =
+    "";
+  const machineTypeRaw =
     (typeof t.machineType === "string" && t.machineType) ||
     (typeof t.machine_type === "string" && t.machine_type) ||
-    "5";
+    "";
+  const machineCode =
+    (typeof t.machineCode === "string" && t.machineCode) ||
+    (typeof t.machine_code === "string" && t.machine_code) ||
+    undefined;
+  const machineOs =
+    (typeof t.machineOs === "string" && t.machineOs) ||
+    (typeof t.machine_os === "string" && t.machine_os) ||
+    undefined;
   const userId =
     (typeof t.userId === "string" && t.userId) ||
     (typeof t.user_id === "string" && t.user_id) ||
@@ -279,7 +297,9 @@ export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
 
   const authMode: QoderAuthMode = personalToken ? "pat" : "device";
 
-  return {
+  // Prefer stored machine*; Cosy path will heal old CLI spoofs stably via
+  // ensureCosyMachineFingerprint (does not invent a new machineId).
+  return ensureCosyMachineFingerprint({
     personalToken: personalToken || undefined,
     securityOauthToken: sessionToken || undefined,
     refreshToken: refreshToken || undefined,
@@ -294,9 +314,61 @@ export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
     expireTime,
     email: typeof t.email === "string" ? t.email : undefined,
     machineId,
-    machineToken,
-    machineType,
+    machineToken: machineTokenRaw || machineId,
+    machineType: machineTypeRaw || "5",
+    machineCode,
+    machineOs,
     authMode,
+  });
+}
+
+/** Stable short hex from a seed (locked fingerprint, not random per call). */
+function stableHex(seed: string, bytes: number): string {
+  return crypto.createHash("sha256").update(seed, "utf8").digest("hex").slice(0, bytes * 2);
+}
+
+/**
+ * True when machine* looks like the old qodercli 1.0.22 spoof that breaks
+ * kmodel_latest / qmodel_preview on free accounts.
+ */
+export function isSpoofedMachineFingerprint(tokens: {
+  machineId?: string;
+  machineToken?: string;
+  machineType?: string;
+  machineCode?: string;
+  machineOs?: string;
+}): boolean {
+  const id = tokens.machineId || "";
+  if (!id) return true;
+  if (!tokens.machineToken || tokens.machineToken === id) return true;
+  if (!tokens.machineType || tokens.machineType === "5") return true;
+  if (!tokens.machineCode) return true;
+  if (!tokens.machineOs) return true;
+  return false;
+}
+
+/**
+ * Ensure Cosy machine fingerprint is desktop-shaped and STABLE for a given
+ * machineId. Heals old CLI spoofs without rotating machineId (device bind).
+ */
+export function ensureCosyMachineFingerprint(tokens: QoderTokens): QoderTokens {
+  const machineId = tokens.machineId || crypto.randomUUID();
+  if (!isSpoofedMachineFingerprint({ ...tokens, machineId })) {
+    return { ...tokens, machineId };
+  }
+  return {
+    ...tokens,
+    machineId,
+    // Opaque, not equal to machineId; stable across process restarts.
+    machineToken: tokens.machineToken && tokens.machineToken !== machineId && tokens.machineToken !== "5"
+      ? tokens.machineToken
+      : stableHex(`qoder:mt:${machineId}`, 32),
+    machineType:
+      tokens.machineType && tokens.machineType !== "5"
+        ? tokens.machineType
+        : stableHex(`qoder:mtype:${machineId}`, 4),
+    machineCode: tokens.machineCode || stableHex(`qoder:mcode:${machineId}`, 4),
+    machineOs: tokens.machineOs || DEFAULT_MACHINE_OS,
   };
 }
 
@@ -307,30 +379,37 @@ export function hasQoderCredentials(tokens: QoderTokens | null | undefined): boo
 }
 
 export function generateMachineIdentity() {
-  // Mirror qodercli 1.0.22 layout: machineToken == machineId (same UUID),
-  // machineType is the literal client type "5" (NOT a random hex blob).
+  // Desktop Cosy-style fingerprint: opaque machineToken ≠ machineId, hex
+  // machineType (not "5"), plus machineCode + machineOs. Locked once per account.
   const machineId = crypto.randomUUID();
-  const machineToken = machineId;
-  const machineType = "5";
-  return { machineId, machineToken, machineType };
+  return {
+    machineId,
+    machineToken: stableHex(`qoder:mt:${machineId}`, 32),
+    machineType: stableHex(`qoder:mtype:${machineId}`, 4),
+    machineCode: stableHex(`qoder:mcode:${machineId}`, 4),
+    machineOs: DEFAULT_MACHINE_OS,
+  };
 }
 
 export function signatureHeaders(tokens: QoderTokens): Record<string, string> {
+  const t = ensureCosyMachineFingerprint(tokens);
   const date = rfc1123Date();
   return {
-    "cosy-machinetoken": tokens.machineToken,
-    "cosy-machinetype": tokens.machineType,
+    "cosy-machinetoken": t.machineToken,
+    "cosy-machinetype": t.machineType,
     "login-version": "v2",
     appcode: APPCODE,
     accept: "application/json",
     "accept-encoding": "identity",
     "cosy-version": COSY_VERSION,
-    "cosy-clienttype": "5",
+    "cosy-clienttype": COSY_CLIENT_TYPE,
     date,
     signature: signSignatureHeader(date),
     "content-type": "application/json",
-    "cosy-machineid": tokens.machineId,
-    "user-agent": "Go-http-client/2.0",
+    "cosy-machineid": t.machineId,
+    "user-agent": `qoder/${COSY_VERSION}`,
+    ...(t.machineCode ? { "cosy-machinecode": t.machineCode } : {}),
+    ...(t.machineOs ? { "cosy-machineos": t.machineOs } : {}),
   };
 }
 
@@ -441,31 +520,26 @@ export interface BearerCallOptions {
 
 export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions): Promise<Response> {
   const method = opts.method || "POST";
-  const session = buildSessionContext(buildIdentity(tokens));
+  const t = ensureCosyMachineFingerprint(tokens);
+  const session = buildSessionContext(buildIdentity(t));
   const bodyEncoded = opts.body == null ? "" : encodeQoderPayload(JSON.stringify(opts.body));
   const payloadB64 = buildPayloadB64(session.info);
   const date = String(Math.floor(Date.now() / 1000));
   const pathSig = pathSigFromUrl(opts.url);
   const sig = signBearerRequest(payloadB64, session.cosyKey, date, bodyEncoded, pathSig);
 
-  // Header layout matches qodercli 1.0.22 capture. Notable differences vs the
-  // older qoder2api port:
-  //   - cosy-data-policy is lowercase "agree" (was "AGREE")
-  //   - cosy-machinetype is the literal string "5" (client type indicator),
-  //     NOT a random UUID-derived value
-  //   - cosy-machinetoken equals cosy-machineid (same UUID)
-  //   - cosy-business-product / cosy-business-type / cosy-scene are NEW —
-  //     the server uses these to attribute the request to a billing bucket
-  //   - the fake link-local cosy-clientip is gone; CLI doesn't send it.
-  //   - user-agent is Go-http-client/2.0 (Go binary, unchanged)
-  const machineId = tokens.machineId;
-  const machineToken = tokens.machineToken || machineId; // CLI: token == id
+  // Cosy 1.15.1 desktop-style headers (not old qodercli 1.0.22 spoof):
+  //   - cosy-version 1.15.1
+  //   - cosy-clienttype "0" (desktop); old CLI used "5"
+  //   - machineToken opaque ≠ machineId; machineType hex ≠ "5"
+  //   - machineCode + machineOs present
+  //   - business product/type/scene for billing bucket attribution
   const headers: Record<string, string> = {
     "cosy-data-policy": "agree",
-    "cosy-machinetype": "5",
-    "cosy-clienttype": "5",
+    "cosy-machinetype": t.machineType,
+    "cosy-clienttype": COSY_CLIENT_TYPE,
     "cosy-date": date,
-    "cosy-user": tokens.userId || "",
+    "cosy-user": t.userId || "",
     "cosy-key": session.cosyKey,
     "cache-control": "no-cache",
     "cosy-business-product": BUSINESS_PRODUCT,
@@ -475,10 +549,12 @@ export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions):
     authorization: `Bearer COSY.${payloadB64}.${sig}`,
     "accept-encoding": "identity",
     "cosy-version": COSY_VERSION,
-    "cosy-machineid": machineId,
-    "cosy-machinetoken": machineToken,
+    "cosy-machineid": t.machineId,
+    "cosy-machinetoken": t.machineToken,
     "login-version": "v2",
-    "user-agent": "Go-http-client/2.0",
+    "user-agent": `qoder/${COSY_VERSION}`,
+    ...(t.machineCode ? { "cosy-machinecode": t.machineCode } : {}),
+    ...(t.machineOs ? { "cosy-machineos": t.machineOs } : {}),
     ...(opts.extraHeaders || {}),
   };
 
@@ -520,10 +596,15 @@ export const QODER_MODELS: QoderModelDef[] = [
   // reject requests it actually can't serve, which is the right place to
   // enforce the real ceiling.
   { id: "qd-Qwen3.7-Max",       upstream: "qmodel_latest", display_name: "Qwen3.7-Max",       max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
+  // Qwen 3.8 preview — NOT qmodel_latest (that is 3.7). Cosy path + free 0/0
+  // can still return 200 when headers/machine* are desktop-shaped.
+  { id: "qd-Qwen3.8-Max-Preview", upstream: "qmodel_preview", display_name: "Qwen3.8-Max-Preview", max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
   { id: "qd-Qwen3.6-Plus",      upstream: "qmodel",        display_name: "Qwen3.6-Plus",      max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
   { id: "qd-DeepSeek-V4-Pro",   upstream: "dmodel",        display_name: "DeepSeek-V4-Pro",   max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.5 },
   { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel",       display_name: "DeepSeek-V4-Flash", max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.1 },
   { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
+  // Kimi K3 → kmodel_latest. Bare kmodel is K2.7-Code — wrong for K3.
+  { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 256000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
   { id: "qd-Kimi-K2.6",         upstream: "kmodel",        display_name: "Kimi-K2.6",         max_input_tokens: 256000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
   { id: "qd-MiniMax-M2.7",      upstream: "mmodel",        display_name: "MiniMax-M2.7",      max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
 ];
