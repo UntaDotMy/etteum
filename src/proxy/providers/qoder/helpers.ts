@@ -604,7 +604,9 @@ export const QODER_MODELS: QoderModelDef[] = [
   { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel",       display_name: "DeepSeek-V4-Flash", max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.1 },
   { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
   // Kimi K3 → kmodel_latest. Bare kmodel is K2.7-Code — wrong for K3.
-  { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 256000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
+  // 1M combined context (canonical kimi-k3 registry). Thinking model: Cosy often
+  // streams reasoning_content first; empty content alone looks like a blank chat.
+  { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.3 },
   { id: "qd-Kimi-K2.6",         upstream: "kmodel",        display_name: "Kimi-K2.6",         max_input_tokens: 256000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
   { id: "qd-MiniMax-M2.7",      upstream: "mmodel",        display_name: "MiniMax-M2.7",      max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
 ];
@@ -999,16 +1001,61 @@ export interface ParsedDelta {
   usage?: { prompt_tokens: number; completion_tokens: number; total_tokens: number };
 }
 
+/**
+ * Pull assistant-visible text from a Cosy/OpenAI-style delta.
+ * Kimi K3 (and other thinking models) often stream only reasoning_* fields
+ * first — if we ignore those, chat UI shows empty replies.
+ */
+function extractDeltaText(delta: Record<string, any>): {
+  content?: string;
+  reasoningContent?: string;
+} {
+  const out: { content?: string; reasoningContent?: string } = {};
+  if (typeof delta.content === "string" && delta.content) out.content = delta.content;
+  // Cosy / OpenAI-compat reasoning field names seen in the wild.
+  for (const key of [
+    "reasoning_content",
+    "reasoning",
+    "reasoning_text",
+    "thinking",
+    "thinking_content",
+  ]) {
+    const v = delta[key];
+    if (typeof v === "string" && v) {
+      out.reasoningContent = (out.reasoningContent || "") + v;
+    }
+  }
+  // Some builds nest text under content parts arrays.
+  if (!out.content && Array.isArray(delta.content)) {
+    const parts: string[] = [];
+    for (const p of delta.content as any[]) {
+      if (typeof p === "string") parts.push(p);
+      else if (p?.type === "text" && typeof p.text === "string") parts.push(p.text);
+      else if (typeof p?.text === "string") parts.push(p.text);
+    }
+    if (parts.length) out.content = parts.join("");
+  }
+  return out;
+}
+
 export function parseSseLine(line: string): ParsedDelta | null {
   if (!line.startsWith("data:")) return null;
   const data = line.slice(5).trim();
   if (!data || data === "[DONE]") return null;
   try {
     const wrapper = JSON.parse(data);
-    const innerStr = wrapper.body;
-    if (typeof innerStr !== "string" || !innerStr) return null;
-    if (innerStr === "[DONE]") return null;
-    const inner = JSON.parse(innerStr);
+    // Cosy wraps OpenAI-style JSON in { body: "<json string>" }. Some builds
+    // also emit flat OpenAI chunks without the wrapper — accept both.
+    let inner: any;
+    if (typeof wrapper.body === "string" && wrapper.body) {
+      if (wrapper.body === "[DONE]") return null;
+      inner = JSON.parse(wrapper.body);
+    } else if (wrapper.choices || wrapper.usage || wrapper.delta) {
+      inner = wrapper;
+    } else {
+      return null;
+    }
+
     const result: ParsedDelta = {};
 
     if (inner.usage) {
@@ -1021,13 +1068,38 @@ export function parseSseLine(line: string): ParsedDelta | null {
 
     const choice = inner.choices?.[0];
     if (!choice) {
+      // Some events put delta at top-level without choices[].
+      if (inner.delta && typeof inner.delta === "object") {
+        const t = extractDeltaText(inner.delta);
+        if (t.content) result.content = t.content;
+        if (t.reasoningContent) result.reasoningContent = t.reasoningContent;
+        if (typeof inner.delta.role === "string") result.role = inner.delta.role;
+        if (Array.isArray(inner.delta.tool_calls) && inner.delta.tool_calls.length > 0) {
+          result.toolCalls = inner.delta.tool_calls;
+        }
+        return result.content || result.reasoningContent || result.toolCalls || result.usage
+          ? result
+          : null;
+      }
       return result.usage ? result : null;
     }
-    const delta = choice.delta || {};
+    const delta = choice.delta || choice.message || {};
     if (choice.finish_reason) result.finishReason = choice.finish_reason;
     if (typeof delta.role === "string") result.role = delta.role;
-    if (typeof delta.content === "string") result.content = delta.content;
-    if (typeof delta.reasoning_content === "string") result.reasoningContent = delta.reasoning_content;
+    const text = extractDeltaText(delta);
+    if (text.content) result.content = text.content;
+    if (text.reasoningContent) result.reasoningContent = text.reasoningContent;
+    // Fallback: full message content on non-streaming-shaped final chunks.
+    if (!result.content && typeof choice.message?.content === "string" && choice.message.content) {
+      result.content = choice.message.content;
+    }
+    if (
+      !result.reasoningContent &&
+      typeof choice.message?.reasoning_content === "string" &&
+      choice.message.reasoning_content
+    ) {
+      result.reasoningContent = choice.message.reasoning_content;
+    }
     if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
       result.toolCalls = delta.tool_calls;
     }
