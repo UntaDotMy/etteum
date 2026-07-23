@@ -94,6 +94,46 @@ export function encodeQoderPayload(data: Uint8Array | string): string {
   return out;
 }
 
+/**
+ * Inverse of encodeQoderPayload. Cosy Encode=1 sometimes wraps response body
+ * fields in the same custom alphabet; chat SSE is usually plaintext JSON but
+ * we try decode when normal JSON parse of a string body fails.
+ */
+export function decodeQoderPayload(encoded: string): string | null {
+  try {
+    const n = encoded.length;
+    if (!n) return null;
+    let std = "";
+    for (let i = 0; i < n; i++) {
+      const c = encoded.charCodeAt(i);
+      const m = c < 128 ? C2S[c] : -1;
+      if (m < 0) return null;
+      std += String.fromCharCode(m);
+    }
+    const a = Math.floor(n / 3);
+    // Same rearrange is an involution (encode applied twice ≈ original layout).
+    const rearranged = std.substring(n - a) + std.substring(a, n - a) + std.substring(0, a);
+    return Buffer.from(rearranged, "base64").toString("utf8");
+  } catch {
+    return null;
+  }
+}
+
+function tryParseJsonMaybeEncoded(raw: string): any | null {
+  try {
+    return JSON.parse(raw);
+  } catch {
+    /* try Cosy custom-base64 decode */
+  }
+  const decoded = decodeQoderPayload(raw);
+  if (!decoded) return null;
+  try {
+    return JSON.parse(decoded);
+  } catch {
+    return null;
+  }
+}
+
 export function rfc1123Date(d = new Date()): string {
   return d.toUTCString();
 }
@@ -1002,9 +1042,8 @@ export interface ParsedDelta {
 }
 
 /**
- * Pull assistant-visible text from a Cosy/OpenAI-style delta.
- * Kimi K3 (and other thinking models) often stream only reasoning_* fields
- * first — if we ignore those, chat UI shows empty replies.
+ * Pull assistant-visible text from a Cosy/OpenAI-style delta OR a richer
+ * llm_model_result event. Kimi K3 often streams only reasoning_* first.
  */
 function extractDeltaText(delta: Record<string, any>): {
   content?: string;
@@ -1012,7 +1051,6 @@ function extractDeltaText(delta: Record<string, any>): {
 } {
   const out: { content?: string; reasoningContent?: string } = {};
   if (typeof delta.content === "string" && delta.content) out.content = delta.content;
-  // Cosy / OpenAI-compat reasoning field names seen in the wild.
   for (const key of [
     "reasoning_content",
     "reasoning",
@@ -1025,7 +1063,6 @@ function extractDeltaText(delta: Record<string, any>): {
       out.reasoningContent = (out.reasoningContent || "") + v;
     }
   }
-  // Some builds nest text under content parts arrays.
   if (!out.content && Array.isArray(delta.content)) {
     const parts: string[] = [];
     for (const p of delta.content as any[]) {
@@ -1035,61 +1072,33 @@ function extractDeltaText(delta: Record<string, any>): {
     }
     if (parts.length) out.content = parts.join("");
   }
+  // Cosy agent events sometimes put text on the event itself.
+  for (const key of ["text", "output_text", "answer", "result", "message"]) {
+    if (out.content) break;
+    const v = delta[key];
+    if (typeof v === "string" && v) out.content = v;
+    else if (v && typeof v === "object" && typeof v.text === "string" && v.text) out.content = v.text;
+    else if (v && typeof v === "object" && typeof v.content === "string" && v.content) out.content = v.content;
+  }
   return out;
 }
 
-export function parseSseLine(line: string): ParsedDelta | null {
-  if (!line.startsWith("data:")) return null;
-  const data = line.slice(5).trim();
-  if (!data || data === "[DONE]") return null;
-  try {
-    const wrapper = JSON.parse(data);
-    // Cosy wraps OpenAI-style JSON in { body: "<json string>" }. Some builds
-    // also emit flat OpenAI chunks without the wrapper — accept both.
-    let inner: any;
-    if (typeof wrapper.body === "string" && wrapper.body) {
-      if (wrapper.body === "[DONE]") return null;
-      inner = JSON.parse(wrapper.body);
-    } else if (wrapper.choices || wrapper.usage || wrapper.delta) {
-      inner = wrapper;
-    } else {
-      return null;
-    }
-
-    const result: ParsedDelta = {};
-
-    if (inner.usage) {
-      result.usage = {
-        prompt_tokens: Number(inner.usage.prompt_tokens) || 0,
-        completion_tokens: Number(inner.usage.completion_tokens) || 0,
-        total_tokens: Number(inner.usage.total_tokens) || 0,
-      };
-    }
-
-    const choice = inner.choices?.[0];
-    if (!choice) {
-      // Some events put delta at top-level without choices[].
-      if (inner.delta && typeof inner.delta === "object") {
-        const t = extractDeltaText(inner.delta);
-        if (t.content) result.content = t.content;
-        if (t.reasoningContent) result.reasoningContent = t.reasoningContent;
-        if (typeof inner.delta.role === "string") result.role = inner.delta.role;
-        if (Array.isArray(inner.delta.tool_calls) && inner.delta.tool_calls.length > 0) {
-          result.toolCalls = inner.delta.tool_calls;
-        }
-        return result.content || result.reasoningContent || result.toolCalls || result.usage
-          ? result
-          : null;
-      }
-      return result.usage ? result : null;
-    }
+function fillParsedFromOpenAiShape(inner: any, result: ParsedDelta): void {
+  if (inner?.usage) {
+    result.usage = {
+      prompt_tokens: Number(inner.usage.prompt_tokens) || 0,
+      completion_tokens: Number(inner.usage.completion_tokens) || 0,
+      total_tokens: Number(inner.usage.total_tokens) || 0,
+    };
+  }
+  const choice = inner?.choices?.[0];
+  if (choice) {
     const delta = choice.delta || choice.message || {};
     if (choice.finish_reason) result.finishReason = choice.finish_reason;
     if (typeof delta.role === "string") result.role = delta.role;
     const text = extractDeltaText(delta);
     if (text.content) result.content = text.content;
     if (text.reasoningContent) result.reasoningContent = text.reasoningContent;
-    // Fallback: full message content on non-streaming-shaped final chunks.
     if (!result.content && typeof choice.message?.content === "string" && choice.message.content) {
       result.content = choice.message.content;
     }
@@ -1103,7 +1112,63 @@ export function parseSseLine(line: string): ParsedDelta | null {
     if (Array.isArray(delta.tool_calls) && delta.tool_calls.length > 0) {
       result.toolCalls = delta.tool_calls;
     }
-    return result;
+    return;
+  }
+  // Flat delta / Cosy agent payload without choices[]
+  if (inner?.delta && typeof inner.delta === "object") {
+    const text = extractDeltaText(inner.delta);
+    if (text.content) result.content = text.content;
+    if (text.reasoningContent) result.reasoningContent = text.reasoningContent;
+    if (typeof inner.delta.role === "string") result.role = inner.delta.role;
+    if (Array.isArray(inner.delta.tool_calls) && inner.delta.tool_calls.length > 0) {
+      result.toolCalls = inner.delta.tool_calls;
+    }
+  }
+  // llm_model_result / agent event shapes
+  if (!result.content && !result.reasoningContent) {
+    const text = extractDeltaText(inner || {});
+    if (text.content) result.content = text.content;
+    if (text.reasoningContent) result.reasoningContent = text.reasoningContent;
+  }
+  if (typeof inner?.finish_reason === "string" && !result.finishReason) {
+    result.finishReason = inner.finish_reason;
+  }
+}
+
+export function parseSseLine(line: string): ParsedDelta | null {
+  if (!line.startsWith("data:")) return null;
+  const data = line.slice(5).trim();
+  if (!data || data === "[DONE]") return null;
+  try {
+    const wrapper = tryParseJsonMaybeEncoded(data);
+    if (!wrapper || typeof wrapper !== "object") return null;
+
+    const result: ParsedDelta = {};
+
+    // Cosy wraps OpenAI-style JSON in { body: "<json string or encoded>" }.
+    if (typeof wrapper.body === "string" && wrapper.body) {
+      if (wrapper.body === "[DONE]") return null;
+      const inner = tryParseJsonMaybeEncoded(wrapper.body);
+      if (inner) fillParsedFromOpenAiShape(inner, result);
+    } else if (wrapper.choices || wrapper.usage || wrapper.delta || wrapper.content || wrapper.text) {
+      fillParsedFromOpenAiShape(wrapper, result);
+    } else if (wrapper.data && typeof wrapper.data === "object") {
+      // Some FetchKeys envelopes: { type, data: { ... } }
+      fillParsedFromOpenAiShape(wrapper.data, result);
+      if (!result.content && !result.reasoningContent) {
+        fillParsedFromOpenAiShape(wrapper, result);
+      }
+    } else {
+      fillParsedFromOpenAiShape(wrapper, result);
+    }
+
+    return result.content ||
+      result.reasoningContent ||
+      result.toolCalls ||
+      result.usage ||
+      result.finishReason
+      ? result
+      : null;
   } catch {
     return null;
   }

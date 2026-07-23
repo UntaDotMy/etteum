@@ -309,7 +309,15 @@ export class QoderProvider extends BaseProvider {
       return { success: false, error: `expired: HTTP 401` };
     }
     if (resp.status === 403) {
-      return { success: false, error: "Rate limited or quota exceeded", quotaExhausted: true };
+      // Cosy returns 403 for many non-quota reasons (signature, path, free-bucket
+      // miss, rate-limit-per-second). Do NOT set quotaExhausted here — that parks
+      // the whole account (including qd-Lite). Let the pool/warmup decide.
+      const text = await resp.text().catch(() => "");
+      return {
+        success: false,
+        error: `Qoder chat HTTP 403: ${text.slice(0, 200) || "forbidden"}`,
+        rateLimited: /rate|limit|too many|throttle/i.test(text),
+      };
     }
     if (!resp.ok) {
       const text = await resp.text().catch(() => "");
@@ -405,25 +413,36 @@ export class QoderProvider extends BaseProvider {
               const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
               if (!line) continue;
 
-              // Detect Qoder error responses in SSE body (HTTP 200 but error in JSON)
-              // Format: {"code":"112","statusCodeValue":403,"message":"..."}
+              // Detect Qoder error responses in SSE body (HTTP 200 but error in JSON).
+              // Only treat as fatal when the payload clearly indicates quota/auth death.
+              // Path/signature/rate-limit 403s must NOT park the account as exhausted.
               if (line.startsWith("data:")) {
                 const dataStr = line.slice(5).trim();
                 if (dataStr && dataStr !== "[DONE]") {
                   try {
                     const wrapper = JSON.parse(dataStr);
-                    const svc = wrapper.statusCodeValue;
+                    const svc = Number(wrapper.statusCodeValue || wrapper.status || 0);
                     if (svc && svc >= 400) {
-                      const errStatus = wrapper.statusCode || "";
+                      const errStatus = String(wrapper.statusCode || wrapper.code || "");
                       let errMsg = wrapper.message || "";
                       if (typeof errMsg === "string" && errMsg.startsWith("{")) {
                         try { const p = JSON.parse(errMsg); errMsg = p.pricingUrl || JSON.stringify(p); } catch {}
                       }
-                      const fullErr = `Qoder HTTP ${svc} ${errStatus}: ${errMsg.slice(0, 200) || "rate limited or quota exceeded"}`;
+                      const fullErr = `Qoder HTTP ${svc} ${errStatus}: ${errMsg.slice(0, 200) || "upstream error"}`;
                       console.error(`[Qoder] ${fullErr}`);
-                      // Send error signal to stream, finalizer will detect and mark exhausted
+                      const quotaish = /quota|credit|exceed|NoQuota|usage.?exhaust|subscription|pricing/i.test(
+                        `${errStatus} ${errMsg}`,
+                      );
                       try {
-                        controller.enqueue(encoder.encode(`data: ${JSON.stringify({ type: "upstream_error", error: fullErr })}\n\n`));
+                        controller.enqueue(
+                          encoder.encode(
+                            `data: ${JSON.stringify({
+                              type: "upstream_error",
+                              error: fullErr,
+                              quotaExhausted: quotaish,
+                            })}\n\n`,
+                          ),
+                        );
                         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
                       } catch {}
                       streamActive = false;

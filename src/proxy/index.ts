@@ -698,10 +698,21 @@ function wrapStreamWithUsageFinalizer(
         continue; // not JSON (shouldn't happen for well-formed SSE), skip
       }
 
-      // Detect upstream errors in SSE stream (Qoder 403 in body, OpenAI error format)
+      // Detect upstream errors in SSE stream (Qoder 403 in body, OpenAI error format).
+      // Only mark streamError when the payload looks like a real failure — not
+      // every object with an "error" key (some Cosy events use nested fields).
       if (parsed.type === "upstream_error") streamError = true;
       if (parsed.statusCodeValue && parsed.statusCodeValue >= 400) streamError = true;
-      if (parsed.error && (typeof parsed.error === "object" || typeof parsed.error === "string")) streamError = true;
+      if (parsed.quotaExhausted === true) streamError = true;
+      if (
+        parsed.error &&
+        (typeof parsed.error === "string"
+          ? parsed.error.length > 0
+          : typeof parsed.error === "object" &&
+            (parsed.error.message || parsed.error.type || parsed.error.code))
+      ) {
+        streamError = true;
+      }
 
       if (firstContentAt == null && isContentfulStreamChunk(parsed)) {
         firstContentAt = Date.now();
@@ -746,22 +757,19 @@ function wrapStreamWithUsageFinalizer(
       try {
         const isQoder = context.provider === "qoder";
 
-        // If stream had upstream error (403 rate limit, empty stream, etc), don't decrement quota
-        // and mark account exhausted for Qoder — but verify with a probe first.
-        // Stream errors on Qoder are a noisy signal: rate-limit-per-second,
-        // signature replay protection, transient auth all surface as 403.
-        // The qd-Lite probe is the authoritative arbiter.
+        // If stream had upstream error, log it. Do NOT auto-exhaust Qoder accounts:
+        // Cosy 403s are noisy (signature, rate-limit-per-second, path spoof, free
+        // bucket miss). Only park the account when the error text clearly says
+        // quota/credits are gone. Warmup remains the source of truth for status.
         if (streamError) {
-          if (isQoder) {
-            // Trust upstream: if Qoder returned a stream error (typically a
-            // 403 due to genuine quota exhaustion or rate-limit), mark the
-            // account exhausted immediately. Warmup will flip it back to
-            // active once Qoder reports available quota again. No probe —
-            // we'd rather pay the occasional false-exhaust (lifted on the
-            // very next warmup tick) than serve a known-bad account.
-            if (!context.skipPoolMutations && context.accountId > 0) {
-              await pool.markExhausted(context.accountId);
-            }
+          const errText = streamedParts.join(" ") || "Upstream stream error";
+          const looksLikeQuota =
+            /quota|credit|exceed|NoQuota|isQuotaExceeded|usage.?exhaust|free.?usage|subscription/i.test(
+              errText,
+            ) || /Qoder HTTP 403/.test(errText) && /quota|credit|exceed/i.test(errText);
+          if (isQoder && looksLikeQuota && !context.skipPoolMutations && context.accountId > 0) {
+            // Definitive quota language only — not every stream glitch.
+            await pool.markExhausted(context.accountId);
           }
           // Still update request log with error status
           if (context.logId) {
@@ -769,7 +777,9 @@ function wrapStreamWithUsageFinalizer(
               .update(requestLogs)
               .set({
                 status: "error",
-                errorMessage: "Upstream rate limit or quota exceeded",
+                errorMessage: looksLikeQuota
+                  ? "Upstream rate limit or quota exceeded"
+                  : "Upstream stream error (not marked exhausted)",
                 durationMs,
                 ttftMs,
               })
