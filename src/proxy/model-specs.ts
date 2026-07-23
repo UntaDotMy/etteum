@@ -32,6 +32,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // ── Qwen (Alibaba DashScope) — help.aliyun.com/zh/model-studio/text-generation-model ──
   "qwen3.7-max":            { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   "qwen3.7-max-preview":    { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
+  // Qoder Cosy qmodel_preview (qd-Qwen3.8-Max-Preview) — same class as 3.7-max tier.
+  "qwen3.8-max-preview":    { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
   "qwen3.7-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   "qwen3.6-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
   "qwen3.5-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
@@ -86,7 +88,7 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "kimi-k3":                { contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true,  vision: true },
 
   // ── MiniMax — platform.minimaxi.com (M3 is current flagship, June 2026) ──
-  "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
+  "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: true },
   "minimax-m2.7":           { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: true },
   "minimax-m2.5":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "minimax-m2.1":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },

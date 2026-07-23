@@ -98,9 +98,8 @@ export class QoderProvider extends BaseProvider {
     created: Date.now(),
     owned_by: "qoder",
     context_window: m.max_input_tokens,
-    // Default max_output; applyModelSpecs overrides from canonical registry
-    // (kimi-k3 → 1M combined window / large max_output).
-    max_output: m.id === "qd-Kimi-K3" ? 131072 : 64000,
+    // Defaults; applyModelSpecs overrides from model-specs.ts when canonical hits.
+    max_output: 65_536,
     thinking: m.is_reasoning,
     vision: m.is_vl,
     creditUnit: "credit" as const,
