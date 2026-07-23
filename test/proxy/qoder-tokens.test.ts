@@ -122,10 +122,43 @@ describe("Cosy machine fingerprint + model map", () => {
     expect(again.machineType).toBe(healed.machineType);
   });
 
-  test("Kimi K3 and Qwen3.8 map to correct upstream keys", () => {
+  test("Kimi K3 is 1M context + reasoning; Qwen3.8 maps to qmodel_preview", () => {
     expect(MODEL_CONFIGS["qd-Kimi-K3"]?.upstream).toBe("kmodel_latest");
+    expect(MODEL_CONFIGS["qd-Kimi-K3"]?.max_input_tokens).toBe(1_000_000);
+    expect(MODEL_CONFIGS["qd-Kimi-K3"]?.is_reasoning).toBe(true);
     expect(MODEL_CONFIGS["qd-Qwen3.8-Max-Preview"]?.upstream).toBe("qmodel_preview");
     expect(MODEL_CONFIGS["qd-Qwen3.7-Max"]?.upstream).toBe("qmodel_latest");
     expect(MODEL_CONFIGS["qd-Kimi-K2.6"]?.upstream).toBe("kmodel");
+  });
+});
+
+describe("parseSseLine Cosy deltas", () => {
+  test("reads reasoning_content when content is empty (Kimi K3 thinking stream)", async () => {
+    const { parseSseLine } = await import("../../src/proxy/providers/qoder/helpers");
+    const line =
+      'data: {"body":' +
+      JSON.stringify(
+        JSON.stringify({
+          choices: [
+            {
+              delta: { role: "assistant", reasoning_content: "thinking…", content: "" },
+            },
+          ],
+        }),
+      ) +
+      "}";
+    const p = parseSseLine(line);
+    expect(p).not.toBeNull();
+    expect(p!.reasoningContent).toContain("thinking");
+    // content empty string should not block reasoning
+    expect(p!.content || p!.reasoningContent).toBeTruthy();
+  });
+
+  test("accepts flat OpenAI-shaped chunks without Cosy body wrapper", async () => {
+    const { parseSseLine } = await import("../../src/proxy/providers/qoder/helpers");
+    const line =
+      'data: {"choices":[{"delta":{"content":"hello"}}]}';
+    const p = parseSseLine(line);
+    expect(p?.content).toBe("hello");
   });
 });

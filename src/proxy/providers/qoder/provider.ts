@@ -97,7 +97,9 @@ export class QoderProvider extends BaseProvider {
     created: Date.now(),
     owned_by: "qoder",
     context_window: m.max_input_tokens,
-    max_output: 64000,
+    // Default max_output; applyModelSpecs overrides from canonical registry
+    // (kimi-k3 → 1M combined window / large max_output).
+    max_output: m.id === "qd-Kimi-K3" ? 131072 : 64000,
     thinking: m.is_reasoning,
     vision: m.is_vl,
     creditUnit: "credit" as const,
@@ -203,6 +205,11 @@ export class QoderProvider extends BaseProvider {
             }
             const delta = chunk.choices?.[0]?.delta;
             if (delta?.content) fullContent += delta.content;
+            else if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) {
+              fullContent += delta.reasoning_content;
+            } else if (typeof delta?.reasoning === "string" && delta.reasoning) {
+              fullContent += delta.reasoning;
+            }
             if (Array.isArray(delta?.tool_calls)) {
               for (const tc of delta.tool_calls) {
                 const idx = tc.index ?? toolCalls.length;
@@ -452,6 +459,11 @@ export class QoderProvider extends BaseProvider {
 
               if (parsedDelta.content) {
                 delta.content = parsedDelta.content;
+              } else if (parsedDelta.reasoningContent) {
+                // Thinking models (Kimi K3) often stream only reasoning_* first.
+                // Promote into content so Chat UIs that ignore reasoning_content
+                // don't show a blank reply.
+                delta.content = parsedDelta.reasoningContent;
               }
 
               if (parsedDelta.toolCalls) {
