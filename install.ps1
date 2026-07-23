@@ -490,6 +490,19 @@ function Setup-PythonVenv {
     }
     Ok "Python deps installed"
 
+    # why: pip exit 0 is not enough — prove camoufox_flow + canva_worker import surface
+    Info "Verifying auth flow imports (aiohttp/httpx/camoufox + adapters + curl_cffi)..."
+    $authDir = Join-Path $PWD "scripts\auth"
+    $prevPyPath = $env:PYTHONPATH
+    $env:PYTHONPATH = if ($prevPyPath) { "$authDir;$prevPyPath" } else { $authDir }
+    & $venvPy -c "import aiohttp, aiohttp_socks, httpx, camoufox, playwright, curl_cffi; from app.providers.kiro import KiroProviderAdapter; from app.providers.codebuddy import CodeBuddyProviderAdapter; from app.providers.canva import CanvaProviderAdapter; from app.providers.qoder_adapter import QoderProviderAdapter"
+    $probeOk = ($LASTEXITCODE -eq 0)
+    if ($null -ne $prevPyPath) { $env:PYTHONPATH = $prevPyPath } else { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
+    if (-not $probeOk) {
+        Fail "Auth flow import probe failed — login/canva will crash. Try: $venvPy -m pip install --no-input -r scripts\auth\requirements.txt"
+    }
+    Ok "Auth flow imports OK (shared venv)"
+
     # Shared browser runtime for provider login + farms (one Camoufox, not per-farm).
     # Remove legacy nodriver if a previous install left it in the venv.
     try {

@@ -37,8 +37,14 @@ describe("camoufox adapter surface", () => {
       "print('import_ok')",
     ].join("; ");
 
-    // Windows launcher first, then POSIX names used on CI/Linux.
+    // Prefer shared auth venv (same as runtime), then PATH fallbacks.
+    const venvRoot = path.join(AUTH_DIR, ".venv");
+    const venvPy =
+      process.platform === "win32"
+        ? [path.join(venvRoot, "Scripts", "python.exe"), path.join(venvRoot, "bin", "python")]
+        : [path.join(venvRoot, "bin", "python"), path.join(venvRoot, "bin", "python3")];
     const candidates: string[][] = [
+      ...venvPy.filter((p) => existsSync(p)).map((p) => [p, "-c", code]),
       ["py", "-3", "-c", code],
       ["python3", "-c", code],
       ["python", "-c", code],

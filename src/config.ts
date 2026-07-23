@@ -1,5 +1,6 @@
 import path from "path";
 import { existsSync, readFileSync } from "node:fs";
+import { resolveAuthPython } from "./utils/python";
 
 const projectRoot = path.resolve(import.meta.dir, "..");
 
@@ -48,36 +49,11 @@ function resolveBuildInfo(): { version: string; commit: string } {
 const buildInfo = resolveBuildInfo();
 
 /**
- * Resolve the Python interpreter path (used only by canva_worker.py for
- * curl_cffi TLS impersonation — auth automation is now TS+Camoufox).
+ * Shared Python for auth/farm/canva_worker. Single source of truth:
+ * src/utils/python.ts resolveAuthPython — never re-implement PATH-first here.
  */
 function resolvePythonPath(): string {
-  // 1. Explicit env override
-  if (process.env.PYTHON_PATH) return process.env.PYTHON_PATH;
-
-  const venvRoot = path.join(projectRoot, "scripts/auth/.venv");
-
-  // 2. Auto-detect venv layout (don't assume platform == layout)
-  const candidates = process.platform === "win32"
-    ? [
-        path.join(venvRoot, "Scripts", "python.exe"),   // native Windows venv
-        path.join(venvRoot, "bin", "python"),             // WSL-created venv
-        path.join(venvRoot, "bin", "python3"),
-      ]
-    : [
-        path.join(venvRoot, "bin", "python"),             // native Linux/macOS venv
-        path.join(venvRoot, "bin", "python3"),
-        path.join(venvRoot, "Scripts", "python.exe"),     // unlikely but symmetrical
-      ];
-
-  for (const candidate of candidates) {
-    if (existsSync(candidate)) return candidate;
-  }
-
-  // 3. Fall back to system Python so the server can still start.
-  //    The auth bot will fail with a clear "venv missing" message when
-  //    a login is actually attempted, rather than crashing on boot.
-  return process.platform === "win32" ? "python.exe" : "python3";
+  return resolveAuthPython(projectRoot);
 }
 
 export const config = {

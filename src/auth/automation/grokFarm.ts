@@ -14,6 +14,7 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, statSync } from "node
 import path from "node:path";
 import { broadcast } from "../../ws/index";
 import { config } from "../../config";
+import { findAuthVenvPython, resolveAuthPython } from "../../utils/python";
 import {
   registerSession,
   appendStep,
@@ -166,11 +167,8 @@ function pythonHasCamoufox(pythonExe: string): boolean {
 }
 
 /**
- * Use etteum's existing Python surface — same as Camoufox auth / canva worker:
- *   1. config.pythonPath  (scripts/auth/.venv or PYTHON_PATH)
- *   2. ETTEUM_PYTHON / BATCHER_PYTHON
- *   3. Any PATH/system python that already has camoufox
- *   4. Optional farm-local .venv only as last resort (not required)
+ * Shared auth Python first (src/utils/python.ts), then any candidate that can
+ * import camoufox. Never invent a PATH-first policy here.
  */
 function resolvePython(): string | null {
   if (resolvePythonCache && Date.now() - resolvePythonCache.at < RESOLVE_PYTHON_CACHE_MS) {
@@ -190,18 +188,11 @@ function resolvePython(): string | null {
     }
   };
 
-  // Official etteum interpreter first (scripts/auth/.venv via config.pythonPath).
-  // Prefer these before expensive PATH probes — usually the right answer.
+  // Shared resolver (overrides + scripts/auth/.venv) — same as camoufox_flow / canva.
+  const root = process.env.ETTEUM_ROOT || process.cwd();
+  push(resolveAuthPython(root));
   push(config.pythonPath);
-  push(process.env.PYTHON_PATH);
-  push(process.env.ETTEUM_PYTHON);
-  push(process.env.BATCHER_PYTHON);
-
-  const authVenv =
-    process.platform === "win32"
-      ? path.join(config.authScriptCwd, ".venv", "Scripts", "python.exe")
-      : path.join(config.authScriptCwd, ".venv", "bin", "python");
-  push(authVenv);
+  push(findAuthVenvPython(root));
 
   // Fast path: first existing candidate with camoufox (auth venv usually).
   for (const c of candidates) {
@@ -1042,12 +1033,10 @@ export function validateGrokFarmSetup(): {
   authVenv: string;
   errors: string[];
 } {
+  const root = process.env.ETTEUM_ROOT || process.cwd();
   const python = resolvePython();
   const script = farmScript();
-  const authVenv =
-    process.platform === "win32"
-      ? path.join(config.authScriptCwd, ".venv", "Scripts", "python.exe")
-      : path.join(config.authScriptCwd, ".venv", "bin", "python");
+  const authVenv = findAuthVenvPython(root) || path.join(config.authScriptCwd, ".venv");
   const errors: string[] = [];
   if (!python) {
     errors.push("Python not found — use etteum scripts/auth/.venv (same as auth bots)");

@@ -202,14 +202,28 @@ if (-not $venvPy) {
     if (-not $venvPy) { Fail "Failed to create Python venv. Try manually: python -m venv $venvDir" }
 }
 if ($venvPy) {
-    Info "Syncing shared auth venv (camoufox + playwright for login + farms)..."
+    Info "Syncing shared auth venv (camoufox + playwright + aiohttp for login + farms)..."
+    & $venvPy -m pip install --no-input --progress-bar off --upgrade pip wheel 2>&1 | Out-Null
     & $venvPy -m pip install --no-input --progress-bar off -r (Join-Path $ProjectDir "scripts\auth\requirements.txt") 2>&1 | Out-Null
+    if ($LASTEXITCODE -ne 0) { Fail "pip install failed for scripts/auth/requirements.txt" }
     # Drop legacy nodriver; never uninstall camoufox.
     & $venvPy -m pip uninstall -y --no-input nodriver 2>&1 | Out-Null
+    # why: catch partial installs before restart; matches camoufox_flow + canva_worker
+    $authDir = Join-Path $ProjectDir "scripts\auth"
+    $prevPyPath = $env:PYTHONPATH
+    $env:PYTHONPATH = if ($prevPyPath) { "$authDir;$prevPyPath" } else { $authDir }
+    Push-Location $authDir
+    & $venvPy -c "import aiohttp, aiohttp_socks, httpx, camoufox, playwright, curl_cffi; from app.providers.kiro import KiroProviderAdapter; from app.providers.codebuddy import CodeBuddyProviderAdapter; from app.providers.canva import CanvaProviderAdapter; from app.providers.qoder_adapter import QoderProviderAdapter"
+    $probeOk = ($LASTEXITCODE -eq 0)
+    Pop-Location
+    if ($null -ne $prevPyPath) { $env:PYTHONPATH = $prevPyPath } else { Remove-Item Env:PYTHONPATH -ErrorAction SilentlyContinue }
+    if (-not $probeOk) {
+        Fail "Auth flow import probe failed after pip install — login/canva will crash. Re-run: $venvPy -m pip install -r scripts\auth\requirements.txt"
+    }
     if ($env:ETTEUM_SKIP_BROWSERS -ne "1") {
         & $venvPy -m camoufox fetch 2>&1 | Out-Null
     }
-    Ok "Python auth venv ready (shared Camoufox)"
+    Ok "Python auth venv ready (shared Camoufox + full flow deps)"
 } else {
     Warn "Python venv missing — run install.ps1 or: python -m venv scripts\auth\.venv"
 }

@@ -499,6 +499,20 @@ setup_python_venv() {
   fi
   ok "Python deps installed"
 
+  # why: pip exit 0 is not enough. kiro login historically crashed on missing aiohttp
+  # while doctor only checked camoufox. Probe the real camoufox_flow + canva import surface.
+  info "Verifying auth flow imports (aiohttp/httpx/camoufox + adapters + curl_cffi)..."
+  if ! (
+    cd scripts/auth &&
+    PYTHONPATH="$(pwd)${PYTHONPATH:+:$PYTHONPATH}" \
+      "$venv_python" -c "import aiohttp, aiohttp_socks, httpx, camoufox, playwright, curl_cffi; from app.providers.kiro import KiroProviderAdapter; from app.providers.codebuddy import CodeBuddyProviderAdapter; from app.providers.canva import CanvaProviderAdapter; from app.providers.qoder_adapter import QoderProviderAdapter"
+  ); then
+    err "Auth flow import probe failed — login/canva will crash at runtime"
+    info "Try: $venv_python -m pip install --no-input -r scripts/auth/requirements.txt"
+    exit 1
+  fi
+  ok "Auth flow imports OK (shared venv)"
+
   # Shared browser runtime for provider login + farms (one Camoufox, not per-farm).
   # Remove legacy nodriver if a previous install left it in the venv.
   if "$venv_python" -c "import nodriver" 2>/dev/null; then

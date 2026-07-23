@@ -2,10 +2,10 @@
  * Update-awareness + one-click update API.
  *
  * - GET  /api/update/status  — is a newer build available on origin/main?
- * - POST /api/update/apply   — git pull + rebuild dashboard + migrate, then
- *                               best-effort restart via the detected supervisor
- *                               (systemd / NSSM / launchd), or a manual-restart
- *                               prompt when no supervisor is present.
+ * - POST /api/update/apply   — git pull + rebuild dashboard + sync auth Python
+ *                               venv + migrate, then best-effort restart via the
+ *                               detected supervisor (systemd / NSSM / launchd),
+ *                               or a manual-restart prompt when unsupervised.
  *
  * Detection is git-based: the install dir is a git clone (upgrade.sh relies on
  * that), so we `git fetch origin main` and compare local HEAD to origin/main.
@@ -18,6 +18,13 @@
 import { Hono } from "hono";
 import { config } from "../config";
 import path from "path";
+import { existsSync } from "node:fs";
+import {
+  authRequirementsPath,
+  findAuthVenvPython,
+  probeAuthFlowImports,
+  probeCanvaWorkerImports,
+} from "../utils/python";
 
 const projectRoot = path.resolve(import.meta.dir, "../..");
 
@@ -271,7 +278,57 @@ export async function applyUpdate(): Promise<{
     return { ok: false, steps, restarted: false, supervisor: detectSupervisor() };
   }
 
-  // 3. Run DB migrations (best-effort — a no-op migration is fine)
+  // 3. Sync shared auth Python venv (aiohttp/curl_cffi/camoufox). Without this,
+  // dashboard/git updates leave login/canva on stale/missing Python deps — the
+  // same class of bug as doctor-green + runtime-red. Non-fatal if venv missing
+  // (operator may not use browser login); surface detail either way.
+  {
+    const py = findAuthVenvPython(projectRoot);
+    const req = authRequirementsPath(projectRoot);
+    if (py && existsSync(req)) {
+      let pipOk = false;
+      let pipDetail = "";
+      try {
+        const r = Bun.spawnSync({
+          cmd: [py, "-m", "pip", "install", "--no-input", "-r", req],
+          cwd: projectRoot,
+          stdout: "pipe",
+          stderr: "pipe",
+        });
+        pipOk = r.exitCode === 0;
+        if (!pipOk) {
+          pipDetail =
+            new TextDecoder().decode(r.stderr).slice(0, 300) ||
+            new TextDecoder().decode(r.stdout).slice(0, 300) ||
+            `exit ${r.exitCode}`;
+        } else {
+          const flow = probeAuthFlowImports(py, projectRoot);
+          const canva = probeCanvaWorkerImports(py);
+          if (!flow.ok || !canva.ok) {
+            pipOk = false;
+            pipDetail = [!flow.ok ? `flow: ${flow.detail}` : "", !canva.ok ? `canva: ${canva.detail}` : ""]
+              .filter(Boolean)
+              .join(" | ");
+          }
+        }
+      } catch (e: any) {
+        pipDetail = e?.message || String(e);
+      }
+      steps.push({
+        name: "sync auth python venv",
+        ok: pipOk,
+        detail: pipOk ? undefined : pipDetail,
+      });
+    } else {
+      steps.push({
+        name: "sync auth python venv",
+        ok: true,
+        detail: py ? undefined : "skipped (scripts/auth/.venv missing)",
+      });
+    }
+  }
+
+  // 4. Run DB migrations (best-effort — a no-op migration is fine)
   let migrateOk = false;
   let migrateErr = "";
   try {

@@ -27,11 +27,21 @@ Optional env:
 
 | Variable | Default | Meaning |
 |----------|---------|---------|
-| `ETTEUM_PYTHON` | PATH / `py -3` | Interpreter path |
+| `ETTEUM_PYTHON` | `scripts/auth/.venv` | Interpreter for camoufox_flow (prefer leaving unset) |
+| `BATCHER_PYTHON` | unset | Legacy alias for `ETTEUM_PYTHON` |
 | `BATCHER_ENABLE_CAMOUFOX` | `true` | Must stay true for real logins |
 | `BATCHER_CAMOUFOX_HEADLESS` | `true` | `false` = visible browser |
 | `BATCHER_PROXY_URL` | unset | Proxy for browser session |
 | `BATCHER_CAPTCHA_MODE` | `skip` | `handle` waits for manual input |
+
+Doctor/preflight/runtime all use the same resolver (`src/utils/python.ts`):
+prefer `scripts/auth/.venv`, then env overrides. Checks cover the full flow
+import surface (`aiohttp`, `httpx`, provider adapters, `curl_cffi` for canva),
+not just camoufox. If login/canva fails with `ModuleNotFoundError`, run:
+
+```bash
+bun scripts/doctor.ts --fix
+```
 
 ## Supported providers
 

@@ -9,9 +9,15 @@
  */
 
 import { existsSync, statSync, readFileSync } from "node:fs";
-import { join, resolve } from "node:path";
+import { basename, join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
 import { platform } from "node:os";
+import {
+  findAuthVenvPython,
+  probeAuthFlowImports,
+  probeCanvaWorkerImports,
+  resolveAuthPython,
+} from "../src/utils/python";
 
 type Severity = "ok" | "warn" | "fail";
 type Check = {
@@ -145,14 +151,15 @@ function checkNodeModules() {
 
 /** Shared Python auth/farm interpreter under scripts/auth/.venv (not per-farm). */
 function authVenvPython(): string | null {
-  const venvRoot = join(ROOT, "scripts", "auth", ".venv");
-  const candidates = IS_WIN
-    ? [join(venvRoot, "Scripts", "python.exe"), join(venvRoot, "bin", "python")]
-    : [join(venvRoot, "bin", "python"), join(venvRoot, "bin", "python3"), join(venvRoot, "Scripts", "python.exe")];
-  for (const c of candidates) {
-    if (existsSync(c)) return c;
-  }
-  return null;
+  return findAuthVenvPython(ROOT);
+}
+
+/** Runtime Python (same policy as config.pythonPath / runPythonFlow / canva). */
+function runtimePython(): string {
+  // Merge .env into process.env for override detection without requiring dotenv.
+  const fileEnv = parseEnv(join(ROOT, ".env"));
+  const merged = { ...process.env, ...fileEnv };
+  return resolveAuthPython(ROOT, merged);
 }
 
 function checkAuthPythonEnv() {
@@ -166,6 +173,77 @@ function checkAuthPythonEnv() {
     return;
   }
   pushOk("Auth Python venv", py);
+
+  // Full flow deps (not just camoufox). Login uses this venv via runPythonFlow.
+  const deps = probeAuthFlowImports(py, ROOT);
+  if (deps.ok) {
+    pushOk("Auth flow deps", "aiohttp/httpx/camoufox + provider adapters importable");
+  } else {
+    pushFail(
+      "Auth flow deps",
+      `scripts/auth/.venv cannot import login deps${deps.detail ? `: ${deps.detail}` : ""}`,
+      `Run: bun scripts/doctor.ts --fix   or: "${py}" -m pip install -r scripts/auth/requirements.txt`,
+    );
+  }
+
+  // Report the interpreter runtime will actually spawn (must match health checks).
+  const runtime = runtimePython();
+  if (resolve(runtime) === resolve(py) || runtime === py) {
+    pushOk("Runtime Python", `matches auth venv (${runtime})`);
+  } else {
+    const probe = probeAuthFlowImports(runtime, ROOT);
+    if (probe.ok) {
+      pushWarn(
+        "Runtime Python",
+        `override ${runtime} (imports OK; prefer scripts/auth/.venv)`,
+        "Unset ETTEUM_PYTHON / BATCHER_PYTHON / PYTHON_PATH unless intentional",
+      );
+    } else {
+      pushFail(
+        "Runtime Python",
+        `${runtime} cannot import login deps — kiro/codebuddy login will crash${probe.detail ? `: ${probe.detail}` : ""}`,
+        `Clear Python overrides in .env or set them to ${py}, then: bun scripts/doctor.ts --fix`,
+      );
+    }
+  }
+
+  // Explicit override pointing outside the venv is a common footgun (system python without deps).
+  for (const key of ["ETTEUM_PYTHON", "BATCHER_PYTHON", "PYTHON_PATH"] as const) {
+    const override = process.env[key] || parseEnv(join(ROOT, ".env"))[key];
+    if (!override || !override.trim()) continue;
+    const val = override.trim();
+    if (basename(val) === val) {
+      // bare name — resolved via PATH; covered by Runtime Python check
+      continue;
+    }
+    if (!existsSync(val)) {
+      pushFail(
+        key,
+        `${key}=${val} does not exist`,
+        `Clear ${key} in .env (auto-detect uses scripts/auth/.venv) or point it at the auth venv`,
+      );
+      continue;
+    }
+    const sameAsVenv = resolve(val) === resolve(py);
+    if (sameAsVenv) {
+      pushOk(key, `points at auth venv (${val})`);
+      continue;
+    }
+    const probe = probeAuthFlowImports(val, ROOT);
+    if (probe.ok) {
+      pushWarn(
+        key,
+        `${key} overrides auth venv → ${val} (imports OK, but prefer scripts/auth/.venv)`,
+        `Unset ${key} unless you intentionally maintain a custom interpreter`,
+      );
+    } else {
+      pushFail(
+        key,
+        `${key}=${val} cannot import login deps — runtime will crash`,
+        `Clear ${key} in .env, or set it to ${py}, then: bun scripts/doctor.ts --fix`,
+      );
+    }
+  }
 
   const nodriver = run(py, ["-c", "import nodriver"]);
   if (nodriver.ok) {
@@ -181,6 +259,7 @@ function checkAuthPythonEnv() {
 
 function checkCamoufox() {
   // Primary runtime: Python camoufox in scripts/auth/.venv (login adapters + farms).
+  // Full adapter/deps probe lives in checkAuthPythonEnv; this stays a focused browser check.
   const py = authVenvPython();
   if (!py) {
     pushFail(
@@ -241,29 +320,30 @@ function checkDatabase() {
 }
 
 function checkCanvaWorker() {
-  // canva_worker.py still uses Python for curl_cffi TLS impersonation
+  // Runtime spawns config.pythonPath (auth venv) — never check a different python.
   const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
   if (!existsSync(workerPath)) {
     pushOk("Canva worker", "canva_worker.py not present (optional)");
     return;
   }
-  const sysPy = findSystemPython();
-  if (!sysPy) {
-    pushWarn(
+  const py = runtimePython();
+  const bare = basename(py) === py;
+  if (!bare && !existsSync(py)) {
+    pushFail(
       "Canva worker",
-      "Python not found — canva media generation will fail",
-      "Install Python 3.10+ and: pip install curl_cffi",
+      `Python not found at ${py} — canva media generation will fail`,
+      "Run: bun scripts/doctor.ts --fix",
     );
     return;
   }
-  const cf = run(sysPy, ["-c", "import curl_cffi"]);
+  const cf = probeCanvaWorkerImports(py);
   if (cf.ok) {
-    pushOk("Canva worker", `Python ${sysPy}, curl_cffi ready`);
+    pushOk("Canva worker", `Python ${py}, curl_cffi ready`);
   } else {
     pushFail(
       "Canva worker",
-      "curl_cffi not installed",
-      `Run: ${sysPy} -m pip install curl_cffi`,
+      `curl_cffi missing in runtime Python (${py})${cf.detail ? `: ${cf.detail}` : ""}`,
+      `Run: bun scripts/doctor.ts --fix   or: "${py}" -m pip install -r scripts/auth/requirements.txt`,
     );
   }
 }
@@ -400,9 +480,23 @@ function autoFix() {
   }
 
   if (venvPy && existsSync(reqFile)) {
-    process.stdout.write("  \x1b[33m! Installing scripts/auth requirements (camoufox[geoip] + playwright)...\x1b[0m\n");
+    process.stdout.write("  \x1b[33m! Installing scripts/auth requirements (camoufox, playwright, aiohttp, httpx, curl_cffi)...\x1b[0m\n");
     runFix(venvPy, ["-m", "pip", "install", "--no-input", "--upgrade", "pip", "wheel"], "pip upgrade", 120);
     runFix(venvPy, ["-m", "pip", "install", "--no-input", "-r", reqFile], "pip install auth requirements", 300);
+
+    // Prove the same import surface camoufox_flow.py + canva_worker need.
+    const probe = probeAuthFlowImports(venvPy, ROOT);
+    if (probe.ok) {
+      process.stdout.write("  \x1b[2m→ Auth flow import probe\x1b[0m \x1b[32mOK\x1b[0m\n");
+    } else {
+      process.stdout.write(`  \x1b[31m✗ Auth flow import probe failed\x1b[0m\n    \x1b[2m${probe.detail}\x1b[0m\n`);
+    }
+    const canvaProbe = probeCanvaWorkerImports(venvPy);
+    if (canvaProbe.ok) {
+      process.stdout.write("  \x1b[2m→ Canva worker (curl_cffi) probe\x1b[0m \x1b[32mOK\x1b[0m\n");
+    } else {
+      process.stdout.write(`  \x1b[31m✗ Canva worker probe failed\x1b[0m\n    \x1b[2m${canvaProbe.detail}\x1b[0m\n`);
+    }
 
     // Remove legacy nodriver — never uninstall camoufox.
     const hasNodriver = run(venvPy, ["-c", "import nodriver"]);
@@ -419,29 +513,41 @@ function autoFix() {
     }
   }
 
-  // 4. Canva worker: install curl_cffi if Python is available
-  const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
-  if (existsSync(workerPath)) {
-    const sysPy = findSystemPython();
-    if (sysPy) {
-      const cf = run(sysPy, ["-c", "import curl_cffi"]);
-      if (!cf.ok) {
-        process.stdout.write("  \x1b[33m! Installing curl_cffi for Canva worker...\x1b[0m\n");
-        runFix(sysPy, ["-m", "pip", "install", "curl_cffi"], "pip install curl_cffi", 120);
-      }
-    }
-  }
+  // 4. Canva worker deps live in the auth venv requirements (curl_cffi) — already
+  // installed in step 3. No separate system-python pip install.
 
-  // 5. .env: BROWSER_ENGINE nodriver → camoufox (do not strip PYTHON_PATH)
+  // 5. .env hygiene: BROWSER_ENGINE + broken Python overrides
   const envPath = join(ROOT, ".env");
   if (existsSync(envPath)) {
-    const env = parseEnv(envPath);
-    if (env.BROWSER_ENGINE === "nodriver") {
+    let content = readFileSync(envPath, "utf8");
+    let envChanged = false;
+
+    if (parseEnv(envPath).BROWSER_ENGINE === "nodriver") {
       process.stdout.write("  \x1b[33m! Fixing BROWSER_ENGINE=nodriver → camoufox...\x1b[0m\n");
-      let content = readFileSync(envPath, "utf8");
       content = content.replace(/^BROWSER_ENGINE=nodriver$/m, "BROWSER_ENGINE=camoufox");
+      envChanged = true;
+    }
+
+    // Clear broken overrides that would spawn system python without deps.
+    // Empty value → auto-detect scripts/auth/.venv (same as install.sh).
+    if (venvPy) {
+      for (const key of ["ETTEUM_PYTHON", "BATCHER_PYTHON", "PYTHON_PATH"] as const) {
+        const m = content.match(new RegExp(`^${key}=(.*)$`, "m"));
+        if (!m) continue;
+        const val = (m[1] || "").trim();
+        if (!val) continue;
+        if (basename(val) === val) continue; // bare PATH name — leave alone
+        if (resolve(val) === resolve(venvPy)) continue;
+        if (existsSync(val) && probeAuthFlowImports(val, ROOT).ok) continue;
+        process.stdout.write(`  \x1b[33m! Clearing broken ${key}=${val} (will use auth venv)\x1b[0m\n`);
+        content = content.replace(new RegExp(`^${key}=.*$`, "m"), `${key}=`);
+        envChanged = true;
+      }
+    }
+
+    if (envChanged) {
       Bun.write(envPath, content);
-      process.stdout.write("  \x1b[2m→ Fixed BROWSER_ENGINE\x1b[0m \x1b[32mOK\x1b[0m\n");
+      process.stdout.write("  \x1b[2m→ Updated .env\x1b[0m \x1b[32mOK\x1b[0m\n");
     }
   }
 

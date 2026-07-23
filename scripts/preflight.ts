@@ -9,10 +9,14 @@
 import { existsSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { spawnSync } from "node:child_process";
-import { platform } from "node:os";
+import {
+  findAuthVenvPython,
+  probeAuthFlowImports,
+  probeCanvaWorkerImports,
+  resolveAuthPython,
+} from "../src/utils/python";
 
 const ROOT = resolve(import.meta.dir, "..");
-const IS_WIN = platform() === "win32";
 
 const RED = "\x1b[31m";
 const GREEN = "\x1b[32m";
@@ -51,24 +55,37 @@ check("Dashboard node_modules", existsSync(join(ROOT, "dashboard", "node_modules
 // 4. Dashboard build
 check("Dashboard build", existsSync(join(ROOT, "dashboard", "dist", "index.html")), "Run: cd dashboard && bun run build");
 
-// 5. Camoufox (optional stealth dep)
-const cfo = spawnSync("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"], { encoding: "utf8" });
-check("Camoufox (stealth browser auth)", cfo.status === 0, "Run: bun install (camoufox-js is in optionalDependencies)");
+// 5. Shared auth Python — same resolver as runtime (config.pythonPath / runPythonFlow)
+const authPy = findAuthVenvPython(ROOT);
+const runtimePy = resolveAuthPython(ROOT);
+check("Auth Python venv", !!authPy, "Run: bun scripts/doctor.ts --fix");
+if (authPy) {
+  const probe = probeAuthFlowImports(authPy, ROOT);
+  check(
+    "Auth flow deps (aiohttp + adapters)",
+    probe.ok,
+    `Run: bun scripts/doctor.ts --fix  or: "${authPy}" -m pip install -r scripts/auth/requirements.txt`,
+  );
+  check(
+    "Runtime Python matches auth venv",
+    runtimePy === authPy || resolve(runtimePy) === resolve(authPy),
+    `Runtime would use ${runtimePy}; clear ETTEUM_PYTHON/BATCHER_PYTHON/PYTHON_PATH overrides`,
+  );
+}
 
-// 6. Canva worker (curl_cffi)
+// 6. Camoufox JS (optional stealth dep for TS bulk-import)
+const cfo = spawnSync("bun", ["-e", "import('camoufox-js').then(() => process.exit(0)).catch(() => process.exit(1))"], { encoding: "utf8" });
+check("Camoufox JS (optional)", cfo.status === 0, "Run: bun install (camoufox-js is in optionalDependencies)");
+
+// 7. Canva worker — runtime uses config.pythonPath (auth venv), not system Python
 const workerPath = join(ROOT, "src", "proxy", "providers", "canva_worker.py");
-if (existsSync(workerPath)) {
-  // Find system Python for canva_worker.py
-  const pyCandidates = IS_WIN ? ["python", "python3", "py"] : ["python3", "python"];
-  let sysPy = "";
-  for (const cmd of pyCandidates) {
-    const out = spawnSync(IS_WIN ? "where" : "command", IS_WIN ? [cmd] : ["-v", cmd], { encoding: "utf8", shell: true });
-    if (out.status === 0) { sysPy = cmd; break; }
-  }
-  if (sysPy) {
-    const cf = spawnSync(sysPy, ["-c", "import curl_cffi"], { encoding: "utf8" });
-    check("Canva worker (curl_cffi)", cf.status === 0, `Run: ${sysPy} -m pip install curl_cffi`);
-  }
+if (existsSync(workerPath) && authPy) {
+  const cf = probeCanvaWorkerImports(authPy);
+  check(
+    "Canva worker (curl_cffi in auth venv)",
+    cf.ok,
+    `Run: bun scripts/doctor.ts --fix  or: "${authPy}" -m pip install -r scripts/auth/requirements.txt`,
+  );
 }
 
 console.log("");

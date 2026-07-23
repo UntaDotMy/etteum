@@ -8,67 +8,20 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { existsSync } from "node:fs";
 import path from "node:path";
-import { execFileSync } from "node:child_process";
 import type { AutomationEvent, EmitFn } from "./automationEvents";
+import { findAuthVenvPython, resolveAuthPython } from "../../utils/python";
 
+/**
+ * Resolve Python for camoufox_flow.py via the shared resolver.
+ * Prefer scripts/auth/.venv; never invent a second PATH-first policy here.
+ */
 function resolvePython(): string | null {
-  if (process.env.ETTEUM_PYTHON && existsSync(process.env.ETTEUM_PYTHON)) {
-    return process.env.ETTEUM_PYTHON;
-  }
-  if (process.env.BATCHER_PYTHON && existsSync(process.env.BATCHER_PYTHON)) {
-    return process.env.BATCHER_PYTHON;
-  }
-
-  // Prefer PATH lookup (cross-machine) over hard-coded user paths.
-  const whichCmds =
-    process.platform === "win32"
-      ? [
-          ["where", "python"],
-          ["where", "python3"],
-          ["where", "py"],
-        ]
-      : [
-          ["which", "python3"],
-          ["which", "python"],
-        ];
-
-  for (const [cmd, arg] of whichCmds) {
-    try {
-      const out = execFileSync(cmd, [arg], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
-      if (out && existsSync(out) && !out.toLowerCase().includes("windowsapps\\python")) {
-        return out;
-      }
-    } catch {
-      /* try next */
-    }
-  }
-
-  // Windows py launcher: `py -3` returns the selected interpreter path via -c
-  if (process.platform === "win32") {
-    try {
-      const out = execFileSync("py", ["-3", "-c", "import sys; print(sys.executable)"], {
-        encoding: "utf8",
-      }).trim();
-      if (out && existsSync(out)) return out;
-    } catch {
-      /* fall through */
-    }
-  }
-
-  // Bundled interpreter next to common install roots (optional, portable names only).
-  const home = process.env.USERPROFILE || process.env.HOME || "";
-  if (home) {
-    const candidates = [
-      path.join(home, "AppData", "Local", "Programs", "Python", "Python312", "python.exe"),
-      path.join(home, "AppData", "Local", "Programs", "Python", "Python311", "python.exe"),
-      path.join(home, "AppData", "Local", "Programs", "Python", "Python310", "python.exe"),
-      "/usr/bin/python3",
-      "/usr/local/bin/python3",
-    ];
-    for (const c of candidates) if (existsSync(c)) return c;
-  }
-
-  return null;
+  const root = process.env.ETTEUM_ROOT || process.cwd();
+  const resolved = resolveAuthPython(root);
+  // Bare names (python3) are PATH lookups — accept them. Absolute paths must exist.
+  if (path.basename(resolved) === resolved) return resolved;
+  if (existsSync(resolved)) return resolved;
+  return findAuthVenvPython(root);
 }
 
 function flowScriptPath(): string {

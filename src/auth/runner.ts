@@ -15,6 +15,7 @@ import { loginProvider } from "./automation/services";
 import type { ProviderId } from "./automation/constants";
 import { runPythonFlow } from "./automation/pythonFlow";
 import type { AutomationEvent } from "./automation/automationEvents";
+import { probeAuthFlowImports } from "../utils/python";
 import {
   registerSession,
   getSession,
@@ -68,7 +69,8 @@ const activeProcesses = new Map<number, ReturnType<typeof Bun.spawn>>();
 const manuallyStoppedIds = new Set<number>();
 
 /**
- * Pre-flight check: verify the Python interpreter and auth script exist.
+ * Pre-flight check: verify the Python interpreter used for legacy login.py
+ * spawns. Camoufox providers use runPythonFlow (shared resolver) instead.
  *
  * Returns an error message string if something is missing, or null if OK.
  * This prevents the cryptic `ENOENT: uv_spawn` error from Bun.spawn and
@@ -77,6 +79,8 @@ const manuallyStoppedIds = new Set<number>();
 function validatePythonEnv(): string | null {
   const pythonPath = config.pythonPath;
   const scriptPath = config.authScriptPath;
+  const projectRoot = path.resolve(config.authScriptCwd, "..", "..");
+  const flowScript = path.join(config.authScriptCwd, "camoufox_flow.py");
 
   // Check if the Python executable exists on disk.
   // On Windows, Bun.spawn with a bare "python.exe" will search PATH, so
@@ -88,14 +92,33 @@ function validatePythonEnv(): string | null {
       `Python interpreter not found at: ${pythonPath}`,
       ``,
       `The auth venv may have been created on a different OS (e.g. WSL vs native Windows).`,
-      `Fix: re-create the venv on this OS, or set PYTHON_PATH in .env to a working Python.`,
+      `Fix: re-create the venv on this OS, or set ETTEUM_PYTHON / PYTHON_PATH in .env.`,
       `  Linux/macOS:  python3 -m venv ${venvRoot} && ${venvRoot}/bin/pip install -r scripts/auth/requirements.txt`,
       `  Windows:     py -m venv ${venvRoot} && ${venvRoot}\\Scripts\\pip.exe install -r scripts/auth/requirements.txt`,
+      `  Or:          bun scripts/doctor.ts --fix`,
     ].join("\n");
   }
 
-  if (!existsSync(scriptPath)) {
+  // Primary path today is camoufox_flow.py (kiro/codebuddy/canva/qoder).
+  // login.py is legacy; only require it when AUTH_SCRIPT_PATH is explicitly set.
+  if (process.env.AUTH_SCRIPT_PATH && !existsSync(scriptPath)) {
     return `Auth script not found at: ${scriptPath}`;
+  }
+  if (!existsSync(flowScript) && !existsSync(scriptPath)) {
+    return `Neither camoufox_flow.py nor login.py found under ${config.authScriptCwd}`;
+  }
+
+  // Probe real import surface of the interpreter runtime will spawn.
+  if (existsSync(flowScript)) {
+    const probe = probeAuthFlowImports(pythonPath, projectRoot);
+    if (!probe.ok) {
+      return [
+        `Python at ${pythonPath} cannot import camoufox_flow deps.`,
+        probe.detail,
+        `Fix: bun scripts/doctor.ts --fix`,
+        `  or: "${pythonPath}" -m pip install -r scripts/auth/requirements.txt`,
+      ].filter(Boolean).join("\n");
+    }
   }
 
   return null;

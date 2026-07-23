@@ -211,15 +211,23 @@ if [[ ! -f "$VENV_PY" ]]; then
   done
 fi
 if [[ -n "$VENV_PY" && -f "$VENV_PY" ]]; then
-  info "Syncing shared auth venv (camoufox + playwright for login + farms)..."
+  info "Syncing shared auth venv (camoufox + playwright + aiohttp for login + farms)..."
   "$VENV_PY" -m pip install --no-input --progress-bar off --upgrade pip wheel >/dev/null 2>&1 || true
   "$VENV_PY" -m pip install --no-input --progress-bar off -r "$PROJECT_DIR/scripts/auth/requirements.txt" || err "pip install failed"
   # Drop legacy nodriver; never uninstall camoufox.
   "$VENV_PY" -m pip uninstall -y --no-input nodriver >/dev/null 2>&1 || true
+  # why: catch partial installs before restart; matches camoufox_flow + canva_worker
+  if ! (
+    cd "$PROJECT_DIR/scripts/auth" &&
+    PYTHONPATH="$(pwd)${PYTHONPATH:+:$PYTHONPATH}" \
+      "$VENV_PY" -c "import aiohttp, aiohttp_socks, httpx, camoufox, playwright, curl_cffi; from app.providers.kiro import KiroProviderAdapter; from app.providers.codebuddy import CodeBuddyProviderAdapter; from app.providers.canva import CanvaProviderAdapter; from app.providers.qoder_adapter import QoderProviderAdapter"
+  ); then
+    err "Auth flow import probe failed after pip install — login/canva will crash. Re-run: $VENV_PY -m pip install -r scripts/auth/requirements.txt"
+  fi
   if [[ "${ETTEUM_SKIP_BROWSERS:-0}" != "1" ]]; then
     "$VENV_PY" -m camoufox fetch >/dev/null 2>&1 || warn "camoufox fetch failed — re-run: $VENV_PY -m camoufox fetch"
   fi
-  ok "Python auth venv ready (shared Camoufox)"
+  ok "Python auth venv ready (shared Camoufox + full flow deps)"
 else
   warn "Python venv missing — run install.sh or: python3 -m venv scripts/auth/.venv"
 fi
