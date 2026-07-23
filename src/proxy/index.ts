@@ -698,18 +698,31 @@ function wrapStreamWithUsageFinalizer(
         continue; // not JSON (shouldn't happen for well-formed SSE), skip
       }
 
-      // Detect upstream errors in SSE stream (Qoder 403 in body, OpenAI error format).
-      // Only mark streamError when the payload looks like a real failure — not
-      // every object with an "error" key (some Cosy events use nested fields).
+      // Detect upstream errors in SSE stream.
+      // Only our explicit bridge signal (type=upstream_error) or a clear OpenAI
+      // error envelope. Do NOT treat every Cosy frame with statusCodeValue as
+      // fatal — some informational events use HTTP-ish fields and were falsely
+      // marking "Upstream stream error" with empty chat.
       if (parsed.type === "upstream_error") streamError = true;
-      if (parsed.statusCodeValue && parsed.statusCodeValue >= 400) streamError = true;
       if (parsed.quotaExhausted === true) streamError = true;
       if (
         parsed.error &&
-        (typeof parsed.error === "string"
-          ? parsed.error.length > 0
-          : typeof parsed.error === "object" &&
-            (parsed.error.message || parsed.error.type || parsed.error.code))
+        typeof parsed.error === "object" &&
+        (parsed.error.type === "api_error" ||
+          parsed.error.type === "rate_limit_error" ||
+          parsed.error.type === "invalid_request_error" ||
+          parsed.error.code === "quota_exhausted")
+      ) {
+        streamError = true;
+      }
+      if (typeof parsed.error === "string" && parsed.error.length > 0 && parsed.type === "upstream_error") {
+        streamError = true;
+      }
+      // Legacy in-body Cosy error frames (statusCodeValue >= 400) only if no content.
+      if (
+        parsed.statusCodeValue &&
+        Number(parsed.statusCodeValue) >= 400 &&
+        !isContentfulStreamChunk(parsed)
       ) {
         streamError = true;
       }

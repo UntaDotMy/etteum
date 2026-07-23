@@ -21,6 +21,7 @@ import {
   BUSINESS_VERSION,
   C2S,
   CHAT_URL,
+  CHAT_URL_FALLBACK,
   COSY_SCENE,
   COSY_VERSION,
   CUSTOM_ALPHABET,
@@ -292,17 +293,43 @@ export class QoderProvider extends BaseProvider {
       const upstreamOverride = getUpstreamNameOverride(request.model);
       const modelKey = upstreamOverride || cfg.upstream;
       const modelSource = body?.model_config?.source || "system";
+      const extraHeaders = {
+        "x-model-key": modelKey,
+        "x-model-source": modelSource,
+      };
+      // Prefer api2 (working bridges). Fall back to api3 once on transport/5xx.
       resp = await bearerFetch(tokens, {
         url: CHAT_URL,
         body,
         stream: true,
-        extraHeaders: {
-          "x-model-key": modelKey,
-          "x-model-source": modelSource,
-        },
+        extraHeaders,
       });
+      if (!resp.ok && resp.status >= 500) {
+        resp = await bearerFetch(tokens, {
+          url: CHAT_URL_FALLBACK,
+          body,
+          stream: true,
+          extraHeaders,
+        });
+      }
     } catch (e) {
-      return { success: false, error: e instanceof Error ? e.message : String(e) };
+      // Network failure on api2 — try api3 once.
+      try {
+        const cfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+        const upstreamOverride = getUpstreamNameOverride(request.model);
+        const modelKey = upstreamOverride || cfg.upstream;
+        resp = await bearerFetch(tokens, {
+          url: CHAT_URL_FALLBACK,
+          body,
+          stream: true,
+          extraHeaders: {
+            "x-model-key": modelKey,
+            "x-model-source": body?.model_config?.source || "system",
+          },
+        });
+      } catch (e2) {
+        return { success: false, error: e2 instanceof Error ? e2.message : String(e2) };
+      }
     }
 
     if (resp.status === 401) {

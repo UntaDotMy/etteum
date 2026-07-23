@@ -88,9 +88,9 @@ describe("normalizeQoderTokens", () => {
 });
 
 describe("Cosy machine fingerprint + model map", () => {
-  test("COSY version is desktop 1.15.1 and clienttype 0", () => {
-    expect(COSY_VERSION).toBe("1.15.1");
-    expect(COSY_CLIENT_TYPE).toBe("0");
+  test("COSY chat wire matches working open-source bridges (0.1.43 / clienttype 5)", () => {
+    expect(COSY_VERSION).toBe("0.1.43");
+    expect(COSY_CLIENT_TYPE).toBe("5");
   });
 
   test("detects and heals old CLI spoof (machineToken==id, type 5)", () => {
