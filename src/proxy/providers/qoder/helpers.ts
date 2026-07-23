@@ -914,11 +914,16 @@ export function buildChatBody(request: ChatCompletionRequest, tokens: QoderToken
   body.request_set_id = crypto.randomUUID();
   body.session_id = sessionId;
   body.stream = true;
-  // Qodercli 1.0.22 sends "" here (NOT "personal_standard"). Mirror that
-  // exactly — server uses this together with userType in the JWT to decide
-  // billing routing, and a non-empty value here appears to send the request
-  // down a path that bypasses the qmodel_latest free-quota bucket.
+  // Empty aliyun_user_type matches free-path routing (Hermes / qodercli free bucket).
+  // Non-empty personal_standard can bypass free promo routing.
   body.aliyun_user_type = "";
+  // Prefer chat session type used by working Free0 Cosy path.
+  body.session_type = body.session_type || "qoder";
+  body.agent_id = body.agent_id || "agent_common";
+  body.task_id = body.task_id || "common";
+  body.chat_task = body.chat_task || "FREE_INPUT";
+  body.version = body.version || "3";
+  body.source = body.source ?? 1;
 
   if (!body.model_config) body.model_config = {};
   body.model_config.key = cfg.upstream;

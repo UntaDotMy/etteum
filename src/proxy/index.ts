@@ -671,6 +671,7 @@ function wrapStreamWithUsageFinalizer(
   let reasoningTokens = 0;
   let finalized = false;
   let streamError = false;
+  let streamErrorDetail = "";
   // First contentful SSE chunk clock (request-relative ms). Captured once.
   let firstContentAt: number | null = null;
 
@@ -698,13 +699,20 @@ function wrapStreamWithUsageFinalizer(
         continue; // not JSON (shouldn't happen for well-formed SSE), skip
       }
 
-      // Detect upstream errors in SSE stream.
-      // Only our explicit bridge signal (type=upstream_error) or a clear OpenAI
-      // error envelope. Do NOT treat every Cosy frame with statusCodeValue as
-      // fatal — some informational events use HTTP-ish fields and were falsely
-      // marking "Upstream stream error" with empty chat.
-      if (parsed.type === "upstream_error") streamError = true;
-      if (parsed.quotaExhausted === true) streamError = true;
+      // Detect upstream errors in SSE stream and capture the real message.
+      // Cosy often returns HTTP 200 with statusCodeValue 4xx in the first frame.
+      const markErr = (msg: string) => {
+        streamError = true;
+        if (msg && !streamErrorDetail) streamErrorDetail = msg.slice(0, 500);
+      };
+      if (parsed.type === "upstream_error") {
+        markErr(
+          typeof parsed.error === "string"
+            ? parsed.error
+            : parsed.error?.message || JSON.stringify(parsed.error || parsed).slice(0, 300),
+        );
+      }
+      if (parsed.quotaExhausted === true) markErr(streamErrorDetail || "quotaExhausted");
       if (
         parsed.error &&
         typeof parsed.error === "object" &&
@@ -713,18 +721,24 @@ function wrapStreamWithUsageFinalizer(
           parsed.error.type === "invalid_request_error" ||
           parsed.error.code === "quota_exhausted")
       ) {
-        streamError = true;
+        markErr(String(parsed.error.message || parsed.error.code || "api_error"));
       }
-      if (typeof parsed.error === "string" && parsed.error.length > 0 && parsed.type === "upstream_error") {
-        streamError = true;
-      }
-      // Legacy in-body Cosy error frames (statusCodeValue >= 400) only if no content.
+      // Cosy in-body error frames (statusCodeValue >= 400) when no content.
       if (
         parsed.statusCodeValue &&
         Number(parsed.statusCodeValue) >= 400 &&
         !isContentfulStreamChunk(parsed)
       ) {
-        streamError = true;
+        let msg = String(parsed.message || parsed.statusCode || parsed.code || "");
+        if (typeof parsed.body === "string" && parsed.body) {
+          try {
+            const b = JSON.parse(parsed.body);
+            msg = String(b.message || b.code || msg);
+          } catch {
+            /* keep msg */
+          }
+        }
+        markErr(`Qoder HTTP ${parsed.statusCodeValue}${msg ? `: ${msg}` : ""}`);
       }
 
       if (firstContentAt == null && isContentfulStreamChunk(parsed)) {
@@ -775,24 +789,27 @@ function wrapStreamWithUsageFinalizer(
         // bucket miss). Only park the account when the error text clearly says
         // quota/credits are gone. Warmup remains the source of truth for status.
         if (streamError) {
-          const errText = streamedParts.join(" ") || "Upstream stream error";
+          const errText =
+            streamErrorDetail ||
+            streamedParts.join(" ") ||
+            "Upstream stream error";
           const looksLikeQuota =
             /quota|credit|exceed|NoQuota|isQuotaExceeded|usage.?exhaust|free.?usage|subscription/i.test(
               errText,
-            ) || /Qoder HTTP 403/.test(errText) && /quota|credit|exceed/i.test(errText);
+            ) || (/Qoder HTTP 403/.test(errText) && /quota|credit|exceed/i.test(errText));
           if (isQoder && looksLikeQuota && !context.skipPoolMutations && context.accountId > 0) {
             // Definitive quota language only — not every stream glitch.
             await pool.markExhausted(context.accountId);
           }
-          // Still update request log with error status
+          // Still update request log with error status — include real Cosy message.
           if (context.logId) {
             await db
               .update(requestLogs)
               .set({
                 status: "error",
                 errorMessage: looksLikeQuota
-                  ? "Upstream rate limit or quota exceeded"
-                  : "Upstream stream error (not marked exhausted)",
+                  ? `Upstream quota/rate: ${errText}`.slice(0, 500)
+                  : `Upstream stream error (not marked exhausted): ${errText}`.slice(0, 500),
                 durationMs,
                 ttftMs,
               })

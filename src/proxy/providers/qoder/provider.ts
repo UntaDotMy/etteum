@@ -447,22 +447,36 @@ export class QoderProvider extends BaseProvider {
               const line = raw.endsWith("\r") ? raw.slice(0, -1) : raw;
               if (!line) continue;
 
-              // Detect Qoder error responses in SSE body (HTTP 200 but error in JSON).
-              // Only treat as fatal when the payload clearly indicates quota/auth death.
-              // Path/signature/rate-limit 403s must NOT park the account as exhausted.
+              // Detect Cosy error frames (HTTP 200 + statusCodeValue 4xx) OR nested body code.
               if (line.startsWith("data:")) {
                 const dataStr = line.slice(5).trim();
                 if (dataStr && dataStr !== "[DONE]") {
                   try {
                     const wrapper = JSON.parse(dataStr);
-                    const svc = Number(wrapper.statusCodeValue || wrapper.status || 0);
-                    if (svc && svc >= 400) {
-                      const errStatus = String(wrapper.statusCode || wrapper.code || "");
-                      let errMsg = wrapper.message || "";
-                      if (typeof errMsg === "string" && errMsg.startsWith("{")) {
-                        try { const p = JSON.parse(errMsg); errMsg = p.pricingUrl || JSON.stringify(p); } catch {}
+                    let svc = Number(wrapper.statusCodeValue || wrapper.status || 0);
+                    let errStatus = String(wrapper.statusCode || wrapper.code || "");
+                    let errMsg = typeof wrapper.message === "string" ? wrapper.message : "";
+                    // Nested body may be stringified JSON with code 105 (login expired).
+                    if (typeof wrapper.body === "string" && wrapper.body) {
+                      try {
+                        const b = JSON.parse(wrapper.body);
+                        if (b && typeof b === "object") {
+                          if (!svc && (b.code === "105" || b.code === 105)) svc = 401;
+                          if (!errMsg && typeof b.message === "string") errMsg = b.message;
+                          if (!errStatus && b.code != null) errStatus = String(b.code);
+                        }
+                      } catch {
+                        /* body not JSON */
                       }
-                      const fullErr = `Qoder HTTP ${svc} ${errStatus}: ${errMsg.slice(0, 200) || "upstream error"}`;
+                    }
+                    if (svc && svc >= 400) {
+                      if (typeof errMsg === "string" && errMsg.startsWith("{")) {
+                        try {
+                          const p = JSON.parse(errMsg);
+                          errMsg = p.pricingUrl || p.message || JSON.stringify(p);
+                        } catch {}
+                      }
+                      const fullErr = `Qoder HTTP ${svc}${errStatus ? ` ${errStatus}` : ""}: ${errMsg.slice(0, 240) || "upstream error"}`;
                       console.error(`[Qoder] ${fullErr}`);
                       const quotaish = /quota|credit|exceed|NoQuota|usage.?exhaust|subscription|pricing/i.test(
                         `${errStatus} ${errMsg}`,
