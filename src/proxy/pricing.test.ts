@@ -311,7 +311,8 @@ describe("getPricingForModel — resolves via canonical name", () => {
   });
   test("previously unmapped provider ids all resolve non-null pricing", async () => {
     const ids = [
-      "qd-Auto", "qd-Ultimate", "qd-Qwen3.7-Max", "qd-Kimi-K2.6",
+      "qd-Auto", "qd-Ultimate", "qd-Qwen3.7-Max", "qd-Qwen3.8-Max-Preview", "qd-Kimi-K2.6", "qd-Kimi-K3",
+      "qd-DeepSeek-V4-Pro", "qd-DeepSeek-V4-Flash", "qd-GLM-5.1", "qd-MiniMax-M3", "qd-MiniMax-M2.7", "qd-Lite",
       "cb-opus-4.8-1m", "cb-gemini-3.0-flash", "cb-gemini-3.1-flash-lite", "cb-default",
       "cbc-deepseek-r1", "cbc-deepseek-v3", "cbc-deepseek-v3-2-volc", "cbc-hy3-preview",
       "codex-auto", "codex-gpt-5.5", "auto", "kp-auto",

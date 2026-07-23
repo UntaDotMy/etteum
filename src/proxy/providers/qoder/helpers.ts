@@ -624,33 +624,33 @@ export interface QoderModelDef {
 }
 
 export const QODER_MODELS: QoderModelDef[] = [
+  // Product tiers (not raw SKUs) — pricing maps via toCanonicalModelName aliases.
   { id: "qd-Auto",              upstream: "auto",          display_name: "Auto",              max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 1 },
   { id: "qd-Ultimate",          upstream: "ultimate",      display_name: "Ultimate",          max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 1.6 },
   { id: "qd-Performance",       upstream: "performance",   display_name: "Performance",       max_input_tokens: 272000, is_vl: true,  is_reasoning: false, price_factor: 1.1 },
   { id: "qd-Efficient",         upstream: "efficient",     display_name: "Efficient",         max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
+  // Always-free path on Community (price_factor 0). Not an /activity promo bucket.
   { id: "qd-Lite",              upstream: "lite",          display_name: "Lite",              max_input_tokens: 180000, is_vl: false, is_reasoning: false, price_factor: 0 },
-  // Qwen3.7-Max accepts up to 1M-token context windows. Qodercli's default
-  // `max_input_tokens: 180000` is just the lowest tier the picker offers —
-  // the server itself accepts much larger windows (the CLI lets users opt
-  // in to 200k / 400k / 1M from settings.json `model.contextWindow`).
-  // Advertise the full 1M here so downstream clients (Cline, Roo, Claude
-  // Code) don't trim history before we even reach Qoder. The server will
-  // reject requests it actually can't serve, which is the right place to
-  // enforce the real ceiling.
-  { id: "qd-Qwen3.7-Max",       upstream: "qmodel_latest", display_name: "Qwen3.7-Max",       max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
-  // Qwen 3.8 preview — NOT qmodel_latest (that is 3.7). Cosy path + free 0/0
-  // can still return 200 when headers/machine* are desktop-shaped.
+  // Named SKUs — max_input_tokens match model-specs.ts (applyModelSpecs overrides too).
+  // Qwen3.7-Max: free /activity promo bucket (qmodel_latest). Thinking-capable.
+  { id: "qd-Qwen3.7-Max",       upstream: "qmodel_latest", display_name: "Qwen3.7-Max",       max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.2 },
+  // Qwen 3.8 preview — NOT qmodel_latest (that is 3.7). Hermes Free0 path uses qmodel_preview.
   { id: "qd-Qwen3.8-Max-Preview", upstream: "qmodel_preview", display_name: "Qwen3.8-Max-Preview", max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
-  { id: "qd-Qwen3.6-Plus",      upstream: "qmodel",        display_name: "Qwen3.6-Plus",      max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
-  { id: "qd-DeepSeek-V4-Pro",   upstream: "dmodel",        display_name: "DeepSeek-V4-Pro",   max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.5 },
-  { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel",       display_name: "DeepSeek-V4-Flash", max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.1 },
-  { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 180000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
-  // Kimi K3 → kmodel_latest. Bare kmodel is K2.7-Code — wrong for K3.
-  // 1M combined context (canonical kimi-k3 registry). Thinking model: Cosy often
-  // streams reasoning_content first; empty content alone looks like a blank chat.
-  { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.3 },
-  { id: "qd-Kimi-K2.6",         upstream: "kmodel",        display_name: "Kimi-K2.6",         max_input_tokens: 256000, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
-  { id: "qd-MiniMax-M2.7",      upstream: "mmodel",        display_name: "MiniMax-M2.7",      max_input_tokens: 180000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
+  { id: "qd-Qwen3.6-Plus",      upstream: "qmodel",        display_name: "Qwen3.6-Plus",      max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
+  { id: "qd-DeepSeek-V4-Pro",   upstream: "dmodel",        display_name: "DeepSeek-V4-Pro",   max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.5 },
+  { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel",       display_name: "DeepSeek-V4-Flash", max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.1 },
+  // GLM-5.1 registry: 198k context (not 180k).
+  { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 198000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
+  // Kimi K3 → kmodel_latest (NOT bare kmodel). 1M context, thinking model.
+  { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 1048576, is_vl: true,  is_reasoning: true,  price_factor: 0.3 },
+  // Kimi K2.6 → bare kmodel (K2.x family). Registry 262144.
+  { id: "qd-Kimi-K2.6",         upstream: "kmodel",        display_name: "Kimi-K2.6",         max_input_tokens: 262144, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
+  // MiniMax-M3 — current Qoder frontier name (docs.qoder.com/en/cli/model, 0.2x).
+  // Cosy upstream key remains mmodel (pi-provider-qoder: minimax-m3 → mmodel;
+  // minimax-m2.7 was the previous friendly alias for the same key).
+  { id: "qd-MiniMax-M3",        upstream: "mmodel",        display_name: "MiniMax-M3",        max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
+  // Legacy alias — same upstream as M3 so existing clients keep working.
+  { id: "qd-MiniMax-M2.7",      upstream: "mmodel",        display_name: "MiniMax-M2.7",      max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
 ];
 
 export const MODEL_CONFIGS: Record<string, QoderModelDef> = Object.fromEntries(

@@ -139,11 +139,22 @@ describe("Cosy machine fingerprint + model map", () => {
 
   test("Kimi K3 is 1M context + reasoning; Qwen3.8 maps to qmodel_preview", () => {
     expect(MODEL_CONFIGS["qd-Kimi-K3"]?.upstream).toBe("kmodel_latest");
-    expect(MODEL_CONFIGS["qd-Kimi-K3"]?.max_input_tokens).toBe(1_000_000);
+    expect(MODEL_CONFIGS["qd-Kimi-K3"]?.max_input_tokens).toBe(1_048_576);
     expect(MODEL_CONFIGS["qd-Kimi-K3"]?.is_reasoning).toBe(true);
     expect(MODEL_CONFIGS["qd-Qwen3.8-Max-Preview"]?.upstream).toBe("qmodel_preview");
+    expect(MODEL_CONFIGS["qd-Qwen3.8-Max-Preview"]?.max_input_tokens).toBe(1_000_000);
     expect(MODEL_CONFIGS["qd-Qwen3.7-Max"]?.upstream).toBe("qmodel_latest");
+    expect(MODEL_CONFIGS["qd-Qwen3.7-Max"]?.is_reasoning).toBe(true);
     expect(MODEL_CONFIGS["qd-Kimi-K2.6"]?.upstream).toBe("kmodel");
+    expect(MODEL_CONFIGS["qd-Kimi-K2.6"]?.max_input_tokens).toBe(262_144);
+    expect(MODEL_CONFIGS["qd-DeepSeek-V4-Pro"]?.max_input_tokens).toBe(1_000_000);
+    expect(MODEL_CONFIGS["qd-MiniMax-M3"]?.upstream).toBe("mmodel");
+    expect(MODEL_CONFIGS["qd-MiniMax-M3"]?.max_input_tokens).toBe(1_000_000);
+    expect(MODEL_CONFIGS["qd-MiniMax-M2.7"]?.upstream).toBe("mmodel");
+    expect(MODEL_CONFIGS["qd-MiniMax-M2.7"]?.max_input_tokens).toBe(1_000_000);
+    expect(MODEL_CONFIGS["qd-GLM-5.1"]?.max_input_tokens).toBe(198_000);
+    expect(MODEL_CONFIGS["qd-Lite"]?.upstream).toBe("lite");
+    expect(MODEL_CONFIGS["qd-Lite"]?.price_factor).toBe(0);
   });
 });
 

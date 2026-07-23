@@ -163,6 +163,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // ── Qwen (DashScope international, indicative) ──
   "qwen3.7-max":                  { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
   "qwen3.7-max-preview":          { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
+  // Qoder Cosy qmodel_preview (qd-Qwen3.8-Max-Preview) — same rate class as 3.7-max until public SKU rates land.
+  "qwen3.8-max-preview":          { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
   "qwen3.7-plus":                 { input: 0.80,  output: 4.00,  cached: 0.08,   reasoning: 4.00,  cacheCreation: 1.00  },
   "qwen3.6-plus":                 { input: 0.80,  output: 4.00,  cached: 0.08,   reasoning: 4.00,  cacheCreation: 1.00  },
   "qwen3.5-plus":                 { input: 0.40,  output: 2.00,  cached: 0.04,   reasoning: 2.00,  cacheCreation: 0.50  },
@@ -192,6 +194,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
   // ── MiniMax / Kimi / GLM ──
   "minimax-m3":                   { input: 0.58,  output: 2.33,  cached: 0.058,  reasoning: 2.33,  cacheCreation: 0.725 },
+  // MiniMax — platform.minimax.io / openrouter public rates (approx).
+  "minimax-m3":                   { input: 0.30,  output: 1.20,  cached: 0.03,   reasoning: 1.20,  cacheCreation: 0.375 },
   "minimax-m2.7":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
   "minimax-m2.5":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
   "minimax-m2.1":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
@@ -338,6 +342,17 @@ export function toCanonicalModelName(model: string | undefined | null): string {
   else if (m === "performance") m = "claude-sonnet-4.6";
   else if (m === "efficient") m = "claude-haiku-4.5";
   else if (m === "lite") m = "gpt-4o-mini";
+  // Qoder Cosy opaque keys if they ever leak into the pricing path as bare ids.
+  else if (m === "qmodel-latest" || m === "qmodel_latest") m = "qwen3.7-max";
+  else if (m === "qmodel-preview" || m === "qmodel_preview") m = "qwen3.8-max-preview";
+  else if (m === "qmodel") m = "qwen3.6-plus";
+  else if (m === "kmodel-latest" || m === "kmodel_latest") m = "kimi-k3";
+  else if (m === "kmodel") m = "kimi-k2.6";
+  else if (m === "dmodel") m = "deepseek-v4-pro";
+  else if (m === "dfmodel") m = "deepseek-v4-flash";
+  else if (m === "gm51model" || m === "gm51-model") m = "glm-5.1";
+  // Cosy MiniMax key: current product name is M3; m2.7 was the old friendly alias.
+  else if (m === "mmodel") m = "minimax-m3";
   // Hosted open-model path slugs (Together / Fireworks).
   if (/^llama-3\.3-70b/.test(m) || m === "llama-v3p3-70b-instruct") m = "llama-3.3-70b-versatile";
   if (/^llama-3\.1-70b/.test(m) || /405b/.test(m)) m = "llama-3.1-70b-versatile";
