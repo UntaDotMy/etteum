@@ -88,7 +88,7 @@ describe("normalizeQoderTokens", () => {
 });
 
 describe("Cosy machine fingerprint + model map", () => {
-  test("COSY version is desktop 1.15.1 and clienttype 0", () => {
+  test("COSY chat wire matches Hermes Free0 path (1.15.1 / clienttype 0)", () => {
     expect(COSY_VERSION).toBe("1.15.1");
     expect(COSY_CLIENT_TYPE).toBe("0");
   });
@@ -120,6 +120,21 @@ describe("Cosy machine fingerprint + model map", () => {
     } as any);
     expect(again.machineToken).toBe(healed.machineToken);
     expect(again.machineType).toBe(healed.machineType);
+  });
+
+  test("preserves good stored machine* (does not rewrite to spoof)", () => {
+    const good = {
+      machineId: "uuid-good",
+      machineToken: "opaque-token-not-id",
+      machineType: "a1b2",
+      machineCode: "c3d4",
+      machineOs: "x86_64_windows",
+    };
+    expect(isSpoofedMachineFingerprint(good)).toBe(false);
+    const kept = ensureCosyMachineFingerprint(good as any);
+    expect(kept.machineToken).toBe("opaque-token-not-id");
+    expect(kept.machineType).toBe("a1b2");
+    expect(kept.machineCode).toBe("c3d4");
   });
 
   test("Kimi K3 is 1M context + reasoning; Qwen3.8 maps to qmodel_preview", () => {

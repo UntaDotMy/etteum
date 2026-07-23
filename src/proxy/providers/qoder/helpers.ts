@@ -16,15 +16,14 @@ import { getUpstreamNameOverride } from "../custom-models";
 
 // ============================================================================
 // Qoder Cosy call path — chat / quota / activity
-// Desktop Cosy 1.15.1-style headers (not old qodercli 1.0.22 spoof).
+// Proven Free0 K3/Qwen3.8 path (Hermes live smoke 2026-07):
+//   COSY 1.15.1 + clienttype 0 + machine* as stored (mt≠id, type hex, code+os).
+// Do NOT use old CLI spoof 1.0.22 + clienttype "5" + machineType "5" — Lite only.
 // Auth/login stays separate; this file owns the request shape that reaches Qoder.
 // ============================================================================
 
-// Cosy desktop capture: version 1.15.1 + clienttype 0. Old CLI spoof (1.0.22 +
-// clienttype "5" + machineType "5" + machineToken===machineId) lets Lite work
-// but often 403s kmodel_latest / qmodel_preview on free accounts.
 export const COSY_VERSION = "1.15.1";
-/** Desktop Cosy client type. Old CLI used "5" — wrong for K3/Qwen3.8 path. */
+/** Desktop Cosy capture. Hermes: clienttype 0 unlocks K3/Qwen3.8 on Free0. */
 export const COSY_CLIENT_TYPE = "0";
 export const APPCODE = "cosy";
 export const SIG_SECRET = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw=="; // base64("war, war never changes")
@@ -40,7 +39,7 @@ export const ACTIVITY_URL = "https://openapi.qoder.sh/algo/api/v2/activity";
 // the request to the right billing/promo bucket.
 export const BUSINESS_PRODUCT = "cli";
 export const BUSINESS_TYPE = "agent";
-export const BUSINESS_VERSION = COSY_VERSION; // keep in lockstep with Cosy-Version
+export const BUSINESS_VERSION = "1.15.1";
 export const COSY_SCENE = "assistant";
 export const DEFAULT_MACHINE_OS = "x86_64_windows";
 
@@ -50,11 +49,14 @@ export function openApiHeaders(securityOauthToken: string): Record<string, strin
     Authorization: `Bearer ${securityOauthToken}`,
     "Cosy-ClientType": COSY_CLIENT_TYPE,
     "Cosy-Version": COSY_VERSION,
-    "User-Agent": "qoder/" + COSY_VERSION,
+    "User-Agent": `qoder/${COSY_VERSION}`,
   };
 }
 export const CHAT_URL =
   "https://api2.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
+// Fallback host used by some bridges (api3). Prefer api2 first.
+export const CHAT_URL_FALLBACK =
+  "https://api3.qoder.sh/algo/api/v2/service/pro/sse/agent_chat_generation?FetchKeys=llm_model_result&AgentId=agent_common&Encode=1";
 
 // 1024-bit RSA pubkey extracted from qodercli bundle. Server uses this to decrypt
 // the per-session AES key. Rotation by Qoder will break all clients at once.
@@ -432,6 +434,7 @@ export function generateMachineIdentity() {
 }
 
 export function signatureHeaders(tokens: QoderTokens): Record<string, string> {
+  // Hermes: use machine* as stored (or healed once) — never force type "5".
   const t = ensureCosyMachineFingerprint(tokens);
   const date = rfc1123Date();
   return {
@@ -448,6 +451,7 @@ export function signatureHeaders(tokens: QoderTokens): Record<string, string> {
     "content-type": "application/json",
     "cosy-machineid": t.machineId,
     "user-agent": `qoder/${COSY_VERSION}`,
+    "cosy-data-policy": "agree",
     ...(t.machineCode ? { "cosy-machinecode": t.machineCode } : {}),
     ...(t.machineOs ? { "cosy-machineos": t.machineOs } : {}),
   };
@@ -568,11 +572,9 @@ export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions):
   const pathSig = pathSigFromUrl(opts.url);
   const sig = signBearerRequest(payloadB64, session.cosyKey, date, bodyEncoded, pathSig);
 
-  // Cosy 1.15.1 desktop-style headers (not old qodercli 1.0.22 spoof):
-  //   - cosy-version 1.15.1
-  //   - cosy-clienttype "0" (desktop); old CLI used "5"
-  //   - machineToken opaque ≠ machineId; machineType hex ≠ "5"
-  //   - machineCode + machineOs present
+  // Cosy 1.15.1 desktop path (Hermes live Free0 K3/Qwen3.8):
+  //   - cosy-version 1.15.1, cosy-clienttype "0"
+  //   - machine* from token store (mt≠id, type hex, code+os) — never force "5"
   //   - business product/type/scene for billing bucket attribution
   const headers: Record<string, string> = {
     "cosy-data-policy": "agree",
