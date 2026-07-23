@@ -142,18 +142,19 @@ class QoderProviderAdapter(ProviderAdapter):
                     if isinstance(user_info, dict):
                         creds.update(user_info)
 
-                    # Canonical shape expected by src/proxy/providers/qoder
-                    # (parseTokens requires personalToken + machineId). Device-flow
-                    # poll returns access_token; map it — do not leave snake_case
-                    # OAuth names only or chat fails with "No personalToken".
+                    # Device-flow poll returns a session token (often `dt-…`), NOT a console PAT.
+                    # Chat/quota use it as securityOauthToken / openapi Bearer.
+                    # jobToken ONLY accepts a real PAT — never put dt- into personalToken
+                    # (that produced HTTP 401 "personal token is invalid").
                     out: dict[str, str] = {
-                        "personalToken": access,
+                        "securityOauthToken": access,
+                        "access_token": access,  # legacy alias for tooling
                         "refreshToken": refresh,
-                        "access_token": access,  # keep for generic tooling
                         "refresh_token": refresh,
                         "machineId": machine_id,
                         "machineToken": machine_id,  # CLI: token == id
                         "machineType": "5",
+                        "authMode": "device",
                     }
                     user_id = str(creds.get("user_id") or "").strip()
                     if user_id:
