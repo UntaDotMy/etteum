@@ -48,6 +48,7 @@ import {
   extractLatestUserPrompt,
   generateMachineIdentity,
   generateOpenAIToolId,
+  hasQoderCredentials,
   loadTemplate,
   md5Hex,
   normalizeImageBlock,
@@ -116,11 +117,30 @@ export class QoderProvider extends BaseProvider {
 
   private async ensureFreshAuth(tokens: QoderTokens): Promise<{ tokens: QoderTokens; refreshed: boolean }> {
     const now = Date.now();
-    const needsRefresh =
-      !tokens.securityOauthToken ||
-      !tokens.userId ||
-      (tokens.expireTime && tokens.expireTime - 60_000 < now);
+    const hasSession = Boolean(tokens.securityOauthToken);
+    const sessionExpired =
+      typeof tokens.expireTime === "number" &&
+      Number.isFinite(tokens.expireTime) &&
+      tokens.expireTime - 60_000 < now;
 
+    // Device-session accounts: securityOauthToken IS the device poll token.
+    // Never call jobToken with it (401 personal token is invalid).
+    if (!tokens.personalToken) {
+      if (!hasSession) {
+        throw new Error(
+          "Qoder device session missing securityOauthToken — re-login via browser or import a console PAT",
+        );
+      }
+      if (sessionExpired) {
+        throw new Error(
+          "Qoder device session expired — re-login via browser (device tokens are not refreshable via jobToken)",
+        );
+      }
+      return { tokens, refreshed: false };
+    }
+
+    // PAT path: mint/refresh securityOauthToken via jobToken.
+    const needsRefresh = !hasSession || !tokens.userId || sessionExpired;
     if (!needsRefresh) return { tokens, refreshed: false };
 
     const jt = await exchangeJobToken(tokens);
@@ -130,6 +150,7 @@ export class QoderProvider extends BaseProvider {
 
     const updated: QoderTokens = {
       ...tokens,
+      authMode: "pat",
       userId: jt.id,
       userName: jt.name || tokens.userName || "",
       securityOauthToken: jt.securityOauthToken || tokens.securityOauthToken || "",
@@ -238,19 +259,22 @@ export class QoderProvider extends BaseProvider {
 
   async chatCompletionStream(account: Account, request: ChatCompletionRequest): Promise<ProviderResult> {
     const parsed = this.parseTokens(account);
-    if (!parsed?.personalToken) {
-      return { success: false, error: "No personalToken available" };
+    if (!hasQoderCredentials(parsed)) {
+      return { success: false, error: "No Qoder credentials (need console PAT or device session)" };
     }
 
     let tokens: QoderTokens;
     let refreshed = false;
     try {
-      const auth = await this.ensureFreshAuth(parsed);
+      const auth = await this.ensureFreshAuth(parsed!);
       tokens = auth.tokens;
       refreshed = auth.refreshed;
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
       return { success: false, error: `expired: ${msg}` };
+    }
+    if (!tokens.securityOauthToken) {
+      return { success: false, error: "No securityOauthToken after auth" };
     }
 
     const body = buildChatBody(request, tokens);
@@ -517,9 +541,22 @@ export class QoderProvider extends BaseProvider {
 
   async refreshToken(account: Account): Promise<{ success: boolean; tokens?: string; error?: string }> {
     const parsed = this.parseTokens(account);
-    if (!parsed?.personalToken) return { success: false, error: "No personalToken" };
+    if (!hasQoderCredentials(parsed)) {
+      return { success: false, error: "No Qoder credentials" };
+    }
+    // Device sessions cannot be refreshed via jobToken — only PAT can.
+    if (!parsed!.personalToken) {
+      return {
+        success: false,
+        error: "Device-session accounts cannot refresh via jobToken — re-login via browser or import a PAT",
+      };
+    }
     try {
-      const { tokens } = await this.ensureFreshAuth({ ...parsed, securityOauthToken: "", userId: "" });
+      const { tokens } = await this.ensureFreshAuth({
+        ...parsed!,
+        securityOauthToken: "",
+        userId: "",
+      });
       return { success: true, tokens: JSON.stringify(tokens) };
     } catch (e) {
       return { success: false, error: e instanceof Error ? e.message : String(e) };
@@ -527,8 +564,7 @@ export class QoderProvider extends BaseProvider {
   }
 
   async validateAccount(account: Account): Promise<boolean> {
-    const t = this.parseTokens(account);
-    return !!t?.personalToken;
+    return hasQoderCredentials(this.parseTokens(account));
   }
 
   /**
@@ -575,12 +611,12 @@ export class QoderProvider extends BaseProvider {
 
   async fetchQuota(account: Account, signal?: AbortSignal): Promise<{ success: boolean; quota?: { limit: number; remaining: number; used: number; resetAt?: Date | string | null }; error?: string }> {
     const parsed = this.parseTokens(account);
-    if (!parsed?.personalToken) return { success: false, error: "No personalToken" };
+    if (!hasQoderCredentials(parsed)) return { success: false, error: "No Qoder credentials" };
 
     try {
-      const { tokens } = await this.ensureFreshAuth(parsed);
+      const { tokens } = await this.ensureFreshAuth(parsed!);
       if (!tokens.securityOauthToken) {
-        return { success: false, error: "No securityOauthToken after refresh" };
+        return { success: false, error: "No securityOauthToken after auth" };
       }
 
       const resp = await fetch(QOTA_USAGE_URL, {
@@ -671,26 +707,35 @@ export class QoderProvider extends BaseProvider {
 
   override async healthCheck(account: Account, signal?: AbortSignal): Promise<ProviderHealthResult> {
     const parsed = this.parseTokens(account);
-    if (!parsed?.personalToken) {
-      return { kind: "missing_tokens", success: false, error: "No personalToken" };
+    if (!hasQoderCredentials(parsed)) {
+      return {
+        kind: "missing_tokens",
+        success: false,
+        error: "No Qoder credentials (need console PAT or device session)",
+      };
     }
 
     let tokens: QoderTokens;
     let refreshed = false;
     try {
-      const auth = await this.ensureFreshAuth(parsed);
+      const auth = await this.ensureFreshAuth(parsed!);
       tokens = auth.tokens;
       refreshed = auth.refreshed;
     } catch (error) {
+      const msg = error instanceof Error ? error.message : String(error);
+      // Device session expired / missing → needs human re-login, not a transient retry.
+      if (/device session|re-login/i.test(msg)) {
+        return { kind: "session_expired", success: false, error: msg };
+      }
       return {
         kind: "transient_error",
         success: false,
         retryable: true,
-        error: error instanceof Error ? error.message : String(error),
+        error: msg,
       };
     }
     if (!tokens.securityOauthToken) {
-      return { kind: "session_expired", success: false, error: "No securityOauthToken after refresh" };
+      return { kind: "session_expired", success: false, error: "No securityOauthToken after auth" };
     }
 
     // ---- Account-wide credit (the "All" bar) ----
@@ -806,6 +851,7 @@ export async function activateQoderPat(personalToken: string): Promise<{ tokens:
   const machine = generateMachineIdentity();
   const seed: QoderTokens = {
     personalToken,
+    authMode: "pat",
     machineId: machine.machineId,
     machineToken: machine.machineToken,
     machineType: machine.machineType,

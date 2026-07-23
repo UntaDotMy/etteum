@@ -163,8 +163,27 @@ export function pathSigFromUrl(fullUrl: string): string {
   return u.pathname.startsWith("/algo") ? u.pathname.slice("/algo".length) : u.pathname;
 }
 
+/**
+ * Qoder has two distinct credential families:
+ *
+ * 1) Console PAT (`personalToken`)
+ *    - Created in Qoder settings (personal access token).
+ *    - Only valid input to POST /algo/api/v3/user/jobToken.
+ *    - jobToken returns securityOauthToken (+ refresh) for COSY/Bearer.
+ *
+ * 2) Browser device-flow session (`dt-…` from deviceToken/poll)
+ *    - Poll body field is `token` (often `dt-` prefix), ~30d session.
+ *    - Used directly as securityOauthToken / openapi Bearer — NOT as PAT.
+ *    - jobToken rejects it with HTTP 401 "personal token is invalid".
+ *
+ * Never store a device-poll token in personalToken.
+ */
+export type QoderAuthMode = "pat" | "device";
+
 export interface QoderTokens {
-  personalToken: string;
+  /** Console PAT for jobToken only. Absent/empty for pure device-session accounts. */
+  personalToken?: string;
+  /** Session credential for COSY + openapi Bearer (from jobToken OR device poll). */
   securityOauthToken?: string;
   refreshToken?: string;
   userId?: string;
@@ -176,28 +195,60 @@ export interface QoderTokens {
   machineId: string;
   machineToken: string;
   machineType: string;
+  authMode?: QoderAuthMode;
+}
+
+/** Device-poll tokens commonly use a `dt-` prefix (reverse-engineered from 9router/qodercli). */
+export function isDeviceSessionToken(token: string | null | undefined): boolean {
+  if (!token) return false;
+  return /^dt[-_]/i.test(token.trim());
 }
 
 /**
- * Normalize stored account.tokens into QoderTokens.
- * Accepts PAT import shape (personalToken) and browser device-flow shape
- * (access_token / machine_id) so parseTokens never returns null solely due
- * to field naming drift between login paths.
+ * Normalize stored account.tokens into QoderTokens with correct auth roles.
+ * Heals the historical bug where device poll `access_token` was written into
+ * `personalToken` and then rejected by jobToken with 401.
  */
 export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
   if (!raw || typeof raw !== "object") return null;
   const t = raw as Record<string, any>;
 
-  const personalToken =
-    (typeof t.personalToken === "string" && t.personalToken.trim()) ||
+  const accessToken =
     (typeof t.access_token === "string" && t.access_token.trim()) ||
     (typeof t.accessToken === "string" && t.accessToken.trim()) ||
     "";
-  if (!personalToken) return null;
+  const securityFromStore =
+    (typeof t.securityOauthToken === "string" && t.securityOauthToken.trim()) ||
+    (typeof t.security_oauth_token === "string" && t.security_oauth_token.trim()) ||
+    "";
+  let personalRaw =
+    (typeof t.personalToken === "string" && t.personalToken.trim()) ||
+    (typeof t.personal_token === "string" && t.personal_token.trim()) ||
+    "";
+
+  // Previous incorrect mapping: personalToken === device access_token.
+  if (personalRaw && accessToken && personalRaw === accessToken) {
+    personalRaw = "";
+  }
+  // personalToken field holds a dt- session (never a console PAT).
+  if (personalRaw && isDeviceSessionToken(personalRaw)) {
+    // fold into session below; do not keep as PAT
+  }
+
+  const sessionToken =
+    securityFromStore ||
+    accessToken ||
+    (isDeviceSessionToken(personalRaw) ? personalRaw : "") ||
+    "";
+
+  const personalToken =
+    personalRaw && !isDeviceSessionToken(personalRaw) ? personalRaw : "";
+
+  if (!personalToken && !sessionToken) return null;
 
   const refreshToken =
-    (typeof t.refreshToken === "string" && t.refreshToken) ||
-    (typeof t.refresh_token === "string" && t.refresh_token) ||
+    (typeof t.refreshToken === "string" && t.refreshToken.trim()) ||
+    (typeof t.refresh_token === "string" && t.refresh_token.trim()) ||
     "";
 
   const machineId =
@@ -217,10 +268,21 @@ export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
     (typeof t.user_id === "string" && t.user_id) ||
     undefined;
 
+  let expireTime: number | undefined =
+    typeof t.expireTime === "number" && Number.isFinite(t.expireTime)
+      ? t.expireTime
+      : undefined;
+  if (expireTime == null && typeof t.expires_at === "string" && t.expires_at) {
+    const ms = Date.parse(t.expires_at);
+    if (Number.isFinite(ms)) expireTime = ms;
+  }
+
+  const authMode: QoderAuthMode = personalToken ? "pat" : "device";
+
   return {
-    personalToken,
+    personalToken: personalToken || undefined,
+    securityOauthToken: sessionToken || undefined,
     refreshToken: refreshToken || undefined,
-    securityOauthToken: (typeof t.securityOauthToken === "string" && t.securityOauthToken) || "",
     userId,
     userName:
       (typeof t.userName === "string" && t.userName) ||
@@ -229,12 +291,19 @@ export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
       undefined,
     userType: typeof t.userType === "string" ? t.userType : undefined,
     plan: typeof t.plan === "string" ? t.plan : undefined,
-    expireTime: typeof t.expireTime === "number" ? t.expireTime : undefined,
+    expireTime,
     email: typeof t.email === "string" ? t.email : undefined,
     machineId,
     machineToken,
     machineType,
+    authMode,
   };
+}
+
+/** True when we have something we can use for chat/quota (PAT and/or session). */
+export function hasQoderCredentials(tokens: QoderTokens | null | undefined): boolean {
+  if (!tokens) return false;
+  return Boolean(tokens.personalToken || tokens.securityOauthToken);
 }
 
 export function generateMachineIdentity() {
@@ -315,8 +384,15 @@ export interface ActivityResponse {
 }
 
 export async function exchangeJobToken(tokens: QoderTokens): Promise<JobTokenResponse> {
+  // jobToken only accepts a console PAT. Device-session (dt-) tokens are not PATs.
+  const pat = (tokens.personalToken || "").trim();
+  if (!pat || isDeviceSessionToken(pat)) {
+    throw new Error(
+      "jobToken requires a console personalToken (PAT). Device-session tokens (dt-…) cannot be exchanged — re-login or import a PAT.",
+    );
+  }
   const inner = {
-    personalToken: tokens.personalToken,
+    personalToken: pat,
     securityOauthToken: tokens.securityOauthToken || "",
     refreshToken: tokens.refreshToken || "",
     needRefresh: !!tokens.refreshToken,
