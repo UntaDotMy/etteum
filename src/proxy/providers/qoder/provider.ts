@@ -212,12 +212,9 @@ export class QoderProvider extends BaseProvider {
               };
             }
             const delta = chunk.choices?.[0]?.delta;
+            // Non-stream aggregation: visible answer only. Do not fold
+            // reasoning into content (leaks chain-of-thought into the reply).
             if (delta?.content) fullContent += delta.content;
-            else if (typeof delta?.reasoning_content === "string" && delta.reasoning_content) {
-              fullContent += delta.reasoning_content;
-            } else if (typeof delta?.reasoning === "string" && delta.reasoning) {
-              fullContent += delta.reasoning;
-            }
             if (Array.isArray(delta?.tool_calls)) {
               for (const tc of delta.tool_calls) {
                 const idx = tc.index ?? toolCalls.length;
@@ -524,13 +521,13 @@ export class QoderProvider extends BaseProvider {
                 delta.reasoning_content = parsedDelta.reasoningContent;
               }
 
+              // Keep content and reasoning separate. Promoting reasoning into
+              // content made Chat show "Thinking Process..." in the answer body
+              // (and often duplicated it). Dashboard streamChat already maps
+              // reasoning_content → thinking; empty content falls back to
+              // thinking for display when needed.
               if (parsedDelta.content) {
                 delta.content = parsedDelta.content;
-              } else if (parsedDelta.reasoningContent) {
-                // Thinking models (Kimi K3) often stream only reasoning_* first.
-                // Promote into content so Chat UIs that ignore reasoning_content
-                // don't show a blank reply.
-                delta.content = parsedDelta.reasoningContent;
               }
 
               if (parsedDelta.toolCalls) {

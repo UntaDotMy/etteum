@@ -163,13 +163,23 @@ type StreamUpdate = {
 function extractEmbeddedThinking(text: string): { thinking: string; content: string } {
   let thinking = "";
   let content = text;
-  const patterns = [/<think>([\s\S]*?)<\/think>/gi, /<thinking>([\s\S]*?)<\/thinking>/gi];
+  const patterns = [
+    /<think>([\s\S]*?)<\/think>/gi,
+    /<thinking>([\s\S]*?)<\/thinking>/gi,
+    // Some Cosy/thinking models leak a "Thinking Process:" prose block into content.
+    /(?:^|\n)\s*Thinking Process:\s*([\s\S]*?)(?=\n\s*(?:Hi |Hello |Hey |Sure |OK |Okay |I |Here |The |$))/i,
+  ];
   for (const re of patterns) {
     content = content.replace(re, (_m, body: string) => {
       const t = String(body || "").trim();
       if (t) thinking = thinking ? `${thinking}\n\n${t}` : t;
       return "";
     });
+  }
+  // If the whole message is a Thinking Process dump with no separate answer.
+  if (!content.trim() && /^Thinking Process:/i.test(text.trim())) {
+    thinking = text.replace(/^Thinking Process:\s*/i, "").trim();
+    content = "";
   }
   return { thinking: thinking.trim(), content: content.replace(/^\s+/, "") };
 }
@@ -419,13 +429,20 @@ async function streamChat(
             deltaTextPiece(message.thinking);
 
           let changed = false;
-          if (contentPiece) {
-            fullText += contentPiece;
-            changed = true;
-          }
-          if (thinkingPiece) {
+          // If provider wrongly puts the same text in content and reasoning,
+          // only count it once as thinking (avoid duplicate body + Thinking panel).
+          if (contentPiece && thinkingPiece && contentPiece === thinkingPiece) {
             fullThinking += thinkingPiece;
             changed = true;
+          } else {
+            if (contentPiece) {
+              fullText += contentPiece;
+              changed = true;
+            }
+            if (thinkingPiece) {
+              fullThinking += thinkingPiece;
+              changed = true;
+            }
           }
           if (changed) emit();
         } catch {
