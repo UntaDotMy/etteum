@@ -133,21 +133,41 @@ class QoderProviderAdapter(ProviderAdapter):
                 if creds:
                     if google_task:
                         google_task.cancel()
-                    creds["machine_id"] = flow.machine_id
-                    user_info = await fetch_user_info(creds.get("access_token", ""))
+                    access = str(creds.get("access_token") or "").strip()
+                    refresh = str(creds.get("refresh_token") or "").strip()
+                    machine_id = str(flow.machine_id or "").strip() or str(
+                        creds.get("machine_id") or ""
+                    ).strip()
+                    user_info = await fetch_user_info(access)
                     if isinstance(user_info, dict):
                         creds.update(user_info)
-                    return {
-                        "access_token": str(creds.get("access_token") or ""),
-                        "refresh_token": str(creds.get("refresh_token") or ""),
-                        "id_token": str(creds.get("id_token") or ""),
-                        **{
-                            k: v
-                            for k, v in creds.items()
-                            if k not in ("access_token", "refresh_token", "id_token")
-                            and isinstance(v, (str, int, float, bool))
-                        },
+
+                    # Canonical shape expected by src/proxy/providers/qoder
+                    # (parseTokens requires personalToken + machineId). Device-flow
+                    # poll returns access_token; map it — do not leave snake_case
+                    # OAuth names only or chat fails with "No personalToken".
+                    out: dict[str, str] = {
+                        "personalToken": access,
+                        "refreshToken": refresh,
+                        "access_token": access,  # keep for generic tooling
+                        "refresh_token": refresh,
+                        "machineId": machine_id,
+                        "machineToken": machine_id,  # CLI: token == id
+                        "machineType": "5",
                     }
+                    user_id = str(creds.get("user_id") or "").strip()
+                    if user_id:
+                        out["userId"] = user_id
+                    email = str(creds.get("email") or "").strip()
+                    if email:
+                        out["email"] = email
+                    display = str(creds.get("display_name") or "").strip()
+                    if display:
+                        out["userName"] = display
+                    expires_at = str(creds.get("expires_at") or "").strip()
+                    if expires_at:
+                        out["expires_at"] = expires_at
+                    return out
                 await asyncio.sleep(2.0)
         finally:
             if google_task and not google_task.done():

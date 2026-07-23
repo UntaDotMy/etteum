@@ -178,6 +178,65 @@ export interface QoderTokens {
   machineType: string;
 }
 
+/**
+ * Normalize stored account.tokens into QoderTokens.
+ * Accepts PAT import shape (personalToken) and browser device-flow shape
+ * (access_token / machine_id) so parseTokens never returns null solely due
+ * to field naming drift between login paths.
+ */
+export function normalizeQoderTokens(raw: unknown): QoderTokens | null {
+  if (!raw || typeof raw !== "object") return null;
+  const t = raw as Record<string, any>;
+
+  const personalToken =
+    (typeof t.personalToken === "string" && t.personalToken.trim()) ||
+    (typeof t.access_token === "string" && t.access_token.trim()) ||
+    (typeof t.accessToken === "string" && t.accessToken.trim()) ||
+    "";
+  if (!personalToken) return null;
+
+  const refreshToken =
+    (typeof t.refreshToken === "string" && t.refreshToken) ||
+    (typeof t.refresh_token === "string" && t.refresh_token) ||
+    "";
+
+  const machineId =
+    (typeof t.machineId === "string" && t.machineId) ||
+    (typeof t.machine_id === "string" && t.machine_id) ||
+    crypto.randomUUID();
+  const machineToken =
+    (typeof t.machineToken === "string" && t.machineToken) ||
+    (typeof t.machine_token === "string" && t.machine_token) ||
+    machineId;
+  const machineType =
+    (typeof t.machineType === "string" && t.machineType) ||
+    (typeof t.machine_type === "string" && t.machine_type) ||
+    "5";
+  const userId =
+    (typeof t.userId === "string" && t.userId) ||
+    (typeof t.user_id === "string" && t.user_id) ||
+    undefined;
+
+  return {
+    personalToken,
+    refreshToken: refreshToken || undefined,
+    securityOauthToken: (typeof t.securityOauthToken === "string" && t.securityOauthToken) || "",
+    userId,
+    userName:
+      (typeof t.userName === "string" && t.userName) ||
+      (typeof t.display_name === "string" && t.display_name) ||
+      (typeof t.name === "string" && t.name) ||
+      undefined,
+    userType: typeof t.userType === "string" ? t.userType : undefined,
+    plan: typeof t.plan === "string" ? t.plan : undefined,
+    expireTime: typeof t.expireTime === "number" ? t.expireTime : undefined,
+    email: typeof t.email === "string" ? t.email : undefined,
+    machineId,
+    machineToken,
+    machineType,
+  };
+}
+
 export function generateMachineIdentity() {
   // Mirror qodercli 1.0.22 layout: machineToken == machineId (same UUID),
   // machineType is the literal client type "5" (NOT a random hex blob).

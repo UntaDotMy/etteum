@@ -812,16 +812,28 @@ export async function loginAccount(account: Account, options: LoginOptions = {})
           broadcast({ type: "login_failed", data: { logId: failLog.id, id: account.id, email: account.email, provider, error: result.error || "login failed" } });
           return { success: false, error: result.error || "login failed" };
         }
-        const toks = result.tokens || result.credentials || {};
+        const toks = (result.tokens || result.credentials || {}) as Record<string, unknown>;
+        // Keep provider-specific fields (e.g. qoder personalToken/machineId).
+        // Historical bug: only kiro OAuth keys were copied, so qoder login
+        // "succeeded" then chat failed with "No personalToken available".
+        const credentials: Record<string, string> = {};
+        for (const [k, v] of Object.entries(toks)) {
+          if (v == null) continue;
+          if (typeof v === "string" || typeof v === "number" || typeof v === "boolean") {
+            credentials[k] = String(v);
+          }
+        }
+        // Kiro-friendly aliases when present under either naming.
+        if (!credentials.access_token && credentials.accessToken) {
+          credentials.access_token = credentials.accessToken;
+        }
+        if (!credentials.refresh_token && credentials.refreshToken) {
+          credentials.refresh_token = credentials.refreshToken;
+        }
         const providerResult: ProviderResult = {
           success: true,
           provider,
-          credentials: {
-            access_token: String((toks as any).access_token || ""),
-            refresh_token: String((toks as any).refresh_token || ""),
-            id_token: String((toks as any).id_token || ""),
-            profile_arn: String((toks as any).profile_arn || ""),
-          },
+          credentials,
           quota: result.quota ? {
             remaining_credits: (result.quota as any).remaining_credits,
             total_credits: (result.quota as any).total_credits,
