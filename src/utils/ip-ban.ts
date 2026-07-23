@@ -24,22 +24,16 @@ import {
   peerIpFromHonoContext,
   realClientIp,
 } from "./security";
+import {
+  FRIEND_KEY_BAN_DAYS,
+  isBannableIp,
+  shouldTripwire,
+} from "./ip-ban-pure";
 
-export const FRIEND_KEY_BAN_DAYS = 9999;
+// Re-export pure helpers so existing imports keep working.
+export { FRIEND_KEY_BAN_DAYS, isBannableIp, shouldTripwire };
+
 const DAY_MS = 24 * 60 * 60 * 1000;
-
-/** Pure: presenting this key scope on an admin surface trips the wire. */
-export function shouldTripwire(scope: string | null | undefined): boolean {
-  return scope === "managed";
-}
-
-/** Pure: never ban loopback / unknown / empty — self-lockout guard. */
-export function isBannableIp(ip: string | null | undefined): boolean {
-  if (!ip) return false;
-  const v = ip.trim();
-  if (!v || v.toLowerCase() === "unknown") return false;
-  return !isLoopbackIp(v);
-}
 
 /**
  * Best available client IP for ban decisions. Peer-first (unspoofable);

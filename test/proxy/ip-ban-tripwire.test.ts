@@ -12,7 +12,6 @@ import {
   clientIdentityFromHeaders,
   effectiveClientIpFromParts,
   FRIEND_KEY_BAN_DAYS,
-  isBannableIp,
   isIpBanned,
   listBans,
   listSecurityEvents,
@@ -22,6 +21,9 @@ import {
   unbanIp,
   __resetBanCacheForTests,
 } from "../../src/utils/ip-ban";
+// Pure helper: import from the side-effect-free module so full-suite load order
+// cannot hit a half-evaluated DB-backed ip-ban barrel (CI flake).
+import { isBannableIp } from "../../src/utils/ip-ban-pure";
 import { resolveApiKey } from "../../src/api/keys";
 import { db } from "../../src/db/index";
 import { apiKeys, ipBans, securityEvents } from "../../src/db/schema";
