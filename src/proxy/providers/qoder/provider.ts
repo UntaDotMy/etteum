@@ -51,6 +51,7 @@ import {
   loadTemplate,
   md5Hex,
   normalizeImageBlock,
+  normalizeQoderTokens,
   normalizeToolCallId,
   openApiHeaders,
   parseSseLine,
@@ -106,17 +107,8 @@ export class QoderProvider extends BaseProvider {
   private parseTokens(account: Account): QoderTokens | null {
     if (!account.tokens) return null;
     try {
-      const t = typeof account.tokens === "string" ? JSON.parse(account.tokens) : account.tokens;
-      if (!t || typeof t !== "object" || !t.personalToken) return null;
-      // Backfill missing machine identity. Older imports (pre 1.0.22 fix)
-      // wrote tokens without machineId/Token/Type. The cosy-machine* headers
-      // depend on these — without them the request is served but appears to
-      // skip the qmodel_latest free-quota bucket. Generate stable values now
-      // so all subsequent requests carry valid headers.
-      if (!t.machineId) t.machineId = crypto.randomUUID();
-      if (!t.machineToken) t.machineToken = t.machineId; // CLI: token == id
-      if (!t.machineType) t.machineType = "5"; // CLI literal client type
-      return t as QoderTokens;
+      const raw = typeof account.tokens === "string" ? JSON.parse(account.tokens) : account.tokens;
+      return normalizeQoderTokens(raw);
     } catch {
       return null;
     }
