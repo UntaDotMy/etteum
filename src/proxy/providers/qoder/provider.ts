@@ -855,6 +855,8 @@ export async function activateQoderPat(personalToken: string): Promise<{ tokens:
     machineId: machine.machineId,
     machineToken: machine.machineToken,
     machineType: machine.machineType,
+    machineCode: machine.machineCode,
+    machineOs: machine.machineOs,
   };
   const jt = await exchangeJobToken(seed);
   if (!jt.id) throw new Error("Qoder jobToken response missing id");

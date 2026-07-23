@@ -144,16 +144,25 @@ class QoderProviderAdapter(ProviderAdapter):
 
                     # Device-flow poll returns a session token (often `dt-…`), NOT a console PAT.
                     # Chat/quota use it as securityOauthToken / openapi Bearer.
-                    # jobToken ONLY accepts a real PAT — never put dt- into personalToken
-                    # (that produced HTTP 401 "personal token is invalid").
+                    # Cosy machine* must be desktop-shaped (opaque machineToken ≠
+                    # machineId, hex machineType ≠ "5", machineCode + machineOs).
+                    # Old CLI spoof (token==id, type "5") 403s K3/Qwen3.8.
+                    import hashlib
+
+                    def _stable_hex(seed: str, nbytes: int) -> str:
+                        return hashlib.sha256(seed.encode("utf-8")).hexdigest()[: nbytes * 2]
+
+                    mid = machine_id or str(__import__("uuid").uuid4())
                     out: dict[str, str] = {
                         "securityOauthToken": access,
                         "access_token": access,  # legacy alias for tooling
                         "refreshToken": refresh,
                         "refresh_token": refresh,
-                        "machineId": machine_id,
-                        "machineToken": machine_id,  # CLI: token == id
-                        "machineType": "5",
+                        "machineId": mid,
+                        "machineToken": _stable_hex(f"qoder:mt:{mid}", 32),
+                        "machineType": _stable_hex(f"qoder:mtype:{mid}", 4),
+                        "machineCode": _stable_hex(f"qoder:mcode:{mid}", 4),
+                        "machineOs": "x86_64_windows",
                         "authMode": "device",
                     }
                     user_id = str(creds.get("user_id") or "").strip()
