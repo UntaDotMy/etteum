@@ -68,11 +68,31 @@ async function runIdempotentColumns() {
 export async function runMigrations() {
   const migrationsFolder = "./drizzle";
 
-  // Only run file-based migrations if the folder exists
+  // Only run file-based migrations if the folder exists.
+  // CI runs `drizzle-kit push` before tests, which creates tables without
+  // writing the drizzle journal. Re-running 0000 CREATE TABLE then fails with
+  // "table already exists". Treat that as "schema already present" and continue
+  // with the idempotent column/table steps below — never leave tests half-boot.
   if (existsSync(`${migrationsFolder}/meta/_journal.json`)) {
     console.log("[DB] Running migrations...");
-    await migrate(db, { migrationsFolder });
-    console.log("[DB] Migrations complete.");
+    try {
+      await migrate(db, { migrationsFolder });
+      console.log("[DB] Migrations complete.");
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const cause = err && typeof err === "object" && "cause" in err
+        ? String((err as { cause?: unknown }).cause ?? "")
+        : "";
+      const combined = `${msg}\n${cause}`;
+      if (/already exists/i.test(combined)) {
+        console.warn(
+          "[DB] Journaled migrations skipped — schema already present " +
+            "(e.g. drizzle-kit push without journal). Continuing with idempotent steps.",
+        );
+      } else {
+        throw err;
+      }
+    }
   } else {
     console.log("[DB] No migrations found, skipping. Use 'bun run db:push' to sync schema.");
   }

@@ -27,8 +27,9 @@ jobs:
         continue-on-error: true # pre-existing baseline — tracked separately
       - name: Push DB schema
         # Create the SQLite schema from src/db/schema.ts so the DB-backed tests
-        # (pricing, BYOK, sticky round-robin, search) have tables to query. The
-        # drizzle/ migrations folder is gitignored, so this is the fresh-DB path.
+        # (pricing, BYOK, sticky round-robin, search) have tables to query.
+        # drizzle/ may also be present; runMigrations() tolerates "already exists"
+        # when a later test re-applies the journal on a push-created DB.
         # mkdir first: better-sqlite3 won't create the data/ dir itself. The
         # final test guards against drizzle-kit silently exiting 0 on error.
         run: |
