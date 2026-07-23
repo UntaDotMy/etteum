@@ -111,7 +111,14 @@ export class QoderProvider extends BaseProvider {
   private parseTokens(account: Account): QoderTokens | null {
     if (!account.tokens) return null;
     try {
-      const raw = typeof account.tokens === "string" ? JSON.parse(account.tokens) : account.tokens;
+      // Hermes: DB may store double-encoded JSON string; unwrap once/twice.
+      let raw: unknown = account.tokens;
+      if (typeof raw === "string") {
+        raw = JSON.parse(raw);
+        if (typeof raw === "string") {
+          raw = JSON.parse(raw);
+        }
+      }
       return normalizeQoderTokens(raw);
     } catch {
       return null;

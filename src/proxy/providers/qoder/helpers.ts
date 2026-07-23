@@ -16,17 +16,15 @@ import { getUpstreamNameOverride } from "../custom-models";
 
 // ============================================================================
 // Qoder Cosy call path — chat / quota / activity
-// Wire format aligned with working qoder2api / qodercli Cosy chat captures
-// (fengyinxia/qoder2api, EchoPing07/Qoder-2API-Go): Encode=1 body + cosy-clienttype 5.
+// Proven Free0 K3/Qwen3.8 path (Hermes live smoke 2026-07):
+//   COSY 1.15.1 + clienttype 0 + machine* as stored (mt≠id, type hex, code+os).
+// Do NOT use old CLI spoof 1.0.22 + clienttype "5" + machineType "5" — Lite only.
 // Auth/login stays separate; this file owns the request shape that reaches Qoder.
 // ============================================================================
 
-// Proven chat path uses Cosy version 0.1.43 (qoder2api) / 1.0.22-era CLI.
-// Desktop 1.15.1 + clienttype 0 was experimental and produced empty streams
-// against current gateways for free/device sessions.
-export const COSY_VERSION = "0.1.43";
-/** Cosy client type used by working open-source bridges (CLI/wasm reimpl). */
-export const COSY_CLIENT_TYPE = "5";
+export const COSY_VERSION = "1.15.1";
+/** Desktop Cosy capture. Hermes: clienttype 0 unlocks K3/Qwen3.8 on Free0. */
+export const COSY_CLIENT_TYPE = "0";
 export const APPCODE = "cosy";
 export const SIG_SECRET = "d2FyLCB3YXIgbmV2ZXIgY2hhbmdlcw=="; // base64("war, war never changes")
 export const JOB_TOKEN_URL = "https://center.qoder.sh/algo/api/v3/user/jobToken?Encode=1";
@@ -41,7 +39,7 @@ export const ACTIVITY_URL = "https://openapi.qoder.sh/algo/api/v2/activity";
 // the request to the right billing/promo bucket.
 export const BUSINESS_PRODUCT = "cli";
 export const BUSINESS_TYPE = "agent";
-export const BUSINESS_VERSION = "1.0.22"; // product version (can differ from cosy-version header)
+export const BUSINESS_VERSION = "1.15.1";
 export const COSY_SCENE = "assistant";
 export const DEFAULT_MACHINE_OS = "x86_64_windows";
 
@@ -51,7 +49,7 @@ export function openApiHeaders(securityOauthToken: string): Record<string, strin
     Authorization: `Bearer ${securityOauthToken}`,
     "Cosy-ClientType": COSY_CLIENT_TYPE,
     "Cosy-Version": COSY_VERSION,
-    "User-Agent": "Go-http-client/2.0",
+    "User-Agent": `qoder/${COSY_VERSION}`,
   };
 }
 export const CHAT_URL =
@@ -436,6 +434,7 @@ export function generateMachineIdentity() {
 }
 
 export function signatureHeaders(tokens: QoderTokens): Record<string, string> {
+  // Hermes: use machine* as stored (or healed once) — never force type "5".
   const t = ensureCosyMachineFingerprint(tokens);
   const date = rfc1123Date();
   return {
@@ -451,8 +450,10 @@ export function signatureHeaders(tokens: QoderTokens): Record<string, string> {
     signature: signSignatureHeader(date),
     "content-type": "application/json",
     "cosy-machineid": t.machineId,
-    "user-agent": "Go-http-client/2.0",
-    "cosy-data-policy": "AGREE",
+    "user-agent": `qoder/${COSY_VERSION}`,
+    "cosy-data-policy": "agree",
+    ...(t.machineCode ? { "cosy-machinecode": t.machineCode } : {}),
+    ...(t.machineOs ? { "cosy-machineos": t.machineOs } : {}),
   };
 }
 
@@ -571,14 +572,12 @@ export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions):
   const pathSig = pathSigFromUrl(opts.url);
   const sig = signBearerRequest(payloadB64, session.cosyKey, date, bodyEncoded, pathSig);
 
-  // Cosy chat headers aligned with working qoder2api bridges:
-  //   - cosy-version 0.1.43, cosy-clienttype "5"
-  //   - cosy-data-policy AGREE
-  //   - user-agent Go-http-client/2.0
-  //   - locked machineId/machineToken/machineType (opaque token ≠ id)
-  // Optional machineCode/machineOs kept when present for desktop-shaped binds.
+  // Cosy 1.15.1 desktop path (Hermes live Free0 K3/Qwen3.8):
+  //   - cosy-version 1.15.1, cosy-clienttype "0"
+  //   - machine* from token store (mt≠id, type hex, code+os) — never force "5"
+  //   - business product/type/scene for billing bucket attribution
   const headers: Record<string, string> = {
-    "cosy-data-policy": "AGREE",
+    "cosy-data-policy": "agree",
     "cosy-machinetype": t.machineType,
     "cosy-clienttype": COSY_CLIENT_TYPE,
     "cosy-date": date,
@@ -595,7 +594,7 @@ export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions):
     "cosy-machineid": t.machineId,
     "cosy-machinetoken": t.machineToken,
     "login-version": "v2",
-    "user-agent": "Go-http-client/2.0",
+    "user-agent": `qoder/${COSY_VERSION}`,
     ...(t.machineCode ? { "cosy-machinecode": t.machineCode } : {}),
     ...(t.machineOs ? { "cosy-machineos": t.machineOs } : {}),
     ...(opts.extraHeaders || {}),
