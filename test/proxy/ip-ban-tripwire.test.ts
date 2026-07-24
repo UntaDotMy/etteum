@@ -6,7 +6,13 @@
  */
 import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { runMigrations } from "../../src/db/migrate";
-import {
+// Namespace import (not named): under bun's full-suite load order the DB-backed
+// ip-ban barrel can be mid circular-evaluation when this test links, and named
+// bindings resolved at link time then throw "Export named '…' not found". A
+// namespace binds the whole module object; the destructure below runs at test
+// evaluation time, after ip-ban has finished evaluating. why: fixes CI flake.
+import * as ipBan from "../../src/utils/ip-ban";
+const {
   banInvalidLoginIp,
   banIp,
   clientIdentityFromHeaders,
@@ -20,7 +26,7 @@ import {
   triggerFriendKeyTripwire,
   unbanIp,
   __resetBanCacheForTests,
-} from "../../src/utils/ip-ban";
+} = ipBan;
 // Pure helper: import from the side-effect-free module so full-suite load order
 // cannot hit a half-evaluated DB-backed ip-ban barrel (CI flake).
 import { isBannableIp } from "../../src/utils/ip-ban-pure";
