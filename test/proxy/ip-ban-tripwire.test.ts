@@ -6,34 +6,37 @@
  */
 import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { runMigrations } from "../../src/db/migrate";
-// Namespace import + LAZY binding (see beforeAll): under bun's full-suite load
-// order the DB-backed ip-ban barrel is mid circular-evaluation when this test
-// module's top-level runs (the test also pulls in src/api/keys → proxy/router →
-// provider graph, which re-enters ip-ban before it finishes). Reading its
-// exports at module-eval time yields either "Export not found" (named import)
-// or undefined (eager destructure). Binding inside beforeAll defers the read to
-// execution time, after every module has finished evaluating. why: fixes CI flake.
-import * as ipBan from "../../src/utils/ip-ban";
-let banInvalidLoginIp: typeof ipBan.banInvalidLoginIp;
-let banIp: typeof ipBan.banIp;
-let clientIdentityFromHeaders: typeof ipBan.clientIdentityFromHeaders;
-let effectiveClientIpFromParts: typeof ipBan.effectiveClientIpFromParts;
-let FRIEND_KEY_BAN_DAYS: typeof ipBan.FRIEND_KEY_BAN_DAYS;
-let isIpBanned: typeof ipBan.isIpBanned;
-let listBans: typeof ipBan.listBans;
-let listSecurityEvents: typeof ipBan.listSecurityEvents;
-let logSecurityEvent: typeof ipBan.logSecurityEvent;
-let shouldTripwire: typeof ipBan.shouldTripwire;
-let triggerFriendKeyTripwire: typeof ipBan.triggerFriendKeyTripwire;
-let unbanIp: typeof ipBan.unbanIp;
-let __resetBanCacheForTests: typeof ipBan.__resetBanCacheForTests;
-// Pure helper: import from the side-effect-free module so full-suite load order
-// cannot hit a half-evaluated DB-backed ip-ban barrel (CI flake).
-import { isBannableIp } from "../../src/utils/ip-ban-pure";
-import { resolveApiKey } from "../../src/api/keys";
+// Pure helpers: side-effect-free module — safe under any bun full-suite load order.
+// (DB-backed ip-ban can be mid circular-evaluation when this file links; named
+// imports then throw "Export named X not found", and namespace/lazy destructure
+// still read undefined. why: fixes CI flake.)
+import {
+  FRIEND_KEY_BAN_DAYS,
+  isBannableIp,
+  shouldTripwire,
+} from "../../src/utils/ip-ban-pure";
+// DB-backed + heavy graph modules: load via dynamic import() in beforeAll so
+// evaluation finishes before any export is read. Static import of keys was
+// especially costly (keys → registry → full provider graph) and worsened order.
 import { db } from "../../src/db/index";
 import { apiKeys, ipBans, securityEvents } from "../../src/db/schema";
 import { eq, like } from "drizzle-orm";
+
+type IpBan = typeof import("../../src/utils/ip-ban");
+type Keys = typeof import("../../src/api/keys");
+
+let banInvalidLoginIp: IpBan["banInvalidLoginIp"];
+let banIp: IpBan["banIp"];
+let clientIdentityFromHeaders: IpBan["clientIdentityFromHeaders"];
+let effectiveClientIpFromParts: IpBan["effectiveClientIpFromParts"];
+let isIpBanned: IpBan["isIpBanned"];
+let listBans: IpBan["listBans"];
+let listSecurityEvents: IpBan["listSecurityEvents"];
+let logSecurityEvent: IpBan["logSecurityEvent"];
+let triggerFriendKeyTripwire: IpBan["triggerFriendKeyTripwire"];
+let unbanIp: IpBan["unbanIp"];
+let __resetBanCacheForTests: IpBan["__resetBanCacheForTests"];
+let resolveApiKey: Keys["resolveApiKey"];
 
 // RFC 5737 TEST-NET-3 — guaranteed non-real public IPs.
 const IP_A = "203.0.113.10";
@@ -43,23 +46,23 @@ const TEST_KEY = "etteum_tripwire_test_keyABC123";
 
 // Tables are created by the boot migration path — tests must run it explicitly.
 beforeAll(async () => {
-  // Bind ip-ban exports now (execution time), after all modules have finished
-  // evaluating — see the import note above re: circular-eval load order.
-  ({
-    banInvalidLoginIp,
-    banIp,
-    clientIdentityFromHeaders,
-    effectiveClientIpFromParts,
-    FRIEND_KEY_BAN_DAYS,
-    isIpBanned,
-    listBans,
-    listSecurityEvents,
-    logSecurityEvent,
-    shouldTripwire,
-    triggerFriendKeyTripwire,
-    unbanIp,
-    __resetBanCacheForTests,
-  } = ipBan);
+  // Await full evaluation of the DB-backed barrel (and keys) before binding.
+  const ipBan = await import("../../src/utils/ip-ban");
+  banInvalidLoginIp = ipBan.banInvalidLoginIp;
+  banIp = ipBan.banIp;
+  clientIdentityFromHeaders = ipBan.clientIdentityFromHeaders;
+  effectiveClientIpFromParts = ipBan.effectiveClientIpFromParts;
+  isIpBanned = ipBan.isIpBanned;
+  listBans = ipBan.listBans;
+  listSecurityEvents = ipBan.listSecurityEvents;
+  logSecurityEvent = ipBan.logSecurityEvent;
+  triggerFriendKeyTripwire = ipBan.triggerFriendKeyTripwire;
+  unbanIp = ipBan.unbanIp;
+  __resetBanCacheForTests = ipBan.__resetBanCacheForTests;
+
+  const keys = await import("../../src/api/keys");
+  resolveApiKey = keys.resolveApiKey;
+
   await runMigrations();
 });
 
