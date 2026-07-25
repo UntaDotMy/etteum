@@ -12,7 +12,9 @@
  *   - reasoning/thinking    → { result: { response: { reasoning: { ... } } } }
  *   - tool usage cards      → { result: { response: { toolUsageCard: ... } } }
  *   - web-search results    → { result: { response: { webSearchResults: ... } } }
- *   - final metadata        → { result: { response: { isSoftStop, isFinal, ... } } }
+ *   - final metadata        → { result: { response: { isFinal, isSoftStop, ... } } }
+ *     isFinal ends the stream; isSoftStop is a mid-generation pause and must
+ *     NOT close the client stream (otherwise answers stop mid-sentence).
  *   - errors                → { error: { message, code } }
  *
  * The StreamAdapter normalizes all of the above into a simple FrameEvent stream
@@ -149,7 +151,7 @@ export interface FrameEvent {
     | "tool_use"      // a tool-usage card (parsed)
     | "citation"      // a citation reference [[id]](url)
     | "web_search"    // web-search result metadata
-    | "done"          // stream finished (isFinal or isSoftStop)
+    | "done"          // stream finished (isFinal only — never isSoftStop)
     | "error";        // upstream error
   text?: string;
   toolName?: string;
@@ -325,8 +327,10 @@ export class StreamAdapter {
 
     const response = result?.response;
     if (!response) {
-      // Check for isFinal at the result level.
-      if (result?.isFinal === true || result?.isSoftStop === true) {
+      // Only isFinal ends the stream. isSoftStop is a mid-generation pause
+      // (tools / search / reasoning segments) — closing on it truncates the
+      // answer with finish_reason "stop" and no error. why: silent early stop.
+      if (result?.isFinal === true) {
         events.push({ type: "done" });
       }
       return events;
@@ -366,8 +370,8 @@ export class StreamAdapter {
       }
     }
 
-    // --- Final / soft stop ---
-    if (response.isFinal === true || response.isSoftStop === true) {
+    // --- Final only (isSoftStop is a pause, not completion — see feed() note) ---
+    if (response.isFinal === true) {
       events.push({ type: "done" });
     }
 
