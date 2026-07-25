@@ -4,6 +4,10 @@
 import { describe, test, expect, mock, beforeEach } from "bun:test";
 
 // Mock resolveApiKey + tripwire + JWT verify before importing the unit under test.
+// IMPORTANT: bun's mock.module REPLACES the entire module registry entry for the
+// rest of the process. Spreading the real module keeps other exports intact so
+// later suites (e.g. ip-ban-tripwire) still get banIp / __resetBanCacheForTests /
+// etc. A stub that only returns the one mocked name was the CI flake root cause.
 const resolveApiKey = mock(async (_token: string, _opts: unknown) => ({
   valid: false as boolean,
   scope: "pool" as string | undefined,
@@ -14,15 +18,21 @@ const triggerFriendKeyTripwire = mock(async () => {});
 
 const verifyDashboardAuthToken = mock(async (_token?: string) => null as Record<string, unknown> | null);
 
+const realKeys = await import("../../src/api/keys");
 mock.module("../../src/api/keys", () => ({
+  ...realKeys,
   resolveApiKey,
 }));
 
+const realIpBan = await import("../../src/utils/ip-ban");
 mock.module("../../src/utils/ip-ban", () => ({
+  ...realIpBan,
   triggerFriendKeyTripwire,
 }));
 
+const realDashSec = await import("../../src/auth/dashboardSecurity");
 mock.module("../../src/auth/dashboardSecurity", () => ({
+  ...realDashSec,
   SESSION_COOKIE: "auth_token",
   verifyDashboardAuthToken,
 }));

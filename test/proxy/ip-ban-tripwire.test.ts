@@ -6,37 +6,29 @@
  */
 import { describe, test, expect, beforeAll, beforeEach, afterEach } from "bun:test";
 import { runMigrations } from "../../src/db/migrate";
-// Pure helpers: side-effect-free module — safe under any bun full-suite load order.
-// (DB-backed ip-ban can be mid circular-evaluation when this file links; named
-// imports then throw "Export named X not found", and namespace/lazy destructure
-// still read undefined. why: fixes CI flake.)
 import {
+  banInvalidLoginIp,
+  banIp,
+  clientIdentityFromHeaders,
+  effectiveClientIpFromParts,
   FRIEND_KEY_BAN_DAYS,
-  isBannableIp,
+  isIpBanned,
+  listBans,
+  listSecurityEvents,
+  logSecurityEvent,
   shouldTripwire,
-} from "../../src/utils/ip-ban-pure";
-// DB-backed + heavy graph modules: load via dynamic import() in beforeAll so
-// evaluation finishes before any export is read. Static import of keys was
-// especially costly (keys → registry → full provider graph) and worsened order.
+  triggerFriendKeyTripwire,
+  unbanIp,
+  __resetBanCacheForTests,
+} from "../../src/utils/ip-ban";
+// Pure helper also available from the side-effect-free module (kept as a
+// second path so this suite still works if another test mock.module's
+// ip-ban without spreading real exports — see dashboard-auth.test.ts).
+import { isBannableIp } from "../../src/utils/ip-ban-pure";
+import { resolveApiKey } from "../../src/api/keys";
 import { db } from "../../src/db/index";
 import { apiKeys, ipBans, securityEvents } from "../../src/db/schema";
 import { eq, like } from "drizzle-orm";
-
-type IpBan = typeof import("../../src/utils/ip-ban");
-type Keys = typeof import("../../src/api/keys");
-
-let banInvalidLoginIp: IpBan["banInvalidLoginIp"];
-let banIp: IpBan["banIp"];
-let clientIdentityFromHeaders: IpBan["clientIdentityFromHeaders"];
-let effectiveClientIpFromParts: IpBan["effectiveClientIpFromParts"];
-let isIpBanned: IpBan["isIpBanned"];
-let listBans: IpBan["listBans"];
-let listSecurityEvents: IpBan["listSecurityEvents"];
-let logSecurityEvent: IpBan["logSecurityEvent"];
-let triggerFriendKeyTripwire: IpBan["triggerFriendKeyTripwire"];
-let unbanIp: IpBan["unbanIp"];
-let __resetBanCacheForTests: IpBan["__resetBanCacheForTests"];
-let resolveApiKey: Keys["resolveApiKey"];
 
 // RFC 5737 TEST-NET-3 — guaranteed non-real public IPs.
 const IP_A = "203.0.113.10";
@@ -46,23 +38,6 @@ const TEST_KEY = "etteum_tripwire_test_keyABC123";
 
 // Tables are created by the boot migration path — tests must run it explicitly.
 beforeAll(async () => {
-  // Await full evaluation of the DB-backed barrel (and keys) before binding.
-  const ipBan = await import("../../src/utils/ip-ban");
-  banInvalidLoginIp = ipBan.banInvalidLoginIp;
-  banIp = ipBan.banIp;
-  clientIdentityFromHeaders = ipBan.clientIdentityFromHeaders;
-  effectiveClientIpFromParts = ipBan.effectiveClientIpFromParts;
-  isIpBanned = ipBan.isIpBanned;
-  listBans = ipBan.listBans;
-  listSecurityEvents = ipBan.listSecurityEvents;
-  logSecurityEvent = ipBan.logSecurityEvent;
-  triggerFriendKeyTripwire = ipBan.triggerFriendKeyTripwire;
-  unbanIp = ipBan.unbanIp;
-  __resetBanCacheForTests = ipBan.__resetBanCacheForTests;
-
-  const keys = await import("../../src/api/keys");
-  resolveApiKey = keys.resolveApiKey;
-
   await runMigrations();
 });
 
