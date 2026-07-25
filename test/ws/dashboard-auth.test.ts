@@ -1,13 +1,16 @@
 /**
  * Dashboard /ws dual-auth: session cookie OR pool api_key (not managed keys).
+ *
+ * Mocks are installed in beforeAll and torn down in afterAll. bun's
+ * mock.module REPLACES the entire module registry entry for the rest of the
+ * process — a top-level stub that only returned one export was the root cause
+ * of the full-suite CI flake in ip-ban-tripwire (banIp / resolveApiKey /
+ * triggerFriendKeyTripwire came back undefined / no-op). Spreading the real
+ * module + restoring after the suite keeps other tests honest.
  */
-import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { describe, test, expect, mock, beforeAll, beforeEach, afterAll } from "bun:test";
+import type { authorizeDashboardWebSocket as AuthorizeFn } from "../../src/ws/dashboard-auth";
 
-// Mock resolveApiKey + tripwire + JWT verify before importing the unit under test.
-// IMPORTANT: bun's mock.module REPLACES the entire module registry entry for the
-// rest of the process. Spreading the real module keeps other exports intact so
-// later suites (e.g. ip-ban-tripwire) still get banIp / __resetBanCacheForTests /
-// etc. A stub that only returns the one mocked name was the CI flake root cause.
 const resolveApiKey = mock(async (_token: string, _opts: unknown) => ({
   valid: false as boolean,
   scope: "pool" as string | undefined,
@@ -18,28 +21,42 @@ const triggerFriendKeyTripwire = mock(async () => {});
 
 const verifyDashboardAuthToken = mock(async (_token?: string) => null as Record<string, unknown> | null);
 
-const realKeys = await import("../../src/api/keys");
-mock.module("../../src/api/keys", () => ({
-  ...realKeys,
-  resolveApiKey,
-}));
-
-const realIpBan = await import("../../src/utils/ip-ban");
-mock.module("../../src/utils/ip-ban", () => ({
-  ...realIpBan,
-  triggerFriendKeyTripwire,
-}));
-
-const realDashSec = await import("../../src/auth/dashboardSecurity");
-mock.module("../../src/auth/dashboardSecurity", () => ({
-  ...realDashSec,
-  SESSION_COOKIE: "auth_token",
-  verifyDashboardAuthToken,
-}));
-
-const { authorizeDashboardWebSocket } = await import("../../src/ws/dashboard-auth");
+let authorizeDashboardWebSocket: typeof AuthorizeFn;
+let realKeys: typeof import("../../src/api/keys");
+let realIpBan: typeof import("../../src/utils/ip-ban");
+let realDashSec: typeof import("../../src/auth/dashboardSecurity");
 
 describe("authorizeDashboardWebSocket", () => {
+  beforeAll(async () => {
+    realKeys = await import("../../src/api/keys");
+    realIpBan = await import("../../src/utils/ip-ban");
+    realDashSec = await import("../../src/auth/dashboardSecurity");
+
+    mock.module("../../src/api/keys", () => ({
+      ...realKeys,
+      resolveApiKey,
+    }));
+    mock.module("../../src/utils/ip-ban", () => ({
+      ...realIpBan,
+      triggerFriendKeyTripwire,
+    }));
+    mock.module("../../src/auth/dashboardSecurity", () => ({
+      ...realDashSec,
+      SESSION_COOKIE: "auth_token",
+      verifyDashboardAuthToken,
+    }));
+
+    // Import SUT only after mocks are registered so it binds to the stubs.
+    ({ authorizeDashboardWebSocket } = await import("../../src/ws/dashboard-auth"));
+  });
+
+  afterAll(() => {
+    // Reinstall real modules so later suites (ip-ban-tripwire) see real exports.
+    if (realKeys) mock.module("../../src/api/keys", () => realKeys);
+    if (realIpBan) mock.module("../../src/utils/ip-ban", () => realIpBan);
+    if (realDashSec) mock.module("../../src/auth/dashboardSecurity", () => realDashSec);
+  });
+
   beforeEach(() => {
     resolveApiKey.mockReset();
     triggerFriendKeyTripwire.mockReset();
