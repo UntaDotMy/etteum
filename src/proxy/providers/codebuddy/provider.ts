@@ -926,12 +926,21 @@ export class CodeBuddyProvider extends BaseProvider {
 
         try {
           while (true) {
-            // Race each read against a timeout to detect stalled streams
+            // Race each read against a timeout to detect stalled streams.
+            // Clear the timer when read wins — otherwise every token leaks a
+            // dangling setTimeout for STREAM_READ_TIMEOUT ms (OOM on long turns).
             const readPromise = reader.read();
+            let readTimer: ReturnType<typeof setTimeout> | undefined;
             const timeoutPromise = new Promise<never>((_, reject) => {
-              setTimeout(() => reject(new Error("Stream read timeout")), STREAM_READ_TIMEOUT);
+              readTimer = setTimeout(() => reject(new Error("Stream read timeout")), STREAM_READ_TIMEOUT);
             });
-            const { done, value } = await Promise.race([readPromise, timeoutPromise]);
+            let done: boolean;
+            let value: Uint8Array | undefined;
+            try {
+              ({ done, value } = await Promise.race([readPromise, timeoutPromise]));
+            } finally {
+              if (readTimer) clearTimeout(readTimer);
+            }
             if (done) break;
 
             buffer += decoder.decode(value, { stream: true });

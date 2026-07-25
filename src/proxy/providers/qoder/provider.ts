@@ -403,11 +403,17 @@ export class QoderProvider extends BaseProvider {
           }
         };
 
+        // When a per-read stall timeout fires we must NOT fall through to the
+        // "no finish_reason → invent stop" path — that looks like a clean
+        // mid-request stop with no error to Claude Code / OpenAI clients.
+        let stalled = false;
+
         try {
           while (streamActive) {
             // Check timeout
             if (Date.now() - lastActivity > STREAM_TIMEOUT) {
               console.error(`[Qoder] Stream timeout after ${STREAM_TIMEOUT}ms`);
+              stalled = true;
               break;
             }
 
@@ -427,7 +433,9 @@ export class QoderProvider extends BaseProvider {
               result = await Promise.race([readPromise, timeoutPromise]);
             } catch (e) {
               if (timer) clearTimeout(timer);
-              console.error(`[Qoder] Stream read error: ${e instanceof Error ? e.message : String(e)}`);
+              const msg = e instanceof Error ? e.message : String(e);
+              console.error(`[Qoder] Stream read error: ${msg}`);
+              if (msg.includes("Stream read timeout") || msg.includes("timeout")) stalled = true;
               break;
             }
             if (timer) clearTimeout(timer);
@@ -569,7 +577,25 @@ export class QoderProvider extends BaseProvider {
             }
           }
 
-          if (!finishEmitted && streamActive) {
+          if (stalled && streamActive) {
+            // Surface a real error instead of inventing finish_reason "stop".
+            // why: silent mid-request stop when upstream was merely quiet.
+            try {
+              controller.enqueue(
+                encoder.encode(
+                  `data: ${JSON.stringify({
+                    error: {
+                      message: `Stream read timeout after ${STREAM_TIMEOUT}ms of silence`,
+                      type: "api_error",
+                      code: "stream_timeout",
+                    },
+                  })}\n\n`,
+                ),
+              );
+            } catch {
+              streamActive = false;
+            }
+          } else if (!finishEmitted && streamActive) {
             // Include usage in the final stop chunk per OpenAI spec
             enqueue({}, "stop", accumulatedUsage.total_tokens > 0 ? accumulatedUsage : undefined);
           }

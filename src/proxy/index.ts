@@ -36,6 +36,7 @@ import {
   runWebSearchLoopStreaming,
 } from "./built-in-tools/agent-loop";
 import { config } from "../config";
+import { startSseKeepalive } from "./sse-keepalive";
 import {
   isGrokWeeklyPercentQuotaLimit,
   refreshGrokWeeklyPoolAfterRequest,
@@ -976,21 +977,31 @@ function wrapStreamWithUsageFinalizer(
     })();
   };
 
-  return new ReadableStream<Uint8Array>({
+return new ReadableStream<Uint8Array>({
     async start(controller) {
       const streamReader = stream.getReader();
       reader = streamReader;
+      // Keep Bun.serve idleTimeout + intermediate proxies from killing long
+      // thinking/tool turns (Claude via CodeBuddy/Qoder/etc.). Anthropic
+      // openAIStreamToAnthropic already pings; OpenAI /v1 used to have none —
+      // that path is what wrapStream owns for every provider. why: mid-request silent stop.
+      const keepalive = startSseKeepalive(
+        (bytes) => controller.enqueue(bytes),
+        config.sseHeartbeatMs,
+      );
       try {
         while (true) {
           const { done, value } = await streamReader.read();
           if (done) break;
           observe(value);
           controller.enqueue(value);
+          keepalive.touch();
         }
       } catch (error) {
         controller.error(error);
         return;
       } finally {
+        keepalive.stop();
         try {
           controller.close();
         } catch {
