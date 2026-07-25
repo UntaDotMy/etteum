@@ -1,15 +1,13 @@
 /**
  * Dashboard /ws dual-auth: session cookie OR pool api_key (not managed keys).
  *
- * Mocks are installed in beforeAll and torn down in afterAll. bun's
- * mock.module REPLACES the entire module registry entry for the rest of the
- * process — a top-level stub that only returned one export was the root cause
- * of the full-suite CI flake in ip-ban-tripwire (banIp / resolveApiKey /
- * triggerFriendKeyTripwire came back undefined / no-op). Spreading the real
- * module + restoring after the suite keeps other tests honest.
+ * Injects stubs via the deps parameter — no mock.module. bun's mock.module
+ * replaces the entire module registry process-wide; a prior stub that only
+ * returned triggerFriendKeyTripwire was the root cause of the full-suite CI
+ * flake in ip-ban-tripwire (banIp / resolveApiKey came back undefined / no-op).
  */
-import { describe, test, expect, mock, beforeAll, beforeEach, afterAll } from "bun:test";
-import type { authorizeDashboardWebSocket as AuthorizeFn } from "../../src/ws/dashboard-auth";
+import { describe, test, expect, mock, beforeEach } from "bun:test";
+import { authorizeDashboardWebSocket } from "../../src/ws/dashboard-auth";
 
 const resolveApiKey = mock(async (_token: string, _opts: unknown) => ({
   valid: false as boolean,
@@ -17,46 +15,20 @@ const resolveApiKey = mock(async (_token: string, _opts: unknown) => ({
   apiKeyId: null as number | null,
 }));
 
-const triggerFriendKeyTripwire = mock(async () => {});
+const triggerFriendKeyTripwire = mock(async () => ({ revoked: false as const, banned: false, ip: "" }));
 
 const verifyDashboardAuthToken = mock(async (_token?: string) => null as Record<string, unknown> | null);
 
-let authorizeDashboardWebSocket: typeof AuthorizeFn;
-let realKeys: typeof import("../../src/api/keys");
-let realIpBan: typeof import("../../src/utils/ip-ban");
-let realDashSec: typeof import("../../src/auth/dashboardSecurity");
+function deps() {
+  return {
+    resolveApiKey: resolveApiKey as unknown as typeof import("../../src/api/keys").resolveApiKey,
+    triggerFriendKeyTripwire: triggerFriendKeyTripwire as unknown as typeof import("../../src/utils/ip-ban").triggerFriendKeyTripwire,
+    verifyDashboardAuthToken: verifyDashboardAuthToken as unknown as typeof import("../../src/auth/dashboardSecurity").verifyDashboardAuthToken,
+    sessionCookie: "auth_token",
+  };
+}
 
 describe("authorizeDashboardWebSocket", () => {
-  beforeAll(async () => {
-    realKeys = await import("../../src/api/keys");
-    realIpBan = await import("../../src/utils/ip-ban");
-    realDashSec = await import("../../src/auth/dashboardSecurity");
-
-    mock.module("../../src/api/keys", () => ({
-      ...realKeys,
-      resolveApiKey,
-    }));
-    mock.module("../../src/utils/ip-ban", () => ({
-      ...realIpBan,
-      triggerFriendKeyTripwire,
-    }));
-    mock.module("../../src/auth/dashboardSecurity", () => ({
-      ...realDashSec,
-      SESSION_COOKIE: "auth_token",
-      verifyDashboardAuthToken,
-    }));
-
-    // Import SUT only after mocks are registered so it binds to the stubs.
-    ({ authorizeDashboardWebSocket } = await import("../../src/ws/dashboard-auth"));
-  });
-
-  afterAll(() => {
-    // Reinstall real modules so later suites (ip-ban-tripwire) see real exports.
-    if (realKeys) mock.module("../../src/api/keys", () => realKeys);
-    if (realIpBan) mock.module("../../src/utils/ip-ban", () => realIpBan);
-    if (realDashSec) mock.module("../../src/auth/dashboardSecurity", () => realDashSec);
-  });
-
   beforeEach(() => {
     resolveApiKey.mockReset();
     triggerFriendKeyTripwire.mockReset();
@@ -80,6 +52,7 @@ describe("authorizeDashboardWebSocket", () => {
       cookieHeader: null,
       ip: "1.2.3.4",
       headers: new Headers(),
+      deps: deps(),
     });
     expect(res).toEqual({ ok: true });
     expect(verifyDashboardAuthToken).not.toHaveBeenCalled();
@@ -96,6 +69,7 @@ describe("authorizeDashboardWebSocket", () => {
       cookieHeader: null,
       ip: "1.2.3.4",
       headers: new Headers(),
+      deps: deps(),
     });
     expect(res).toEqual({ ok: false, status: 403, body: "Access denied." });
     expect(triggerFriendKeyTripwire).toHaveBeenCalled();
@@ -113,6 +87,7 @@ describe("authorizeDashboardWebSocket", () => {
       cookieHeader: "auth_token=good.session",
       ip: "1.2.3.4",
       headers: new Headers(),
+      deps: deps(),
     });
     expect(res).toEqual({ ok: false, status: 401, body: "Unauthorized" });
     expect(verifyDashboardAuthToken).not.toHaveBeenCalled();
@@ -127,6 +102,7 @@ describe("authorizeDashboardWebSocket", () => {
       cookieHeader: "other=1; auth_token=sess.jwt.here; x=y",
       ip: "1.2.3.4",
       headers: new Headers(),
+      deps: deps(),
     });
     expect(res).toEqual({ ok: true });
     expect(resolveApiKey).not.toHaveBeenCalled();
@@ -138,6 +114,7 @@ describe("authorizeDashboardWebSocket", () => {
       cookieHeader: null,
       ip: "1.2.3.4",
       headers: new Headers(),
+      deps: deps(),
     });
     expect(res).toEqual({ ok: false, status: 401, body: "Unauthorized" });
   });
