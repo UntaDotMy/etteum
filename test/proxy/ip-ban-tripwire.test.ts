@@ -21,8 +21,9 @@ import {
   unbanIp,
   __resetBanCacheForTests,
 } from "../../src/utils/ip-ban";
-// Pure helper: import from the side-effect-free module so full-suite load order
-// cannot hit a half-evaluated DB-backed ip-ban barrel (CI flake).
+// Pure helper also available from the side-effect-free module (kept as a
+// second path so this suite still works if another test mock.module's
+// ip-ban without spreading real exports — see dashboard-auth.test.ts).
 import { isBannableIp } from "../../src/utils/ip-ban-pure";
 import { resolveApiKey } from "../../src/api/keys";
 import { db } from "../../src/db/index";

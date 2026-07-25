@@ -17,18 +17,32 @@ export type DashboardWsAuthResult =
   | { ok: true }
   | { ok: false; status: 401 | 403; body: string };
 
+/** Optional deps for unit tests — avoid process-wide mock.module pollution. */
+export type DashboardWsAuthDeps = {
+  resolveApiKey?: typeof resolveApiKey;
+  triggerFriendKeyTripwire?: typeof triggerFriendKeyTripwire;
+  verifyDashboardAuthToken?: typeof verifyDashboardAuthToken;
+  sessionCookie?: string;
+};
+
 export async function authorizeDashboardWebSocket(args: {
   apiKeyQuery: string | null;
   cookieHeader: string | null | undefined;
   ip: string;
   headers: Headers;
+  deps?: DashboardWsAuthDeps;
 }): Promise<DashboardWsAuthResult> {
+  const resolve = args.deps?.resolveApiKey ?? resolveApiKey;
+  const tripwire = args.deps?.triggerFriendKeyTripwire ?? triggerFriendKeyTripwire;
+  const verifySession = args.deps?.verifyDashboardAuthToken ?? verifyDashboardAuthToken;
+  const cookieName = args.deps?.sessionCookie ?? SESSION_COOKIE;
+
   const presented = (args.apiKeyQuery || "").trim();
   if (presented) {
-    const resolved = await resolveApiKey(presented, {});
+    const resolved = await resolve(presented, {});
     if (resolved.valid) {
       if (resolved.scope === "managed") {
-        await triggerFriendKeyTripwire({
+        await tripwire({
           token: presented,
           apiKeyId: resolved.apiKeyId,
           surface: "ws",
@@ -44,8 +58,8 @@ export async function authorizeDashboardWebSocket(args: {
     return { ok: false, status: 401, body: "Unauthorized" };
   }
 
-  const sessionToken = getCookieValue(args.cookieHeader, SESSION_COOKIE);
-  const session = await verifyDashboardAuthToken(sessionToken || undefined);
+  const sessionToken = getCookieValue(args.cookieHeader, cookieName);
+  const session = await verifySession(sessionToken || undefined);
   if (session) {
     return { ok: true };
   }
