@@ -193,8 +193,8 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "qwen-image-plus":              { input: 4.00,  output: 4.00,  cached: 4.00,   reasoning: 4.00,  cacheCreation: 4.00  },
 
   // ── MiniMax / Kimi / GLM ──
-  "minimax-m3":                   { input: 0.58,  output: 2.33,  cached: 0.058,  reasoning: 2.33,  cacheCreation: 0.725 },
-  // MiniMax — platform.minimax.io / openrouter public rates (approx).
+  // MiniMax-M3 standard tier (≤512K ctx), verified 2026-07 via openrouter.ai/minimax/minimax-m3
+  // and pricepertoken/aiapiprices: $0.30 in / $1.20 out per 1M (promo 50% off $0.60/$2.40).
   "minimax-m3":                   { input: 0.30,  output: 1.20,  cached: 0.03,   reasoning: 1.20,  cacheCreation: 0.375 },
   "minimax-m2.7":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
   "minimax-m2.5":                 { input: 0.29,  output: 1.17,  cached: 0.029,  reasoning: 1.17,  cacheCreation: 0.3625 },
