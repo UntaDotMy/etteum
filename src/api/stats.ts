@@ -5,6 +5,7 @@ import { desc, sql, eq } from "drizzle-orm";
 import { pool } from "../proxy/pool";
 import { config } from "../config";
 import { getAllModels } from "../proxy/router";
+import { listProviderNames } from "../proxy/providers/registry";
 
 export const statsRouter = new Hono();
 
@@ -216,7 +217,10 @@ statsRouter.get("/usage", async (c) => {
  * GET /api/stats/providers - Get per-provider statistics (from usage_summary + accounts)
  */
 statsRouter.get("/providers", async (c) => {
-  const allowedProviders = new Set<string>(config.providers);
+  // why: config.providers omits the OpenAI-compatible catalog and every dynamic
+  // compatible-node, so their usage never reached the dashboard.
+  const providerNames = listProviderNames();
+  const allowedProviders = new Set<string>(providerNames);
   const requestStats = await db
     .select({
       provider: usageSummary.provider,
@@ -265,7 +269,13 @@ statsRouter.get("/providers", async (c) => {
     byProvider.set(quota.provider, { ...current, ...quota });
   }
 
-  const data = config.providers
+  // config.providers first (stable first-party ordering the dashboard expects),
+  // then any remaining registry provider that actually has rows.
+  const ordered = [
+    ...config.providers,
+    ...providerNames.filter((p) => !(config.providers as readonly string[]).includes(p)),
+  ];
+  const data = ordered
     .map((provider) => byProvider.get(provider))
     .filter(Boolean);
 

@@ -24,7 +24,7 @@ import { forcedSseToJson } from "./transforms/forced-sse-to-json";
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { confirmLedgerExhaustion } from "./ledger-exhaustion";
 import { prepareLogBody } from "./logging";
-import { resolveModelAlias } from "./model-mapping";
+import { resolveModelAlias, normalizeModelId } from "./model-mapping";
 import { estimateRequestTokens } from "./compression";
 import { calculateCost, type TokenBreakdown } from "./pricing";
 import { and, desc, eq, gt, gte, isNotNull, sql } from "drizzle-orm";
@@ -41,14 +41,15 @@ import {
   isGrokWeeklyPercentQuotaLimit,
   refreshGrokWeeklyPoolAfterRequest,
 } from "./providers/grok";
-import { RateLimiter } from "../utils/security";
+import { RateLimiter, isLoopbackIp } from "../utils/security";
+import { effectiveClientIp } from "../utils/ip-ban";
 import {
   checkKeyAccess,
   parseAllowedModels,
   modelAllowed,
   recordKeyTokens,
 } from "./friend-keys";
-import { shareKeyPublic } from "./share-key-public";
+import { shareKeyPublic, isShareLocked } from "./share-key-public";
 import { getActiveClientRequests, trackClientRequestStart } from "./live-clients";
 import {
   averageSpeedMetrics,
@@ -90,17 +91,25 @@ async function getActiveModelsCached(activeOnly: boolean): Promise<ModelInfo[]> 
 const keyRequestLimiters = new Map<number, RateLimiter>();
 const shareLimiter = new RateLimiter(30, 30);
 
-function getClientIpFromHeaders(h: Headers): string {
-  return (h.get("x-forwarded-for")?.split(",")[0]?.trim() || h.get("x-real-ip") || "unknown");
+/**
+ * Rate-limit identity for the authless /v1/share surfaces.
+ * Peer-first (unspoofable); only trusts a stamped XFF across a loopback proxy
+ * hop, which serve-share.ts / serve-dashboard.ts set to the real socket peer.
+ */
+function shareClientIp(c: any): string {
+  return effectiveClientIp(c) || "unknown";
 }
 
-function isLocalRequest(headers: Headers, hostname: string): boolean {
-  const xf = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
-  const xr = headers.get("x-real-ip");
-  const ip = xf || xr || "";
-  const LOCAL = new Set(["127.0.0.1", "::1", "::ffff:127.0.0.1", "localhost", ""]);
-  const host = (hostname || "").toLowerCase();
-  return LOCAL.has(ip) || host === "localhost" || host === "127.0.0.1" || host === "[::1]";
+/**
+ * Exempt only genuinely local callers from the share rate limit.
+ *
+ * why: the previous form derived the IP from headers and treated the empty
+ * string as local, so ANY direct client that simply omitted x-forwarded-for
+ * skipped the limiter entirely. Decide from the resolved peer instead, and
+ * never let a bare Host header vouch for locality.
+ */
+function isLocalShareRequest(ip: string): boolean {
+  return isLoopbackIp(ip);
 }
 
 /** Structured friend-key gate rejection (OpenAI error envelope). */
@@ -259,18 +268,23 @@ async function upsertUsageSummary(entry: {
   creditsUsed: number;
   cost: number;
   durationMs: number;
+  /** Managed key that made the request; 0/null = pool key (see db/migrate.ts). */
+  apiKeyId?: number | null;
 }) {
   try {
     const bucket = new Date();
     bucket.setMinutes(0, 0, 0); // truncate to hour
+    // 0, never NULL: SQLite treats NULLs as distinct in a UNIQUE index, so a
+    // NULL here would make every pool-key request insert a fresh row.
+    const apiKeyId = Number(entry.apiKeyId) > 0 ? Number(entry.apiKeyId) : 0;
 
     await db.run(sql`
-      INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_cost, total_duration_ms)
-      VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, 1,
+      INSERT INTO usage_summary (bucket, provider, model, api_key_id, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_cost, total_duration_ms)
+      VALUES (${bucket.toISOString()}, ${entry.provider || "unknown"}, ${entry.model || "unknown"}, ${apiKeyId}, 1,
         ${entry.status === "success" ? 1 : 0}, ${entry.status === "error" ? 1 : 0},
         ${entry.promptTokens || 0}, ${entry.completionTokens || 0}, ${entry.totalTokens || 0},
         ${entry.creditsUsed || 0}, ${entry.cost || 0}, ${entry.durationMs || 0})
-      ON CONFLICT (bucket, provider, model) DO UPDATE SET
+      ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
         total_requests = usage_summary.total_requests + excluded.total_requests,
         success_requests = usage_summary.success_requests + excluded.success_requests,
         error_requests = usage_summary.error_requests + excluded.error_requests,
@@ -360,6 +374,7 @@ export async function recordRequest(entry: NewRequestLog) {
       creditsUsed: entry.creditsUsed || 0,
       cost: entry.cost || 0,
       durationMs: entry.durationMs || 0,
+      apiKeyId: entry.apiKeyId ?? null,
     });
     // Log pruning is background-only (setInterval below) to avoid SQLite write contention.
     broadcast({
@@ -376,10 +391,6 @@ export async function recordRequest(entry: NewRequestLog) {
   }
 }
 
-function normalizeModelId(model: string): string {
-  // Common typo seen from clients: "sonet" -> canonical Anthropic "sonnet".
-  return model.replace(/claude-sonet/gi, "claude-sonnet");
-}
 
 
 function computeCredits(
@@ -557,6 +568,7 @@ async function logProxyError(entry: NewRequestLog, label: string) {
       creditsUsed: 0,
       cost: 0,
       durationMs: entry.durationMs || 0,
+      apiKeyId: entry.apiKeyId ?? null,
     });
   } catch (logError) {
     console.error(`[Proxy] Failed to log ${label}:`, logError);
@@ -660,8 +672,7 @@ function wrapStreamWithUsageFinalizer(
   // concatenation where each += re-allocates and copies the growing string.
   const rawChunks: string[] = [];
   let buffer = "";
-  let streamedContent = "";
-  let streamedParts: string[] = [];
+  const streamedParts: string[] = [];
   let promptTokens = 0;
   let completionTokens = 0;
   let totalTokens = 0;
@@ -914,6 +925,7 @@ function wrapStreamWithUsageFinalizer(
           creditsUsed,
           cost,
           durationMs,
+          apiKeyId: context.apiKeyId ?? null,
         });
 
         // Friend-key token quota: debit the stream's actual tokens against the key's budget.
@@ -1022,7 +1034,17 @@ return new ReadableStream<Uint8Array>({
 
 export async function handleChatCompletion(
   body: ChatCompletionRequest,
-  opts?: { apiKeyId?: number | null; request?: Request | null },
+  opts?: {
+    apiKeyId?: number | null;
+    request?: Request | null;
+    /**
+     * Skip the friend-key gate because the caller already applied it for this
+     * client request. Set ONLY by the built-in web_search loop, which fans one
+     * client request out into many completions; re-gating each one would debit
+     * the key's per-minute bucket up to maxUses+1 times.
+     */
+    skipFriendKeyGate?: boolean;
+  },
 ) {
   // Share-board concurrent clients: count every in-flight completion (stream + non-stream).
   // Streams release in wrapStream finalize; non-streams release in the outer finally.
@@ -1037,11 +1059,13 @@ export async function handleChatCompletion(
   // completion entrypoints so /v1/messages and /v1/responses cannot bypass the
   // chat-only check that previously left exhausted keys queryable.
   const gateApiKeyId = opts?.apiKeyId ?? currentApiKeyId(opts?.request ?? null);
-  try {
-    await assertFriendKeyLimits(gateApiKeyId, body.model);
-  } catch (err) {
-    endClient();
-    throw err;
+  if (!opts?.skipFriendKeyGate) {
+    try {
+      await assertFriendKeyLimits(gateApiKeyId, body.model);
+    } catch (err) {
+      endClient();
+      throw err;
+    }
   }
 
   const isStream = body.stream === true;
@@ -1227,6 +1251,7 @@ export async function handleChatCompletion(
     creditsUsed,
     cost,
     durationMs,
+    apiKeyId: resolvedApiKeyId,
   });
 
   // Friend-key token quota: debit the consumed tokens against the key's budget.
@@ -1375,9 +1400,9 @@ async function loadShareSpeedSamples(windowMs = 15 * 60 * 1000, limit = 200): Pr
   }
 }
 
-function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }): Response | null {
-  const ip = getClientIpFromHeaders(c.req.raw.headers);
-  if (!isLocalRequest(c.req.raw.headers, new URL(c.req.url).hostname)) {
+function shareRateLimited(c: any): Response | null {
+  const ip = shareClientIp(c);
+  if (!isLocalShareRequest(ip)) {
     const rl = shareLimiter.check(`share:${ip}`);
     if (!rl.allowed) {
       return new Response(
@@ -1399,6 +1424,14 @@ function shareRateLimited(c: { req: { raw: { headers: Headers }; url: string } }
  * Rate-limited per IP.
  */
 proxyRouter.get("/v1/share/board", async (c) => {
+  // Lock mode is link-only access, so enumerating every key defeats it. The flag
+  // was substituted into the HTML only; `curl` still listed them all.
+  if (isShareLocked()) {
+    return c.json(
+      { error: { message: "Share board is locked. Use your personal share link.", type: "invalid_request_error" } },
+      403,
+    );
+  }
   const blocked = shareRateLimited(c);
   if (blocked) return blocked;
   c.header("Cache-Control", "no-store");
@@ -1716,7 +1749,20 @@ proxyRouter.post("/v1/messages", async (c) => {
       return c.json({ type: "error", error: { type: "invalid_request_error", message: msg } }, 400);
     }
 
-    const hcOpts = { apiKeyId: currentApiKeyId(c.req.raw), request: c.req.raw };
+    // Gate the friend key ONCE per client request: the loop runs up to maxUses+1
+    // completions, which previously debited the key's RPM bucket every iteration.
+    const loopApiKeyId = currentApiKeyId(c.req.raw);
+    try {
+      await assertFriendKeyLimits(loopApiKeyId, resolveModelAlias(normalizeModelId(body.model)));
+    } catch (err) {
+      if (err instanceof FriendKeyLimitError) return friendKeyLimitResponse(c, err, "anthropic");
+      throw err;
+    }
+    const hcOpts = {
+      apiKeyId: loopApiKeyId,
+      request: c.req.raw,
+      skipFriendKeyGate: true,
+    };
     const runners = {
       runCompletion: async (req: ChatCompletionRequest) => {
         const { result } = await handleChatCompletion({ ...req, stream: false }, hcOpts);
@@ -1864,7 +1910,9 @@ proxyRouter.post("/v1/messages", async (c) => {
 async function handleResponsesHttp(c: any) {
   let body: ResponsesApiRequest;
   try {
-    body = await c.req.json<ResponsesApiRequest>();
+    // `c` is `any` here (shared by two mount points), so the generic form of
+    // c.req.json() is not callable; assert the parsed shape instead.
+    body = (await c.req.json()) as ResponsesApiRequest;
   } catch (error) {
     if (isJsonParseError(error)) {
       return c.json({ type: "error", error: { type: "invalid_request_error", message: "Invalid JSON request body" } }, 400);

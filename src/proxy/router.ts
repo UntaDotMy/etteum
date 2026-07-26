@@ -248,7 +248,15 @@ export async function routeRequest(
   // provider reject it with a 400.
   const requiredCaps = detectRequiredCapabilities(sanitizedRequest.messages, sanitizedRequest.tools);
   if (requiredCaps.size > 0) {
-    const stripped = stripUnsupportedCapabilities(sanitizedRequest.messages, providerName, sanitizedRequest.model);
+    // The routed model's own ModelInfo (model-specs.ts) is the precise source of
+    // truth; the provider table is only the fallback for models that declare none.
+    const modelInfo = resolveProviderInstance(providerName)?.getModelInfo(sanitizedRequest.model);
+    const stripped = stripUnsupportedCapabilities(
+      sanitizedRequest.messages,
+      providerName,
+      sanitizedRequest.model,
+      { vision: modelInfo?.vision },
+    );
     if (stripped.visionStripped || stripped.pdfStripped || stripped.audioStripped) {
       console.log(`[Capabilities] Stripped unsupported modalities for ${providerName}/${sanitizedRequest.model}:`, stripped);
     }
@@ -575,6 +583,9 @@ export async function routeRequest(
 
             if (retryResult.success) {
               await pool.markUsed(account.id, providerName);
+              // Same hand-off contract as the primary success path: without it
+              // the outer finally also released and in-flight read 0 mid-stream.
+              if (stream && retryResult.stream) handedStreamToCaller = true;
               return {
                 result: retryResult,
                 account,
@@ -585,6 +596,8 @@ export async function routeRequest(
               };
             }
           } finally {
+            // Releases only the inner attempt's start; the outer start is
+            // released by the outer finally (or by the stream finalizer).
             pool.trackRequestEnd(account.id);
           }
           // Refresh succeeded but retry failed — treat as transient (token

@@ -101,7 +101,7 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     expect(text).toContain('"content":"Hi"');
     expect(text).toContain('"content":"!"');
     expect(text).toContain("[DONE]");
-    expect(usage).toEqual({ prompt_tokens: 10, completion_tokens: 2 });
+    expect(usage as unknown).toEqual({ prompt_tokens: 10, completion_tokens: 2 });
   });
 
   test("reasoning deltas become reasoning_content", async () => {

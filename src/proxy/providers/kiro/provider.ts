@@ -36,6 +36,7 @@ import {
   buildHistory,
 } from "./messages";
 import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
+import type { Utf8StreamReader } from "../../../utils/stream-reader";
 
 interface KiroTokens {
   access_token?: string;
@@ -789,7 +790,7 @@ export class KiroProvider extends BaseProvider {
     const encoder = new TextEncoder();
     const contextWindow = this.getModelInfo(model)?.context_window ?? 200000;
     // Hoisted so cancel() can release the upstream reader on client disconnect.
-    let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let upstreamReader: Utf8StreamReader | undefined;
     const stream = new ReadableStream<Uint8Array>({
       start: async (controller) => {
         const reader = response.body?.getReader();

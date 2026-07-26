@@ -29,6 +29,7 @@ import type {
   StreamChunk,
 } from "../providers/base";
 import { safeJsonParse } from "../../utils/safe-json";
+import type { Utf8StreamReader } from "../../utils/stream-reader";
 
 /* ------------------------------------------------------------------ */
 /* Request types                                                       */
@@ -585,7 +586,7 @@ export function chatStreamToResponsesStream(
 
   // Hoisted so cancel() can release the UPSTREAM reader on client disconnect
   // (the prior cancel() only stopped local emission, leaking chatStream).
-  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let upstreamReader: Utf8StreamReader | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = chatStream.getReader();

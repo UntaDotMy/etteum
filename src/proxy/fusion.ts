@@ -7,19 +7,47 @@
  *
  * SEMANTICS NOTE: this uses Promise.allSettled — it waits for ALL models to
  * settle, then returns the first fulfilled result. It is NOT a true race
- * (which would cancel losing requests via AbortController once one succeeds).
- * Consequence: every model's full response (incl. streaming) is consumed and
- * billed even after one has succeeded, and latency = the slowest model, not
- * the fastest. This is acceptable for non-streaming judge fusion where all
- * candidates are needed; for streaming "fastest wins" a true race with
- * AbortSignal should be implemented (threading a signal through routeRequest
- * → provider fetches is the required change — see routeRequest signature).
+ * (which would cancel losing requests via AbortController before they finish).
+ * Consequence: every model's request is issued and billed even after one has
+ * succeeded, and latency = the slowest model, not the fastest. Losing STREAMS
+ * are cancelled and their pool tracking released once a winner is picked (see
+ * releaseLosingResults); a true race would additionally abort them in flight,
+ * which needs an AbortSignal threaded through routeRequest → provider fetches.
  */
 
 import type { ChatCompletionRequest } from "./providers/base";
 import type { RouteResult } from "./router";
 import { routeRequest } from "./router";
+import { pool } from "./pool";
 import { broadcast } from "../ws/index";
+
+/**
+ * Release every fulfilled fan-out result except the winner.
+ *
+ * why: routeRequest hands a SUCCESSFUL stream to the caller and deliberately
+ * skips pool.trackRequestEnd; the stream finalizer owns that release. Only the
+ * winner reaches a finalizer, so an abandoned loser's in-flight count never
+ * returns to zero and the least-in-flight balancer stops picking that account
+ * for the life of the process. Cancelling also frees the upstream socket.
+ */
+export function releaseLosingResults(
+  results: PromiseSettledResult<RouteResult>[],
+  winnerIndex: number,
+): void {
+  for (let i = 0; i < results.length; i++) {
+    if (i === winnerIndex) continue;
+    const r = results[i];
+    if (!r || r.status !== "fulfilled") continue;
+    const loser = r.value;
+    if (!loser.result?.stream) continue; // non-stream results already released
+    try {
+      void loser.result.stream.cancel();
+    } catch {
+      /* already closed */
+    }
+    if (loser.account?.id > 0) pool.trackRequestEnd(loser.account.id);
+  }
+}
 
 export interface FusionOptions {
   request: ChatCompletionRequest;
@@ -52,6 +80,7 @@ export async function routeComboFusion(opts: FusionOptions): Promise<RouteResult
     if (!r) continue;
     if (r.status === "fulfilled") {
       const winner = models[i] ?? `model-${i}`;
+      releaseLosingResults(results, i);
       broadcast({
         type: "combo_success",
         data: { comboName, model: winner, allModels: models, strategy: "fusion" },
@@ -60,6 +89,8 @@ export async function routeComboFusion(opts: FusionOptions): Promise<RouteResult
     }
     errors.push({ model: models[i] ?? `model-${i}`, error: String((r as PromiseRejectedResult).reason) });
   }
+  // Nothing won; release any fulfilled-but-unused stream before throwing.
+  releaseLosingResults(results, -1);
 
   broadcast({
     type: "combo_fusion_exhausted",

@@ -21,6 +21,7 @@ import type { Account } from "../../../db/schema";
 import { generateCursorBody, parseConnectRPCFrame, extractTextFromResponse } from "./cursorProtobuf";
 import { buildCursorHeaders } from "./cursorChecksum";
 import zlib from "node:zlib";
+import type { Utf8StreamReader } from "../../../utils/stream-reader";
 
 const CURSOR_ENDPOINT = "https://api2.cursor.sh/aiserver.v1.AiService/StreamUnifiedChatWithTools";
 
@@ -158,7 +159,7 @@ export class CursorProvider extends BaseProvider {
     const encoder = new TextEncoder();
     const upstream = response.body;
     // Hoisted so cancel() can release the upstream reader on client disconnect.
-    let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+    let upstreamReader: Utf8StreamReader | undefined;
 
     const stream = new ReadableStream<Uint8Array>({
       async start(controller) {

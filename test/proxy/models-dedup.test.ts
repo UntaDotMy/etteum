@@ -30,7 +30,7 @@ describe("getAllModels — dedup across providers", () => {
     const models = getAllModels();
     const gpt4 = models.filter((m) => m.id === "gpt-4");
     expect(gpt4).toHaveLength(1);
-    expect(gpt4[0].owned_by).toBe(getProviderForModel("gpt-4"));
+    expect(gpt4[0]!.owned_by).toBe(getProviderForModel("gpt-4") as string);
   });
 
   test("gpt-4o appears exactly once", () => {

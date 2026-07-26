@@ -146,7 +146,28 @@ export async function runMigrations() {
     console.error("[DB] ip_bans/security_events table creation skipped:", err);
   }
 
-  // 2026-07-11 — encrypt legacy plaintext VCC card rows at rest (AES-256-GCM).
+  /**
+   * 2026-07-26. Per-key usage attribution: `usage_summary.api_key_id` shipped in
+   * 0002 but could never be populated, because the unique key was
+   * (bucket, provider, model) so two keys sharing a bucket collided.
+   *
+   * Additive and ordered for safety: create the wider index FIRST, then drop the
+   * narrower one. Rows written before this point keep api_key_id NULL and are
+   * left untouched; new rows write 0 for "no managed key" so SQLite's
+   * NULLs-are-distinct rule cannot defeat the upsert. Sums over both stay correct
+   * because the old rows hold pre-migration counts only.
+   */
+  try {
+    await db.run(sql.raw(`
+      CREATE UNIQUE INDEX IF NOT EXISTS usage_summary_bucket_provider_model_key_idx
+        ON usage_summary (bucket, provider, model, api_key_id)
+    `));
+    await db.run(sql.raw(`DROP INDEX IF EXISTS usage_summary_bucket_provider_model_idx`));
+  } catch (err) {
+    console.error("[DB] usage_summary per-key index migration skipped:", err);
+  }
+
+  // 2026-07-11; encrypt legacy plaintext VCC card rows at rest (AES-256-GCM).
   // Skips rows already encrypted. PCI DSS Req 3.4. Safe & idempotent.
   try {
     const { migrateVccEncryption } = await import("../api/vcc");

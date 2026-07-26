@@ -26,6 +26,7 @@ import type { AnthropicMessagesRequest } from "../transforms/anthropic";
 import { searchWeb, type WebSearchResult } from "./web-search";
 import { config } from "../../config";
 import { safeJsonParse } from "../../utils/safe-json";
+import type { Utf8StreamReader } from "../../utils/stream-reader";
 
 const WEB_SEARCH_FN_NAME = "web_search";
 // Agent-driven: high ceiling, not a low fixed cap. Bounds cost/abuse; the 2-min
@@ -199,7 +200,6 @@ export async function runWebSearchLoopNonStreaming(
 ): Promise<any> {
   const { maxUses } = extractWebSearchConfig(anthropicRequest.tools);
   const started = Date.now();
-  let searches = 0;
   const searchBlocks: any[] = [];
   // Working message list grows with tool_use + tool_result across iterations.
   let messages = openAIRequest.messages;
@@ -223,7 +223,6 @@ export async function runWebSearchLoopNonStreaming(
     const input = parseWebSearchInput(wsCall.function?.arguments || "");
     const outcome = await searchWeb(input.query);
     const results = outcome.results;
-    searches++;
     const serverToolUseId = newId("srvtoolu");
     searchBlocks.push({
       server_tool_use: {
@@ -358,13 +357,12 @@ export function runWebSearchLoopStreaming(
 
   // Hoisted so cancel() can release whichever upstream reader is currently
   // active (the loop creates a fresh reader per iteration).
-  let currentUpstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let currentUpstreamReader: Utf8StreamReader | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       let heartbeat: ReturnType<typeof setInterval> | null = null;
       // Working conversation for the loop.
       let messages = openAIRequest.messages;
-      let searches = 0;
 
       try {
         controller.enqueue(event("message_start", {
@@ -454,8 +452,9 @@ export function runWebSearchLoopStreaming(
           const wsCall = [...toolCallAccum.values()].find((c) => c.name === WEB_SEARCH_FN_NAME);
           const otherCalls = [...toolCallAccum.values()].filter((c) => c.name && c.name !== WEB_SEARCH_FN_NAME);
 
-          // Forward any non-web_search tool_calls as normal tool_use blocks.
-          for (const call of otherCalls) {
+          // Final turn only: a tool_use emitted mid-loop is one the client can
+          // never answer (no tool_result round-trip exists inside the shim).
+          for (const call of wsCall ? [] : otherCalls) {
             closeTextBlock(controller);
             blockIndex += 1;
             let input: any = call.args;
@@ -501,7 +500,6 @@ export function runWebSearchLoopStreaming(
           }
 
           // Execute the search and emit server_tool_use + web_search_tool_result.
-          searches++;
           const input = parseWebSearchInput(wsCall.args);
           const outcome = await searchWeb(input.query);
           const results = outcome.results;

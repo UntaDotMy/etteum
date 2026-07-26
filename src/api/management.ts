@@ -15,14 +15,30 @@ import { db } from "../db/index";
 import { kv } from "../db/schema";
 import { eq, and } from "drizzle-orm";
 import { getAllModels } from "../proxy/router";
-import { pool } from "../proxy/pool";
-import { adminGuard } from "../utils/security";
+import { pool, type ProviderName } from "../proxy/pool";
+import { adminGuardFromPeer, peerIpFromHonoContext } from "../utils/security";
 import { invalidatePricingCache, getPricingForModel } from "../proxy/pricing";
 import { refreshCustomModels } from "../proxy/providers/registry";
 import { routeRequest } from "../proxy/router";
 import type { ChatCompletionRequest } from "../proxy/providers/base";
 
 export const managementRouter = new Hono();
+
+/**
+ * Local-origin / CLI-token gate for secret-bearing + config-mutating routes.
+ *
+ * why: the header-only adminGuard() can never allow a genuinely local request; 
+ * realClientIp() returns "unknown" unless TRUST_PROXY=true, so isLoopbackIp()
+ * always fails. Deciding from the TCP peer (adminGuardFromPeer) is both correct
+ * and unspoofable, and matches /api/update/apply + /api/mitm/*.
+ */
+function requireAdmin(c: any): { allowed: boolean; reason: string } {
+  return adminGuardFromPeer(
+    peerIpFromHonoContext(c),
+    c.req.raw.headers,
+    new URL(c.req.url).searchParams,
+  );
+}
 
 /**
  * Attach resolved pricing (from the catalog + user overrides) to each model.
@@ -82,12 +98,45 @@ managementRouter.get("/models/active", async (c) => {
 
 managementRouter.get("/models/availability", async (c) => {
   // Per-model availability: whether an active+enabled account can serve it.
+  // Resolved per PROVIDER, not per model: the serial per-model loop issued one
+  // pool lookup for every id in the catalog (hundreds of round-trips per call).
   const models = getAllModels();
-  const availability: Record<string, { available: boolean }> = {};
+  const byProvider = new Map<string, string[]>();
+  const unowned: string[] = [];
   for (const m of models) {
-    const acct = await pool.getAccountForModel(m.id).catch(() => null);
-    availability[m.id] = { available: !!acct };
+    const provider = pool.getProviderForModel(m.id);
+    if (!provider) { unowned.push(m.id); continue; }
+    const list = byProvider.get(provider) ?? [];
+    list.push(m.id);
+    byProvider.set(provider, list);
   }
+
+  const availability: Record<string, { available: boolean }> = {};
+  for (const id of unowned) availability[id] = { available: false };
+  await Promise.all(
+    [...byProvider.entries()].map(async ([provider, ids]) => {
+      // BYOK resolves per model prefix, so it still needs a per-model probe.
+      if (provider === "byok") {
+        await Promise.all(ids.map(async (id) => {
+          const acct = await pool.getAccountForModel(id).catch(() => null);
+          availability[id] = { available: !!acct };
+        }));
+        return;
+      }
+      const acct = await pool
+        .getNextAccountForModel(provider as ProviderName, ids[0] ?? "")
+        .catch(() => null);
+      // Alibaba gates on per-account queryableModels → probe each model.
+      if (provider === "alibaba") {
+        await Promise.all(ids.map(async (id) => {
+          const a = await pool.getNextAccountForModel(provider as ProviderName, id).catch(() => null);
+          availability[id] = { available: !!a };
+        }));
+        return;
+      }
+      for (const id of ids) availability[id] = { available: !!acct };
+    }),
+  );
   return c.json({ availability });
 });
 
@@ -205,7 +254,7 @@ managementRouter.delete("/pricing/:model", async (c) => {
 // --- Config sync (merge-to-target: export/import configuration) ---
 managementRouter.get("/sync/export", async (c) => {
   // Export can include provider config/secrets → admin-guard it.
-  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  const guard = requireAdmin(c);
   if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const [customModels, disabledModels, pricing] = await Promise.all([
     kvGet("customModels"), kvGet("disabledModels"), kvGet("pricing"),
@@ -213,6 +262,10 @@ managementRouter.get("/sync/export", async (c) => {
   return c.json({ customModels, disabledModels, pricing, exportedAt: Date.now() });
 });
 managementRouter.post("/sync/merge-to-target", async (c) => {
+  // Import writes customModels (which decide a model's routing target) and
+  // pricing → same trust level as the matching export.
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ customModels?: Record<string, any>; disabledModels?: Record<string, any>; pricing?: Record<string, any> }>();
   let merged = 0;
   for (const [scope, data] of Object.entries({ customModels: body.customModels, disabledModels: body.disabledModels, pricing: body.pricing })) {
@@ -234,7 +287,7 @@ managementRouter.get("/tunnel/status", async (c) => {
 });
 managementRouter.post("/tunnel/enable", async (c) => {
   // Tunnel enable may spawn a sidecar process → admin-guard it.
-  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  const guard = requireAdmin(c);
   if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ provider: "cloudflare" | "tailscale"; token?: string }>().catch(() => ({}) as any);
   if (!body?.provider) return c.json({ error: "provider required (cloudflare|tailscale)" }, 400);
@@ -270,7 +323,7 @@ managementRouter.get("/system/specs", (c) => {
 // Generic key/value settings store (mirrors 9router settings). Admin-guarded
 // because oidc_config can carry a client secret.
 managementRouter.post("/settings", async (c) => {
-  const guard = adminGuard(c.req.raw.headers, new URL(c.req.url).searchParams);
+  const guard = requireAdmin(c);
   if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ key: string; value: string }>();
   if (!body.key) return c.json({ error: "key required" }, 400);

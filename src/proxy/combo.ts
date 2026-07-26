@@ -226,8 +226,8 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         break; // move to next model in combo
       }
 
-      excludedAccounts.add(account.id);
-
+      // why: the lookup above is a liveness probe. Excluding account.id here fed
+      // routeRequest the very account it should use. Exclude on FAILURE instead.
       try {
         // Pass the SPLIT model name (after the slash) — not the full
         // "provider/model" spec — so routeRequest's getProviderForModel
@@ -243,6 +243,8 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         });
         return result;
       } catch (err: any) {
+        // Only now is the credential known-bad for the rest of this combo.
+        excludedAccounts.add(account.id);
         lastError = err?.message ?? String(err);
         lastErrorModel = modelSpec;
         options.onAccountFailed?.(account.id, modelSpec, lastError);
@@ -279,8 +281,9 @@ export async function expandComboRequest(request: ChatCompletionRequest): Promis
   const chain = await resolveCombo(modelStr);
   if (!chain) return null;
 
-  // Replace the combo/model request with just the alias (first model in chain)
-  const firstModel = alias ?? chain[0] ?? modelStr;
+  // Alias is "" for a bare "combo-name/", and `??` would keep that empty string,
+  // so fall back on emptiness rather than null/undefined.
+  const firstModel = alias || chain[0] || modelStr;
   return {
     expanded: true,
     comboName,

@@ -51,7 +51,7 @@ export function dashboardAssetNotFoundResponse(): Response {
   });
 }
 
-export function dashboardIndexHeaders(): HeadersInit {
+export function dashboardIndexHeaders(): Record<string, string> {
   return {
     "Content-Type": "text/html; charset=utf-8",
     // index.html must never be long-cached: it points at content-hashed assets.
@@ -60,7 +60,7 @@ export function dashboardIndexHeaders(): HeadersInit {
   };
 }
 
-export function dashboardAssetCacheHeaders(pathname: string): HeadersInit {
+export function dashboardAssetCacheHeaders(pathname: string): Record<string, string> {
   const base = pathname.split("/").pop() || "";
   const isHtml = base.endsWith(".html");
   // Hashed files under /assets/ are immutable; bare names stay short-cache.

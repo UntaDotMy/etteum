@@ -197,24 +197,50 @@ export function isLoopbackPeer(peerIp: string | null | undefined): boolean {
 }
 
 /**
+ * True origin of a request for admin decisions, resolved through at most one
+ * loopback reverse-proxy hop.
+ *
+ * why: this repo ships its own local front-ends (scripts/serve-dashboard.ts on
+ * DASHBOARD_PORT, scripts/serve-share.ts on SHARE_PORT) that forward to the
+ * backend over loopback. Reading the TCP peer alone would classify EVERY
+ * request through them as local, handing remote callers the admin surface
+ * (/api/update/apply → RCE). Both proxies OVERWRITE x-forwarded-for with the
+ * real socket peer, so when the peer is loopback the stamped first hop is the
+ * trustworthy origin. Mirrors effectiveClientIpFromParts in utils/ip-ban.ts.
+ *
+ * @returns the resolved origin IP, or "unknown" when it cannot be proven
+ */
+export function effectiveAdminOriginIp(
+  peerIp: string | null | undefined,
+  headers: Headers,
+): string {
+  // A non-loopback peer IS the client; headers cannot override it.
+  if (peerIp && !isLoopbackIp(peerIp)) return peerIp;
+  if (peerIp) {
+    // Loopback peer: either a genuinely local caller (no XFF) or a bundled
+    // local proxy forwarding a real client (XFF stamped with its peer).
+    const first = headers.get("x-forwarded-for")?.split(",")[0]?.trim();
+    if (first) return first;
+    return peerIp;
+  }
+  // No peer available; only a trusted reverse proxy may speak for the client.
+  return realClientIp(headers);
+}
+
+/**
  * Decide local-origin for admin guarding using the TCP peer as the source of
- * truth, falling back to header-derived IP only under TRUST_PROXY. Use this
- * (or adminGuardFromPeer) instead of the header-only isLocalOrigin for any
- * spawn-capable / secret-disclosure route.
+ * truth, resolved through a loopback proxy hop. Use this (or adminGuardFromPeer)
+ * instead of the header-only isLocalOrigin for any spawn-capable /
+ * secret-disclosure route.
  */
 export function isLocalOriginFromPeer(
   peerIp: string | null | undefined,
   headers: Headers,
 ): boolean {
   if (process.env.ALLOW_REMOTE_ADMIN === "true") return true;
-  // 1. Trust the TCP socket peer first (non-spoofable).
-  if (peerIp) return isLoopbackIp(peerIp);
-  // 2. Fallback: header-derived IP, only if behind a trusted proxy.
-  if (process.env.TRUST_PROXY === "true") {
-    return isLoopbackIp(realClientIp(headers));
-  }
-  // 3. No peer info and no trusted proxy → cannot prove local → fail closed.
-  return false;
+  const origin = effectiveAdminOriginIp(peerIp, headers);
+  // "unknown" (no peer, no trusted proxy) cannot prove local → fail closed.
+  return isLoopbackIp(origin);
 }
 
 /**
@@ -338,6 +364,12 @@ export function isAdminApiScope(scope: string | null | undefined): boolean {
  *   (a) the TRUE origin is local (loopback), OR
  *   (b) a valid machine-bound CLI admin token is presented.
  * Returns an error Response (to short-circuit the route) or null (allow).
+ */
+/**
+ * @deprecated Header-only guard: realClientIp() returns "unknown" unless
+ * TRUST_PROXY=true, so this can never allow a genuinely local request; it
+ * denied even loopback callers. Use {@link adminGuardFromPeer}, which decides
+ * from the TCP peer. Kept exported so any out-of-tree caller keeps compiling.
  */
 export function adminGuard(
   headers: Headers,

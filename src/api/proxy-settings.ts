@@ -36,7 +36,9 @@ proxySettingsRouter.get("/", async (c) => {
   const allSettings = await db.select().from(settings);
   const settingsMap: Record<string, string> = {};
   for (const s of allSettings) {
-    settingsMap[s.key] = s.value;
+    // settings.value is nullable; keep the key present (the defaults merge below
+    // only fills keys that are ABSENT) but emit a string, as the type promises.
+    settingsMap[s.key] = s.value ?? "";
   }
 
   // Merge backend defaults for any key not yet persisted in the DB.

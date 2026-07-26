@@ -225,6 +225,7 @@ function resolvePython(): string | null {
       ? [["where", "python"], ["where", "python3"], ["where", "py"]]
       : [["which", "python3"], ["which", "python"]];
   for (const [cmd, arg] of whichCmds) {
+    if (!cmd || !arg) continue;
     try {
       const out = execFileSync(cmd, [arg], { encoding: "utf8" }).trim().split(/\r?\n/)[0];
       if (out && !out.toLowerCase().includes("windowsapps\\python")) push(out);
@@ -770,7 +771,9 @@ export async function startGrokFarm(cfg: GrokFarmConfig): Promise<GrokFarmJobSta
     env,
     stdio: ["ignore", "pipe", "pipe"],
     windowsHide: true,
-  }) as ChildProcessWithoutNullStreams;
+    // stdin is "ignore", so node types this as ChildProcessByStdio<null,…>;
+    // the code only ever touches stdout/stderr, which both shapes provide.
+  }) as unknown as ChildProcessWithoutNullStreams;
 
   activeProc = proc;
   job.pid = proc.pid;

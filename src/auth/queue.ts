@@ -355,9 +355,16 @@ class LoginQueue {
         }
         while (active < limit && nextIndex < total) {
           const item = manifest[nextIndex++];
+          if (!item) continue;
           const account = accountRows.get(item.accountId);
           if (!account) {
             done++;
+            // No worker fires for this item, so nothing else will resolve the
+            // batch; if every row is missing the promise would hang forever.
+            if (done >= total && active === 0) {
+              resolveAll();
+              return;
+            }
             continue;
           }
           active++;

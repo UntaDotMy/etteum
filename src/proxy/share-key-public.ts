@@ -13,6 +13,18 @@
 import type { apiKeys } from "../db/schema";
 import { parseAllowedModels, modelAllowed } from "./friend-keys";
 
+/**
+ * SHARE_LOCK=1 → the friend page is link-only, so the all-keys board is closed.
+ *
+ * Read per call (not captured at import) so restarts and tests pick it up.
+ * Lives in this side-effect-free module rather than proxy/index.ts: importing
+ * the proxy router just to read a flag drags its boot-time timers and the whole
+ * provider graph into light callers, which broke module init under the suite.
+ */
+export function isShareLocked(): boolean {
+  return process.env.SHARE_LOCK === "1";
+}
+
 export type ShareKeyRow = typeof apiKeys.$inferSelect;
 
 export interface ShareKeySpeed {

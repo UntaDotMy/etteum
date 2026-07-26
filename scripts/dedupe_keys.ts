@@ -8,7 +8,7 @@ const DRY_RUN = !process.argv.includes("--commit");
 const envPath = resolve(import.meta.dir, "..", ".env");
 const envText = readFileSync(envPath, "utf8");
 const m = envText.match(/^ENCRYPTION_KEY=(.+)$/m);
-const ENCRYPTION_KEY = (m ? m[1].trim().replace(/^["']|["']$/g, "") : "") || process.env.ENCRYPTION_KEY || "";
+const ENCRYPTION_KEY = (m?.[1]?.trim().replace(/^["']|["']$/g, "") ?? "") || process.env.ENCRYPTION_KEY || "";
 
 if (!ENCRYPTION_KEY || ENCRYPTION_KEY.length < 16) {
   console.error("ENCRYPTION_KEY missing or too short");
@@ -61,7 +61,7 @@ for (const provider of PROVIDERS) {
   if (!DRY_RUN && toDelete.length > 0) {
     const placeholders = toDelete.map(() => "?").join(",");
     db.transaction(() => {
-      db.run(`DELETE FROM accounts WHERE id IN (${placeholders})`, ...toDelete);
+      db.run(`DELETE FROM accounts WHERE id IN (${placeholders})`, toDelete as number[]);
     })();
   }
 

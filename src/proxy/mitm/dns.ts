@@ -106,7 +106,9 @@ function flushDnsCache(): void {
     } else if (IS_MAC) {
       execSync("dscacheutil -flushcache && killall -HUP mDNSResponder", { stdio: "ignore" } as any);
     } else {
-      execSync("resolvctl flush-caches 2>/dev/null || true", { stdio: "ignore" } as any);
+      // resolvectl, not resolvctl; the typo made every Linux flush a silent
+      // no-op because `|| true` swallowed "command not found".
+      execSync("resolvectl flush-caches 2>/dev/null || true", { stdio: "ignore" } as any);
     }
   } catch { /* best effort */ }
 }

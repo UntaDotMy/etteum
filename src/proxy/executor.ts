@@ -22,6 +22,7 @@ import type { ChatCompletionRequest } from "./providers/base";
 import type { BaseProvider, ProviderResult } from "./providers/base";
 import { classifyError } from "./error-rules";
 import { isHardConnectFailure } from "./errors";
+import type { Utf8StreamReader } from "../utils/stream-reader";
 
 // Retry config — mirrors reference runtimeConfig.js DEFAULT_RETRY_CONFIG + RETRY_CONFIG.
 const RETRY_CONFIG: Record<number, { attempts: number; delayMs: number }> = {
@@ -43,6 +44,16 @@ const MAX_RETRY_ATTEMPTS = Math.max(
 // Codex SSE-peek — mirrors reference codex.js:16-17.
 const CODEX_SSE_OVERLOADED_PATTERNS = ["server_is_overloaded", "service_unavailable_error"];
 const CODEX_SSE_PEEK_BYTES = 4096;
+/**
+ * Wall-clock ceiling on the overload peek. The byte budget alone stalls the
+ * client until upstream has produced 4 KB of SSE; seconds of buffered tokens on
+ * a healthy stream, i.e. a TTFT regression on the one provider it applies to.
+ * An overload frame arrives in the FIRST chunk, so a short deadline loses nothing.
+ */
+const CODEX_SSE_PEEK_MS = Math.max(
+  100,
+  Number(process.env.POOLPROX_CODEX_PEEK_MS) || 1_500,
+);
 
 const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
@@ -62,13 +73,23 @@ const sleep = (ms: number) => new Promise((r) => setTimeout(r, ms));
  * Mirrors reference codex.js _peekSseOverloaded (195-263).
  */
 async function peekSseOverloaded(stream: ReadableStream<Uint8Array>): Promise<string | null> {
-  let reader: ReadableStreamDefaultReader<Uint8Array> | null = null;
+  let reader: Utf8StreamReader | null = null;
+  const deadline = Date.now() + CODEX_SSE_PEEK_MS;
   try {
     reader = stream.getReader();
     let acc = "";
     let bytesRead = 0;
     while (bytesRead < CODEX_SSE_PEEK_BYTES) {
-      const { done, value } = await reader.read();
+      const remaining = deadline - Date.now();
+      if (remaining <= 0) break;
+      // Race the read against the remaining budget so a slow-but-healthy stream
+      // is handed to the client promptly instead of buffering to the byte cap.
+      const next = await Promise.race([
+        reader.read(),
+        new Promise<null>((resolve) => setTimeout(() => resolve(null), remaining)),
+      ]);
+      if (!next) break; // deadline hit
+      const { done, value } = next;
       if (done) break;
       if (value) {
         acc += new TextDecoder().decode(value, { stream: true });
@@ -123,8 +144,13 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
 
   let lastResult: ProviderResult = { success: false, error: "No attempt made" };
 
+  // Set when a branch below already slept its per-status delay, so the
+  // top-of-loop backoff does not double-charge (a 503 cost 2s + 2s = 4s).
+  let sleptForThisAttempt = false;
+
   for (let attempt = 0; attempt <= maxAttempts; attempt++) {
-    if (attempt > 0) await sleep(DEFAULT_DELAY_MS);
+    if (attempt > 0 && !sleptForThisAttempt) await sleep(DEFAULT_DELAY_MS);
+    sleptForThisAttempt = false;
     if (signal?.aborted) return { success: false, error: "aborted" };
 
     try {
@@ -142,6 +168,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
             const retry = RETRY_CONFIG[503];
             if (retry && attempt < effectiveAttempts(retry.attempts)) {
               await sleep(retry.delayMs);
+              sleptForThisAttempt = true;
               continue;
             }
             return lastResult;
@@ -170,6 +197,7 @@ export async function execute(opts: ExecuteOptions): Promise<ProviderResult> {
         const retry = RETRY_CONFIG[status]!;
         if (attempt < effectiveAttempts(retry.attempts)) {
           await sleep(retry.delayMs);
+          sleptForThisAttempt = true;
           continue;
         }
       }

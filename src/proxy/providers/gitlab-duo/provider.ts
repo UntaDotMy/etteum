@@ -1015,8 +1015,8 @@ export class GitlabDuoProvider extends BaseProvider {
             if (matched.name.toLowerCase().includes("bash") || 
                 matched.name.toLowerCase().includes("shell") ||
                 matched.name.toLowerCase().includes("terminal")) {
-              const args = safeJsonParse(argsJson, {}) ?? {};
-              const command = args.command || args.cmd || "";
+              const args = safeJsonParse<Record<string, unknown>>(argsJson, {}) ?? {};
+              const command = String(args.command || args.cmd || "");
               
               // Detect cd command and update session working directory
               const newCwd = detectCwdCommand(command, session?.workingDirectory || process.cwd());

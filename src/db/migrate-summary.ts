@@ -20,17 +20,15 @@ async function migrateSummary() {
   // Aggregate all request_logs into usage_summary, grouped by hour + provider + model.
   // created_at is an integer epoch-ms timestamp (mode:"timestamp"), so divide by 1000 and
   // use SQLite 'unixepoch' to derive the UTC ISO-8601 hour bucket string.
-  // Aggregate request_logs → usage_summary. NOTE: the unique index on
-  // usage_summary is (bucket, provider, model) — it does NOT include api_key_id,
-  // so per-key granularity is not supported at the schema level for historical
-  // rows (a schema migration to add api_key_id to the index would be needed for
-  // per-key rollups). We DO aggregate total_cost now (previously dropped).
+  // Per-key granularity is possible now that the unique index includes
+  // api_key_id (db/migrate.ts). `0` = pool key; NULL would break the upsert.
   const result = await db.run(sql`
-    INSERT INTO usage_summary (bucket, provider, model, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, total_cost)
+    INSERT INTO usage_summary (bucket, provider, model, api_key_id, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, total_cost)
     SELECT
       strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch') AS bucket,
       COALESCE(provider, 'unknown') AS provider,
       COALESCE(model, 'unknown') AS model,
+      COALESCE(api_key_id, 0) AS api_key_id,
       CAST(count(*) AS INTEGER) AS total_requests,
       CAST(SUM(CASE WHEN status = 'success' THEN 1 ELSE 0 END) AS INTEGER) AS success_requests,
       CAST(SUM(CASE WHEN status = 'error' THEN 1 ELSE 0 END) AS INTEGER) AS error_requests,
@@ -41,8 +39,8 @@ async function migrateSummary() {
       COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
       COALESCE(SUM(cost), 0) AS total_cost
     FROM request_logs
-    GROUP BY strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch'), COALESCE(provider, 'unknown'), COALESCE(model, 'unknown')
-    ON CONFLICT (bucket, provider, model) DO UPDATE SET
+    GROUP BY strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch'), COALESCE(provider, 'unknown'), COALESCE(model, 'unknown'), COALESCE(api_key_id, 0)
+    ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
       total_requests = usage_summary.total_requests + excluded.total_requests,
       success_requests = usage_summary.success_requests + excluded.success_requests,
       error_requests = usage_summary.error_requests + excluded.error_requests,

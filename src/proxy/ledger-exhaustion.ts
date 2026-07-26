@@ -47,12 +47,16 @@ export function resolveLedgerZeroAction(args: {
 }
 
 function withTimeout<T>(p: Promise<T>, ms: number): Promise<T> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
   return Promise.race([
     p,
-    new Promise<T>((_resolve, reject) =>
-      setTimeout(() => reject(new Error("ledger-zero probe timeout")), ms),
-    ),
-  ]);
+    new Promise<T>((_resolve, reject) => {
+      timer = setTimeout(() => reject(new Error("ledger-zero probe timeout")), ms);
+    }),
+    // why: without the clear, a fast probe still left a live 10s timer per call.
+  ]).finally(() => {
+    if (timer) clearTimeout(timer);
+  });
 }
 
 /**

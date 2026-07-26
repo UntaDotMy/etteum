@@ -30,6 +30,7 @@ import type { Account } from "../../db/schema";
 import { config } from "../../config";
 import { applyModelSpecs, resolveModelSpec } from "../model-specs";
 import { safeJsonParse } from "../../utils/safe-json";
+import type { Utf8StreamReader } from "../../utils/stream-reader";
 
 // ── OAuth (Antigravity CLI's public client) ────────────────────────────────
 // The client_id is public (ships in the Antigravity CLI binary + public
@@ -467,7 +468,7 @@ export class AntigravityProvider extends BaseProvider {
       const created = Math.floor(Date.now() / 1000);
       const encoder = new TextEncoder();
       // Hoisted so cancel() can release the upstream reader on client disconnect.
-      let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let upstreamReader: Utf8StreamReader | undefined;
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {
