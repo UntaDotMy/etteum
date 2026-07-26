@@ -438,9 +438,19 @@ function trustedProxyIp(headers: Headers): string | null {
 
 // Rate-limit the destructive /apply endpoint: at most 3 applies/hour per IP.
 const applyLimiter = new RateLimiter(3, 3);
+// `?force=1` bypasses the 5-minute status cache and spawns a `git fetch` per
+// call, so it needs its own bound: 6 forced checks/minute per caller.
+const forcedStatusLimiter = new RateLimiter(6, 6);
 
 updateRouter.get("/status", (c) => {
   const force = c.req.query("force") === "1";
+  if (force) {
+    const peerIp = peerIpFromHonoContext(c);
+    const ip = peerIp || trustedProxyIp(c.req.raw.headers) || "unknown";
+    const rl = forcedStatusLimiter.check(ip);
+    // Degrade to the cached result rather than erroring; the dashboard polls this.
+    if (!rl.allowed) return c.json({ data: computeStatus(false) });
+  }
   return c.json({ data: computeStatus(force) });
 });
 

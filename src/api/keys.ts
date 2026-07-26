@@ -7,6 +7,7 @@ import { constantTimeEqual, RateLimiter } from "../utils/security";
 import { refreshByokModels } from "../proxy/providers/registry";
 import { getAllModels } from "../proxy/router";
 import { parseAllowedModels, isExpired } from "../proxy/friend-keys";
+import { effectiveClientIp } from "../utils/ip-ban";
 
 const API_KEY_SETTING = "api_key";
 const API_KEY_CACHE_TTL_MS = 5_000;
@@ -187,7 +188,7 @@ keysRouter.post("/test", async (c) => {
       429,
     );
   }
-  const body = await c.req.json<{ key: string }>();
+  const body = await c.req.json<{ key: string }>().catch(() => ({ key: "" }));
   const valid = await isValidApiKey(body.key || "");
   return c.json({ valid });
 });
@@ -347,10 +348,14 @@ keysRouter.delete("/managed/:id", async (c) => {
   return c.json({ success: true });
 });
 
-function getClientIp(c: { req: { header: (n: string) => string | undefined } }): string {
-  return (
-    c.req.header("x-forwarded-for")?.split(",")[0]?.trim() ||
-    c.req.header("x-real-ip") ||
-    "unknown"
-  );
+/**
+ * Rate-limit identity for the authless /test oracle.
+ *
+ * why: reading x-forwarded-for directly let a caller mint a fresh bucket per
+ * request, turning a 10/min brute-force guard into no guard at all (CWE-348).
+ * effectiveClientIp is peer-first and only trusts XFF across a loopback proxy
+ * hop, which our own front-ends stamp with the real peer.
+ */
+function getClientIp(c: any): string {
+  return effectiveClientIp(c) || "unknown";
 }

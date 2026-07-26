@@ -1,6 +1,7 @@
 import type { ChatCompletionRequest, ChatMessage } from "../providers/base";
 import { createHash } from "node:crypto";
 import { safeJsonParse } from "../../utils/safe-json";
+import type { Utf8StreamReader } from "../../utils/stream-reader";
 
 /**
  * Generate a deterministic, Anthropic-like signature for a thinking block.
@@ -439,159 +440,6 @@ export function normalizeRequestToOpenAI(request: ChatCompletionRequest): ChatCo
   };
 }
 
-function anthropicContentToOpenAI(content: string | AnthropicContentBlock[] | undefined): string | any[] {
-  if (!Array.isArray(content)) return content || "";
-  return content.map((block) => {
-    if (block.type === "text") return { type: "text", text: block.text || "" };
-    // Pass through tool_result / tool_use / image blocks; the caller
-    // (anthropicToOpenAI) is responsible for splitting them into proper
-    // OpenAI role:"tool" messages / assistant.tool_calls.
-    return block;
-  });
-}
-
-/**
- * Convert a single message's content-block array (or string) into one or more
- * canonical OpenAI-format messages.
- *
- * Anthropic packs `tool_result` and `tool_use` blocks inside a single
- * user/assistant message's `content` array. OpenAI represents them as:
- *   - `tool_result` → separate `role:"tool"` messages with `tool_call_id`
- *   - `tool_use`    → `assistant.tool_calls[]`
- *
- * Without this conversion, upstream OpenAI-compatible relays reject the
- * request with:
- *   "Invalid value: tool_result. Supported values are: 'text','image_url',…"
- *
- * Returns an array of messages (which may contain MORE entries than the input
- * — one `role:"tool"` per `tool_result` block, plus the base message).
- */
-function anthropicMessageToOpenAIMessages(message: AnthropicMessage): ChatCompletionRequest["messages"] {
-  const content = message.content;
-
-  // String content — passthrough.
-  if (!Array.isArray(content)) {
-    return [{ role: message.role, content: content || "" }];
-  }
-
-  const textParts: string[] = [];
-  const imageParts: any[] = [];
-  const toolCalls: any[] = [];
-  // Raw content kept so toolResultToOpenAIMessages can preserve images.
-  const toolResults: { id: string; content: unknown; is_error?: boolean }[] = [];
-
-  for (const block of content as any[]) {
-    if (!block || typeof block !== "object") continue;
-
-    if (block.type === "text" && typeof block.text === "string") {
-      textParts.push(block.text);
-      continue;
-    }
-
-    // OpenAI image_url block — passthrough.
-    if (block.type === "image_url" && block.image_url?.url) {
-      imageParts.push({ type: "image_url", image_url: block.image_url });
-      continue;
-    }
-
-    // Anthropic image block: { type:"image", source:{type:"base64",media_type,data} }
-    if (block.type === "image" && block.source?.type === "base64") {
-      imageParts.push({
-        type: "image_url",
-        image_url: { url: `data:${block.source.media_type};base64,${block.source.data}` },
-      });
-      continue;
-    }
-    if (block.type === "image" && block.source?.type === "url" && block.source.url) {
-      imageParts.push({ type: "image_url", image_url: { url: block.source.url } });
-      continue;
-    }
-
-    // Anthropic tool_use → OpenAI assistant.tool_calls
-    if (block.type === "tool_use") {
-      const args = typeof block.input === "string" ? block.input : JSON.stringify(block.input ?? {});
-      toolCalls.push({
-        id: block.id,
-        type: "function",
-        function: { name: block.name, arguments: args },
-      });
-      continue;
-    }
-
-    // Anthropic tool_result → separate role:"tool" messages (emitted below).
-    // Keep the raw content (not pre-flattened) so images are preserved.
-    if (block.type === "tool_result") {
-      toolResults.push({
-        id: block.tool_use_id,
-        content: block.content,
-        is_error: Boolean(block.is_error),
-      });
-      continue;
-    }
-
-    // Anthropic thinking blocks — drop; OpenAI has no equivalent and would
-    // reject the unknown content type.
-    if (block.type === "thinking" || block.type === "redacted_thinking") continue;
-
-    // Unknown block — coerce to text so we never propagate a raw Anthropic
-    // shape downstream that the upstream relay would reject.
-    if (typeof (block as any).text === "string") textParts.push((block as any).text);
-  }
-
-  const out: ChatCompletionRequest["messages"] = [];
-
-  // Emit tool_results FIRST (one role:"tool" message per result, + optional
-  // follow-up user image message for multimodal results), preserving order.
-  for (const tr of toolResults) {
-    out.push(...toolResultToOpenAIMessages(tr.id, tr.content, tr.is_error === true));
-  }
-
-  const text = textParts.join("\n");
-
-  // Assistant message with tool_calls.
-  if (message.role === "assistant" && toolCalls.length > 0) {
-    out.push({
-      role: "assistant",
-      content: text || "",
-      tool_calls: toolCalls,
-    });
-    return out;
-  }
-
-  // Multimodal user content stays as an array.
-  if (imageParts.length > 0 && message.role === "user") {
-    const mmContent: any[] = [];
-    if (text) mmContent.push({ type: "text", text });
-    mmContent.push(...imageParts);
-    out.push({ role: "user", content: mmContent });
-    return out;
-  }
-
-  // Emit the remaining text/image content as a message, UNLESS this was a
-  // user message whose only meaningful content was tool_results (already
-  // emitted above as role:"tool" messages) — emitting an empty user message
-  // would confuse some upstream relays.
-  const onlyHadToolResults = toolResults.length > 0 && !text && imageParts.length === 0 && toolCalls.length === 0;
-  if (!onlyHadToolResults) {
-    // Skip empty assistant messages that only carried tool_use blocks
-    // (already emitted above as tool_calls).
-    if (text || message.role !== "assistant" || toolCalls.length === 0) {
-      out.push({ role: message.role, content: text });
-    }
-  }
-
-  return out;
-}
-
-/**
- * Convert Anthropic tool definitions `{ name, description, input_schema }` into
- * the OpenAI shape `{ type: "function", function: { name, description, parameters } }`
- * that every internal provider (kiro, kiro-pro, qoder, ...) expects.
- *
- * Without this, providers receive `input_schema` where they look for
- * `function.parameters`, silently send no usable tool spec upstream, and the
- * model replies with an empty turn — which surfaces in agents as "no reply".
- */
 /**
  * Anthropic built-in tool types have no OpenAI function-calling equivalent and
  * cannot be honored by an OpenAI-shaped upstream. If a request asks for one we
@@ -632,34 +480,13 @@ export class AnthropicBuiltinToolError extends Error {
   }
 }
 
-export function anthropicToolsToOpenAI(tools: any[] | undefined): any[] | undefined {
-  if (!Array.isArray(tools) || tools.length === 0) return undefined;
-  // Fail fast on built-in tools — silent degradation causes empty-turn bugs.
-  for (const tool of tools) {
-    if (isAnthropicBuiltinTool(tool)) {
-      throw new AnthropicBuiltinToolError(tool.type);
-    }
-  }
-  return tools
-    .map((tool) => {
-      // Already OpenAI-shaped — pass through untouched.
-      if (tool?.type === "function" && tool.function?.name) return tool;
-      const name = tool?.name;
-      if (!name) return null;
-      const parameters =
-        tool.input_schema ?? tool.parameters ?? { type: "object", properties: {} };
-      return {
-        type: "function",
-        function: {
-          name,
-          description: tool.description || "",
-          parameters,
-          ...(tool.strict === true ? { strict: true } : {}), // Fix #7: carry strict
-        },
-      };
-    })
-    .filter(Boolean);
-}
+/**
+ * @deprecated Alias of {@link normalizeToolsToOpenAI}, which is what
+ * anthropicToOpenAI actually calls. Kept as a re-export so existing tests and
+ * any out-of-tree caller keep working; the duplicate implementation was
+ * removed because two copies of this logic could silently drift apart.
+ */
+export const anthropicToolsToOpenAI = normalizeToolsToOpenAI;
 
 /**
  * Convert Anthropic `tool_choice` into the OpenAI equivalent.
@@ -846,7 +673,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
   }
 
   // Hoisted so cancel() can release the upstream reader on client disconnect.
-  let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+  let upstreamReader: Utf8StreamReader | undefined;
   return new ReadableStream<Uint8Array>({
     async start(controller) {
       const reader = stream.getReader();
@@ -1087,14 +914,17 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   }
                 }
               } else if (finishReason) {
-                // length → max_tokens; content_filter/refusal/stop → end_turn.
-                // (Has-tool-calls path already set tool_use above and wins.)
-                stopReason = mapFinishReasonToStopReason(finishReason, false, "");
+                // Upstreams send finish_reason:"stop" alongside tool_calls, and
+                // tool_use paired with end_turn makes Claude Code skip the tool.
+                stopReason = mapFinishReasonToStopReason(finishReason, toolBlocks.size > 0, "");
               }
             } catch {
               // ignore malformed upstream stream chunk
             }
           }
+          // `error` is terminal per the streaming spec, and the inner `break`
+          // only leaves the per-frame loop, so stop reading here.
+          if (errored) break;
         }
       } finally {
         if (heartbeat) clearInterval(heartbeat);

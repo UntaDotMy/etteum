@@ -119,7 +119,7 @@ describe("responsesRequestToChat", () => {
         },
       ],
     });
-    const content = chat.messages[0].content as any[];
+    const content = chat.messages[0]!.content as any[];
     expect(content[0]).toEqual({ type: "text", text: "describe" });
     expect(content[1]).toEqual({ type: "image_url", image_url: { url: "https://x/y.png" } });
   });
@@ -135,7 +135,7 @@ describe("responsesRequestToChat", () => {
     });
     // user, assistant w/ tool_calls, tool
     expect(chat.messages.map((m) => m.role)).toEqual(["user", "assistant", "tool"]);
-    const asst = chat.messages[1];
+    const asst = chat.messages[1]!;
     expect(asst.tool_calls).toEqual([
       { id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"q":"sf"}' } },
     ]);
@@ -257,7 +257,7 @@ describe("chatResponseToResponses", () => {
     expect(r.object).toBe("response");
     expect(r.status).toBe("completed");
     expect(r.output).toHaveLength(1);
-    expect(r.output[0].type).toBe("message");
+    expect(r.output[0]!.type).toBe("message");
     const msg = r.output[0] as any;
     expect(msg.content).toEqual([{ type: "output_text", text: "Hello!", annotations: [] }]);
     expect(r.usage).toEqual({
@@ -288,14 +288,14 @@ describe("chatResponseToResponses", () => {
     );
     // reasoning item precedes the message item (output order: reasoning -> message)
     expect(r.output).toHaveLength(2);
-    expect(r.output[0].type).toBe("reasoning");
+    expect(r.output[0]!.type).toBe("reasoning");
     const rs = r.output[0] as any;
     expect(rs.id.startsWith("rs_")).toBe(true);
     expect(rs.status).toBe("completed");
     expect(rs.summary).toEqual([
       { type: "summary_text", text: "Let me think about this question carefully..." },
     ]);
-    expect(r.output[1].type).toBe("message");
+    expect(r.output[1]!.type).toBe("message");
   });
 
   test("tool_calls → function_call output items (and no empty message)", () => {
@@ -318,7 +318,7 @@ describe("chatResponseToResponses", () => {
       "gpt-5"
     );
     expect(r.output).toHaveLength(1);
-    expect(r.output[0].type).toBe("function_call");
+    expect(r.output[0]!.type).toBe("function_call");
     const fc = r.output[0] as any;
     expect(fc.call_id).toBe("call_1");
     expect(fc.name).toBe("get_weather");
@@ -378,7 +378,7 @@ describe("chatStreamToResponsesStream", () => {
     expect(names).toContain("response.output_item.done");
     expect(names[names.length - 1]).toBe("response.completed");
 
-    const completed = events[events.length - 1].data;
+    const completed = events[events.length - 1]!.data;
     // Canonical shape: data.type == event name, data.response wraps the object.
     expect(completed.type).toBe("response.completed");
     expect(completed.response.status).toBe("completed");
@@ -391,8 +391,8 @@ describe("chatStreamToResponsesStream", () => {
     // Every event's data.type matches its SSE event: field.
     for (const e of events) expect(e.data.type).toBe(e.event);
     // response.created wraps the response object too.
-    expect(events[0].data.type).toBe("response.created");
-    expect(events[0].data.response.id).toBe(meta.id);
+    expect(events[0]!.data.type).toBe("response.created");
+    expect(events[0]!.data.response.id).toBe(meta.id);
   });
 
   test("emits function_call argument deltas + done for tool-call stream", async () => {
@@ -409,7 +409,7 @@ describe("chatStreamToResponsesStream", () => {
     expect(names.filter((n) => n === "response.function_call_arguments.delta")).toHaveLength(2);
     expect(names).toContain("response.function_call_arguments.done");
     expect(names).toContain("response.output_item.done");
-    const completed = events[events.length - 1].data;
+    const completed = events[events.length - 1]!.data;
     expect(completed.type).toBe("response.completed");
     expect(completed.response.status).toBe("completed");
     expect(completed.response.output[0].type).toBe("function_call");
@@ -423,8 +423,8 @@ describe("chatStreamToResponsesStream", () => {
     const meta = newResponsesResponseMeta();
     const stream = chatStreamToResponsesStream(chatChunksToStream(chunks), "gpt-5", meta.id, meta.createdAt);
     const events = await decodeResponsesSse(stream);
-    expect(events[events.length - 1].event).toBe("response.completed");
-    expect(events[events.length - 1].data.response.output[0].content[0].text).toBe("x");
+    expect(events[events.length - 1]!.event).toBe("response.completed");
+    expect(events[events.length - 1]!.data.response.output[0].content[0].text).toBe("x");
   });
 
   test("source errors mid-stream → emits response.failed as terminal event and closes cleanly", async () => {
@@ -449,7 +449,7 @@ describe("chatStreamToResponsesStream", () => {
     // Terminal event is response.failed (NOT response.completed), and it is last.
     expect(names[names.length - 1]).toBe("response.failed");
     expect(names).not.toContain("response.completed");
-    const failed = events[events.length - 1].data;
+    const failed = events[events.length - 1]!.data;
     expect(failed.type).toBe("response.failed");
     expect(failed.response.status).toBe("failed");
     expect(failed.response.error.type).toBe("api_error");
@@ -491,7 +491,7 @@ describe("chatStreamToResponsesStream", () => {
     const reasonDone = events.find((e) => e.event === "response.reasoning_summary_text.done")!;
     expect(reasonDone.data.text).toBe("Thinking");
     // Final completed output has reasoning first, then message.
-    const completed = events[events.length - 1].data;
+    const completed = events[events.length - 1]!.data;
     expect(completed.response.output[0].type).toBe("reasoning");
     expect(completed.response.output[0].summary[0].text).toBe("Thinking");
     expect(completed.response.output[1].type).toBe("message");

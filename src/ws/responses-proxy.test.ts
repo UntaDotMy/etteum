@@ -18,8 +18,8 @@ describe("parseSseEvents (real implementation)", () => {
     const frame = 'event: response.create\ndata: {"type":"response.create","response":{"model":"gpt-5","input":"hi"}}\n\n';
     const events = parseSseEvents(frame);
     expect(events).toHaveLength(1);
-    expect(events[0].event).toBe("response.create");
-    expect(JSON.parse(events[0].data).response.model).toBe("gpt-5");
+    expect(events[0]!.event).toBe("response.create");
+    expect(JSON.parse(events[0]!.data).response.model).toBe("gpt-5");
   });
 
   test("parses multiple events in one buffer", () => {
@@ -33,7 +33,7 @@ describe("parseSseEvents (real implementation)", () => {
       "response.output_text.delta",
       "response.completed",
     ]);
-    expect(JSON.parse(events[2].data).status).toBe("completed");
+    expect(JSON.parse(events[2]!.data).status).toBe("completed");
   });
 
   test("joins multiple data: lines with \\n (WHATWG spec) and strips only one leading space", () => {
@@ -43,14 +43,14 @@ describe("parseSseEvents (real implementation)", () => {
     const frame = 'event: response.create\ndata: line1\ndata: line2\n\n';
     const events = parseSseEvents(frame);
     expect(events).toHaveLength(1);
-    expect(events[0].data).toBe("line1\nline2");
+    expect(events[0]!.data).toBe("line1\nline2");
   });
 
   test("strips only one leading space from a data: value", () => {
     // Per spec: strip exactly one U+0020 after "data:". "data:  x" → " x".
     const frame = 'event: e\ndata:  x\n\n';
     const events = parseSseEvents(frame);
-    expect(events[0].data).toBe(" x");
+    expect(events[0]!.data).toBe(" x");
   });
 
   test("ignores blocks with no event field", () => {

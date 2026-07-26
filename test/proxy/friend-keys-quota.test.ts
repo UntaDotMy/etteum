@@ -40,7 +40,7 @@ describe("friend-key token quota", () => {
         expiresAt: partial.expiresAt ?? null,
       })
       .returning();
-    createdIds.push(row.id);
+    createdIds.push(row!.id);
     return row;
   }
 
@@ -53,31 +53,31 @@ describe("friend-key token quota", () => {
 
   test("null tokenQuota never exhausts (unlimited)", async () => {
     const row = await insertKey({ tokenQuota: null, tokensUsed: 9_999_999 });
-    const access = await checkKeyAccess(row.id);
+    const access = await checkKeyAccess(row!.id);
     expect(access.allowed).toBe(true);
   });
 
   test("tokensUsed below quota is allowed", async () => {
     const row = await insertKey({ tokenQuota: 1000, tokensUsed: 999 });
-    const access = await checkKeyAccess(row.id);
+    const access = await checkKeyAccess(row!.id);
     expect(access.allowed).toBe(true);
   });
 
   test("tokensUsed equal to quota is exhausted", async () => {
     const row = await insertKey({ tokenQuota: 1000, tokensUsed: 1000 });
-    const access = await checkKeyAccess(row.id);
+    const access = await checkKeyAccess(row!.id);
     expect(access).toEqual({ allowed: false, reason: "quota_exhausted" });
   });
 
   test("tokensUsed above quota is exhausted", async () => {
     const row = await insertKey({ tokenQuota: 100, tokensUsed: 150 });
-    const access = await checkKeyAccess(row.id);
+    const access = await checkKeyAccess(row!.id);
     expect(access).toEqual({ allowed: false, reason: "quota_exhausted" });
   });
 
   test("inactive outranks quota", async () => {
     const row = await insertKey({ tokenQuota: 100, tokensUsed: 0, isActive: false });
-    const access = await checkKeyAccess(row.id);
+    const access = await checkKeyAccess(row!.id);
     expect(access).toEqual({ allowed: false, reason: "inactive" });
   });
 

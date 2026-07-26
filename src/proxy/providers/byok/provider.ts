@@ -15,6 +15,7 @@ import { decrypt } from "../../../utils/crypto";
 import { safeJsonParse } from "../../../utils/safe-json";
 import { resolveModelSpec } from "../../model-specs";
 import { toCanonicalModelName } from "../../pricing";
+import type { Utf8StreamReader } from "../../../utils/stream-reader";
 
 /**
  * BYOK (Bring Your Own Key) Provider
@@ -748,7 +749,7 @@ export class ByokProvider extends BaseProvider {
       const encoder = new TextEncoder();
       const upstream = response.body;
       // Hoisted so cancel() can release the upstream reader on client disconnect.
-      let upstreamReader: ReadableStreamDefaultReader<Uint8Array> | undefined;
+      let upstreamReader: Utf8StreamReader | undefined;
 
       const stream = new ReadableStream<Uint8Array>({
         async start(controller) {

@@ -103,6 +103,8 @@ export interface ModelInfo {
   object: "model";
   created: number;
   owned_by: string;
+  /** Human label for dashboard-added custom models (see custom-models.ts). */
+  display_name?: string;
   context_window?: number; // e.g. 200000
   max_output?: number; // e.g. 64000
   thinking?: boolean; // supports -thinking suffix

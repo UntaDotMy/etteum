@@ -11,11 +11,14 @@ interface CachedProxy {
 // ── Proxy list cache ────────────────────────────────────────────────
 let cachedProxies: CachedProxy[] = [];
 let cacheTimestamp = 0;
+// why: distinguishes "cached an empty pool" from "never loaded". The old
+// length>0 guard missed every call when no proxies exist: a SELECT per request.
+let cacheLoaded = false;
 const CACHE_TTL_MS = 5000;
 
 async function refreshCache(): Promise<CachedProxy[]> {
   const now = Date.now();
-  if (now - cacheTimestamp < CACHE_TTL_MS && cachedProxies.length > 0) {
+  if (cacheLoaded && now - cacheTimestamp < CACHE_TTL_MS) {
     return cachedProxies;
   }
 
@@ -26,11 +29,13 @@ async function refreshCache(): Promise<CachedProxy[]> {
 
   cachedProxies = rows;
   cacheTimestamp = now;
+  cacheLoaded = true;
   return cachedProxies;
 }
 
 export function invalidateProxyCache() {
   cacheTimestamp = 0;
+  cacheLoaded = false;
 }
 
 // ── Proxy pool settings cache ───────────────────────────────────────

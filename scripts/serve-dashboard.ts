@@ -65,17 +65,22 @@ async function loadIndexHtml(): Promise<string> {
   return ENV_SNIPPET + html;
 }
 
-/** Forward /api/* to the pool backend (same machine). */
-async function proxyToBackend(req: Request, pathname: string): Promise<Response> {
+/**
+ * Forward /api/* to the pool backend (same machine).
+ *
+ * Stamps X-Forwarded-For with the REAL TCP peer, OVERWRITING any client-supplied
+ * value. why: without it every proxied request reaches the backend from loopback,
+ * so adminGuardFromPeer would classify a remote caller as local and hand them
+ * /api/update/apply (RCE), /api/backup/* (.env + ENCRYPTION_KEY) and /api/mitm/*.
+ * Same contract as scripts/serve-share.ts.
+ */
+async function proxyToBackend(req: Request, pathname: string, peerIp: string | null): Promise<Response> {
   const incoming = new URL(req.url);
   const target = new URL(pathname + incoming.search, backendOrigin);
   const headers = new Headers(req.headers);
   headers.delete("host");
-  // Prefer real client IP for rate limits / auth locality checks.
-  const xff = req.headers.get("x-forwarded-for");
-  if (!xff) {
-    // Bun may not expose peer; leave unset for loopback proxy.
-  }
+  if (peerIp) headers.set("x-forwarded-for", peerIp);
+  else headers.delete("x-forwarded-for");
 
   try {
     const init: RequestInit & { duplex?: "half" } = {
@@ -196,7 +201,12 @@ Bun.serve<WsProxyData>({
       pathname === "/backend-api" ||
       pathname.startsWith("/backend-api/")
     ) {
-      return proxyToBackend(req, pathname);
+      const sock = server.requestIP(req);
+      const peerIp =
+        typeof sock === "string"
+          ? sock
+          : ((sock as { address?: string } | null)?.address ?? null);
+      return proxyToBackend(req, pathname, peerIp);
     }
 
     const filePathname = pathname === "/" ? "/index.html" : pathname;

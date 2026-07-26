@@ -5,6 +5,7 @@ import { warmupQueue } from "./warmup-queue";
 import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
 import { config } from "../config";
+import { listProviderNames } from "../proxy/providers/registry";
 
 const INTERVAL_KEY = "auto_warmup_interval_minutes"; // global default
 const ENABLED_KEY_PREFIX = "auto_warmup_provider_";
@@ -108,7 +109,9 @@ class AutoWarmupScheduler {
     const keys = [
       INTERVAL_KEY,
       WARMUP_CONCURRENCY_KEY,
-      ...config.providers.flatMap((p) => [
+      // Registry-sourced: config.providers omits the OpenAI-compatible catalog
+      // and dynamic compatible-nodes, so those could never be scheduled.
+      ...listProviderNames().flatMap((p) => [
         `${ENABLED_KEY_PREFIX}${p}`,
         `${INTERVAL_KEY_PREFIX}${p}`,
       ]),
@@ -131,7 +134,7 @@ class AutoWarmupScheduler {
     warmupQueue.setConcurrency(concurrency);
 
     // Build per-provider schedules for enabled providers
-    for (const provider of config.providers) {
+    for (const provider of listProviderNames()) {
       const enabled = map.get(`${ENABLED_KEY_PREFIX}${provider}`) === "true";
       if (!enabled) continue;
 

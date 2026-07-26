@@ -53,8 +53,8 @@ const DB: Record<string, CapEntry[]> = {
   canva: [["*", { vision: true }]],
   codex: [["*", { thinking: true }]],
   qoder: [["*", { thinking: true }]],
-  byok: [["*", {}]],
-  youmind: [["*", {}]],
+  // byok / youmind deliberately absent: `[["*", {}]]` reads as "supports
+  // nothing" and would strip images a user-configured endpoint accepts.
   alibaba: [["*", { vision: true, thinking: true }]],
   antigravity: [
     ["gemini-2.0*", { vision: true, thinking: true, search: true, computerUse: true }],
@@ -77,6 +77,18 @@ function matchPattern(pattern: string, model: string): boolean {
 }
 
 const _cache = new Map<string, ModelCapabilities>();
+
+/**
+ * Whether this provider has declared capabilities at all.
+ *
+ * why: getCapabilities() returns {} for an unlisted provider, which reads as
+ * "supports nothing". Stripping on that would silently drop images for every
+ * provider missing from DB (cursor, the openai-compatible catalog, dynamic
+ * compatible-nodes). Absence of a declaration means UNKNOWN, not unsupported.
+ */
+export function isProviderCapabilityKnown(provider: string): boolean {
+  return Object.prototype.hasOwnProperty.call(DB, provider);
+}
 
 export function getCapabilities(provider: string, model: string): ModelCapabilities {
   const key = `${provider}::${model}`;
@@ -159,34 +171,68 @@ export function reorderByCapabilities<C>(
     .map(({ c }) => c);
 }
 
+/**
+ * Per-model capability facts that outrank the coarse provider table; sourced
+ * from the routed model's own ModelInfo (model-specs.ts). `true`/`false` are
+ * authoritative; `undefined` means "no per-model declaration, use the table".
+ */
+export interface ModelCapabilityOverrides {
+  vision?: boolean;
+  pdf?: boolean;
+  audioInput?: boolean;
+}
+
+/**
+ * Replace modality blocks the target model cannot accept with a text placeholder,
+ * IN PLACE on `messages`.
+ *
+ * @param overrides per-model facts from ModelInfo; win over the provider table
+ * @returns which modalities were replaced
+ */
 export function stripUnsupportedCapabilities(
   messages: { role: string; content: string | any[] | null }[],
   provider: string,
   model: string,
+  overrides?: ModelCapabilityOverrides,
 ): { visionStripped: boolean; pdfStripped: boolean; audioStripped: boolean } {
-  const caps = getCapabilities(provider, model);
   const stripped = { visionStripped: false, pdfStripped: false, audioStripped: false };
+  // Nothing declared at either level → unknown capabilities → never strip.
+  const hasOverride =
+    overrides?.vision !== undefined ||
+    overrides?.pdf !== undefined ||
+    overrides?.audioInput !== undefined;
+  if (!isProviderCapabilityKnown(provider) && !hasOverride) return stripped;
+  const table = getCapabilities(provider, model);
+  const caps: ModelCapabilities = {
+    ...table,
+    ...(overrides?.vision !== undefined ? { vision: overrides.vision } : {}),
+    ...(overrides?.pdf !== undefined ? { pdf: overrides.pdf } : {}),
+    ...(overrides?.audioInput !== undefined ? { audioInput: overrides.audioInput } : {}),
+  };
 
   for (const msg of messages) {
     if (!msg?.content || typeof msg.content !== "object" || !Array.isArray(msg.content)) continue;
+    let replaced = false;
     const newBlocks: any[] = [];
     for (const block of msg.content) {
       if (!block || typeof block !== "object") { newBlocks.push(block); continue; }
       const t = block.type;
       if (t === "image_url" || t === "image") {
-        if (!caps.vision) { stripped.visionStripped = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
+        if (!caps.vision) { stripped.visionStripped = true; replaced = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
       }
       if (t === "file" || t === "document" || t === "input_file") {
         const mime = block.mime_type || block.document?.mime_type || "";
-        if (mime.startsWith("image/") && !caps.vision) { stripped.visionStripped = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
-        if (!caps.pdf && (mime.includes("pdf") || mime === "application/pdf")) { stripped.pdfStripped = true; newBlocks.push({ type: "text", text: "[Document removed - not supported by this model]" }); continue; }
-        if (mime.startsWith("audio/") && !caps.audioInput) { stripped.audioStripped = true; newBlocks.push({ type: "text", text: "[Audio removed - not supported by this model]" }); continue; }
+        if (mime.startsWith("image/") && !caps.vision) { stripped.visionStripped = true; replaced = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
+        if (!caps.pdf && (mime.includes("pdf") || mime === "application/pdf")) { stripped.pdfStripped = true; replaced = true; newBlocks.push({ type: "text", text: "[Document removed - not supported by this model]" }); continue; }
+        if (mime.startsWith("audio/") && !caps.audioInput) { stripped.audioStripped = true; replaced = true; newBlocks.push({ type: "text", text: "[Audio removed - not supported by this model]" }); continue; }
       }
       const mime = block.inlineData?.mimeType || block.fileData?.mimeType || "";
-      if (mime.startsWith("image/") && !caps.vision) { stripped.visionStripped = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
+      if (mime.startsWith("image/") && !caps.vision) { stripped.visionStripped = true; replaced = true; newBlocks.push({ type: "text", text: "[Image removed - not supported by this model]" }); continue; }
       newBlocks.push(block);
     }
-    if (newBlocks.length > 0 && newBlocks.length !== (msg.content as any[]).length) {
+    // Every branch pushes exactly one block, so lengths always match; the
+    // write-back keys off substitution, not the count.
+    if (replaced) {
       (msg as any).content = newBlocks;
     }
   }

@@ -240,8 +240,39 @@ export type Provider = (typeof config.providers)[number];
  * Validate security-critical configuration at startup.
  * Returns an array of human-readable problems (empty = OK).
  */
+/**
+ * Rough entropy floor for a secret: distinct characters observed.
+ *
+ * why: the at-rest key is derived with a bare SHA-256 of the passphrase (no
+ * KDF), because decrypt() runs on the request hot path for byok / alibaba /
+ * gitlab-duo / youmind / openai-compatible; a per-call scrypt would add ~100ms
+ * to every proxied request, and changing the derivation would make every stored
+ * credential unreadable. SHA-256 is fine for a high-entropy random key and weak
+ * for a guessable phrase, so reject guessable phrases at startup instead.
+ */
+function looksLowEntropy(secret: string): boolean {
+  const distinct = new Set(secret).size;
+  if (distinct <= 4) return true; // e.g. "abababab…", "1111…"
+  if (/^(.)\1+$/.test(secret)) return true; // single repeated char
+  if (/^(?:0123456789|abcdefghijklmnopqrstuvwxyz)+/i.test(secret)) return true;
+  return false;
+}
+
 export function validateSecurityConfig(): string[] {
   const problems: string[] = [];
+  if (config.encryptionKey && config.encryptionKey.length >= 16 && looksLowEntropy(config.encryptionKey)) {
+    problems.push(
+      "ENCRYPTION_KEY is long enough but low-entropy (few distinct characters). " +
+        "Stored credentials are protected by a key derived directly from this " +
+        "value, so a guessable phrase is brute-forceable. Generate a random key " +
+        "(e.g. `openssl rand -hex 32`).",
+    );
+  }
+  if (config.apiKey && config.apiKey.length >= 16 && looksLowEntropy(config.apiKey)) {
+    problems.push(
+      "API_KEY is long enough but low-entropy (few distinct characters). Generate a random key.",
+    );
+  }
   if (!config.encryptionKey || config.encryptionKey.length < 16) {
     problems.push(
       "ENCRYPTION_KEY is missing or shorter than 16 characters. Stored provider " +

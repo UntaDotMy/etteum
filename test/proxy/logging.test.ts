@@ -1,11 +1,21 @@
 import { describe, expect, test, mock, beforeEach } from "bun:test";
 import type {} from "bun:test";
 
-// Override config BEFORE importing logging. Bun's mock.module replaces the
-// module in the registry, so when logging.ts does `import { config }`, it gets
-// our override instead of the real config that reads env vars at load time.
+/**
+ * Override config BEFORE importing logging. Bun's mock.module replaces the module
+ * in the registry, so `import { config }` inside logging.ts gets this override.
+ *
+ * The stub MUST spread the real module: mock.module is process-wide and permanent
+ * for the run, so a partial stub silently breaks every later test file that reads
+ * a field it omitted. This one previously dropped `providers`, which made
+ * `config.providers` undefined across the rest of the suite. Same failure mode
+ * documented in test/ws/dashboard-auth.test.ts.
+ */
+const realConfig = await import("../../src/config");
 mock.module("../../src/config", () => ({
+  ...realConfig,
   config: {
+    ...realConfig.config,
     logBodyEnabled: true,
     logBodyFull: false,
     logBodyRedact: true,

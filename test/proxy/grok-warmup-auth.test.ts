@@ -252,7 +252,7 @@ describe("GrokProvider.healthCheck — shipped path", () => {
         return { success: false, error: "billing endpoints returned no usable quota" };
       }
     }
-    globalThis.fetch = mock(async (input: RequestInfo | URL) => {
+    globalThis.fetch = mock(async (input: Request | string | URL) => {
       const url = String(input);
       if (url.includes("/v1/models")) {
         return new Response(JSON.stringify({ error: "Access denied" }), { status: 403 });

@@ -15,7 +15,7 @@ import { pool } from "../proxy/pool";
 import { providers } from "../proxy/router";
 import { applyPudidilFilters } from "../proxy/filters";
 import { getCompressionConfig, compressRequest } from "../proxy/compression";
-import { resolveModelAlias } from "../proxy/model-mapping";
+import { resolveModelAlias, normalizeModelId as proxyNormalizeModelId } from "../proxy/model-mapping";
 
 export const debugRouter = new Hono();
 
@@ -74,13 +74,18 @@ export function installConsoleBridge(): void {
   }
 }
 
-/** Inline model-id normalization (mirrors proxy/index.ts normalizeModelId). */
+/**
+ * Model-id normalization for the Translator preview.
+ *
+ * MUST match the production edge (proxy/index.ts normalizeModelId), otherwise
+ * the debug page reports a pipeline the real request never runs. The extra
+ * vendor-prefix trim is applied first because the dashboard's own model picker
+ * can hand us `anthropic/...` ids that never reach /v1.
+ */
 function normalizeModelId(model: string): string {
   if (!model) return model;
-  let m = model.trim();
-  // Common aliases the dashboard/clients send before alias resolution.
-  m = m.replace(/^anthropic\//, "").replace(/^openai\//, "");
-  return m;
+  const trimmed = model.trim().replace(/^anthropic\//, "").replace(/^openai\//, "");
+  return proxyNormalizeModelId(trimmed);
 }
 
 /** POST /api/translator/debug — dry-run a request through the transform pipeline. */

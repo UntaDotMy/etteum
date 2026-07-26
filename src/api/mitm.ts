@@ -75,7 +75,11 @@ mitmRouter.post("/enable-dns", async (c) => {
 });
 
 // --- Alias CRUD (tool → real model) ---
+// Aliases decide which real model intercepted IDE traffic is rerouted to, so
+// they carry the same trust level as starting the interceptor itself.
 mitmRouter.get("/aliases", async (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const rows = await db.select().from(kv).where(eq(kv.scope, "mitmAlias"));
   const out: Record<string, any> = {};
   for (const r of rows) {
@@ -85,6 +89,8 @@ mitmRouter.get("/aliases", async (c) => {
 });
 
 mitmRouter.put("/aliases", async (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ tool: string; model: string; target: string }>();
   if (!body.tool || !body.model || !body.target) {
     return c.json({ error: "tool, model, target required" }, 400);
@@ -101,6 +107,8 @@ mitmRouter.put("/aliases", async (c) => {
 });
 
 mitmRouter.delete("/aliases", async (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const body = await c.req.json<{ tool: string; model: string }>();
   const key = `${body.tool}:${body.model}`;
   await db.delete(kv).where(and(eq(kv.scope, "mitmAlias"), eq(kv.key, key)));

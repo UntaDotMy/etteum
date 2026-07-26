@@ -16,6 +16,20 @@ import { asc, eq } from "drizzle-orm";
 
 const MAPPING_ENABLED_SETTING = "model_mapping_enabled";
 
+/**
+ * Canonicalize a client-supplied model id before alias resolution.
+ *
+ * Single source of truth: the /v1 edge and the Translator debug preview must
+ * agree, or the debug page describes a pipeline the live request never runs.
+ * Lives here (not proxy/index.ts) so importing it cannot drag the proxy
+ * router's boot-time timers into an early module.
+ */
+export function normalizeModelId(model: string): string {
+  if (!model) return model;
+  // Common typo seen from clients: "sonet" -> canonical Anthropic "sonnet".
+  return model.replace(/claude-sonet/gi, "claude-sonnet");
+}
+
 let cache: ModelMapping[] = [];
 let masterEnabled = true;
 
@@ -130,17 +144,30 @@ function matchesPattern(model: string, rule: ModelMapping): boolean {
  * Claude Code only ever sends DASHED ids ("claude-3-5-sonnet-..."), so using
  * underscore presence as the discriminator is a safe and zero-config rule.
  */
+/**
+ * Prefixes that identify a model id as native to a specific in-pool provider.
+ * Must stay in step with the provider registry: a missing entry lets a generic
+ * Claude Code template (e.g. contains:"haiku") rewrite a real provider model
+ * such as `cbc-haiku-4.5` to the wrong target.
+ */
+const NATIVE_PROVIDER_PREFIXES = [
+  "gitlab-duo:", // GitLab Duo explicit alias
+  "qd-",         // Qoder
+  "grok-",       // Grok
+  "cb-",         // CodeBuddy
+  "cbc-",        // CodeBuddy China
+  "ali-",        // Alibaba DashScope
+  "codex-",      // Codex
+  "kp-",         // Kiro Pro
+  "ym-",         // YouMind
+  "kiro:",       // Kiro Pro variant
+  "canva-",      // Canva
+];
+
 function isNativeProviderId(model: string): boolean {
   // GitLab Duo identifiers: claude_sonnet_4_6, gpt_5_codex, gemini_3_5_flash, …
   if (/^(claude|gpt|gemini)_/.test(model)) return true;
-  // Explicit alias prefixes used by routed providers:
-  if (model.startsWith("gitlab-duo:")) return true;
-  if (model.startsWith("qd-")) return true;          // Qoder
-  if (model.startsWith("grok-")) return true;       // Grok
-  if (model.startsWith("cb-")) return true;          // CodeBuddy
-  if (model.startsWith("ym-")) return true;          // YouMind
-  if (model.startsWith("kiro:")) return true;        // Kiro Pro variant
-  return false;
+  return NATIVE_PROVIDER_PREFIXES.some((p) => model.startsWith(p));
 }
 
 /**

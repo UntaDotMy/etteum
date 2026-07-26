@@ -85,16 +85,16 @@ export function resolveToolPaths(
   if (!argsJson || !cwd) return argsJson;
   
   try {
-    const args = safeJsonParse(argsJson, {}) ?? {};
+    const args = safeJsonParse<Record<string, unknown>>(argsJson, {}) ?? {};
     if (!args || typeof args !== 'object') return argsJson;
-    
+
     // Fields that typically contain file paths
     const pathFields = ['filepath', 'path', 'file', 'directory', 'directory_path'];
-    
+
     let modified = false;
     for (const field of pathFields) {
       if (args[field] && typeof args[field] === 'string') {
-        const original = args[field];
+        const original = args[field] as string;
         const resolved = resolvePath(original, cwd);
         if (resolved !== original) {
           args[field] = resolved;

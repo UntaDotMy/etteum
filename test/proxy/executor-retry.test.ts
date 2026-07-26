@@ -24,6 +24,9 @@ function failingProvider(calls: { n: number }) {
       calls.n++;
       return { success: false, error: "503 service unavailable", statusCode: 503 } as any;
     }
+    async refreshToken() { return { success: false, error: "not supported" }; }
+    async validateAccount() { return true; }
+    async fetchQuota() { return { success: false, error: "not supported" }; }
   })();
 }
 
@@ -39,6 +42,9 @@ function succeedingProvider(calls: { n: number }) {
       calls.n++;
       return { success: true, response: { choices: [] } } as any;
     }
+    async refreshToken() { return { success: false, error: "not supported" }; }
+    async validateAccount() { return true; }
+    async fetchQuota() { return { success: false, error: "not supported" }; }
   })();
 }
 
@@ -68,4 +74,20 @@ describe("execute() maxRetries cap (H5)", () => {
     expect(r.success).toBe(true);
     expect(calls.n).toBe(1);
   });
+
+  /**
+   * §5.3; a retryable status slept twice per hop: once for the per-status
+   * RETRY_CONFIG delay before `continue`, then again for DEFAULT_DELAY_MS at the
+   * top of the next iteration. A 503 cost 4s per retry instead of 2s.
+   */
+  test("a retryable status sleeps its per-status delay ONCE per retry", async () => {
+    const calls = { n: 0 };
+    const started = Date.now();
+    await execute({ provider: failingProvider(calls), providerName: "mock", account: fakeAccount, request: req, stream: false, maxRetries: 1 });
+    const elapsed = Date.now() - started;
+    expect(calls.n).toBe(2);
+    // 503 delay is 2000ms. One retry ⇒ ~2s. The double-sleep made it ~4s.
+    expect(elapsed).toBeGreaterThanOrEqual(1_800);
+    expect(elapsed).toBeLessThan(3_400);
+  }, 20_000);
 });

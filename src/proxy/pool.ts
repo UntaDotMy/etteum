@@ -823,6 +823,8 @@ class AccountPool {
    */
   async markUsed(accountId: number, providerName: ProviderName): Promise<void> {
     // Reset siblings' sticky count so a rotated-away account starts fresh.
+    // Scoped to non-zero rows: the unscoped form rewrote every sibling on every
+    // successful request (499 writes at 500 accounts) against one SQLite writer.
     await db
       .update(accounts)
       .set({ consecutiveUseCount: sql`0` })
@@ -830,6 +832,7 @@ class AccountPool {
         and(
           eq(accounts.provider, providerName),
           sql`${accounts.id} <> ${accountId}`,
+          sql`${accounts.consecutiveUseCount} <> 0`,
         ),
       );
 

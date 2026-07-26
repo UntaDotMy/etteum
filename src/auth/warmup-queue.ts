@@ -5,6 +5,7 @@ import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
 import { warmupAccount, type WarmupResult } from "./warmup-runner";
 import { config } from "../config";
+import { listProviderNames } from "../proxy/providers/registry";
 
 type WarmupStatus = "queued" | "processing" | "retrying" | "completed" | "failed";
 
@@ -385,7 +386,9 @@ class WarmupQueue {
     // and live requests hit dead accounts → 503 "All accounts failed".
     const providers = options.providers?.length
       ? options.providers
-      : [...config.providers];
+      // Registry-sourced fan-out: config.providers omits the OpenAI-compatible
+      // catalog and dynamic compatible-nodes, whose accounts were never warmed.
+      : listProviderNames();
     const statuses = options.statuses?.length
       ? options.statuses
       : options.includePending

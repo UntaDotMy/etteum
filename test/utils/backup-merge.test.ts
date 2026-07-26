@@ -80,6 +80,7 @@ function writePack(dir: string, rows: Array<Record<string, unknown>>, encKey: st
     const now = Math.floor(Date.now() / 1000);
     for (const r of rows) {
       ins.run({
+        // bun:sqlite types named-parameter objects loosely; the shape is correct.
         $provider: r.provider,
         $email: r.email,
         $password: r.password,
@@ -88,7 +89,7 @@ function writePack(dir: string, rows: Array<Record<string, unknown>>, encKey: st
         $tokens: r.tokens ?? null,
         $priority: r.priority ?? 0,
         $now: now,
-      });
+      } as any);
     }
   } finally {
     db.close();

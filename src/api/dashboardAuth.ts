@@ -30,7 +30,6 @@ import {
   checkLock,
   recordFail,
   recordSuccess,
-  getClientIp,
 } from "../auth/dashboardSecurity";
 import { resolveApiKey } from "./keys";
 import {
@@ -66,17 +65,19 @@ dashboardAuthRouter.get("/status", async (c) => {
  */
 dashboardAuthRouter.post("/login", async (c) => {
   const headers = c.req.raw.headers;
-  const headerIp = getClientIp(headers);
-  const lock = checkLock(headerIp);
+  // why: getClientIp(headers) is "unknown" without TRUST_PROXY, which collapsed
+  // every caller into one shared lockout bucket (one attacker locks out all).
+  const ip = effectiveClientIp(c);
+  const lockIp = ip || "unknown";
+  const lock = checkLock(lockIp);
   if (lock.locked) {
     return c.json({ error: `Too many attempts. Locked. Retry in ${lock.retryAfter}s.` }, 429, { "Retry-After": String(lock.retryAfter) });
   }
   const body = await c.req.json<{ password?: string }>().catch(() => ({ password: "" }));
   const presented = (body.password || "").trim();
-  const ip = effectiveClientIp(c);
   const identity = clientIdentityFromHeaders(headers);
   if (!presented) {
-    recordFail(headerIp);
+    recordFail(lockIp);
     await banInvalidLoginIp({
       ip,
       path: "/api/dashboard-auth/login",
@@ -100,7 +101,7 @@ dashboardAuthRouter.post("/login", async (c) => {
     return c.json({ error: "Access denied." }, 403);
   }
   if (!resolved.valid) {
-    recordFail(headerIp);
+    recordFail(lockIp);
     await banInvalidLoginIp({
       ip,
       path: "/api/dashboard-auth/login",
@@ -111,7 +112,7 @@ dashboardAuthRouter.post("/login", async (c) => {
     return c.json({ error: "Invalid password" }, 401);
   }
 
-  recordSuccess(headerIp);
+  recordSuccess(lockIp);
   await logSecurityEvent({
     ip,
     surface: "dashboard-login",

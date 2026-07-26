@@ -49,7 +49,7 @@ function makeAccount(tokens: Record<string, unknown>): Account {
     metadata: null,
     createdAt: new Date(),
     updatedAt: new Date(),
-  } as Account;
+  } as unknown as Account;
 }
 
 describe("resolveGrokAccessExpiresAtSec / ensureFreshAccessToken", () => {

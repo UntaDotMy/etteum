@@ -136,7 +136,9 @@ export const usageSummary = sqliteTable("usage_summary", {
   apiKeyId: integer("api_key_id"),
   totalCost: real("total_cost").default(0),
 }, (table) => [
-  uniqueIndex("usage_summary_bucket_provider_model_idx").on(table.bucket, table.provider, table.model),
+  // Widened to include apiKeyId so per-key usage is recordable (see db/migrate.ts).
+  // `0` means "no managed key"; NULL is distinct-per-row in SQLite and breaks the upsert.
+  uniqueIndex("usage_summary_bucket_provider_model_key_idx").on(table.bucket, table.provider, table.model, table.apiKeyId),
   index("usage_summary_bucket_idx").on(table.bucket),
   index("usage_summary_provider_idx").on(table.provider, table.bucket),
   index("usage_summary_api_key_idx").on(table.apiKeyId),

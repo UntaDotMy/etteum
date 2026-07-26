@@ -165,6 +165,25 @@ export function resolveProviderInstance(name: string): BaseProvider | null {
 /** Iterable list of provider instances (priority order). */
 export const providerList: readonly BaseProvider[] = PROVIDER_ORDER;
 
+/**
+ * Every provider name that can own accounts: the static map (first-party +
+ * the OpenAI-compatible catalog) plus dynamic compatible-nodes.
+ *
+ * why: config.providers is a hand-maintained `as const` covering only the 14
+ * first-party providers. Consumers that mean "all providers" (warmup schedule,
+ * warmup fan-out, per-provider stats) silently skipped the catalog and every
+ * user-defined node.
+ */
+export function listProviderNames(): string[] {
+  const names = new Set<string>(Object.keys(providers));
+  try {
+    for (const p of compatibleNodeRegistry.getProviders()) names.add(p.name);
+  } catch {
+    /* registry not loaded yet */
+  }
+  return [...names];
+}
+
 /** Refresh BYOK models from database. */
 export async function refreshByokModels(): Promise<void> {
   await byok.refreshModelsCache();

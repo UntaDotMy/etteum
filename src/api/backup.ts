@@ -24,8 +24,24 @@ import { client as sqlite } from "../db/index";
 import { config } from "../config";
 import { pool } from "../proxy/pool";
 import { broadcast } from "../ws/index";
+import { adminGuardFromPeer, peerIpFromHonoContext } from "../utils/security";
 
 export const backupRouter = new Hono();
+
+/**
+ * Backup packs carry the FULL .env (incl. ENCRYPTION_KEY), data/jwt-secret and
+ * the whole database; and import can overwrite all three from a caller-supplied
+ * path. A pool API key alone must not reach that (OWASP API5:2023 / CWE-862), so
+ * these routes require a loopback TCP peer or a machine-bound CLI admin token,
+ * matching /api/update/apply.
+ */
+function requireAdmin(c: any): { allowed: boolean; reason: string } {
+  return adminGuardFromPeer(
+    peerIpFromHonoContext(c),
+    c.req.raw.headers,
+    new URL(c.req.url).searchParams,
+  );
+}
 
 function tableCount(name: string): number {
   try {
@@ -62,6 +78,8 @@ backupRouter.get("/status", (c) => {
  * Body/query: mode=essential|full (default essential — no request history).
  */
 backupRouter.post("/export", async (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   try {
     let mode: BackupMode = "essential";
     try {
@@ -97,6 +115,8 @@ backupRouter.post("/export", async (c) => {
 
 /** Download a zip from data/backups/ by basename only (no path traversal). */
 backupRouter.get("/download", (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const file = c.req.query("file") || "";
   if (!file || file.includes("..") || file.includes("/") || file.includes("\\")) {
     return c.json({ error: "Invalid file" }, 400);
@@ -131,6 +151,8 @@ backupRouter.get("/download", (c) => {
  * replace — swap entire DB + .env; requires confirm + full process restart
  */
 backupRouter.post("/import", async (c) => {
+  const guard = requireAdmin(c);
+  if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
   const qMode = (c.req.query("mode") || "").toLowerCase();
   let mode: ImportMode =
     qMode === "replace" ? "replace" : qMode === "merge" ? "merge" : "merge";

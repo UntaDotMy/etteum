@@ -86,7 +86,7 @@ describe("execute hard-connect fail-fast (same account)", () => {
           error: `error: ${CONNECT_REFUSED}`,
         };
       },
-      async chatCompletionStream(): Promise<ProviderResult> {
+      async chatCompletionStream(this: BaseProvider): Promise<ProviderResult> {
         return this.chatCompletion({} as Account, {} as any);
       },
     } as unknown as BaseProvider;
@@ -117,7 +117,7 @@ describe("execute hard-connect fail-fast (same account)", () => {
         calls++;
         return classifyGrokUpstreamError(new Error(ACCESS_DENIED));
       },
-      async chatCompletionStream(): Promise<ProviderResult> {
+      async chatCompletionStream(this: BaseProvider): Promise<ProviderResult> {
         return this.chatCompletion({} as Account, {} as any);
       },
     } as unknown as BaseProvider;

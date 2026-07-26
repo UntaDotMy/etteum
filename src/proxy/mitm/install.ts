@@ -88,7 +88,9 @@ export function installRootCA(password?: string): TrustResult {
   }
   if (IS_WIN) {
     if (!isAdmin()) return { ok: false, requiresAdmin: true };
-    return run(`certutil -addstore -f Root '${ROOT_CA_CERT_PATH}'`);
+    // Double quotes: execSync runs through cmd.exe, where single quotes are
+    // LITERAL characters; certutil received `'C:\...crt'` and never found the file.
+    return run(`certutil -addstore -f Root "${ROOT_CA_CERT_PATH}"`);
   }
   // Linux
   const cfg = getLinuxCertConfig();
