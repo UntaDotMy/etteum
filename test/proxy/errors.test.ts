@@ -42,5 +42,16 @@ describe("proxy error classification", () => {
     expect(isNonAccountRequestError("Content moderation: Your input was flagged")).toBe(true);
     expect(isNonAccountRequestError("flagged as potentially sensitive")).toBe(true);
     expect(isNonAccountRequestError("401 unauthorized")).toBe(false);
+    // Grok image SuperGrok gate — free OAuth fleet must not be walked account-by-account
+    expect(
+      isNonAccountRequestError(
+        "image_generation_not_entitled: Image generation is a SuperGrok feature",
+      ),
+    ).toBe(true);
+    expect(
+      isBadUpstreamRequest(
+        "Image generation is a SuperGrok feature and isn't available on the free or X Basic tier",
+      ),
+    ).toBe(true);
   });
 });

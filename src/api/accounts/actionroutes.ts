@@ -598,6 +598,19 @@ export async function importGrokFarmAccounts(
       const vLim = Number(rec.verify_credits_limit ?? (tokensRaw as any)?.credits_limit);
       if (Number.isFinite(vRem)) oauthTokens.credits_remaining = vRem;
       if (Number.isFinite(vLim)) oauthTokens.credits_limit = vLim;
+      // Free web Imagine cookies from farm activate (also accepted via normalize).
+      const rawTok =
+        tokensRaw && typeof tokensRaw === "object"
+          ? (tokensRaw as Record<string, unknown>)
+          : {};
+      if (!oauthTokens.sso && typeof rawTok.sso === "string" && rawTok.sso) {
+        oauthTokens.sso = rawTok.sso;
+        oauthTokens.ssoRw =
+          (typeof rawTok.ssoRw === "string" && rawTok.ssoRw) || rawTok.sso;
+      }
+      if (!oauthTokens.cf_clearance && typeof rawTok.cf_clearance === "string") {
+        oauthTokens.cf_clearance = rawTok.cf_clearance;
+      }
 
       const email =
         emailRaw ||
@@ -653,6 +666,23 @@ async function upsertGrokOAuthAccount(
     if (bySub) existing = [bySub];
   }
 
+  // Preserve free-web SSO cookies: prefer incoming oauthTokens, else keep
+  // existing account sso so OAuth refresh/import does not wipe Imagine.
+  const prevTok =
+    existing.length > 0 && existing[0]!.tokens && typeof existing[0]!.tokens === "object"
+      ? (existing[0]!.tokens as Record<string, unknown>)
+      : null;
+  const ssoKeep =
+    oauthTokens.sso ||
+    (typeof prevTok?.sso === "string" ? prevTok.sso : undefined);
+  const ssoRwKeep =
+    oauthTokens.ssoRw ||
+    (typeof prevTok?.ssoRw === "string" ? prevTok.ssoRw : undefined) ||
+    ssoKeep;
+  const cfKeep =
+    oauthTokens.cf_clearance ||
+    (typeof prevTok?.cf_clearance === "string" ? prevTok.cf_clearance : undefined);
+
   const tokensBlob = {
     auth_method: "oauth" as const,
     access_token: oauthTokens.access_token,
@@ -663,6 +693,8 @@ async function upsertGrokOAuthAccount(
     email: oauthTokens.email || email,
     ...(oauthTokens.credits_remaining != null ? { credits_remaining: oauthTokens.credits_remaining } : {}),
     ...(oauthTokens.credits_limit != null ? { credits_limit: oauthTokens.credits_limit } : {}),
+    ...(ssoKeep ? { sso: ssoKeep, ssoRw: ssoRwKeep || ssoKeep } : {}),
+    ...(cfKeep ? { cf_clearance: cfKeep } : {}),
   };
 
   const quotaPatch: Record<string, unknown> = {};
