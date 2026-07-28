@@ -395,6 +395,56 @@ describe("chatStreamToResponsesStream", () => {
     expect(events[0]!.data.response.id).toBe(meta.id);
   });
 
+  test("quiet upstream emits response.in_progress activity (not comment-only)", async () => {
+    // Client stream-idle watchdogs need a real protocol event; comments alone
+    // do not reset them (Claude Code "Response stalled mid-stream").
+    const prev = process.env.POOLPROX_SSE_HEARTBEAT_MS;
+    process.env.POOLPROX_SSE_HEARTBEAT_MS = "40";
+    try {
+      const encoder = new TextEncoder();
+      const source = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                id: "c1",
+                object: "chat.completion.chunk",
+                created: 1,
+                model: "gpt-5",
+                choices: [{ index: 0, delta: { content: "hi" }, finish_reason: null }],
+              })}\n\n`,
+            ),
+          );
+          await Bun.sleep(120);
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({
+                id: "c2",
+                object: "chat.completion.chunk",
+                created: 1,
+                model: "gpt-5",
+                choices: [{ index: 0, delta: {}, finish_reason: "stop" }],
+                usage: { prompt_tokens: 1, completion_tokens: 1, total_tokens: 2 },
+              })}\n\n`,
+            ),
+          );
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+      const meta = newResponsesResponseMeta();
+      const stream = chatStreamToResponsesStream(source, "gpt-5", meta.id, meta.createdAt);
+      const events = await decodeResponsesSse(stream);
+      const inProgress = events.filter((e) => e.event === "response.in_progress");
+      // At least the initial one + one quiet-window activity frame.
+      expect(inProgress.length).toBeGreaterThanOrEqual(2);
+      expect(events[events.length - 1]!.event).toBe("response.completed");
+    } finally {
+      if (prev === undefined) delete process.env.POOLPROX_SSE_HEARTBEAT_MS;
+      else process.env.POOLPROX_SSE_HEARTBEAT_MS = prev;
+    }
+  });
+
   test("emits function_call argument deltas + done for tool-call stream", async () => {
     const chunks = [
       { id: "c1", object: "chat.completion.chunk", created: 1, model: "gpt-5", choices: [{ index: 0, delta: { tool_calls: [{ index: 0, id: "call_1", type: "function", function: { name: "get_weather", arguments: '{"q":' } }] }, finish_reason: null }] },

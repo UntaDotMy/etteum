@@ -322,8 +322,10 @@ describe("openAIStreamToAnthropic streaming round-trip", () => {
       .join("");
     expect(text).toBe("Hello");
 
-    const messageDelta = events.find((e) => e.event === "message_delta");
-    expect(messageDelta?.data.delta.stop_reason).toBe("end_turn");
+    // Final terminal message_delta (not any mid-stream activity heartbeat).
+    const messageDeltas = events.filter((e) => e.event === "message_delta");
+    expect(messageDeltas.length).toBeGreaterThan(0);
+    expect(messageDeltas[messageDeltas.length - 1]?.data.delta.stop_reason).toBe("end_turn");
   });
 
   test("emits tool_use block with streamed input_json_delta and tool_use stop_reason", async () => {
@@ -344,8 +346,8 @@ describe("openAIStreamToAnthropic streaming round-trip", () => {
       .join("");
     expect(json).toBe('{"city":"Tokyo"}');
 
-    const messageDelta = events.find((e) => e.event === "message_delta");
-    expect(messageDelta?.data.delta.stop_reason).toBe("tool_use");
+    const messageDeltas = events.filter((e) => e.event === "message_delta");
+    expect(messageDeltas[messageDeltas.length - 1]?.data.delta.stop_reason).toBe("tool_use");
   });
 
   test("surfaces reasoning_content as text (no fake thinking/signature block)", async () => {
@@ -368,5 +370,48 @@ describe("openAIStreamToAnthropic streaming round-trip", () => {
       .filter((e) => e.event === "content_block_delta" && e.data.delta?.type === "text_delta")
       .map((e) => e.data.delta.text);
     expect(textDeltas.join("")).toBe("hmmanswer");
+  });
+
+  test("quiet upstream emits message_delta activity (not just ping) to reset client idle", async () => {
+    // Claude Code drops event:ping before its stream-idle watchdog; only real
+    // events reset it. message_delta with stop_reason:null is the safe activity.
+    const prev = process.env.POOLPROX_SSE_HEARTBEAT_MS;
+    process.env.POOLPROX_SSE_HEARTBEAT_MS = "40";
+    try {
+      const encoder = new TextEncoder();
+      const source = new ReadableStream<Uint8Array>({
+        async start(controller) {
+          controller.enqueue(
+            encoder.encode(
+              `data: ${JSON.stringify({ choices: [{ delta: { content: "hi" }, finish_reason: null }] })}\n\n`,
+            ),
+          );
+          // Hold open past one quiet window so the activity timer fires.
+          await Bun.sleep(120);
+          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+          controller.close();
+        },
+      });
+
+      const out = openAIStreamToAnthropic(source, req);
+      const reader = out.getReader();
+      const decoder = new TextDecoder();
+      let buf = "";
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += decoder.decode(value, { stream: true });
+      }
+
+      expect(buf.includes("event: message_delta")).toBe(true);
+      expect(
+        buf.includes('"stop_reason":null') || buf.includes('"stop_reason": null'),
+      ).toBe(true);
+      // Final terminal stop_reason must still be end_turn (activity uses null only).
+      expect(buf.includes('"stop_reason":"end_turn"') || buf.includes('"stop_reason": "end_turn"')).toBe(true);
+    } finally {
+      if (prev === undefined) delete process.env.POOLPROX_SSE_HEARTBEAT_MS;
+      else process.env.POOLPROX_SSE_HEARTBEAT_MS = prev;
+    }
   });
 });

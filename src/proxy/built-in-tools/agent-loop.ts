@@ -379,10 +379,31 @@ export function runWebSearchLoopStreaming(
           },
         }));
 
-        heartbeat = setInterval(() => {
-          try { controller.enqueue(event("ping", { type: "ping" })); }
-          catch { if (heartbeat) clearInterval(heartbeat); }
-        }, HEARTBEAT_MS);
+        // why: Claude Code drops `event: ping` before its stream-idle watchdog;
+        // message_delta with stop_reason:null is a real event that resets it
+        // without synthesizing end_turn or crediting usage (see anthropic.ts).
+        // Prefer shared POOLPROX_SSE_HEARTBEAT_MS when set so tests/ops can tune.
+        let lastActivityAt = Date.now();
+        const activityMs = (() => {
+          const n = Number(process.env.POOLPROX_SSE_HEARTBEAT_MS);
+          if (Number.isFinite(n) && n >= 0) return n;
+          return HEARTBEAT_MS;
+        })();
+        heartbeat = activityMs > 0
+          ? setInterval(() => {
+              if (Date.now() - lastActivityAt < activityMs) return;
+              try {
+                controller.enqueue(event("message_delta", {
+                  type: "message_delta",
+                  delta: { stop_reason: null },
+                }));
+                controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
+                lastActivityAt = Date.now();
+              } catch {
+                if (heartbeat) clearInterval(heartbeat);
+              }
+            }, Math.max(1, Math.floor(activityMs / 2)))
+          : null;
 
         for (let iter = 0; iter < maxUses + 1; iter++) {
           if (Date.now() - started > OVERALL_TIMEOUT_MS) break;
@@ -409,6 +430,9 @@ export function runWebSearchLoopStreaming(
               if (!payload || payload === "[DONE]") continue;
               let chunk: any;
               try { chunk = JSON.parse(payload); } catch { continue; }
+              // wrapStream empty keepalives are not Anthropic events — skip so
+              // our message_delta activity still fires for Claude Code idle.
+              if (chunk?.id === "chatcmpl-keepalive") continue;
               if (chunk?.error) continue;
               const choice = chunk?.choices?.[0];
               const delta = choice?.delta || {};
@@ -431,6 +455,7 @@ export function runWebSearchLoopStreaming(
                   }));
                   outputTokens += Math.ceil(out.length / 4);
                   modelText += out;
+                  lastActivityAt = Date.now();
                 }
               }
 

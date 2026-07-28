@@ -605,19 +605,34 @@ export function chatStreamToResponsesStream(
         if (heartbeat) { clearInterval(heartbeat); heartbeat = null; }
       };
 
-      // Keep the connection alive during long upstream reasoning turns. SSE
-      // comment frames are ignored by clients but keep the wire warm.
-      heartbeat = setInterval(() => {
-        if (closed) return;
-        try { controller.enqueue(encoder.encode(": keepalive\n\n")); } catch { /* closed */ }
-      }, 15000);
-
       try {
         // response.created wraps the response object under `response`.
         const responseObj = (status: string) => ({
           id: responseId, object: "response", created_at: createdAt,
           model: lastModel, status, output: [] as any[], usage: null as any,
         });
+
+        // Wire comment keeps Bun/proxies warm; response.in_progress is a real
+        // protocol event so client stream-idle watchdogs (Claude Code ~5 min)
+        // reset. Comment-only keepalives do NOT reset those watchdogs.
+        // Read env at timer-start so tests can shorten via POOLPROX_SSE_HEARTBEAT_MS.
+        let lastActivityAt = Date.now();
+        const activityMs = (() => {
+          const n = Number(process.env.POOLPROX_SSE_HEARTBEAT_MS);
+          return Number.isFinite(n) && n >= 0 ? n : 15_000;
+        })();
+        heartbeat = activityMs > 0
+          ? setInterval(() => {
+              if (closed) return;
+              if (Date.now() - lastActivityAt < activityMs) return;
+              try {
+                emit("response.in_progress", { response: responseObj("in_progress") });
+                controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
+                lastActivityAt = Date.now();
+              } catch { /* closed */ }
+            }, Math.max(1, Math.floor(activityMs / 2)))
+          : null;
+
         emit("response.created", { response: responseObj("in_progress") });
         emit("response.in_progress", { response: responseObj("in_progress") });
 
@@ -631,8 +646,15 @@ export function chatStreamToResponsesStream(
             const line = buffer.slice(0, nl).trim();
             buffer = buffer.slice(nl + 1);
             if (!line) continue;
+            // SSE comments (`: keepalive`) from wrapStream — ignore for activity.
+            if (line.startsWith(":")) continue;
             const chunk = parseChatSseLine(line);
             if (!chunk) continue;
+            // wrapStream empty keepalives are OpenAI-only; skip so we still
+            // emit response.in_progress for Responses clients on quiet turns.
+            if ((chunk as any).id === "chatcmpl-keepalive") continue;
+            // Real upstream frame we will process — postpone activity heartbeat.
+            lastActivityAt = Date.now();
             if (chunk.model) lastModel = chunk.model;
             if (chunk.usage) {
               const u = chunk.usage;

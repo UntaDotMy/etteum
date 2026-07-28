@@ -114,13 +114,14 @@ export const config = {
   authProcessTimeoutMs: Number(process.env.POOLPROX_AUTH_PROCESS_TIMEOUT_MS) || 10 * 60 * 1000,
   providerRequestTimeoutMs: Number(process.env.POOLPROX_PROVIDER_REQUEST_TIMEOUT_MS) || 120_000,
   providerQuotaTimeoutMs: Number(process.env.POOLPROX_PROVIDER_QUOTA_TIMEOUT_MS) || 15_000,
-  // Shared SSE keepalive for every /v1 streaming response (OpenAI chat,
-  // Anthropic messages via openAIStreamToAnthropic, Responses API). Bun.serve
-  // idleTimeout is 255s — if no bytes leave the server for that long (long
-  // Claude thinking, tool waits), the *client* connection is force-closed and
-  // the answer looks like it "stopped mid-request with no reason". Comment
-  // frames (`: keepalive`) are ignored by SSE clients but keep the wire warm.
-  // Must stay well below 255s. Set 0 to disable.
+  // Shared SSE keepalive interval for every /v1 streaming response.
+  // Two layers (see sse-keepalive.ts + wrapStream / transforms):
+  //   1. Comment frames keep Bun.serve idleTimeout (255s) + reverse proxies warm
+  //   2. Protocol activity frames (empty OpenAI delta / Anthropic message_delta /
+  //      Responses in_progress) reset client event-idle watchdogs
+  // Claude Code aborts after ~5 min with no non-ping events →
+  // "API Error: Response stalled mid-stream". Comment/ping alone do not reset it.
+  // Must stay well below both 255s (Bun) and 300s (Claude Code default). Set 0 to disable.
   sseHeartbeatMs: Number(process.env.POOLPROX_SSE_HEARTBEAT_MS) || 15_000,
   // ── GitLab Duo tunables ──────────────────────────────────────────────────
   // Defaults are tuned to handle the full task spectrum: short Q&A,
@@ -130,10 +131,10 @@ export const config = {
   // legitimate operation. Each one is sized so that a healthy turn — even
   // a 6-hour one — never trips it.
   //
-  // SSE heartbeat interval — emits a ": keepalive" comment every N ms so the
-  // upstream socket never goes idle long enough for Bun's idleTimeout (255s
-  // hard cap) or any intermediate proxy to cut it. Must stay well below 255s.
-  // 15s is the de-facto industry standard (matches OpenAI, Anthropic SSE).
+  // GitLab Duo SSE heartbeat (comment frames on the Duo provider stream).
+  // Protocol-level activity for Claude Code is handled globally by wrapStream
+  // + Anthropic/Responses transforms; this is the Duo-specific wire timer.
+  // Must stay well below Bun idleTimeout 255s.
   gitlabDuoSseHeartbeatMs: Number(process.env.POOLPROX_GITLAB_DUO_SSE_HEARTBEAT_MS) || 15_000,
   // How long an idle WS session lives after the last activity. This only
   // bites when the WS goes COMPLETELY silent — every upstream frame
