@@ -35,7 +35,16 @@ export function isBadUpstreamRequest(error?: string): boolean {
     // instead of retrying every account and mis-marking them ("All accounts
     // failed"). See codebuddy-china provider + router isNonAccountRequestError.
     normalized.includes("invalid request parameters") ||
-    normalized.includes("invalid_parameter_value")
+    normalized.includes("invalid_parameter_value") ||
+    // Grok image: CLI tool is SuperGrok-only; free path needs web SSO. Either way
+    // every free OAuth-only account fails the same — fail-fast the fleet.
+    normalized.includes("image_generation_not_entitled") ||
+    normalized.includes("no_web_sso_and_cli_not_entitled") ||
+    normalized.includes("no_web_sso:") ||
+    (normalized.includes("supergrok") &&
+      (normalized.includes("image generation") ||
+        normalized.includes("image_generation") ||
+        normalized.includes("video generation")))
   );
 }
 

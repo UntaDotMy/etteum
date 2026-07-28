@@ -76,6 +76,15 @@ export interface GrokChatPayloadOptions {
   reasoning?: boolean;
   /** Conversation history — Grok web API is stateless per-request; we inline prior turns. */
   history?: Array<{ role: string; content: string }>;
+  /**
+   * Free-tier Imagine on grok.com web (SSO cookies). Public reverse-engineers
+   * (gpt4free Grok, grok2api) set enableImageGeneration + enableImageStreaming
+   * true; response carries modelResponse.generatedImageUrls / streamingImageGenerationResponse.
+   * Default false so normal chat does not burn free image quota.
+   */
+  enableImageGeneration?: boolean;
+  /** How many images to request when enableImageGeneration is true (web default 2). */
+  imageGenerationCount?: number;
 }
 
 /**
@@ -86,6 +95,11 @@ export interface GrokChatPayloadOptions {
  */
 export function buildChatPayload(opts: GrokChatPayloadOptions): Record<string, any> {
   const { message, modeId, systemPrompt, history } = opts;
+  const wantImages = opts.enableImageGeneration === true;
+  const imageCount = Math.min(
+    4,
+    Math.max(1, Math.floor(opts.imageGenerationCount ?? (wantImages ? 2 : 2))),
+  );
 
   // If history is provided, prepend it as context inside the message.
   let fullMessage = message;
@@ -105,13 +119,16 @@ export function buildChatPayload(opts: GrokChatPayloadOptions): Record<string, a
   }
 
   return {
+    // temporary: true matches gpt4free / grok2api free web clients (no history persist).
+    temporary:                     true,
     disableSearch:                 false,
-    enableImageGeneration:         false,
-    enableImageStreaming:          false,
-    imageGenerationCount:          2,
+    enableImageGeneration:         wantImages,
+    enableImageStreaming:          wantImages,
+    imageGenerationCount:          imageCount,
     isPreset:                      false,
     isReasoning:                   opts.reasoning ?? false,
     isScreenshotGeneration:        false,
+    // Free web returns asset paths; we download with SSO cookie → data URL.
     returnImageBytes:              false,
     returnRawGrokInXaiRequest:     false,
     sendFinalMetadata:             true,
@@ -121,10 +138,14 @@ export function buildChatPayload(opts: GrokChatPayloadOptions): Record<string, a
     },
     customInstructions:            systemPrompt ?? "",
     conversationId:                "",
-    returnSearchResults:           true,
+    returnSearchResults:           !wantImages,
     contextGroupCount:             0,
     message:                       fullMessage,
     modeId:                        modeId,
+    // Lowercase modeId is what live free clients send (auto/fast/expert/…).
+    // Keep both: modeId field above is our enum; web also accepts modelMode-style.
+    fileAttachments:               [],
+    imageAttachments:              [],
     responseMetadata:              {},
     isAsyncChat:                   false,
     isReasoningEnded:              false,
@@ -151,6 +172,7 @@ export interface FrameEvent {
     | "tool_use"      // a tool-usage card (parsed)
     | "citation"      // a citation reference [[id]](url)
     | "web_search"    // web-search result metadata
+    | "image"         // free web Imagine asset path or URL
     | "done"          // stream finished (isFinal only — never isSoftStop)
     | "error";        // upstream error
   text?: string;
@@ -159,8 +181,19 @@ export interface FrameEvent {
   citationIndex?: number;
   citationUrl?: string;
   citationTitle?: string;
+  /** Relative path (e.g. users/…/generated/….jpg) or absolute assets.grok.com URL. */
+  imageUrl?: string;
   errorMessage?: string;
   errorStatus?: number;
+}
+
+/** Absolute assets.grok.com URL for a free-web generated path. */
+export function resolveGrokAssetUrl(pathOrUrl: string): string {
+  const s = (pathOrUrl || "").trim();
+  if (!s) return "";
+  if (/^https?:\/\//i.test(s)) return s;
+  const path = s.startsWith("/") ? s : `/${s}`;
+  return `https://assets.grok.com${path}`;
 }
 
 // ---------------------------------------------------------------------------
@@ -359,6 +392,35 @@ export class StreamAdapter {
     // --- Web search results ---
     if (response.webSearchResults) {
       this.handleWebSearch(response.webSearchResults);
+    }
+
+    // --- Free web Imagine (enableImageGeneration) ---
+    // Progress frames: streamingImageGenerationResponse.imageUrl (partial preview).
+    // Final: modelResponse.generatedImageUrls[] (paths under assets.grok.com).
+    const streamImg = response.streamingImageGenerationResponse;
+    if (streamImg && typeof streamImg === "object") {
+      const preview = (streamImg as any).imageUrl ?? (streamImg as any).url;
+      if (typeof preview === "string" && preview.trim()) {
+        events.push({ type: "image", imageUrl: preview.trim() });
+      }
+    }
+    const modelResponse = response.modelResponse;
+    if (modelResponse && typeof modelResponse === "object") {
+      const urls = (modelResponse as any).generatedImageUrls;
+      if (Array.isArray(urls)) {
+        for (const u of urls) {
+          if (typeof u === "string" && u.trim()) {
+            events.push({ type: "image", imageUrl: u.trim() });
+          }
+        }
+      }
+      // Some builds nest a single generated image on modelResponse directly.
+      const single =
+        (modelResponse as any).generatedImageUrl ??
+        (modelResponse as any).imageUrl;
+      if (typeof single === "string" && single.trim()) {
+        events.push({ type: "image", imageUrl: single.trim() });
+      }
     }
 
     // --- Cards (cache for later citation rendering) ---

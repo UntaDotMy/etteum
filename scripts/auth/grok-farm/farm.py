@@ -10650,14 +10650,60 @@ async def obtain_oidc_tokens(page, email_addr: str, password: str, attempt: int,
 
 
 # ── Worker ───────────────────────────────────────────────────────────────────
+async def _capture_grok_sso_cookies(page, attempt: int) -> dict[str, str]:
+    """Read grok.com/x.ai SSO cookies after web activation (free Imagine path).
+
+    Free image gen uses POST /rest/app-chat/conversations/new with Cookie sso +
+    sso-rw — OAuth access_token alone is SuperGrok CLI only. Capture here so
+    farm tokens store sso/ssoRw for the proxy.
+    """
+    out: dict[str, str] = {}
+    try:
+        cookies = await page.context.cookies()
+    except Exception as e:
+        print(f"[{attempt}] capture sso cookies failed: {e}", flush=True)
+        return out
+    for c in cookies or []:
+        try:
+            name = str(c.get("name") or "")
+            val = str(c.get("value") or "")
+            dom = str(c.get("domain") or "")
+        except Exception:
+            continue
+        if not name or not val:
+            continue
+        # Only product / auth hosts — avoid unrelated trackers.
+        if "grok.com" not in dom and "x.ai" not in dom:
+            continue
+        if name == "sso":
+            out["sso"] = val
+        elif name in ("sso-rw", "sso_rw"):
+            out["ssoRw"] = val
+        elif name == "cf_clearance":
+            out["cf_clearance"] = val
+    if out.get("sso") and not out.get("ssoRw"):
+        out["ssoRw"] = out["sso"]
+    print(
+        f"[{attempt}] sso cookie capture: "
+        f"sso={'yes' if out.get('sso') else 'no'} "
+        f"ssoRw={'yes' if out.get('ssoRw') else 'no'} "
+        f"cf={'yes' if out.get('cf_clearance') else 'no'}",
+        flush=True,
+    )
+    return out
+
+
 async def activate_grok_com(
     page, email_addr: str, password: str, attempt: int,
-) -> bool:
+) -> dict[str, Any]:
     """Visit grok.com, solve CF, login if needed (port from refer/grok-farm-refer).
 
     Many free CLI 403s happen when OAuth tokens exist but the account never
     opened the web product. First real session on grok.com often attaches
     free Build / chat entitlement. Not guaranteed — still server-side gated.
+
+    Returns dict: {ok: bool, sso?, ssoRw?, cf_clearance?, reason?}.
+    Caller merges sso/ssoRw into OIDC tokens so free web Imagine works.
 
     Waits are DOM/page-state driven (classify_* + settle_page / wait_for_url).
     Hard-fails with explicit reason + screenshot — never open-ended hang.
@@ -11044,8 +11090,17 @@ async def activate_grok_com(
     )
     if not ok:
         print(f"[{attempt}] activate hard-fail: {reason}", flush=True)
-        return False
-    return True
+        return {"ok": False, "reason": reason}
+    cookies = await _capture_grok_sso_cookies(page, attempt)
+    result: dict[str, Any] = {"ok": True, "reason": reason, **cookies}
+    if not result.get("sso"):
+        # Activation UI ok but no sso — free web Imagine will not work; still
+        # mark activated for CLI chat entitlement (historical behavior).
+        print(
+            f"[{attempt}] activate ok but no sso cookie — free web Imagine unavailable",
+            flush=True,
+        )
+    return result
 
 
 async def _do_register_body(attempt_num: int, email_addr: str, password: str, proxy_url: str, proxy_id: str, mail_page=None) -> dict:
@@ -11125,13 +11180,24 @@ async def _do_register_body(attempt_num: int, email_addr: str, password: str, pr
         activated = False
         if ACTIVATE_WEB:
             try:
-                activated = await activate_grok_com(
+                act = await activate_grok_com(
                     page, email_addr, password, attempt_num,
                 )
             except Exception as _ae:
                 print(f"[{attempt_num}] activate_grok_com error: {_ae}", flush=True)
-                activated = False
-            tokens["web_activated"] = bool(activated)
+                act = {"ok": False, "reason": str(_ae)}
+            activated = bool(act.get("ok")) if isinstance(act, dict) else bool(act)
+            tokens["web_activated"] = activated
+            # Free web Imagine (app-chat enableImageGeneration) needs sso cookies.
+            if isinstance(act, dict):
+                if act.get("sso"):
+                    tokens["sso"] = act["sso"]
+                if act.get("ssoRw"):
+                    tokens["ssoRw"] = act["ssoRw"]
+                elif act.get("sso"):
+                    tokens["ssoRw"] = act["sso"]
+                if act.get("cf_clearance"):
+                    tokens["cf_clearance"] = act["cf_clearance"]
             if not activated:
                 # EXIT this browser stack entirely — outer loop spawns NEW worker
                 # browsers + NEW email (never soft-retry activate on same session).
@@ -12013,12 +12079,23 @@ async def _refresh_one_account(
                 )
                 if ACTIVATE_WEB:
                     try:
-                        toks["web_activated"] = await activate_grok_com(
+                        act = await activate_grok_com(
                             page, email, password, idx,
                         )
                     except Exception as _ae:
                         print(f"[{idx}] refresh activate warn: {_ae}", flush=True)
-                        toks["web_activated"] = False
+                        act = {"ok": False, "reason": str(_ae)}
+                    activated = bool(act.get("ok")) if isinstance(act, dict) else bool(act)
+                    toks["web_activated"] = activated
+                    if isinstance(act, dict):
+                        if act.get("sso"):
+                            toks["sso"] = act["sso"]
+                        if act.get("ssoRw"):
+                            toks["ssoRw"] = act["ssoRw"]
+                        elif act.get("sso"):
+                            toks["ssoRw"] = act["sso"]
+                        if act.get("cf_clearance"):
+                            toks["cf_clearance"] = act["cf_clearance"]
                     if not toks.get("web_activated"):
                         raise RuntimeError(
                             "activate_grok_com failed on refresh (CF/login/UI)"

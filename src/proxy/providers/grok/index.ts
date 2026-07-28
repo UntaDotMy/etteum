@@ -81,6 +81,7 @@ import {
   GROK_IMAGE_MODEL,
   grokGenerateImage,
   isGrokImageModel,
+  isGrokImageEntitlementError,
 } from "./image";
 import {
   buildCliProxyHeaders,
@@ -183,6 +184,16 @@ export function classifyGrokUpstreamError(err: unknown): ProviderResult {
     )
   ) {
     return { success: false, error: `invalid_model: ${msg}` };
+  }
+  // Free/X Basic OAuth cannot use image_generation (CLI: SuperGrok-only).
+  // Prefix so isNonAccountRequestError fail-fasts instead of "All accounts failed".
+  if (isGrokImageEntitlementError(msg)) {
+    return {
+      success: false,
+      error: msg.toLowerCase().includes("image_generation_not_entitled")
+        ? msg
+        : `image_generation_not_entitled: ${msg}`,
+    };
   }
   // Credit declined / free usage exhausted — mark account exhausted (router
   // → pool.markExhausted). Must run before the bare "429" rate-limit match.

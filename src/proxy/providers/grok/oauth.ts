@@ -187,6 +187,15 @@ export interface GrokOAuthTokens {
   /** Free Build absolute token credits (from x-ratelimit-*-tokens headers). */
   credits_remaining?: number;
   credits_limit?: number;
+  /**
+   * grok.com web SSO cookie (free Imagine / app-chat). Captured at farm
+   * activate_grok_com; preserved across OAuth refresh merges.
+   */
+  sso?: string;
+  /** Companion sso-rw cookie (defaults to sso when absent). */
+  ssoRw?: string;
+  /** Optional Cloudflare clearance from the same browser session. */
+  cf_clearance?: string;
 }
 
 /**
@@ -234,6 +243,19 @@ export function normalizeGrokOAuthTokens(raw: unknown): GrokOAuthTokens | null {
 
   const creditsRem = Number(t.credits_remaining);
   const creditsLim = Number(t.credits_limit);
+  const sso =
+    (typeof t.sso === "string" && t.sso.trim()) ||
+    (typeof t.sso_cookie === "string" && t.sso_cookie.trim()) ||
+    "";
+  const ssoRw =
+    (typeof t.ssoRw === "string" && t.ssoRw.trim()) ||
+    (typeof t["sso-rw"] === "string" && String(t["sso-rw"]).trim()) ||
+    (typeof t.sso_rw === "string" && t.sso_rw.trim()) ||
+    sso;
+  const cf =
+    (typeof t.cf_clearance === "string" && t.cf_clearance.trim()) ||
+    (typeof t.cfClearance === "string" && t.cfClearance.trim()) ||
+    "";
 
   return {
     auth_method: "oauth",
@@ -245,6 +267,8 @@ export function normalizeGrokOAuthTokens(raw: unknown): GrokOAuthTokens | null {
     email: typeof t.email === "string" ? t.email : undefined,
     credits_remaining: Number.isFinite(creditsRem) ? creditsRem : undefined,
     credits_limit: Number.isFinite(creditsLim) ? creditsLim : undefined,
+    ...(sso ? { sso, ssoRw: ssoRw || sso } : {}),
+    ...(cf ? { cf_clearance: cf } : {}),
   };
 }
 
