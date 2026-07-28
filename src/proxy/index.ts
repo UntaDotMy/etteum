@@ -713,6 +713,9 @@ function wrapStreamWithUsageFinalizer(
 
       // Detect upstream errors in SSE stream and capture the real message.
       // Cosy often returns HTTP 200 with statusCodeValue 4xx in the first frame.
+      // Our own empty activity keepalives — never treat as stream error/content.
+      if (parsed?.id === "chatcmpl-keepalive") continue;
+
       const markErr = (msg: string) => {
         streamError = true;
         if (msg && !streamErrorDetail) streamErrorDetail = msg.slice(0, 500);
@@ -993,13 +996,33 @@ return new ReadableStream<Uint8Array>({
     async start(controller) {
       const streamReader = stream.getReader();
       reader = streamReader;
-      // Keep Bun.serve idleTimeout + intermediate proxies from killing long
-      // thinking/tool turns (Claude via CodeBuddy/Qoder/etc.). Anthropic
-      // openAIStreamToAnthropic already pings; OpenAI /v1 used to have none —
-      // that path is what wrapStream owns for every provider. why: mid-request silent stop.
+      // Two-layer keepalive for every provider stream (Grok/Qoder/CodeBuddy/…):
+      //   1. `: keepalive` comment — Bun.serve idleTimeout + reverse proxies
+      //   2. empty chat.completion.chunk delta — client event-idle watchdogs
+      // Claude Code aborts after ~5 min with no non-ping events ("Response
+      // stalled mid-stream"). Comment/ping frames do not reset that timer.
+      // Anthropic / Responses transforms add their own protocol activity on
+      // top; this covers the raw OpenAI /v1 chat path globally.
+      const activityEncoder = new TextEncoder();
       const keepalive = startSseKeepalive(
         (bytes) => controller.enqueue(bytes),
         config.sseHeartbeatMs,
+        {
+          activity: () => {
+            // Empty delta is a real chat.completion.chunk event — resets client
+            // event-idle watchdogs without advancing content or finish_reason.
+            const chunk = {
+              id: "chatcmpl-keepalive",
+              object: "chat.completion.chunk",
+              created: Math.floor(Date.now() / 1000),
+              model: context.model || "",
+              choices: [{ index: 0, delta: {}, finish_reason: null }],
+            };
+            controller.enqueue(
+              activityEncoder.encode(`data: ${JSON.stringify(chunk)}\n\n`),
+            );
+          },
+        },
       );
       try {
         while (true) {

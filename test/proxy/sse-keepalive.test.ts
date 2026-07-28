@@ -1,6 +1,11 @@
 /**
- * SSE keepalive: quiet streams must keep emitting comment frames so
- * Bun.serve idleTimeout / reverse proxies don't cut /v1 mid-request.
+ * SSE keepalive: quiet streams must keep emitting wire comments AND optional
+ * protocol activity so Bun.serve idleTimeout / reverse proxies / client
+ * event-idle watchdogs don't cut /v1 mid-request.
+ *
+ * Claude Code aborts after ~5 min with no non-ping stream events
+ * ("API Error: Response stalled mid-stream"). Comment/ping alone do not reset
+ * that timer — activity() must supply a real protocol event.
  */
 import { describe, expect, test } from "bun:test";
 import { startSseKeepalive } from "../../src/proxy/sse-keepalive";
@@ -46,5 +51,43 @@ describe("startSseKeepalive", () => {
     const n = writes.length;
     await Bun.sleep(100);
     expect(writes.length).toBe(n);
+  });
+
+  test("activity() fires on quiet interval (protocol event for client idle reset)", async () => {
+    const writes: string[] = [];
+    let activityCount = 0;
+    const h = startSseKeepalive(
+      (b) => writes.push(new TextDecoder().decode(b)),
+      40,
+      {
+        activity: () => {
+          activityCount += 1;
+          writes.push("ACTIVITY\n\n");
+        },
+      },
+    );
+    await Bun.sleep(120);
+    h.stop();
+    expect(activityCount).toBeGreaterThan(0);
+    expect(writes.some((w) => w === "ACTIVITY\n\n")).toBe(true);
+    expect(writes.some((w) => w.startsWith(": keepalive"))).toBe(true);
+  });
+
+  test("activity() is postponed by touch() while stream is chatty", async () => {
+    const writes: string[] = [];
+    let activityCount = 0;
+    const h = startSseKeepalive(
+      (b) => writes.push(new TextDecoder().decode(b)),
+      80,
+      { activity: () => { activityCount += 1; } },
+    );
+    const end = Date.now() + 120;
+    while (Date.now() < end) {
+      h.touch();
+      await Bun.sleep(15);
+    }
+    h.stop();
+    expect(activityCount).toBe(0);
+    expect(writes).toEqual([]);
   });
 });

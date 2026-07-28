@@ -769,14 +769,35 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
 
       try {
         startMessage();
-        heartbeat = setInterval(() => {
-          try {
-            controller.enqueue(event("ping", { type: "ping" }));
-          } catch {
-            if (heartbeat) clearInterval(heartbeat);
-            heartbeat = null;
-          }
-        }, 10_000);
+        // Claude Code aborts after ~5 min with no non-ping stream events
+        // ("API Error: Response stalled mid-stream"). Its SSE parser drops
+        // `event: ping` before the consumer loop, so ping alone never resets
+        // the idle timer. Emit a message_delta with stop_reason:null — that
+        // is a real event (resets the watchdog) and does not credit usage or
+        // synthesize end_turn (Yr becomes null; credit path requires !== null).
+        // Also keep a wire comment via the same timer for Bun idleTimeout.
+        // Read env at timer-start (not module load) so tests can shorten it.
+        let lastActivityAt = Date.now();
+        const activityMs = (() => {
+          const n = Number(process.env.POOLPROX_SSE_HEARTBEAT_MS);
+          return Number.isFinite(n) && n >= 0 ? n : 15_000;
+        })();
+        heartbeat = activityMs > 0
+          ? setInterval(() => {
+              if (Date.now() - lastActivityAt < activityMs) return;
+              try {
+                controller.enqueue(event("message_delta", {
+                  type: "message_delta",
+                  delta: { stop_reason: null },
+                }));
+                controller.enqueue(encoder.encode(`: keepalive ${Date.now()}\n\n`));
+                lastActivityAt = Date.now();
+              } catch {
+                if (heartbeat) clearInterval(heartbeat);
+                heartbeat = null;
+              }
+            }, Math.max(1, Math.floor(activityMs / 2)))
+          : null;
 
         while (true) {
           const { done, value } = await reader.read();
@@ -791,6 +812,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
             if (payload === "[DONE]") continue;
             try {
               const chunk = JSON.parse(payload);
+              // wrapStream injects empty chatcmpl-keepalive deltas for raw
+              // OpenAI clients. They are not Anthropic events — if we treated
+              // them as activity here we'd suppress our message_delta
+              // heartbeat without ever resetting Claude Code's watchdog.
+              if (chunk?.id === "chatcmpl-keepalive") continue;
               if (chunk?.error) {
                 const message = typeof chunk.error === "string"
                   ? chunk.error
@@ -848,6 +874,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   index: blockIndex,
                   delta: { type: "thinking_delta", thinking: reasoning },
                 }));
+                lastActivityAt = Date.now();
               }
               // When thinking is NOT enabled, surface reasoning_content as
               // regular text so the model's chain-of-thought is not silently
@@ -861,6 +888,7 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   delta: { type: "text_delta", text: reasoning },
                 }));
                 index += reasoning.length;
+                lastActivityAt = Date.now();
               }
 
               if (text) {
@@ -871,9 +899,11 @@ export function openAIStreamToAnthropic(stream: ReadableStream<Uint8Array>, requ
                   delta: { type: "text_delta", text },
                 }));
                 index += text.length;
+                lastActivityAt = Date.now();
               }
               for (const call of delta.tool_calls || []) {
                 stopReason = "tool_use";
+                lastActivityAt = Date.now();
                 const callIndex = Number(call.index || 0);
                 if (!toolBlocks.has(callIndex)) {
                   if (textBlockOpen) {
