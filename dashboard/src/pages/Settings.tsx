@@ -849,7 +849,7 @@ export default function Settings() {
                   {(
                     [
                       { name: "Conservative", chars: "8000", turns: "6", smart: "true", hint: "Max context for long CLI sessions. Lowest “dumb agent” risk." },
-                      { name: "Balanced", chars: "1500", turns: "4", smart: "true", hint: "Recommended default for Claude Code / Codex. Matches backend." },
+                      { name: "Balanced", chars: "4000", turns: "4", smart: "true", hint: "Recommended default for Claude Code / Codex. Matches backend." },
                       { name: "Aggressive", chars: "500", turns: "2", smart: "true", hint: "Max savings. Older tool output is heavily truncated — model may re-read files." },
                     ] as const
                   ).map((preset) => {
@@ -895,7 +895,7 @@ export default function Settings() {
                         className="mt-1"
                       />
                       <p className="text-[10px] text-[var(--muted-foreground)] mt-1 leading-relaxed">
-                        ~4 chars = 1 token. Default: <code>1500</code> (≈375 tokens) for older turns only.
+                        ~4 chars = 1 token. Default: <code>4000</code> (≈1000 tokens) for older turns only.
                       </p>
                     </div>
                     <div>

@@ -151,7 +151,7 @@ export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
     // turns full and a larger per-block cap for older turns.
     enabled: true,
     // Cap for OLD tool results only (last N turns stay intact).
-    // 1500 chars keeps meaningful Read/Grep snippets without replaying 30K
+    // 4000 chars keeps meaningful Read/Grep snippets without replaying 30K
     // dumps every turn.
     maxToolChars: 4000,
     // Protect the last 4 turns fully so the active tool loop stays sharp.

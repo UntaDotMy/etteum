@@ -29,6 +29,7 @@ import {
 import {
   encryptWithPassphrase,
   decryptWithPassphrase,
+  isGcm,
   reencryptSecret,
 } from "../../src/utils/crypto";
 import { client as liveSqlite } from "../../src/db/index";
@@ -42,6 +43,11 @@ const markerEmail = `merge-test-${Date.now()}@example.com`;
 const markerProvider = "grok";
 let packDir = "";
 const createdIds: number[] = [];
+
+function readEncryptedTokens(stored: string): Record<string, unknown> {
+  expect(isGcm(stored)).toBe(true);
+  return JSON.parse(decryptWithPassphrase(stored, LIVE_KEY)) as Record<string, unknown>;
+}
 
 function ensureAccountsTable(db: Database) {
   db.exec(`
@@ -257,11 +263,13 @@ describe("mergeAccountsFromPack", () => {
           provider: markerProvider,
           email: emailB,
           password: packPwB,
-          tokens: JSON.stringify({
-            refresh_token: "rt-b",
-            auth_method: "oauth",
-            sub: "sub-b",
-          }),
+          // Current-format backup: the raw token column is encrypted with the
+          // pack key and must be opened before dedup, then re-keyed for live.
+          tokens: encryptWithPassphrase(JSON.stringify({
+              refresh_token: "rt-b",
+              auth_method: "oauth",
+              sub: "sub-b",
+            }), PACK_KEY),
         },
         // duplicate row in pack — should be skipped after first
         {
@@ -305,8 +313,8 @@ describe("mergeAccountsFromPack", () => {
 
     const a = rows.find((r) => r.email === emailA)!;
     const b = rows.find((r) => r.email === emailB)!;
-    expect(JSON.parse(a.tokens).refresh_token).toBe("new-rt-from-pack");
-    expect(JSON.parse(b.tokens).refresh_token).toBe("rt-b");
+    expect(readEncryptedTokens(a.tokens).refresh_token).toBe("new-rt-from-pack");
+    expect(readEncryptedTokens(b.tokens).refresh_token).toBe("rt-b");
     // password re-keyed to live ENCRYPTION_KEY
     expect(decryptWithPassphrase(a.password, LIVE_KEY)).toBe("pack-pw-a");
     expect(decryptWithPassphrase(b.password, LIVE_KEY)).toBe("pack-pw-b");
@@ -375,7 +383,7 @@ describe("mergeAccountsFromPack", () => {
       const row = liveSqlite
         .query(`SELECT tokens FROM accounts WHERE id = ?`)
         .get(seed.id) as { tokens: string };
-      const tok = JSON.parse(row.tokens);
+      const tok = readEncryptedTokens(row.tokens);
       // Must NOT install the pack's already-rotated refresh token.
       expect(tok.refresh_token).toBe("live-rotated-rt");
       expect(tok.expires_at).toBe(2_100_000_000);
@@ -451,7 +459,7 @@ describe("mergeAccountsFromPack", () => {
         .get(seed.id) as { email: string; tokens: string };
       // Keep live email; take fresher pack tokens (higher expires_at).
       expect(row.email).toBe(liveEmail);
-      expect(JSON.parse(row.tokens).refresh_token).toBe("same-rt-rotated");
+      expect(readEncryptedTokens(row.tokens).refresh_token).toBe("same-rt-rotated");
     } finally {
       try {
         rmSync(packDir2, { recursive: true, force: true });

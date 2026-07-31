@@ -1,6 +1,7 @@
 import { migrate } from "drizzle-orm/bun-sqlite/migrator";
 import { db, client } from "./index";
 import { existsSync } from "node:fs";
+import { migrateSensitiveColumnEncryption } from "./sensitive-migration";
 import { sql } from "drizzle-orm";
 
 /**
@@ -175,6 +176,15 @@ export async function runMigrations() {
     if (n > 0) console.log(`[DB] Re-encrypted ${n} VCC card(s) at rest.`);
   } catch (err) {
     console.error("[DB] VCC encryption migration skipped:", err);
+  }
+
+  // 2026-07-31 — protect OAuth/session JSON, dynamic-node credentials, and
+  // KV payloads with the same AES-GCM envelope used for account passwords.
+  // This intentionally fails startup when plaintext exists but ENCRYPTION_KEY
+  // is unavailable: silently serving with exposed credentials is unsafe.
+  const protectedRows = migrateSensitiveColumnEncryption(client);
+  if (protectedRows > 0) {
+    console.log(`[DB] Encrypted ${protectedRows} sensitive JSON/value row(s) at rest.`);
   }
 }
 

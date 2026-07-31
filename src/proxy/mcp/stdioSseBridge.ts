@@ -12,6 +12,7 @@
  */
 import { spawn } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import path from "node:path";
 
 export interface StdioPlugin {
   name: string;
@@ -23,15 +24,37 @@ export interface StdioPlugin {
 // Preset, code-defined plugins only. Users cannot add arbitrary commands.
 // (These are safe, well-known MCP servers; extend this list in code, never via
 // untrusted input.)
-// NOTE: package versions are unpinned (npx -y fetches latest). Pinning would
-// guard against drift but risks breakage when the maintainers deprecate a
-// version; instead, getOrSpawn enforces a spawn-readiness timeout so a slow
-// first-run npm fetch can't hang the bridge forever.
-export const LOCAL_STDIO_PLUGINS: StdioPlugin[] = [
-  { name: "filesystem", command: "npx", args: ["-y", "@modelcontextprotocol/server-filesystem", "."], description: "Local filesystem access" },
-  { name: "fetch", command: "npx", args: ["-y", "@modelcontextprotocol/server-fetch"], description: "HTTP fetch tool" },
-  { name: "sqlite", command: "npx", args: ["-y", "@modelcontextprotocol/server-sqlite"], description: "SQLite explorer" },
-];
+// Every npm package is pinned to an exact reviewed version. Never use a bare
+// package name here: `npx -y` would otherwise execute whatever is latest at
+// request time. Add a preset only after verifying the package exists.
+export function buildLocalStdioPlugins(env: NodeJS.ProcessEnv = process.env): StdioPlugin[] {
+  const filesystemRoot = env.MCP_FILESYSTEM_ROOT?.trim();
+  if (!filesystemRoot) return [];
+  if (!path.isAbsolute(filesystemRoot)) {
+    throw new Error("MCP_FILESYSTEM_ROOT must be an absolute path");
+  }
+  const resolvedRoot = path.resolve(filesystemRoot);
+  const cwdFromRoot = path.relative(resolvedRoot, process.cwd());
+  if (!cwdFromRoot || (!cwdFromRoot.startsWith(`..${path.sep}`) && cwdFromRoot !== ".." && !path.isAbsolute(cwdFromRoot))) {
+    throw new Error("MCP_FILESYSTEM_ROOT must not contain the process working directory");
+  }
+  return [
+    {
+      name: "filesystem",
+      command: "npx",
+      args: [
+        "-y",
+        "@modelcontextprotocol/server-filesystem@2026.7.10",
+        resolvedRoot,
+      ],
+      description: "Local filesystem access",
+    },
+  ];
+}
+
+// Filesystem access is opt-in. Never default to `.`: the process working
+// directory often contains source, configuration, logs, and deployment data.
+export const LOCAL_STDIO_PLUGINS: StdioPlugin[] = buildLocalStdioPlugins();
 
 /** Max ms to wait for a freshly-spawned plugin to emit its first stdout line
  *  (npx -y fetches the package on first run; this bounds that wait). */

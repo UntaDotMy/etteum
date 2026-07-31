@@ -1,4 +1,5 @@
 import { sqliteTable, text, real, integer, uniqueIndex, index } from "drizzle-orm/sqlite-core";
+import { encryptedJson, encryptedText } from "./encrypted-columns";
 
 export const accounts = sqliteTable("accounts", {
   id: integer("id").primaryKey({ autoIncrement: true }),
@@ -7,7 +8,7 @@ export const accounts = sqliteTable("accounts", {
   password: text("password").notNull(), // encrypted
   status: text("status").notNull().default("pending"), // active | exhausted | error | pending
   enabled: integer("enabled", { mode: "boolean" }).notNull().default(true), // user toggle: false = skip in upstream pool
-  tokens: text("tokens", { mode: "json" }), // { access_token, refresh_token, ... }
+  tokens: encryptedJson("tokens"), // AES-GCM encrypted { access_token, refresh_token, ... }
   quotaLimit: real("quota_limit").default(0),
   quotaRemaining: real("quota_remaining").default(0),
   quotaResetAt: integer("quota_reset_at", { mode: "timestamp" }),
@@ -311,7 +312,7 @@ export const apiKeys = sqliteTable("api_keys", {
 export const kv = sqliteTable("kv", {
   scope: text("scope").notNull(), // e.g. "customModels" | "disabledModels" | "pricing" | "mitmAlias"
   key: text("key").notNull(), // e.g. model id or provider:model
-  value: text("value").notNull(), // JSON-encoded payload
+  value: encryptedText("value").notNull(), // AES-GCM encrypted payload
   updatedAt: integer("updated_at", { mode: "timestamp" }).$defaultFn(() => new Date()),
 }, (table) => [
   // composite primary key via unique index — Drizzle sqlite composite PK helper
@@ -334,7 +335,7 @@ export const providerNodes = sqliteTable("provider_nodes", {
   id: text("id").primaryKey(), // user-supplied node id (also the routing key)
   type: text("type").notNull(), // "openai-compatible" | "anthropic-compatible" | "custom-embedding"
   name: text("name").notNull(),
-  data: text("data", { mode: "json" }).notNull(), // { prefix, baseUrl, apiType, models[], headers? }
+  data: encryptedJson("data").notNull(), // AES-GCM encrypted node config (including headers/apiKey)
   createdAt: integer("created_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
   updatedAt: integer("updated_at", { mode: "timestamp" }).notNull().$defaultFn(() => new Date()),
 });

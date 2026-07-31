@@ -356,6 +356,24 @@ export function isAdminApiScope(scope: string | null | undefined): boolean {
   return scope !== "managed";
 }
 
+const MANAGED_KEY_HTTP_ROUTES = new Set([
+  "GET /v1/models",
+  "POST /v1/chat/completions",
+  "POST /v1/messages",
+  "POST /v1/messages/count_tokens",
+  "POST /v1/responses",
+  "POST /backend-api/codex/responses",
+]);
+
+/**
+ * Managed keys are completion credentials, not general-purpose client keys.
+ * An allowlist makes new auxiliary /v1 routes fail closed by default.
+ */
+export function isManagedKeyHttpRouteAllowed(method: string, pathname: string): boolean {
+  const normalizedPath = pathname.length > 1 ? pathname.replace(/\/+$/, "") : pathname;
+  return MANAGED_KEY_HTTP_ROUTES.has(`${method.toUpperCase()} ${normalizedPath}`);
+}
+
 /**
  * Guard for spawn-capable / secret-reading management routes (update.ts,
  * management.ts, dashboardAuth reset-password, oauth.ts).

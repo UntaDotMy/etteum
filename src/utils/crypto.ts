@@ -1,4 +1,3 @@
-import { config } from "../config";
 import { createCipheriv, createDecipheriv, randomBytes, createHash } from "node:crypto";
 
 /**
@@ -36,10 +35,12 @@ function keyFromPassphrase(passphrase: string): Buffer {
 
 /** Derive a 32-byte AES-256 key from the configured passphrase via SHA-256. */
 function getKey(): Buffer {
-  // Read live from process.env first (test-resilient + supports key rotation
-  // without restart), then fall back to the config-captured value.
+  // Read live from process.env so key rotation and isolated tests take effect
+  // immediately. Keeping this module independent of config.ts also lets
+  // drizzle-kit import schema custom types under its CommonJS loader, where
+  // Bun's import.meta.dir extension is unavailable.
   return keyFromPassphrase(
-    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+    requirePassphrase(process.env.ENCRYPTION_KEY),
   );
 }
 
@@ -50,7 +51,7 @@ function getKey(): Buffer {
 export function encrypt(plaintext: string): string {
   return encryptWithPassphrase(
     plaintext,
-    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+    requirePassphrase(process.env.ENCRYPTION_KEY),
   );
 }
 
@@ -79,7 +80,7 @@ export function encryptWithPassphrase(plaintext: string, passphrase: string): st
 export function decrypt(ciphertext: string): string {
   return decryptWithPassphrase(
     ciphertext,
-    requirePassphrase(process.env.ENCRYPTION_KEY || config.encryptionKey),
+    requirePassphrase(process.env.ENCRYPTION_KEY),
   );
 }
 

@@ -11,14 +11,14 @@ import { mcpRouter } from "./proxy/mcp/router";
 import { searchRouter } from "./proxy/search/router";
 import { websocketHandler, getClientCount } from "./ws/index";
 import { authorizeDashboardWebSocket } from "./ws/dashboard-auth";
-import { extractApiKey } from "./utils/security";
+import { extractApiKey, isManagedKeyHttpRouteAllowed } from "./utils/security";
 import {
   effectiveClientIp,
   effectiveClientIpFromParts,
   isIpBanned,
   triggerFriendKeyTripwire,
 } from "./utils/ip-ban";
-import { resolveApiKey, extractMachineId, isValidApiKey } from "./api/keys";
+import { resolveApiKey, extractMachineId } from "./api/keys";
 import { getCookie } from "hono/cookie";
 import { verifyDashboardAuthToken, SESSION_COOKIE } from "./auth/dashboardSecurity";
 import { autoWarmupScheduler } from "./auth/warmup-scheduler";
@@ -283,6 +283,18 @@ app.use("/v1/*", async (c, next) => {
   // Pool/install key: no apiKeyId → full model catalog, no friend limits.
   // Managed key: apiKeyId set → allowlist / quota / rate apply.
   if (resolved.valid && resolved.scope === "managed") {
+    if (!isManagedKeyHttpRouteAllowed(c.req.method, path)) {
+      return c.json(
+        {
+          error: {
+            message: "Managed API keys are limited to completion and model endpoints.",
+            type: "permission_error",
+            code: "managed_key_scope_denied",
+          },
+        },
+        403,
+      );
+    }
     (c.req.raw as any).apiKeyId = resolved.apiKeyId;
     void db
       .update(apiKeys)
@@ -321,6 +333,19 @@ app.use("/backend-api/*", async (c, next) => {
     );
   }
   if (resolved.valid && resolved.scope === "managed") {
+    const path = new URL(c.req.url).pathname;
+    if (!isManagedKeyHttpRouteAllowed(c.req.method, path)) {
+      return c.json(
+        {
+          error: {
+            message: "Managed API keys are limited to completion and model endpoints.",
+            type: "permission_error",
+            code: "managed_key_scope_denied",
+          },
+        },
+        403,
+      );
+    }
     (c.req.raw as any).apiKeyId = resolved.apiKeyId;
     void db
       .update(apiKeys)
@@ -350,6 +375,7 @@ const AUTHLESS_API_PATHS = new Set([
   "/api/dashboard-auth/oidc/callback",
   "/api/dashboard-auth/oidc/test",
 ]);
+
 app.use("/api/*", async (c, next) => {
   // Allow health check, info, key validation, and SSE frame streams without header auth
   // (EventSource cannot send custom headers, so SSE uses ?token= query param)
@@ -505,8 +531,16 @@ const server = Bun.serve({
         return new Response("Banned", { status: 403 });
       }
       const token = extractApiKey(req.headers, null, { allowQuery: false });
-      if (!token || !(await isValidApiKey(token))) {
+      const resolved = token
+        ? await resolveApiKey(token, { machineId: extractMachineId(req.headers, null) })
+        : { valid: false as const };
+      if (!resolved.valid) {
         return new Response("Unauthorized", { status: 401 });
+      }
+      // The WS passthrough path does not own friend-key quota accounting, so
+      // managed keys use the fully-accounted HTTP Responses endpoint instead.
+      if (resolved.scope === "managed") {
+        return new Response("Managed API keys cannot use WebSocket transport", { status: 403 });
       }
       // Bun auto-negotiates Sec-WebSocket-Protocol; we just tag the socket.
       const upgraded = server.upgrade(req, {

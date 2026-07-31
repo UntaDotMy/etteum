@@ -134,7 +134,7 @@ export const QUOTA_CACHE_TTL_MS = 60_000; // 1 minute
  * Account storage:
  * - provider: "alibaba"
  * - email: label (user-defined, e.g. "alibaba-key1")
- * - password: encrypted API key (XOR + base64)
+ * - password: AES-256-GCM encrypted API key
  * - tokens: null (not needed — static API key)
  *
  * Model routing via `ali-` prefix.

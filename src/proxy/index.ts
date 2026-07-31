@@ -49,7 +49,7 @@ import {
   modelAllowed,
   recordKeyTokens,
 } from "./friend-keys";
-import { shareKeyPublic, isShareLocked } from "./share-key-public";
+import { shareKeyPresented, shareKeyPublic, isShareLocked } from "./share-key-public";
 import { getActiveClientRequests, trackClientRequestStart } from "./live-clients";
 import {
   averageSpeedMetrics,
@@ -1440,11 +1440,9 @@ function shareRateLimited(c: any): Response | null {
 /**
  * GET /v1/share/board — friend status board for ALL managed keys.
  *
- * Powers the bare share page (open :SHARE_PORT). Returns status + full key
- * for copy — the page renders it blurred (CSS) with a copy button. Operator
- * accepted this exposure: friend keys are REQUEST-scoped only, and presenting
- * one on any admin surface trips the wire (key revoked + caller IP banned).
- * Rate-limited per IP.
+ * Powers the bare share page (open :SHARE_PORT). It returns status and a
+ * non-secret preview only. Full credentials are never enumerable from this
+ * authless endpoint. Rate-limited per IP.
  */
 proxyRouter.get("/v1/share/board", async (c) => {
   // Lock mode is link-only access, so enumerating every key defeats it. The flag
@@ -1480,11 +1478,7 @@ proxyRouter.get("/v1/share/board", async (c) => {
   }
   const boardSpeed = averageSpeedMetrics(allSamples);
   const keys = rows.map((row) =>
-    // Full key on the board (blurred in the page; copy for friends). Scope
-    // enforcement + the admin-surface tripwire are the mitigation, not secrecy.
-    shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || []), {
-      includeFullKey: true,
-    }),
+    shareKeyPublic(row, activeIds, averageSpeedMetrics(byKey.get(row.id) || [])),
   );
   return c.json({
     keys,
@@ -1530,9 +1524,7 @@ proxyRouter.get("/v1/share", async (c) => {
     }));
   return c.json({
     // Deep link: the caller presented the secret — returning it is safe.
-    ...shareKeyPublic(row, activeModels.map((m) => m.id), averageSpeedMetrics(keySamples), {
-      includeFullKey: true,
-    }),
+    ...shareKeyPresented(row, activeModels.map((m) => m.id), averageSpeedMetrics(keySamples)),
     activeClients: getActiveClientRequests(),
   });
 });
