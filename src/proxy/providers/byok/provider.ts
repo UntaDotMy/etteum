@@ -26,7 +26,7 @@ import type { Utf8StreamReader } from "../../../utils/stream-reader";
  * Storage:
  * - provider: "byok"
  * - email: label/nama provider (e.g., "openrouter", "myrouter")
- * - password: encrypted API key (XOR + base64)
+ * - password: AES-256-GCM encrypted API key
  * - tokens: JSON { base_url, format, models[], model_prefix, headers }
  *
  * Model routing via prefix:
@@ -191,7 +191,7 @@ export class ByokProvider extends BaseProvider {
 
   /**
    * Resolve the API key for an account.
-   * The real key lives in `password` (XOR-encrypted); tokens.api_key is optional.
+   * The real key lives in `password` (AES-256-GCM encrypted); tokens.api_key is optional.
    */
   private getApiKey(account: Account): string {
     try {

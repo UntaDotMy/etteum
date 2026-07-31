@@ -1,13 +1,9 @@
 /**
  * Friend share-board payload builder (side-effect-free for testability).
  *
- * `includeFullKey` controls whether the full secret is emitted. Both the
- * multi-key board (/v1/share/board) and the single-key deep link
- * (/v1/share?key=…) include it BY OPERATOR DECISION: friend keys are
- * request-scoped credentials (no admin surface), the page renders them
- * blurred, and the admin-surface tripwire (src/utils/ip-ban.ts) revokes a
- * friend key + bans the caller's IP the moment one is presented where it
- * doesn't belong. Defense is scope + tripwire, not secrecy of the board.
+ * The authless multi-key board always receives a preview-only payload. The
+ * separate `shareKeyPresented` helper may echo a key only after the caller has
+ * already presented that exact credential.
  */
 
 import type { apiKeys } from "../db/schema";
@@ -58,7 +54,6 @@ export function shareKeyPublic(
   row: ShareKeyRow,
   activeModelIds: string[],
   speed?: ShareKeySpeed,
-  opts?: { includeFullKey?: boolean },
 ): ShareKeyPublicPayload {
   const allowlist = parseAllowedModels(row.allowedModels);
   const usable = activeModelIds.filter((id) => modelAllowed(allowlist, id));
@@ -75,7 +70,6 @@ export function shareKeyPublic(
   return {
     id: row.id,
     name: row.name || null,
-    ...(opts?.includeFullKey ? { key: row.key } : {}),
     keyPreview: row.key.slice(0, 12) + "…",
     status,
     isActive: row.isActive,
@@ -92,4 +86,12 @@ export function shareKeyPublic(
     tokensPerSecond: speed?.tokensPerSecond ?? null,
     sampleSize: speed?.sampleSize ?? 0,
   };
+}
+
+export function shareKeyPresented(
+  row: ShareKeyRow,
+  activeModelIds: string[],
+  speed?: ShareKeySpeed,
+): ShareKeyPublicPayload & { key: string } {
+  return { ...shareKeyPublic(row, activeModelIds, speed), key: row.key };
 }

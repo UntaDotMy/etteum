@@ -23,8 +23,7 @@ jobs:
         # "JSX.IntrinsicElements does not exist" because @types/react is absent.
         run: cd dashboard && bun install --frozen-lockfile
       - name: Typecheck
-        run: bunx tsc --noEmit
-        continue-on-error: true # pre-existing baseline — tracked separately
+        run: bunx tsc --noEmit -p tsconfig.ci.json
       - name: Push DB schema
         # Create the SQLite schema from src/db/schema.ts so the DB-backed tests
         # (pricing, BYOK, sticky round-robin, search) have tables to query.

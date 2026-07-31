@@ -71,7 +71,7 @@ export class YouMindProvider extends BaseProvider {
   }
 
   /**
-   * The real API key lives in `password` (XOR-encrypted at rest). We never
+   * The real API key lives in `password` (AES-256-GCM encrypted at rest). We never
    * store it elsewhere — `tokens` JSON is reserved for ephemeral metadata
    * (e.g. last validation timestamp).
    */

@@ -1,14 +1,11 @@
 /**
- * Share-board payload + admin scope gate (operator threat model):
- *  - The board intentionally serves FULL friend keys (page blurs them; friends
- *    copy). Secrecy is NOT the defense — scope + tripwire is: friend keys are
- *    request-only, and presenting one on an admin surface revokes it and bans
- *    the caller's IP (src/utils/ip-ban.ts).
- *  - includeFullKey:false remains available for callers that want previews.
+ * Share-board payload + admin scope gate:
+ *  - The public board is preview-only; CSS presentation is not a secret boundary.
+ *  - A single-key endpoint may echo a key only after the caller presents it.
  *  - Managed (friend) keys are /v1 client credentials, never admin (/api/*, /ws).
  */
 import { describe, test, expect } from "bun:test";
-import { shareKeyPublic, type ShareKeyRow } from "../../src/proxy/share-key-public";
+import { shareKeyPresented, shareKeyPublic, type ShareKeyRow } from "../../src/proxy/share-key-public";
 import { isAdminApiScope } from "../../src/utils/security";
 
 const FULL_KEY = "etteum_testsecret_ABCDEFGH1234567890";
@@ -34,9 +31,10 @@ function row(partial: Partial<ShareKeyRow> = {}): ShareKeyRow {
 const ACTIVE_MODELS = ["grok-4.5", "composer-2.5", "cbc-kimi-k3"];
 
 describe("shareKeyPublic payload", () => {
-  test("board mode includes the full key (operator decision; tripwire is the mitigation)", () => {
-    const p = shareKeyPublic(row(), ACTIVE_MODELS, undefined, { includeFullKey: true });
-    expect(p.key).toBe(FULL_KEY);
+  test("public board mode omits the full key", () => {
+    const p = shareKeyPublic(row(), ACTIVE_MODELS);
+    expect(p.key).toBeUndefined();
+    expect(JSON.stringify(p)).not.toContain(FULL_KEY);
     expect(p.keyPreview).toBe(FULL_KEY.slice(0, 12) + "…");
     expect(p.status).toBe("active");
     expect(p.tokensLeft).toBe(750);
@@ -44,10 +42,9 @@ describe("shareKeyPublic payload", () => {
     expect(p.baseUrl).toBe("/v1");
   });
 
-  test("includeFullKey:false omits the secret (preview-only callers)", () => {
-    const p = shareKeyPublic(row(), ACTIVE_MODELS, undefined, { includeFullKey: false });
-    expect(p.key).toBeUndefined();
-    expect(JSON.stringify(p)).not.toContain(FULL_KEY);
+  test("single-key mode can echo an already-presented credential", () => {
+    const p = shareKeyPresented(row(), ACTIVE_MODELS);
+    expect(p.key).toBe(FULL_KEY);
   });
 
   test("status: inactive / expired / exhausted", () => {

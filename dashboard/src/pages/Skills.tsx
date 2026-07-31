@@ -19,9 +19,7 @@ const DEFAULT_SKILLS: Skill[] = [
   { id: "image-gen", name: "Image Generation", description: "Generate images from text prompts", category: "media", source: "built-in" },
   { id: "tts", name: "Text-to-Speech", description: "Convert text to spoken audio", category: "media", source: "built-in" },
   { id: "stt", name: "Speech-to-Text", description: "Transcribe audio to text", category: "media", source: "built-in" },
-  { id: "mcp-filesystem", name: "MCP: Filesystem", description: "Local filesystem access via MCP", category: "mcp", source: "mcp" },
-  { id: "mcp-fetch", name: "MCP: Fetch", description: "HTTP fetch tool via MCP", category: "mcp", source: "mcp" },
-  { id: "mcp-sqlite", name: "MCP: SQLite", description: "SQLite database explorer via MCP", category: "mcp", source: "mcp" },
+  { id: "mcp-filesystem", name: "MCP: Filesystem", description: "Opt-in local filesystem access under MCP_FILESYSTEM_ROOT", category: "mcp", source: "mcp" },
 ];
 
 const CATEGORIES = ["all", "retrieval", "compute", "media", "mcp"];

@@ -41,7 +41,7 @@ If anything in the pipeline throws, the original sanitized request is
 forwarded as a fallback — compression failure never breaks a real request.
 
 **CLI note.** Pathological RTK values (`max_tool_chars` &lt; 500) are clamped at
-boot by `compression_policy_v1` to Balanced defaults (1500 / 4 turns).
+boot by the compression policy to Balanced defaults (4000 / 4 turns).
 
 ---
 
@@ -78,7 +78,7 @@ common command shapes and uses pattern-aware logic:
 | Key                                       | Default | Range          | Meaning                                                                          |
 | ----------------------------------------- | ------- | -------------- | -------------------------------------------------------------------------------- |
 | `compression_rtk_enabled`                 | `true`  | bool           | Master switch.                                                                   |
-| `compression_rtk_max_tool_chars`          | `1500`  | 500 – 50 000   | Cap per older `tool_result`. ~4 chars = 1 token, so 1500 ≈ 375 tokens.           |
+| `compression_rtk_max_tool_chars`          | `4000`  | 500 – 50 000   | Cap per older `tool_result`. ~4 chars = 1 token, so 4000 ≈ 1000 tokens.          |
 | `compression_rtk_keep_last_n_turns_full`  | `4`     | 0 – 20         | Turns to leave fully untouched. Lower = more saving; higher = safer for CLIs.    |
 | `compression_rtk_smart_truncate`          | `true`  | bool           | Pattern-aware truncation for git diff / tree. Off → generic head+tail only.      |
 
@@ -87,7 +87,7 @@ common command shapes and uses pattern-aware logic:
 | Preset       | maxToolChars | keepN | When to use                                                       |
 | ------------ | ------------ | ----- | ----------------------------------------------------------------- |
 | Conservative | 8000         | 6     | Long-context agents, debugging sessions where history matters.    |
-| Balanced     | 1500         | 4     | **Default.** Tuned for Claude Code / Codex-style coding agents.   |
+| Balanced     | 4000         | 4     | **Default.** Tuned for Claude Code / Codex-style coding agents.   |
 | Aggressive   | 500          | 2     | High-volume, mostly-stateless calls. Saves more; may re-read.     |
 
 **Example.** A `git diff` of 18 000 chars in turn #3 of a 12-turn session,
@@ -178,7 +178,7 @@ sometimes more confident-but-wrong outputs).
 
 ---
 
-### 4. Image Dedupe *(lossless, default ON)*
+### 4. Image Dedupe *(lossless, default OFF)*
 
 Detects duplicate images attached more than once in a single request and
 replaces later occurrences with `[duplicate of image in message #N]`. Pure
@@ -192,11 +192,11 @@ data, or the URL itself for URL-style images. Collision-resistant for the
 
 | Key                              | Default | Notes |
 | -------------------------------- | ------- | ----- |
-| `compression_image_dedupe_enabled` | `true`  | Lossless; safe to leave on. |
+| `compression_image_dedupe_enabled` | `false` | Opt in when clients commonly resend identical images. |
 
 ---
 
-### 5. Cache Markers — Anthropic Prompt Caching *(structural, default ON)*
+### 5. Cache Markers — Anthropic Prompt Caching *(structural, default OFF)*
 
 Tags the stable system-prompt prefix (or last tool definition) with
 `cache_control: { type: "ephemeral" }` so upstream Anthropic-compatible
@@ -214,7 +214,7 @@ disabled for that provider by default.
 
 | Key                                   | Default | Notes                                                       |
 | ------------------------------------- | ------- | ----------------------------------------------------------- |
-| `compression_cache_markers_enabled`   | `true`  | Master switch.                                              |
+| `compression_cache_markers_enabled`   | `false` | Master switch.                                              |
 | `compression_cache_markers_overrides` | `{"codex":false}` | JSON object `{ provider: bool }`. `false` = disable for that provider. |
 
 **Stats note.** Cache markers report `0` tokens saved in
@@ -348,7 +348,7 @@ config cache to expire. The HTTP API does this invalidation for you.
 export const DEFAULT_COMPRESSION_CONFIG: CompressionConfig = {
   rtk: {
     enabled: true,
-    maxToolChars: 1500,       // older tool results only
+    maxToolChars: 4000,       // older tool results only
     keepLastNTurnsFull: 4,    // CLI-safe protected window
     smartTruncate: true,
   },

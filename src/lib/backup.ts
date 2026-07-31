@@ -30,7 +30,12 @@ import path from "node:path";
 import { Database } from "bun:sqlite";
 import { config } from "../config";
 import { client as liveSqlite } from "../db/index";
-import { reencryptSecret } from "../utils/crypto";
+import {
+  decryptWithPassphrase,
+  encryptWithPassphrase,
+  isGcm,
+  reencryptSecret,
+} from "../utils/crypto";
 
 export const BACKUP_FORMAT = "etteum-backup" as const;
 export const BACKUP_VERSION = 1 as const;
@@ -208,6 +213,20 @@ export function chooseMergeTokens(
   const packExp = oauthExpiresAtSec(pack);
   if (liveExp > packExp) return live;
   return pack;
+}
+
+/** Read a token JSON blob from either a legacy plaintext or current GCM row. */
+function openStoredTokens(value: string | null | undefined, passphrase: string): string | null {
+  if (value == null) return null;
+  const stored = typeof value === "string" ? value : JSON.stringify(value);
+  return isGcm(stored) ? decryptWithPassphrase(stored, passphrase) : stored;
+}
+
+/** Raw-SQL backup merge bypasses the ORM, so seal token JSON explicitly. */
+function sealStoredTokens(value: string | null | undefined, passphrase: string): string | null {
+  if (value == null) return null;
+  const plain = typeof value === "string" ? value : JSON.stringify(value);
+  return encryptWithPassphrase(plain, passphrase);
 }
 
 /** Tables dropped in essential mode (history only — not needed to run the same accounts). */
@@ -484,7 +503,7 @@ type PackAccountRow = {
  * expires_at) so a stale pack cannot overwrite a live rotated refresh_token.
  * Pack wins on tie / missing expiry (intentional transfer).
  *
- * Passwords are re-encrypted when the pack ENCRYPTION_KEY differs from this install.
+ * Passwords and encrypted token JSON are re-keyed for this installation.
  * Does NOT replace the DB file — safe while the server is running (no restart).
  */
 export function mergeAccountsFromPack(packDir: string): MergeImportResult {
@@ -508,7 +527,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
   }
   if (!sourceKey || sourceKey.length < 16) {
     throw new Error(
-      "Backup pack env is missing ENCRYPTION_KEY — cannot safely re-key passwords.",
+      "Backup pack env is missing ENCRYPTION_KEY — cannot safely re-key credentials.",
     );
   }
 
@@ -553,9 +572,10 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
   };
 
   for (const row of existing) {
+    const tokens = openStoredTokens(row.tokens, targetKey);
     byKey.set(accountIdentityKey(row.provider, row.email), row.id);
-    liveTokensById.set(row.id, row.tokens);
-    indexOAuthKeys(row.id, row.provider, row.tokens);
+    liveTokensById.set(row.id, tokens);
+    indexOAuthKeys(row.id, row.provider, tokens);
   }
 
   const insertStmt = liveSqlite.prepare(
@@ -613,12 +633,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
 
       try {
         const password = reencryptSecret(String(row.password || ""), sourceKey, targetKey);
-        const packTokens =
-          row.tokens == null
-            ? null
-            : typeof row.tokens === "string"
-              ? row.tokens
-              : JSON.stringify(row.tokens);
+        const packTokens = openStoredTokens(row.tokens, sourceKey);
         const packSub = oauthSub(packTokens);
         const packRt = oauthRefreshToken(packTokens);
 
@@ -670,7 +685,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
             $password: password,
             $status: status,
             $enabled: enabled,
-            $tokens: tokens,
+            $tokens: sealStoredTokens(tokens, targetKey),
             $quota_limit: row.quota_limit,
             $quota_remaining: row.quota_remaining,
             $free_limit: row.free_limit,
@@ -691,7 +706,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
             $password: password,
             $status: status,
             $enabled: enabled,
-            $tokens: packTokens,
+            $tokens: sealStoredTokens(packTokens, targetKey),
             $quota_limit: row.quota_limit,
             $quota_remaining: row.quota_remaining,
             $free_limit: row.free_limit,
