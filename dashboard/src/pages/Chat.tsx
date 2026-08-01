@@ -275,12 +275,19 @@ async function ensurePoolApiKey(): Promise<string> {
   return "";
 }
 
-function mapModelRows(rows: Array<{ id?: string } | string>): ProviderModel[] {
+function mapModelRows(rows: Array<{ id?: string; owned_by?: string } | string>): ProviderModel[] {
   return rows
     .map((m) => {
       const id = typeof m === "string" ? m : String(m.id || "");
       if (!id) return null;
-      const prefix = id.includes("-") ? id.split("-")[0]! : "";
+      // Prefer the catalog's owned_by (e.g. "commandcode") when present;
+      // otherwise derive from the id prefix (legacy path).
+      const ownedBy = typeof m === "object" && typeof m.owned_by === "string" ? m.owned_by : "";
+      const prefix = ownedBy
+        ? ownedBy
+        : id.includes("-")
+          ? id.split("-")[0]!
+          : "";
       return { id, provider: providerFromPrefix(prefix), label: id };
     })
     .filter((m): m is ProviderModel => m != null);
@@ -324,6 +331,7 @@ function providerFromPrefix(prefix: string): string {
     canva: "Canva",
     ym: "YouMind",
     byok: "BYOK",
+    commandcode: "Command Code",
     gl: "GitLab",
     gd: "GitLab",
   };

@@ -41,6 +41,7 @@ import {
   isGrokWeeklyPercentQuotaLimit,
   refreshGrokWeeklyPoolAfterRequest,
 } from "./providers/grok";
+import { refreshCommandCodeUsageAfterRequest } from "./providers/commandcode";
 import { RateLimiter, isLoopbackIp } from "../utils/security";
 import { effectiveClientIp } from "../utils/ip-ban";
 import {
@@ -976,6 +977,19 @@ function wrapStreamWithUsageFinalizer(
             })
             .catch(() => {});
         }
+        // CommandCode: live window-meter refresh for streamed requests too.
+        if (context.provider === "commandcode") {
+          void db
+            .select()
+            .from(accounts)
+            .where(eq(accounts.id, context.accountId))
+            .limit(1)
+            .then((rows) => {
+              const a = rows[0];
+              if (a) void refreshCommandCodeUsageAfterRequest(a);
+            })
+            .catch(() => {});
+        }
       } catch (error) {
         console.error("[Proxy] Failed to finalize stream usage:", error);
       } finally {
@@ -1301,6 +1315,11 @@ export async function handleChatCompletion(
       isGrokWeeklyPercentQuotaLimit(account.quotaLimit)
     ) {
       void refreshGrokWeeklyPoolAfterRequest(account);
+    }
+    // CommandCode: re-probe /alpha/billing/credits after success so the 5-hour
+    // and weekly window meters on the provider card update in real time.
+    if (!isStaticLogAccount && provider === "commandcode") {
+      void refreshCommandCodeUsageAfterRequest(account);
     }
 
     return { result, isStream };

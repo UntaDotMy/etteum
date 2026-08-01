@@ -88,6 +88,7 @@ const providerColors: Record<string, string> = {
   byok: "bg-[var(--info)]/15 text-[var(--info)] border-[var(--info)]/30",
   "gitlab-duo": "bg-orange-500/15 text-orange-400 border-orange-400/30",
   youmind: "bg-teal-500/15 text-teal-400 border-teal-400/30",
+  commandcode: "bg-indigo-500/15 text-indigo-300 border-indigo-400/30",
   alibaba: "bg-[var(--success)]/15 text-[var(--success)] border-[var(--success)]/30",
   antigravity: "bg-fuchsia-500/15 text-fuchsia-400 border-fuchsia-400/30",
   // F13 OpenAI-compatible catalog providers

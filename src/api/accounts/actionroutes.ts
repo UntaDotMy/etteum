@@ -804,7 +804,7 @@ export function registerActionRoutes(router: Hono): void {
       return c.json({ error: "Account not found" }, 404);
     }
 
-    const KEY_BASED_PROVIDERS = new Set(["byok", "codebuddy-china", "youmind", "alibaba"]);
+    const KEY_BASED_PROVIDERS = new Set(["byok", "codebuddy-china", "youmind", "alibaba", "commandcode"]);
     if (!KEY_BASED_PROVIDERS.has(account.provider)) {
       return c.json({ error: "This provider does not use static API keys" }, 400);
     }

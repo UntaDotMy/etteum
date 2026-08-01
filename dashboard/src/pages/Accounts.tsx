@@ -50,7 +50,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity" | "grok";
+type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "commandcode" | "alibaba" | "antigravity" | "grok";
 
 type ByokFormKey = {
   id?: number;
@@ -101,10 +101,10 @@ interface AlibabaQuotaTokens {
   updatedAt: string;
 }
 
-const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "alibaba", "antigravity", "grok"];
+const providers: Provider[] = ["kiro", "kiro-pro", "codebuddy", "codebuddy-china", "canva", "codex", "qoder", "gitlab-duo", "youmind", "commandcode", "alibaba", "antigravity", "grok"];
 
 /** Providers that authenticate with static API keys / PATs — no browser login. */
-const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "alibaba", "grok"]);
+const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "commandcode", "alibaba", "grok"]);
 
 function labelProvider(provider: string) {
   if (provider === "kiro-pro") return "Kiro Pro";
@@ -116,6 +116,7 @@ function labelProvider(provider: string) {
   if (provider === "grok") return "Grok";
   if (provider === "gitlab-duo") return "GitLab Duo";
   if (provider === "youmind") return "YouMind";
+  if (provider === "commandcode") return "Command Code";
   return provider.charAt(0).toUpperCase() + provider.slice(1);
 }
 
@@ -151,9 +152,11 @@ export default function Accounts() {
   const [gitlabLabel, setGitlabLabel] = useState("");
   const [gitlabBusy, setGitlabBusy] = useState(false);
   const [youmindApiKey, setYoumindApiKey] = useState("");
+  const [commandcodeApiKey, setCommandcodeApiKey] = useState("");
   const [grokSso, setGrokSso] = useState("");
   const [grokSsoRw, setGrokSsoRw] = useState("");
   const [youmindBusy, setYoumindBusy] = useState(false);
+  const [commandcodeBusy, setCommandcodeBusy] = useState(false);
   const [grokBusy, setGrokBusy] = useState(false);
   const [codebuddyChinaApiKey, setCodebuddyChinaApiKey] = useState("");
   const [codebuddyChinaBulkApiKeys, setCodebuddyChinaBulkApiKeys] = useState("");
@@ -594,6 +597,33 @@ export default function Accounts() {
     finally { setYoumindBusy(false); }
   }
 
+  async function handleCommandCodeApiKeyLogin() {
+    const apiKey = commandcodeApiKey.trim();
+    if (!apiKey) { showError(new Error("Paste your Command Code API key")); return; }
+    if (!apiKey.startsWith("user_")) {
+      showError(new Error("Command Code API key must start with user_"));
+      return;
+    }
+    setCommandcodeBusy(true);
+    try {
+      const res = await fetchApi<any>("/api/accounts", {
+        method: "POST",
+        body: JSON.stringify({
+          provider: "commandcode",
+          apiKey,
+        }),
+      });
+      const labelText = res?.email || "account";
+      showSuccess(res?.updated
+        ? `Command Code key updated (${labelText})`
+        : `Command Code ${labelText} added successfully`);
+      setCommandcodeApiKey("");
+      setAddDialogProvider(null);
+      await load();
+    } catch (err) { showError(err); }
+    finally { setCommandcodeBusy(false); }
+  }
+
   async function handleGrokSsoLogin() {
     const sso = grokSso.trim();
     if (!sso) { showError(new Error("Paste your grok.com SSO cookie value")); return; }
@@ -993,7 +1023,7 @@ export default function Accounts() {
     if (ids.length === 0) return;
     // For API-key-based providers, "retry" means warmup (re-validate key),
     // not browser login (which would fail with "not found in result").
-    const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "alibaba"]);
+    const NON_LOGINABLE = new Set(["byok", "codebuddy-china", "youmind", "commandcode", "alibaba"]);
     if (NON_LOGINABLE.has(provider)) {
       try {
         await warmupAllAccounts({ providers: [provider], statuses: ["error"] });
@@ -1441,6 +1471,69 @@ export default function Accounts() {
         }
       }
 
+      // For commandcode, aggregate the two rolling usage windows (5-hour +
+      // weekly, in USD credits) across active accounts. Each account's warmup
+      // stores metadata.window_limits (used/cap/resetAt per window) fetched
+      // from /alpha/billing/credits. We average the usage% and sum the caps,
+      // and surface the pool's total remaining credit balance.
+      let commandCodeWindows: {
+        fiveHourPct: number;
+        weeklyPct: number;
+        fiveHourUsed: number;
+        fiveHourCap: number;
+        weeklyUsed: number;
+        weeklyCap: number;
+        count: number;
+        fiveHourResetAt: string | null;
+        weeklyResetAt: string | null;
+      } | undefined;
+      let commandCodeCreditBalance: number | undefined;
+      if (provider === "commandcode") {
+        const acc = { fiveHourPct: [] as number[], weeklyPct: [] as number[], fiveHourUsed: 0, fiveHourCap: 0, weeklyUsed: 0, weeklyCap: 0, fiveHourReset: [] as string[], weeklyReset: [] as string[] };
+        let balanceSum = 0;
+        let anyBalance = false;
+        for (const a of activeRows) {
+          const m = (a.metadata || {}) as Record<string, any>;
+          const wl = m.window_limits;
+          if (!wl) continue;
+          const fh = wl.fiveHour;
+          const wk = wl.weekly;
+          if (fh && typeof fh.cap === "number" && fh.cap > 0) {
+            acc.fiveHourPct.push(Math.min(100, (Number(fh.used ?? 0) / fh.cap) * 100));
+            acc.fiveHourUsed += Number(fh.used ?? 0);
+            acc.fiveHourCap += fh.cap;
+            if (typeof fh.resetAt === "number" && fh.resetAt > 0) acc.fiveHourReset.push(new Date(fh.resetAt).toISOString());
+          }
+          if (wk && typeof wk.cap === "number" && wk.cap > 0) {
+            acc.weeklyPct.push(Math.min(100, (Number(wk.used ?? 0) / wk.cap) * 100));
+            acc.weeklyUsed += Number(wk.used ?? 0);
+            acc.weeklyCap += wk.cap;
+            if (typeof wk.resetAt === "number" && wk.resetAt > 0) acc.weeklyReset.push(new Date(wk.resetAt).toISOString());
+          }
+          const cr = m.credits;
+          if (cr && typeof cr.monthly === "number") {
+            balanceSum += (cr.monthly || 0) + (cr.purchased || 0) + (cr.free || 0);
+            anyBalance = true;
+          }
+        }
+        const avg = (xs: number[]) => (xs.length ? xs.reduce((s, x) => s + x, 0) / xs.length : 0);
+        const earliest = (xs: string[]) => (xs.length ? xs.slice().sort()[0] : null);
+        if (acc.fiveHourPct.length || acc.weeklyPct.length) {
+          commandCodeWindows = {
+            fiveHourPct: avg(acc.fiveHourPct),
+            weeklyPct: avg(acc.weeklyPct),
+            fiveHourUsed: acc.fiveHourUsed,
+            fiveHourCap: acc.fiveHourCap,
+            weeklyUsed: acc.weeklyUsed,
+            weeklyCap: acc.weeklyCap,
+            count: Math.max(acc.fiveHourPct.length, acc.weeklyPct.length),
+            fiveHourResetAt: earliest(acc.fiveHourReset),
+            weeklyResetAt: earliest(acc.weeklyReset),
+          };
+        }
+        if (anyBalance) commandCodeCreditBalance = balanceSum;
+      }
+
       return {
         provider,
         total: rows.length,
@@ -1467,6 +1560,8 @@ export default function Accounts() {
         codexCreditBalance,
         codexCreditUnlimited,
         qoderStatus,
+        commandCodeWindows,
+        commandCodeCreditBalance,
       };
     });
   }, [accounts]);
@@ -1749,6 +1844,64 @@ export default function Accounts() {
                       </div>
                       <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
                         <div className={`h-full ${s.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, s.remaining))}%` }} />
+                      </div>
+                    </div>
+                  </div>
+                );
+              })()}
+
+              {/* Command Code rolling usage windows: 5-hour + weekly, in USD
+                  credits, pooled (averaged %) across active accounts. */}
+              {stat.provider === "commandcode" && stat.commandCodeWindows && (() => {
+                const w = stat.commandCodeWindows;
+                const fmtReset = (iso: string | null) => {
+                  if (!iso) return "—";
+                  const d = new Date(iso);
+                  const diffMs = d.getTime() - Date.now();
+                  if (diffMs <= 0) return "now";
+                  const mins = Math.round(diffMs / 60000);
+                  if (mins < 60) return `${mins}m`;
+                  const hrs = Math.round(mins / 60);
+                  if (hrs < 48) return `${hrs}h`;
+                  return `${Math.round(hrs / 24)}d`;
+                };
+                const bar = (usedPct: number) => {
+                  const remaining = Math.max(0, 100 - usedPct);
+                  const tone = usedPct >= 100 ? "bg-[var(--error)]" : remaining <= 10 ? "bg-[var(--error)]" : remaining <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
+                  return { remaining, tone };
+                };
+                const fh = bar(w.fiveHourPct);
+                const wk = bar(w.weeklyPct);
+                return (
+                  <div className="space-y-1.5">
+                    <div className="flex justify-between text-xs">
+                      <span className="text-[var(--muted-foreground)]">Usage windows <span className="opacity-60">({w.count} acc)</span></span>
+                      {stat.commandCodeCreditBalance != null && (
+                        <span className="text-[var(--foreground)]">${stat.commandCodeCreditBalance.toFixed(2)} credits</span>
+                      )}
+                    </div>
+                    {/* 5-hour window */}
+                    <div className="space-y-0">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-[var(--foreground)] font-medium">5-hour</span>
+                        <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
+                          ${w.fiveHourUsed.toFixed(2)}/${w.fiveHourCap.toFixed(2)} · {fh.remaining.toFixed(0)}% left · resets {fmtReset(w.fiveHourResetAt)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+                        <div className={`h-full ${fh.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, fh.remaining))}%` }} />
+                      </div>
+                    </div>
+                    {/* Weekly window */}
+                    <div className="space-y-0">
+                      <div className="flex items-center justify-between text-[10px]">
+                        <span className="text-[var(--foreground)] font-medium">Weekly</span>
+                        <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
+                          ${w.weeklyUsed.toFixed(2)}/${w.weeklyCap.toFixed(2)} · {wk.remaining.toFixed(0)}% left · resets {fmtReset(w.weeklyResetAt)}
+                        </span>
+                      </div>
+                      <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+                        <div className={`h-full ${wk.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, wk.remaining))}%` }} />
                       </div>
                     </div>
                   </div>
@@ -2318,6 +2471,12 @@ export default function Accounts() {
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "pat" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >API Key (sk-ym-...)</button>
             </div>
+          ) : addDialogProvider === "commandcode" ? (
+            <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
+              <button onClick={() => setAddMode("pat")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "pat" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >API Key (user_...)</button>
+            </div>
           ) : addDialogProvider === "antigravity" ? (
             <div className="flex gap-1 rounded-md bg-[var(--secondary)] p-1">
               <button onClick={() => setAddMode("bulk")}
@@ -2404,6 +2563,33 @@ export default function Accounts() {
                 <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={youmindBusy}>Cancel</Button>
                 <Button onClick={handleYouMindApiKeyLogin} disabled={youmindBusy}>
                   {youmindBusy ? "Validating..." : "Add Account"}
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {addMode === "pat" && addDialogProvider === "commandcode" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">Command Code API Key</label>
+                <textarea
+                  value={commandcodeApiKey}
+                  onChange={(e) => setCommandcodeApiKey(e.target.value)}
+                  className="mt-1 w-full h-32 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
+                  placeholder="user_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+                  disabled={commandcodeBusy}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  Paste your Command Code CLI API key (starts with <code>user_</code>) from{" "}
+                  <code>~/.commandcode/auth.json</code> or{" "}
+                  <a href="https://commandcode.ai/studio" target="_blank" rel="noreferrer" className="underline">commandcode.ai/studio</a>.
+                  Server validates via <code>POST /alpha/generate</code> and stores the key encrypted. Works with any plan (Go and up).
+                </p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)} disabled={commandcodeBusy}>Cancel</Button>
+                <Button onClick={handleCommandCodeApiKeyLogin} disabled={commandcodeBusy}>
+                  {commandcodeBusy ? "Validating..." : "Add Account"}
                 </Button>
               </div>
             </div>

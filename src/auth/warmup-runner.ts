@@ -411,6 +411,12 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
           (quotaSource.includes("GetGrokCreditsConfig") ||
             quotaSource.includes("weekly-percent") ||
             (rawLimit > 0 && rawLimit <= 100));
+        // CommandCode /alpha/billing/credits is the real window state
+        // (5h + weekly USD caps). The local per-request decrement double-counts
+        // because the same request is already reflected in the upstream `used`,
+        // so warmup must always trust the upstream values.
+        const isCommandCodeAuthoritative =
+          account.provider === "commandcode" && quotaSource.includes("commandcode.fetchQuota");
         const untrustedFullRemaining =
           isGrok &&
           !isGrokWeeklyPercent &&
@@ -422,8 +428,11 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
         if (health.kind === "exhausted") {
           // Provider says exhausted — always zero out.
           update.quotaRemaining = 0;
-        } else if (isGrokWeeklyPercent) {
+        } else if (isGrokWeeklyPercent || isCommandCodeAuthoritative) {
           // Same surface as Grok CLI creditUsagePercent — trust live probe.
+          // CommandCode: /alpha/billing/credits already reflects every request
+          // (both this proxy's and the user's own CLI), so the upstream value
+          // is the only accurate remaining.
           update.quotaRemaining = upstreamRemaining;
         } else if (untrustedFullRemaining) {
           // Never seed free-Build absolute package into remaining.

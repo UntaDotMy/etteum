@@ -205,6 +205,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   // cbc-kimi-k2.7 / bare kimi-k2.7 ≈ kimi-k2.7-code SKU
   "kimi-k2.7":                    { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
   "kimi-k2.7-code":               { input: 0.95,  output: 4.00,  cached: 0.19,   reasoning: 4.00,  cacheCreation: 1.1875 },
+  // Kimi K2.7 Code Highspeed — Moonshot's premium-speed tier of the K2.7-Code SKU
+  // (CommandCode lists it alongside the regular code SKU; rate ~1.2x of base).
+  "kimi-k2.7-code-highspeed":     { input: 1.10,  output: 5.00,  cached: 0.22,   reasoning: 5.00,  cacheCreation: 1.375 },
   // Kimi K3 (July 2026) — openrouter.ai/moonshotai/kimi-k3: $3 / $15 per M tokens.
   // cached/cacheCreation estimated at 20%/125% of input (same family heuristic as k2.x).
   "kimi-k3":                      { input: 3.00,  output: 15.00, cached: 0.60,   reasoning: 15.00, cacheCreation: 3.75  },
@@ -212,6 +215,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "moonshot-v1-32k":              { input: 1.00,  output: 3.00,  cached: 0.10,   reasoning: 3.00,  cacheCreation: 1.25  },
   "moonshot-v1-128k":             { input: 2.00,  output: 5.00,  cached: 0.20,   reasoning: 5.00,  cacheCreation: 2.50  },
   "glm-5.2":                      { input: 0.69,  output: 2.08,  cached: 0.069,  reasoning: 2.08,  cacheCreation: 0.8625 },
+  "glm-5.2-fast":                 { input: 0.69,  output: 2.08,  cached: 0.069,  reasoning: 2.08,  cacheCreation: 0.8625 },
   "glm-5.1":                      { input: 0.55,  output: 1.66,  cached: 0.055,  reasoning: 1.66,  cacheCreation: 0.6875 },
   "glm-5":                        { input: 0.42,  output: 1.25,  cached: 0.042,  reasoning: 1.25,  cacheCreation: 0.525 },
   // Z.AI docs.z.ai: GLM-5V-Turbo $1.20 / $4.00, cache read $0.24 (2026-07)
@@ -220,6 +224,25 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "glm-4-flash":                  { input: 0.00,  output: 0.00,  cached: 0.00,   reasoning: 0.00,  cacheCreation: 0.00  },
   // CBC Hunyuan / specialty
   "hy3-preview":                  { input: 0.80,  output: 2.00,  cached: 0.08,   reasoning: 2.00,  cacheCreation: 1.00  },
+  // Tencent Hy3 paid tier (CommandCode) — openrouter tencent/hy3: $0.132 / $0.528.
+  "hy3-paid":                     { input: 0.132, output: 0.528, cached: 0.033,  reasoning: 0.528, cacheCreation: 0.165 },
+
+  // ── Command Code catalog extras (verified via openrouter.ai 2026-07) ──
+  "mimo-v2.5-pro":                { input: 0.435, output: 0.87,  cached: 0.0036, reasoning: 0.87,  cacheCreation: 0.54375 },
+  "mimo-v2.5":                    { input: 0.14,  output: 0.28,  cached: 0.0028, reasoning: 0.28,  cacheCreation: 0.175 },
+  "qwen3.6-max-preview":          { input: 1.03,  output: 6.16,  cached: 0.10,   reasoning: 6.16,  cacheCreation: 1.28  },
+  "qwen3.7-flash":                { input: 0.03,  output: 0.13,  cached: 0.006,  reasoning: 0.13,  cacheCreation: 0.038 },
+  "step-3.7-flash":               { input: 0.20,  output: 1.15,  cached: 0.04,   reasoning: 1.15,  cacheCreation: 0.25  },
+  "step-3.5-flash":               { input: 0.10,  output: 0.30,  cached: 0.02,   reasoning: 0.30,  cacheCreation: 0.125 },
+  "gemini-3.6-flash":             { input: 1.50,  output: 7.50,  cached: 0.15,   reasoning: 7.50,  cacheCreation: 0.083 },
+  "gemini-3.5-flash-lite":        { input: 0.30,  output: 2.50,  cached: 0.03,   reasoning: 2.50,  cacheCreation: 0.083 },
+  "fugu-ultra":                   { input: 5.00,  output: 30.00, cached: 0.50,   reasoning: 30.00, cacheCreation: 6.25  },
+  "nemotron-3-ultra-550b-a55b":   { input: 0.50,  output: 2.20,  cached: 0.10,   reasoning: 2.20,  cacheCreation: 0.625 },
+  "inkling":                      { input: 1.00,  output: 4.05,  cached: 0.17,   reasoning: 4.05,  cacheCreation: 1.25  },
+  "inkling-small":                { input: 0.50,  output: 1.20,  cached: 0.10,   reasoning: 1.20,  cacheCreation: 0.625 },
+  "laguna-s-2.1-free":            { input: 0.00,  output: 0.00,  cached: 0.00,   reasoning: 0.00,  cacheCreation: 0.00  },
+  "ling-3.0-flash-free":          { input: 0.00,  output: 0.00,  cached: 0.00,   reasoning: 0.00,  cacheCreation: 0.00  },
+  "muse-spark-1.1":               { input: 1.25,  output: 4.25,  cached: 0.15,   reasoning: 4.25,  cacheCreation: 1.5625 },
 
   // ── Proprietary / non-token surfaces (indicative for cost UI) ──
   "canva-image":                  { input: 5.00,  output: 5.00,  cached: 5.00,   reasoning: 5.00,  cacheCreation: 5.00  },

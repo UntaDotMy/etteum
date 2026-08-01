@@ -32,6 +32,10 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // ── Qwen (Alibaba DashScope) — help.aliyun.com/zh/model-studio/text-generation-model ──
   "qwen3.7-max":            { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   "qwen3.7-max-preview":    { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
+  // Qwen 3.6 Max Preview (CommandCode) — openrouter: 262K ctx, 65K max out.
+  "qwen3.6-max-preview":    { contextWindow: 262_144,   maxOutput: 65_536, thinking: true,  vision: true },
+  // Qwen 3.7 Flash (CommandCode) — openrouter: 1M ctx, 65K max out.
+  "qwen3.7-flash":          { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   // Qoder Cosy qmodel_preview (qd-Qwen3.8-Max-Preview) — same class as 3.7-max tier.
   "qwen3.8-max-preview":    { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
   "qwen3.7-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
@@ -70,6 +74,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
 
   // ── GLM (Zhipu) — docs.z.ai + DashScope ──
   "glm-5.2":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
+  // GLM-5.2-Fast (CommandCode) — same family/specs as glm-5.2.
+  "glm-5.2-fast":           { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "glm-5.1":                { contextWindow: 198_000,   maxOutput: 8_192,   thinking: true,  vision: true },
   "glm-5":                  { contextWindow: 200_000,   maxOutput: 8_192,   thinking: false, vision: false },
   // GLM-5V-Turbo — ~203K context, vision; Z.AI docs 2026-07
@@ -80,6 +86,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // kimi-k2.7 bare id (cbc-kimi-k2.7) shares kimi-k2.7-code SKU.
   "kimi-k2.7":              { contextWindow: 262_144,   maxOutput: 98_304,  thinking: true,  vision: true },
   "kimi-k2.7-code":         { contextWindow: 262_144,   maxOutput: 98_304,  thinking: false, vision: false },
+  // Kimi K2.7 Code Highspeed (CommandCode) — same specs as the code SKU.
+  "kimi-k2.7-code-highspeed": { contextWindow: 262_144, maxOutput: 98_304, thinking: false, vision: false },
   "kimi-k2.6":              { contextWindow: 262_144,   maxOutput: 65_536,  thinking: false, vision: true },
   "kimi-k2.5":              { contextWindow: 164_000,   maxOutput: 8_192,   thinking: false, vision: true },
   // Kimi K3 flagship (July 2026) — 1M combined context (input+output ≤ 1_048_576).
@@ -92,6 +100,33 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "minimax-m2.7":           { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: true },
   "minimax-m2.5":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },
   "minimax-m2.1":           { contextWindow: 196_000,   maxOutput: 65_536,  thinking: false, vision: false },
+
+  // ── Command Code open-model catalog (openrouter.ai 2026-07) ──
+  // Xiaomi MiMo V2.5 / V2.5 Pro — 1.05M ctx, 131K max out.
+  "mimo-v2.5-pro":          { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
+  "mimo-v2.5":              { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
+  // StepFun Step 3.7 Flash — 262K ctx, 256K max out; Step 3.5 Flash — 262K / 65K.
+  "step-3.7-flash":         { contextWindow: 262_144,   maxOutput: 256_000, thinking: true,  vision: true },
+  "step-3.5-flash":         { contextWindow: 262_144,   maxOutput: 65_536,  thinking: true,  vision: true },
+  // Tencent Hy3 paid — 262K ctx, 128K max out.
+  "hy3-paid":               { contextWindow: 262_144,   maxOutput: 128_000, thinking: true,  vision: true },
+  // Google Gemini 3.6 Flash / 3.5 Flash Lite / 3.1 Flash Lite — 1M ctx, 65K out.
+  "gemini-3.6-flash":       { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3.5-flash-lite":  { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "gemini-3.1-flash-lite":  { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  // Sakana Fugu Ultra — 1M ctx, 128K max out.
+  "fugu-ultra":             { contextWindow: 1_000_000, maxOutput: 128_000, thinking: true,  vision: true },
+  // NVIDIA Nemotron 3 Ultra 550B-A55B — 512K ctx, 16K max out.
+  "nemotron-3-ultra-550b-a55b": { contextWindow: 512_288, maxOutput: 16_384, thinking: true, vision: true },
+  // Thinking Machines Inkling / Inkling Small — 1M / 524K ctx.
+  "inkling":                { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
+  "inkling-small":          { contextWindow: 524_288,   maxOutput: 65_536,  thinking: true,  vision: true },
+  // Poolside Laguna S 2.1 (free tier) — 1M ctx, 131K max out.
+  "laguna-s-2.1-free":      { contextWindow: 1_048_576, maxOutput: 131_072, thinking: true,  vision: true },
+  // inclusionAI Ling 3.0 Flash (free tier) — 262K ctx, 32K max out.
+  "ling-3.0-flash-free":    { contextWindow: 262_144,   maxOutput: 32_768,  thinking: true,  vision: true },
+  // Meta Muse Spark 1.1 — 1M ctx, 65K max out.
+  "muse-spark-1.1":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
 
   // ── Claude (Anthropic) — docs.claude.com / platform.claude.com ──
   "claude-fable-5":         { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },

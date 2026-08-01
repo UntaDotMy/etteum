@@ -23,7 +23,7 @@ import {
   revealApiKey,
 } from "@/lib/api";
 
-type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "alibaba";
+type Provider = "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "alibaba" | "commandcode";
 type Status = "active" | "exhausted" | "error" | "pending" | "disabled";
 
 /** Providers that authenticate with static API keys, not browser login.
@@ -42,6 +42,26 @@ interface CodexQuotaMetadata {
   primary?: CodexQuotaWindow;
   secondary?: CodexQuotaWindow;
   rate_limited?: boolean;
+}
+
+// Command Code window limits persisted by warmup (metadata.window_limits).
+interface CmcWindowLimit {
+  used: number;
+  cap: number;
+  exceeded: boolean;
+  resetAt: number;
+}
+interface CmcWindowLimits {
+  limited?: boolean;
+  fiveHour?: CmcWindowLimit | null;
+  weekly?: CmcWindowLimit | null;
+  fetchedAt?: string;
+}
+interface CmcCredits {
+  monthly: number;
+  purchased: number;
+  free: number;
+  fetchedAt?: string;
 }
 
 // CodeBuddy-CN per-package row persisted by warmup (metadata.packages).
@@ -81,6 +101,7 @@ interface Account {
   enabled?: boolean;
   quotaLimit?: number;
   quotaRemaining?: number;
+  quotaResetAt?: string | null;
   freeLimit?: number;
   freeRemaining?: number;
   freeResetAt?: string | null;
@@ -98,6 +119,8 @@ interface Account {
     packages?: CbcPackageRow[];
     dailyClaim?: CbcDailyClaim | null;
     activation?: CbcActivation | null;
+    window_limits?: CmcWindowLimits | null;
+    credits?: CmcCredits | null;
   } | null;
 }
 
@@ -236,6 +259,68 @@ function CodexQuotaCell({ codex, fallbackRemaining, fallbackLimit }: { codex?: C
       {codex.plan_type && <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">Plan: {codex.plan_type}{codex.rate_limited && <span className="ml-2 text-[var(--error)]">RATE LIMITED</span>}</div>}
       {renderBar("Session", codex.primary)}
       {renderBar("Weekly", codex.secondary)}
+    </div>
+  );
+}
+
+// ── Command Code 5-hour / weekly window cell ─────────────────────────
+// Renders metadata.window_limits (synced from /alpha/billing/credits by
+// warmup): a "$ used / $ cap" bar per rolling window plus reset countdown.
+// Falls back to the 5-hour-derived quota columns when no metadata yet.
+
+function cmcResetInSeconds(resetAt?: number | null): number | null {
+  if (!resetAt || !Number.isFinite(resetAt)) return null;
+  const diff = Math.floor((resetAt - Date.now()) / 1000);
+  return diff > 0 ? diff : null;
+}
+
+function CommandCodeQuotaCell({ limits, credits, fallbackRemaining, fallbackLimit, fallbackResetAt }: {
+  limits?: CmcWindowLimits | null;
+  credits?: CmcCredits | null;
+  fallbackRemaining?: number;
+  fallbackLimit?: number;
+  fallbackResetAt?: string | null;
+}) {
+  const five = limits?.fiveHour;
+  const weekly = limits?.weekly;
+  if (!five || !weekly || !limits) {
+    return (
+      <span className="text-xs text-[var(--muted-foreground)]">
+        ${Number(fallbackRemaining ?? 0).toFixed(2)}/${Number(fallbackLimit ?? 0).toFixed(2)}
+        {fallbackResetAt ? ` · reset ${formatResetIn(Math.floor((new Date(fallbackResetAt).getTime() - Date.now()) / 1000))}` : ""}
+      </span>
+    );
+  }
+  const renderBar = (label: string, w: CmcWindowLimit) => {
+    const usedPct = w.cap > 0 ? Math.min(100, (w.used / w.cap) * 100) : 0;
+    const remainingPct = 100 - usedPct;
+    const tone = remainingPct <= 10 ? "bg-[var(--error)]" : remainingPct <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
+    const resetIn = cmcResetInSeconds(w.resetAt);
+    return (
+      <div className="space-y-0.5">
+        <div className="flex items-center justify-between text-[10px] text-[var(--muted-foreground)]">
+          <span className="font-medium">{label}</span>
+          <span>${w.used.toFixed(2)}/${w.cap.toFixed(2)} · {w.exceeded ? <span className="text-[var(--error)]">EXCEEDED</span> : `${remainingPct.toFixed(0)}% left`}{resetIn ? ` · reset ${formatResetIn(resetIn)}` : ""}</span>
+        </div>
+        <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
+          <div className={`h-full ${tone}`} style={{ width: `${remainingPct}%` }} />
+        </div>
+      </div>
+    );
+  };
+  const totalCredits = credits
+    ? (Number(credits.monthly) || 0) + (Number(credits.purchased) || 0) + (Number(credits.free) || 0)
+    : null;
+  return (
+    <div className="space-y-1.5 min-w-[220px]">
+      {totalCredits != null && (
+        <div className="text-[10px] uppercase tracking-wide text-[var(--muted-foreground)]">
+          Credits: <span className="text-[var(--foreground)]">${totalCredits.toFixed(2)}</span>
+          {Number(credits?.purchased) > 0 && <span className="ml-1">(+${Number(credits?.purchased).toFixed(2)} extra)</span>}
+        </div>
+      )}
+      {renderBar("5-hour", five)}
+      {renderBar("Weekly", weekly)}
     </div>
   );
 }
@@ -977,6 +1062,8 @@ export default function AccountList() {
                     <td className="p-4 text-sm text-[var(--muted-foreground)] hidden sm:table-cell">
                       {account.provider === "codex"
                         ? <CodexQuotaCell codex={account.metadata?.codex_quota} fallbackRemaining={account.quotaRemaining} fallbackLimit={account.quotaLimit} />
+                        : account.provider === "commandcode"
+                        ? <CommandCodeQuotaCell limits={account.metadata?.window_limits as CmcWindowLimits | null | undefined} credits={account.metadata?.credits as CmcCredits | null | undefined} fallbackRemaining={account.quotaRemaining} fallbackLimit={account.quotaLimit} fallbackResetAt={account.quotaResetAt ? new Date(account.quotaResetAt).toISOString() : null} />
                         : account.provider === "qoder"
                         ? <QoderQuotaCell account={account} />
                         : account.provider === "alibaba"

@@ -12,6 +12,7 @@ import { warmupAccount } from "../../auth/warmup-runner";
 import { pool, type ProviderName } from "../../proxy/pool";
 import { activateQoderPat } from "../../proxy/providers/qoder";
 import { activateYouMindKey } from "../../proxy/providers/youmind";
+import { activateCommandCodeKey } from "../../proxy/providers/commandcode";
 import {
   exchangeRefreshToken,
   bundleFromAccessToken,
@@ -57,11 +58,11 @@ export function registerCrudRoutes(router: Hono): void {
    */
   router.post("/", async (c) => {
     const body = await c.req.json<{
-      provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "alibaba" | "antigravity" | "grok";
+      provider: "kiro" | "kiro-pro" | "codebuddy" | "codebuddy-china" | "canva" | "codex" | "qoder" | "gitlab-duo" | "youmind" | "commandcode" | "alibaba" | "antigravity" | "grok";
       email?: string;
       password?: string;
       personalToken?: string;
-      apiKey?: string; // YouMind sk-ym-... key
+      apiKey?: string; // YouMind sk-ym-... key / CommandCode user_... key
       apiKeys?: string; // CodeBuddy China bulk: newline-separated ck_... keys
       refreshTokens?: string; // Antigravity bulk: newline-separated Google OAuth refresh_tokens
       tokens?: Record<string, unknown>;
@@ -170,6 +171,60 @@ export function registerCrudRoutes(router: Hono): void {
       } catch (error) {
         const msg = error instanceof Error ? error.message : String(error);
         return c.json({ error: `YouMind API key activation failed: ${msg}` }, 400);
+      }
+    }
+
+    // ── CommandCode: API key paste flow (user_...) ──────────────────────
+    // Mirrors the YouMind branch: validate the key against /alpha/generate,
+    // derive a stable email from the key tail, then upsert by (provider, email)
+    // so re-pasting the same key updates the existing row.
+    if (body.provider === "commandcode" && body.apiKey) {
+      const trimmed = body.apiKey.trim();
+      if (!trimmed) return c.json({ error: "apiKey is empty" }, 400);
+
+      try {
+        const { email, metadata } = await activateCommandCodeKey(trimmed);
+        const encryptedKey = encrypt(trimmed);
+
+        const existing = await db.select().from(accounts)
+          .where(eq(accounts.email, email))
+          .then((rows) => rows.find((r) => r.provider === "commandcode"));
+
+        if (existing) {
+          await db.update(accounts).set({
+            password: encryptedKey,
+            status: "active",
+            tokens: null,
+            metadata: metadata as unknown,
+            errorMessage: null,
+            lastLoginAt: new Date(),
+            updatedAt: new Date(),
+          }).where(eq(accounts.id, existing.id));
+          pool.invalidate("commandcode");
+          broadcast({ type: "account_updated", data: { id: existing.id, provider: "commandcode", status: "active" } });
+          return c.json({ id: existing.id, provider: "commandcode", email, status: "active", updated: true }, 200);
+        }
+
+        const inserted = await db.insert(accounts).values({
+          provider: "commandcode",
+          email,
+          password: encryptedKey,
+          status: "active",
+          tokens: null,
+          metadata: metadata as unknown,
+          // /alpha/generate exposes no quota — use the -1 sentinel so warmup
+          // never flips the account to exhausted on a real positive limit.
+          quotaLimit: -1,
+          quotaRemaining: -1,
+          lastLoginAt: new Date(),
+        }).returning();
+        const created = inserted[0]!;
+        pool.invalidate("commandcode");
+        broadcast({ type: "account_created", data: { id: created.id, provider: "commandcode", email } });
+        return c.json({ ...created, password: "***", tokens: null }, 201);
+      } catch (error) {
+        const msg = error instanceof Error ? error.message : String(error);
+        return c.json({ error: `CommandCode key activation failed: ${msg}` }, 400);
       }
     }
 

@@ -8,6 +8,7 @@ import { QoderProvider } from "./qoder";
 import { ByokProvider } from "./byok";
 import { GitlabDuoProvider } from "./gitlab-duo";
 import { YouMindProvider } from "./youmind";
+import { CommandCodeProvider } from "./commandcode";
 import { GrokProvider } from "./grok";
 import { AlibabaProvider } from "./alibaba";
 import { AntigravityProvider } from "./antigravity";
@@ -46,6 +47,7 @@ const qoder = new QoderProvider();
 const byok = new ByokProvider();
 const gitlabDuo = new GitlabDuoProvider();
 const youmind = new YouMindProvider();
+const commandcode = new CommandCodeProvider();
 const alibaba = new AlibabaProvider();
 const antigravity = new AntigravityProvider();
 const cursor = new CursorProvider();
@@ -65,7 +67,7 @@ const openaiCompatibleProviders = createOpenAICompatibleProviders();
 // owns the `ym-*` prefix exclusively — also position-independent, but slotted
 // alongside the other prefix-based providers for readability.
 const PROVIDER_ORDER = [
-  gitlabDuo, canva, qoder, codex, kiroPro, youmind, grok, antigravity, cursor,
+  gitlabDuo, canva, qoder, codex, kiroPro, youmind, commandcode, grok, antigravity, cursor,
   ...openaiCompatibleProviders,
   byok, alibaba, codebuddyChina, codebuddy, kiro,
 ] as const;
@@ -81,6 +83,7 @@ export const providers = {
   byok,
   "gitlab-duo": gitlabDuo,
   youmind,
+  commandcode,
   alibaba,
   antigravity,
   cursor,
