@@ -40,25 +40,39 @@ export function registerListRoutes(router: Hono): void {
    * GET /api/accounts - List all accounts
    */
   router.get("/", async (c) => {
-    const allAccounts = await db.select().from(accounts);
+    const allAccounts = await db
+      .select({
+        id: accounts.id,
+        provider: accounts.provider,
+        email: accounts.email,
+        status: accounts.status,
+        enabled: accounts.enabled,
+        quotaLimit: accounts.quotaLimit,
+        quotaRemaining: accounts.quotaRemaining,
+        quotaResetAt: accounts.quotaResetAt,
+        freeLimit: accounts.freeLimit,
+        freeRemaining: accounts.freeRemaining,
+        freeResetAt: accounts.freeResetAt,
+        lastUsedAt: accounts.lastUsedAt,
+        lastLoginAt: accounts.lastLoginAt,
+        errorMessage: accounts.errorMessage,
+        metadata: accounts.metadata,
+        cooldownUntil: accounts.cooldownUntil,
+        consecutiveTransientFailures: accounts.consecutiveTransientFailures,
+        nextBackoffMs: accounts.nextBackoffMs,
+        consecutiveAuthErrors: accounts.consecutiveAuthErrors,
+        priority: accounts.priority,
+        consecutiveUseCount: accounts.consecutiveUseCount,
+        createdAt: accounts.createdAt,
+        updatedAt: accounts.updatedAt,
+        hasTokens: sql<number>`CASE WHEN ${accounts.tokens} IS NULL OR ${accounts.tokens} = '' THEN 0 ELSE 1 END`,
+      })
+      .from(accounts);
 
     // Don't expose passwords in response
     const sanitized = allAccounts.map((acc) => {
-      let tokensOut: unknown = null;
-      if (acc.tokens) {
-        if (acc.provider === "alibaba") {
-          // Alibaba tokens contain per-model quota data (non-sensitive).
-          // Try to parse from JSON string if needed.
-          if (typeof acc.tokens === "string") {
-            try { tokensOut = JSON.parse(acc.tokens); } catch { tokensOut = acc.tokens; }
-          } else {
-            tokensOut = acc.tokens;
-          }
-        } else {
-          tokensOut = "[set]";
-        }
-      }
-      return { ...acc, password: "***", tokens: tokensOut };
+      const { hasTokens, ...safeAccount } = acc;
+      return { ...safeAccount, password: "***", tokens: hasTokens ? "[set]" : null };
     });
 
     return c.json({ data: sanitized, total: sanitized.length });
