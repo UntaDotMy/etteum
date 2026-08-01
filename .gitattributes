@@ -1,0 +1,29 @@
+# Normalize all text files to LF for storage.
+* text=auto
+
+# Declare binary types explicitly — these must never be renormalized.
+*.png  -text
+*.jpg  -text
+*.jpeg -text
+*.gif  -text
+*.ico  -text
+*.webp -text
+*.woff -text
+*.woff2 -text
+*.ttf  -text
+*.otf  -text
+*.eot  -text
+*.pdf  -text
+*.zip  -text
+*.gz   -text
+*.tar  -text
+*.jar  -text
+*.exe  -text
+*.dll  -text
+*.pdb  -text
+*.pyc  -text
+*.so   -text
+*.dylib -text
+*.node -text
+*.db   -text
+*.sqlite -text
