@@ -428,6 +428,12 @@ export async function routeRequest(
           await pool.updateTokens(account.id, result.tokens);
         }
         if (!isStaticAccount) await pool.markUsed(account.id, providerName);
+        // Self-heal: an `error`-status row served via the error fallback
+        // succeeded — clear the error so it returns to the active pool
+        // immediately (no waiting for the next warmup tick).
+        if (!isStaticAccount && account.status === "error") {
+          await pool.clearError(account.id);
+        }
         // Successful stream: the caller owns the in-flight tracking now.
         if (stream && result.stream) handedStreamToCaller = true;
         return { result, account, provider: providerName, durationMs, compressionStats, compressedRequest };

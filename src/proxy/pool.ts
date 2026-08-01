@@ -263,7 +263,36 @@ class AccountPool {
   ): Promise<Account | null> {
     const activeAccounts = await this.getActiveAccounts(provider);
     const eligible = filterDispatchEligibleAccounts(activeAccounts, options.excludeAccountIds);
-    return this.pickFromEligible(provider, eligible, options);
+    if (eligible.length > 0) {
+      return this.pickFromEligible(provider, eligible, options);
+    }
+    // No active account: fall back to enabled `error`-status rows so a
+    // transiently-bad key is retried (it self-heals on success via the
+    // provider's post-request refresh / warmup), mirroring BYOK's fallback.
+    // Excludes accounts in cooldown and rows already attempted this request.
+    // Dispatch filter is intentionally NOT applied here: a stale local
+    // remaining=0 (e.g. commandcode's upstream-driven window) must not block
+    // retrying the key — the live request re-validates it.
+    const fallback = await db
+      .select()
+      .from(accounts)
+      .where(
+        and(
+          eq(accounts.provider, provider),
+          eq(accounts.status, "error"),
+          eq(accounts.enabled, true),
+          or(
+            isNull(accounts.cooldownUntil),
+            lt(accounts.cooldownUntil, new Date()),
+          ),
+        ),
+      )
+      .orderBy(asc(accounts.priority), desc(accounts.lastUsedAt));
+    const eligibleFallback = options.excludeAccountIds?.size
+      ? fallback.filter((a) => !options.excludeAccountIds!.has(a.id))
+      : fallback;
+    if (eligibleFallback.length === 0) return null;
+    return this.pickFromEligible(provider, eligibleFallback, options);
   }
 
   /**
@@ -921,6 +950,30 @@ class AccountPool {
       .from(accounts)
       .where(and(eq(accounts.provider, provider), eq(accounts.enabled, true)));
     return summarizePoolDepletion(rows, Date.now());
+  }
+
+  /**
+   * Clear an error-status account back to active (after a successful request
+   * served via the error fallback, or a successful re-validation).
+   */
+  async clearError(accountId: number): Promise<void> {
+    const [account] = await db
+      .update(accounts)
+      .set({
+        status: "active",
+        errorMessage: null,
+        consecutiveAuthErrors: 0,
+        cooldownUntil: null,
+        updatedAt: new Date(),
+      })
+      .where(eq(accounts.id, accountId))
+      .returning();
+    if (!account) return;
+    this.invalidate(account.provider as ProviderName);
+    broadcast({
+      type: "account_status",
+      data: { id: accountId, provider: account.provider, status: "active" },
+    });
   }
 
   /**

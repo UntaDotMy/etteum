@@ -395,10 +395,7 @@ export class CommandCodeProvider extends BaseProvider {
 
   /** Translate an OpenAI ChatCompletionRequest into the CommandCode envelope. */
   private buildRequestBody(request: ChatCompletionRequest, stream: boolean): Record<string, unknown> {
-    const messages = request.messages.map((msg: ChatMessage) => {
-      const content = typeof msg.content === "string" ? msg.content : JSON.stringify(msg.content ?? "");
-      return { role: msg.role === "tool" ? "tool" : msg.role, content };
-    });
+    const { messages, system } = this.toCommandCodeMessages(request.messages);
 
     const params: Record<string, unknown> = {
       model: request.model,
@@ -407,7 +404,9 @@ export class CommandCodeProvider extends BaseProvider {
       max_tokens: request.max_tokens ?? 4096,
       temperature: request.temperature ?? 0.3,
     };
-    if (request.tools?.length) params.tools = request.tools;
+    if (system) params.system = system;
+    const tools = this.toCommandCodeTools(request.tools);
+    if (tools) params.tools = tools;
     if (request.top_p != null) params.top_p = request.top_p;
 
     const today = new Date().toISOString().slice(0, 10);
@@ -427,6 +426,129 @@ export class CommandCodeProvider extends BaseProvider {
       },
       params,
     };
+  }
+
+  /**
+   * Convert OpenAI messages to the CommandCode /alpha/generate schema
+   * (ported from 9router openai-to-commandcode.js):
+   *  - system → top-level params.system (never a messages[] role)
+   *  - role: user/assistant/tool only; content is ALWAYS an array of blocks
+   *  - assistant tool_calls → { type: "tool-call", toolCallId, toolName, input }
+   *  - role: tool → { type: "tool-result", toolCallId, toolName, output:{type:"text",value} }
+   */
+  private toCommandCodeMessages(messages: ChatMessage[]): { messages: Record<string, unknown>[]; system: string } {
+    const out: Record<string, unknown>[] = [];
+    const systemTexts: string[] = [];
+
+    for (const m of messages) {
+      if (!m) continue;
+      if (m.role === "system") {
+        const t = this.flattenText(m.content);
+        if (t) systemTexts.push(t);
+        continue;
+      }
+      if (m.role === "tool") {
+        const value = this.flattenText(m.content);
+        out.push({
+          role: "tool",
+          content: [{
+            type: "tool-result",
+            toolCallId: m.tool_call_id || "",
+            toolName: (m as any).name || "",
+            output: { type: "text", value },
+          }],
+        });
+        continue;
+      }
+      if (m.role === "assistant") {
+        const blocks: Record<string, unknown>[] = [];
+        const text = this.flattenText(m.content);
+        if (text) blocks.push({ type: "text", text });
+        if (Array.isArray(m.tool_calls)) {
+          for (const tc of m.tool_calls) {
+            const fn = tc.function || {};
+            blocks.push({
+              type: "tool-call",
+              toolCallId: tc.id || "",
+              toolName: fn.name || "",
+              input: this.safeParseJson(fn.arguments),
+            });
+          }
+        }
+        out.push({ role: "assistant", content: blocks.length ? blocks : [{ type: "text", text: "" }] });
+        continue;
+      }
+      out.push({ role: "user", content: this.toContentBlocks(m.content) });
+    }
+
+    return { messages: out, system: systemTexts.join("\n\n") };
+  }
+
+  private flattenText(content: unknown): string {
+    if (content == null) return "";
+    if (typeof content === "string") return content;
+    if (Array.isArray(content)) {
+      const parts: string[] = [];
+      for (const p of content) {
+        if (typeof p === "string") parts.push(p);
+        else if (p && typeof p === "object" && typeof (p as any).text === "string") parts.push((p as any).text);
+      }
+      return parts.join("\n");
+    }
+    return String(content);
+  }
+
+  private toContentBlocks(content: unknown): Record<string, unknown>[] {
+    if (content == null) return [{ type: "text", text: "" }];
+    if (typeof content === "string") return [{ type: "text", text: content }];
+    if (Array.isArray(content)) {
+      const blocks: Record<string, unknown>[] = [];
+      for (const part of content) {
+        if (typeof part === "string") {
+          blocks.push({ type: "text", text: part });
+        } else if (part && typeof part === "object") {
+          const p = part as any;
+          if (p.type === "text" && typeof p.text === "string") {
+            blocks.push({ type: "text", text: p.text });
+          } else if (p.type === "image_url" || p.type === "image") {
+            blocks.push({ type: "text", text: "[image omitted]" });
+          } else if (typeof p.text === "string") {
+            blocks.push({ type: "text", text: p.text });
+          }
+        }
+      }
+      return blocks.length ? blocks : [{ type: "text", text: "" }];
+    }
+    return [{ type: "text", text: String(content) }];
+  }
+
+  private safeParseJson(s: unknown): unknown {
+    if (s == null) return {};
+    if (typeof s !== "string") return s;
+    try { return JSON.parse(s); } catch { return {}; }
+  }
+
+  /** Convert OpenAI tools to Anthropic plain { name, description, input_schema }. */
+  private toCommandCodeTools(tools: unknown): Record<string, unknown>[] | undefined {
+    if (!Array.isArray(tools) || tools.length === 0) return undefined;
+    const result: Record<string, unknown>[] = [];
+    for (const t of tools) {
+      if (!t) continue;
+      if (t.type === "function" && t.function) {
+        result.push({
+          name: t.function.name,
+          description: t.function.description,
+          input_schema: t.function.parameters || { type: "object" },
+        });
+      } else if (t.name && (t.input_schema || t.parameters)) {
+        result.push({
+          name: t.name,
+          description: t.description,
+          input_schema: t.input_schema || t.parameters,
+        });
+      }
+    }
+    return result.length ? result : undefined;
   }
 
   private async doGenerate(account: Account, request: ChatCompletionRequest, stream: boolean): Promise<Response> {
