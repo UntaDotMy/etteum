@@ -25,7 +25,7 @@ async function migrateSummary() {
   const result = await db.run(sql`
     INSERT INTO usage_summary (bucket, provider, model, api_key_id, total_requests, success_requests, error_requests, prompt_tokens, completion_tokens, total_tokens, credits_used, total_duration_ms, total_cost)
     SELECT
-      strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch') AS bucket,
+      strftime('%Y-%m-%dT%H:00:00.000Z', created_at/1000, 'unixepoch') AS bucket,
       COALESCE(provider, 'unknown') AS provider,
       COALESCE(model, 'unknown') AS model,
       COALESCE(api_key_id, 0) AS api_key_id,
@@ -39,7 +39,7 @@ async function migrateSummary() {
       COALESCE(SUM(duration_ms), 0) AS total_duration_ms,
       COALESCE(SUM(cost), 0) AS total_cost
     FROM request_logs
-    GROUP BY strftime('%Y-%m-%dT%H:00:00Z', created_at/1000, 'unixepoch'), COALESCE(provider, 'unknown'), COALESCE(model, 'unknown'), COALESCE(api_key_id, 0)
+    GROUP BY strftime('%Y-%m-%dT%H:00:00.000Z', created_at/1000, 'unixepoch'), COALESCE(provider, 'unknown'), COALESCE(model, 'unknown'), COALESCE(api_key_id, 0)
     ON CONFLICT (bucket, provider, model, api_key_id) DO UPDATE SET
       total_requests = usage_summary.total_requests + excluded.total_requests,
       success_requests = usage_summary.success_requests + excluded.success_requests,

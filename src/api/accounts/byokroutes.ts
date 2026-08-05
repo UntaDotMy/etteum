@@ -382,7 +382,12 @@ export function registerByokRoutes(router: Hono): void {
         loginQueue.cancelAccounts(removedKeyIds);
       }
 
-      await setByokLbMethod(prefix, normalizeByokLbMethod(body.load_balancing_method || currentTokens.load_balancing_method));
+      // Only overwrite the authoritative settings row when the caller explicitly
+      // provides a method — otherwise a partial PATCH would clobber a method set
+      // via the settings API back to round_robin.
+      if (body.load_balancing_method !== undefined) {
+        await setByokLbMethod(prefix, normalizeByokLbMethod(body.load_balancing_method));
+      }
       await refreshByokRuntime();
       broadcast({ type: "byok_updated", data: { id, label: prefix } });
 
@@ -396,6 +401,111 @@ export function registerByokRoutes(router: Hono): void {
       if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
       return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
     }
+  });
+
+  /**
+   * POST /api/accounts/byok/:id/keys - Append API keys to an existing BYOK provider group.
+   * Additive bulk-add: incoming keys that already exist on the group are skipped
+   * (idempotent retry-safe), a label that collides with a different stored secret
+   * is a 409 conflict, and all inserts run in one transaction.
+   */
+  router.post("/byok/:id/keys", async (c) => {
+    const id = Number(c.req.param("id"));
+    const body = await c.req.json<{ api_key?: string; api_keys?: ByokKeyInput[] }>();
+
+    const account = await db.select().from(accounts).where(eq(accounts.id, id)).get();
+    if (!account || account.provider !== "byok") {
+      return c.json({ error: "BYOK provider not found" }, 404);
+    }
+
+    const prefix = getByokPrefix(account);
+    const allByok = await db.select().from(accounts).where(eq(accounts.provider, "byok"));
+    const groupAccounts = allByok.filter((acc) => getByokPrefix(acc) === prefix);
+    const templateTokens = parseByokTokens(account.tokens);
+
+    // Within-batch normalization reuses the shared helper (rejects duplicate
+    // labels and duplicate key values inside the submitted batch).
+    let keyInputs: Array<{ label: string; key: string; weight?: number; priority?: number }>;
+    try {
+      keyInputs = normalizeByokKeys(body.api_keys, body.api_key);
+    } catch (error) {
+      return c.json({ error: error instanceof Error ? error.message : String(error) }, 400);
+    }
+    if (keyInputs.length === 0) {
+      return c.json({ error: "At least one API key is required" }, 400);
+    }
+
+    // Index the existing group by label and by decrypted secret so duplicates can
+    // be skipped and label conflicts detected without ever inserting a dupe.
+    const existingByLabel = new Map<string, { id: number; secret: string }>();
+    const existingBySecret = new Map<string, string>();
+    for (const acc of groupAccounts) {
+      const keyLabel = getByokKeyLabel(acc);
+      let secret = "";
+      try { secret = decrypt(acc.password); } catch { /* undecryptable row: match on label only */ }
+      existingByLabel.set(keyLabel, { id: acc.id, secret });
+      if (secret && !existingBySecret.has(secret)) existingBySecret.set(secret, keyLabel);
+    }
+
+    const results: Array<{ label: string; status: "added" | "duplicate"; id?: number }> = [];
+    let added = 0;
+    let skipped = 0;
+    const maxPriority = groupAccounts.reduce((max, acc) => {
+      const priority = Number(parseByokTokens(acc.tokens).priority);
+      return Number.isFinite(priority) ? Math.max(max, priority) : max;
+    }, -1);
+
+    try {
+      await db.transaction(async (tx) => {
+        for (const [index, keyInput] of keyInputs.entries()) {
+          const labelConflict = existingByLabel.get(keyInput.label);
+          if (labelConflict && labelConflict.secret && labelConflict.secret !== keyInput.key) {
+            throw new HttpError(409, `key label "${keyInput.label}" already exists with a different secret`);
+          }
+
+          const duplicateOf = labelConflict?.secret === keyInput.key
+            ? keyInput.label
+            : existingBySecret.get(keyInput.key);
+          if (duplicateOf !== undefined) {
+            results.push({ label: keyInput.label, status: "duplicate" });
+            skipped += 1;
+            continue;
+          }
+
+          const tokens: ByokTokensShape = {
+            ...templateTokens,
+            key_label: keyInput.label,
+            weight: keyInput.weight,
+            priority: Number.isFinite(Number(keyInput.priority)) ? Number(keyInput.priority) : maxPriority + index + 1,
+          };
+          const inserted = await tx.insert(accounts).values({
+            provider: "byok",
+            email: buildByokEmail(prefix, keyInput.label),
+            password: encrypt(keyInput.key),
+            status: "active",
+            enabled: true,
+            tokens,
+            quotaLimit: -1,
+            quotaRemaining: -1,
+          }).returning();
+
+          results.push({ label: keyInput.label, status: "added", id: inserted[0]?.id });
+          existingBySecret.set(keyInput.key, keyInput.label);
+          existingByLabel.set(keyInput.label, { id: inserted[0]?.id ?? -1, secret: keyInput.key });
+          added += 1;
+        }
+      });
+    } catch (error) {
+      if (error instanceof HttpError) return c.json({ error: error.message }, error.status);
+      return c.json({ error: error instanceof Error ? error.message : "Unknown error" }, 500);
+    }
+
+    if (added > 0) {
+      await refreshByokRuntime();
+      broadcast({ type: "byok_updated", data: { id, label: prefix } });
+    }
+
+    return c.json({ success: true, label: prefix, added, skipped, results });
   });
 
   /**

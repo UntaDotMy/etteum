@@ -627,7 +627,7 @@ export default function Accounts() {
   async function handleGrokSsoLogin() {
     const sso = grokSso.trim();
     if (!sso) { showError(new Error("Paste your grok.com SSO cookie value")); return; }
-    setYoumindBusy(true);
+    setGrokBusy(true);
     try {
       const res = await fetchApi<any>("/api/accounts", {
         method: "POST",
@@ -1096,6 +1096,16 @@ export default function Accounts() {
     if (!byokBulkKeysText.trim()) return;
     const lines = byokBulkKeysText.trim().split("\n");
     const newKeys: ByokFormKey[] = [];
+    const existingKeys = new Set(
+      byokForm.keys
+        .map((k) => (k.key && k.key !== BYOK_KEY_PLACEHOLDER ? k.key.trim() : ""))
+        .filter(Boolean)
+    );
+    const existingLabels = new Set(
+      byokForm.keys.map((k) => k.label.trim().toLowerCase()).filter(Boolean)
+    );
+    const batchKeys = new Set<string>();
+    let skippedDupes = 0;
     for (const line of lines) {
       const trimmed = line.trim();
       if (!trimmed) continue;
@@ -1116,15 +1126,27 @@ export default function Accounts() {
         }
       }
       if (!key) continue;
+      // Client-side duplicate guard: skip keys already staged or repeated in this paste.
+      if (existingKeys.has(key) || batchKeys.has(key)) { skippedDupes += 1; continue; }
       if (!label) label = `key-${newKeys.length + 1}`;
-      newKeys.push({ label, key, enabled: true });
+      let uniqueLabel = label;
+      let suffix = 2;
+      while (existingLabels.has(uniqueLabel) || newKeys.some((k) => k.label === uniqueLabel)) {
+        uniqueLabel = `${label}-${suffix++}`;
+      }
+      batchKeys.add(key);
+      newKeys.push({ label: uniqueLabel, key, enabled: true });
     }
-    if (newKeys.length === 0) return;
+    if (newKeys.length === 0) {
+      if (skippedDupes > 0) showSuccess(`Skipped ${skippedDupes} duplicate key(s)`);
+      return;
+    }
     // Add after existing keys
     setByokForm((form) => ({
       ...form,
       keys: [...form.keys.filter((k) => k.key || k.label !== "default"), ...newKeys],
     }));
+    if (skippedDupes > 0) showSuccess(`Skipped ${skippedDupes} duplicate key(s)`);
     setByokBulkKeysText("");
     setByokBulkKeysOpen(false);
   }

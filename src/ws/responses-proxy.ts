@@ -312,6 +312,11 @@ async function runPassthrough(
   }
   ws.data.turn!.upstream = upstream;
 
+  // Register the WS connection as in-flight so least_inflight balancing counts it
+  // and the account isn't over-selected while it serves a live stream. Released in
+  // the upstream `close` handler below (the single guaranteed teardown point).
+  pool.trackRequestStart(account.id);
+
   let sawTerminal = false;
   const markTerminal = () => { sawTerminal = true; };
 
@@ -350,6 +355,10 @@ async function runPassthrough(
       sendTerminalError(ws, responseId, "Upstream websocket closed before response.completed");
     }
     ws.data.turn = undefined;
+    // Release the in-flight slot and record use so round-robin/sticky rotation
+    // advances (lastUsedAt / consecutiveUseCount), mirroring the HTTP translate path.
+    pool.trackRequestEnd(account.id);
+    void pool.markUsed(account.id, "codex");
   });
 
   // If the client aborts (close/cancel), close the upstream.

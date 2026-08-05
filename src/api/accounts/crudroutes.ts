@@ -501,7 +501,9 @@ export function registerCrudRoutes(router: Hono): void {
     };
 
     // Parallel exchange (concurrency 8) so large pastes finish before client timeout.
-    const items = body.tokens;
+    // Dedupe first: duplicate tokens race the unique (provider,email) index, and the
+    // email derives from token.slice(10,18), so identical tokens silently overwrite.
+    const items = Array.from(new Set(body.tokens.map((t) => t.trim()).filter(Boolean)));
     let next = 0;
     const workers = Array.from({ length: Math.min(8, Math.max(1, items.length)) }, async () => {
       while (true) {
@@ -652,10 +654,30 @@ export function registerCrudRoutes(router: Hono): void {
       updatedAt: new Date(),
     };
 
-    if (body.status) updateData.status = body.status;
     if (typeof body.enabled === "boolean") updateData.enabled = body.enabled;
     if (body.tokens) updateData.tokens = body.tokens;
     if (body.password) updateData.password = encrypt(body.password);
+
+    // Prevent activating an account that has no usable credential: dispatch would
+    // then waste hops on guaranteed-fail requests until hysteresis re-parks it.
+    if (body.status === "active") {
+      const existing = await db.select().from(accounts).where(eq(accounts.id, id)).get();
+      if (!existing) return c.json({ error: "Account not found" }, 404);
+      const tokens = body.tokens !== undefined ? body.tokens : existing.tokens;
+      const password = body.password !== undefined ? body.password : existing.password;
+      const hasTokens = (() => {
+        if (tokens == null) return false;
+        if (typeof tokens === "string") return tokens.trim().length > 2 && tokens.trim() !== "{}";
+        if (typeof tokens === "object") return Object.keys(tokens as Record<string, unknown>).length > 0;
+        return false;
+      })();
+      const hasPassword = typeof password === "string" && password.trim().length > 0;
+      if (!hasTokens && !hasPassword) {
+        return c.json({ error: "Cannot set status to active: account has no tokens or credentials" }, 400);
+      }
+    }
+
+    if (body.status) updateData.status = body.status;
     if (body.quotaLimit !== undefined) updateData.quotaLimit = body.quotaLimit;
     if (body.quotaRemaining !== undefined) updateData.quotaRemaining = body.quotaRemaining;
     if (body.quotaResetAt) updateData.quotaResetAt = new Date(body.quotaResetAt);

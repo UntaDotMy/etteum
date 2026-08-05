@@ -611,7 +611,7 @@ export function mergeAccountsFromPack(packDir: string): MergeImportResult {
   let updated = 0;
   let skipped = 0;
   const errors: string[] = [];
-  const now = Math.floor(Date.now() / 1000);
+  const now = Date.now();
   // Within-pack dedup (same provider+email twice in export)
   const seenInPack = new Set<string>();
   const seenSubInPack = new Set<string>();

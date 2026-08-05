@@ -717,6 +717,7 @@ export class ByokProvider extends BaseProvider {
       model: actualModel,
       messages: request.messages,
       stream: true,
+      stream_options: { include_usage: true },
     };
     this.appendOptionalParams(body, request);
 
