@@ -105,6 +105,10 @@ export function registerAlibabaRoutes(router: Hono): void {
    * POST /api/accounts/alibaba/:id/reveal - Reveal a stored Alibaba API key.
    */
   router.post("/alibaba/:id/reveal", async (c) => {
+    // Secret disclosure: require local origin / CLI admin token.
+    const guard = adminGuardFromPeer(peerIpFromHonoContext(c), c.req.raw.headers, new URL(c.req.url).searchParams);
+    if (!guard.allowed) return c.json({ error: `Forbidden: ${guard.reason}` }, 403);
+
     const id = Number(c.req.param("id"));
     if (!Number.isFinite(id)) return c.json({ error: "Invalid account id" }, 400);
 

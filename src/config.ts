@@ -123,6 +123,13 @@ export const config = {
   // "API Error: Response stalled mid-stream". Comment/ping alone do not reset it.
   // Must stay well below both 255s (Bun) and 300s (Claude Code default). Set 0 to disable.
   sseHeartbeatMs: Number(process.env.POOLPROX_SSE_HEARTBEAT_MS) || 15_000,
+  // Abort a streaming upstream that sends headers then goes fully silent (no SSE
+  // data) for this long. fetchWithTimeout only bounds time-to-headers, so without
+  // this a stalled upstream body hangs the request forever and leaks the account's
+  // in-flight slot (released only in finalize). Only true upstream silence trips
+  // it — downstream keepalive heartbeats do NOT reset this timer. Default matches
+  // the per-provider STREAM_READ_TIMEOUT used by guarded providers (qoder/codebuddy).
+  streamReadTimeoutMs: Number(process.env.POOLPROX_STREAM_READ_TIMEOUT_MS) || 300_000,
   // ── GitLab Duo tunables ──────────────────────────────────────────────────
   // Defaults are tuned to handle the full task spectrum: short Q&A,
   // multi-minute reasoning, AND multi-hour agentic loops (e.g. autonomous

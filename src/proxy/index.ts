@@ -1040,7 +1040,29 @@ return new ReadableStream<Uint8Array>({
       );
       try {
         while (true) {
-          const { done, value } = await streamReader.read();
+          // Stall guard: abort if the upstream goes fully silent (no SSE data) for
+          // streamReadTimeoutMs. fetchWithTimeout only bounds time-to-headers, so a
+          // stalled body would otherwise hang forever and leak the in-flight slot.
+          // Errors to cancel the upstream reader; the finally below runs finalize(),
+          // which releases trackRequestEnd and closes the client stream cleanly.
+          const readPromise = streamReader.read();
+          let stallTimer: ReturnType<typeof setTimeout> | undefined;
+          const stallPromise = new Promise<never>((_, reject) => {
+            stallTimer = setTimeout(
+              () => reject(new Error(`Upstream stream stalled: no data for ${config.streamReadTimeoutMs}ms`)),
+              config.streamReadTimeoutMs,
+            );
+          });
+          let readResult;
+          try {
+            readResult = await Promise.race([readPromise, stallPromise]);
+          } catch (stallErr) {
+            if (stallTimer) clearTimeout(stallTimer);
+            try { await streamReader.cancel(stallErr); } catch { /* already closed */ }
+            throw stallErr;
+          }
+          if (stallTimer) clearTimeout(stallTimer);
+          const { done, value } = readResult;
           if (done) break;
           observe(value);
           controller.enqueue(value);

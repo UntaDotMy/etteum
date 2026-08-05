@@ -200,7 +200,10 @@ export class KiroProvider extends BaseProvider {
       const response = await this.makeRequest(tokens, request, false);
 
       if (response.status === 401 || response.status === 403) {
-        const refreshResult = await this.refreshToken(account);
+        // Route through the refresh coordinator so concurrent 401s dedupe and the
+        // rotated refresh token is the single winner (Kiro rotates RTs).
+        const { coordinatedRefresh } = await import("../../../auth/refresh-coordinator");
+        const refreshResult = await coordinatedRefresh(this, account);
         if (!refreshResult.success) {
           return { success: false, error: "Token expired and refresh failed" };
         }
@@ -259,7 +262,8 @@ export class KiroProvider extends BaseProvider {
       const response = await this.makeRequest(tokens, request, true);
 
       if (response.status === 401 || response.status === 403) {
-        const refreshResult = await this.refreshToken(account);
+        const { coordinatedRefresh } = await import("../../../auth/refresh-coordinator");
+        const refreshResult = await coordinatedRefresh(this, account);
         if (!refreshResult.success) {
           return { success: false, error: "Token expired and refresh failed" };
         }

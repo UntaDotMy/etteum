@@ -196,7 +196,7 @@ export class OpenAICompatibleProvider extends BaseProvider {
       return this.chatCompletionAnthropic(apiKey, model, request, true);
     }
 
-    const body = { ...request, model, stream: true };
+    const body = { ...request, model, stream: true, stream_options: { include_usage: true } };
     try {
       const resp = await this.fetchWithTimeout(`${this.spec.baseUrl}/chat/completions`, {
         method: "POST",
