@@ -1323,6 +1323,22 @@ export async function deleteByokProvider(id: number): Promise<{ success: boolean
   return fetchApi(`/api/accounts/byok/${id}`, { method: "DELETE" });
 }
 
+export async function addByokKeys(
+  id: number,
+  keys: Array<{ label?: string; key: string; enabled?: boolean }>
+): Promise<{
+  success: boolean;
+  label: string;
+  added: number;
+  skipped: number;
+  results: Array<{ label: string; status: "added" | "duplicate"; id?: number }>;
+}> {
+  return fetchApi(`/api/accounts/byok/${id}/keys`, {
+    method: "POST",
+    body: JSON.stringify({ api_keys: keys }),
+  });
+}
+
 export async function revealByokKey(
   id: number
 ): Promise<{ success: boolean; id: number; label: string; key: string }> {

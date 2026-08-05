@@ -4,8 +4,9 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Eye, EyeOff, FlaskConical, Key, Plus, RefreshCw, Save, Trash2, Zap } from "lucide-react";
+import { ArrowLeft, Eye, EyeOff, FlaskConical, Key, ListPlus, Plus, RefreshCw, Save, Trash2, Zap } from "lucide-react";
 import {
+  addByokKeys,
   deleteAccount,
   fetchByokProviders,
   revealByokKey,
@@ -53,6 +54,9 @@ export default function ByokAccountList() {
   const { prefix } = useParams<{ prefix: string }>();
   const navigate = useNavigate();
   const [saving, setSaving] = useState(false);
+  const [bulkAdding, setBulkAdding] = useState(false);
+  const [bulkOpen, setBulkOpen] = useState(false);
+  const [bulkText, setBulkText] = useState("");
   const [testingKey, setTestingKey] = useState<number | null>(null);
   const [revealingKey, setRevealingKey] = useState<string | null>(null);
   const [visibleSecrets, setVisibleSecrets] = useState<Set<string>>(new Set());
@@ -205,6 +209,56 @@ export default function ByokAccountList() {
 
   function showSuccess(text: string) { setMessage(text); setError(null); }
   function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
+
+  // Parse "label:key", "label key", or bare "key" lines from the bulk paste box.
+  function parseBulkLines(text: string): Array<{ label: string; key: string }> {
+    const parsed: Array<{ label: string; key: string }> = [];
+    for (const rawLine of text.split("\n")) {
+      const trimmed = rawLine.trim();
+      if (!trimmed) continue;
+      let label = "";
+      let key = "";
+      const colonIdx = trimmed.indexOf(":");
+      if (colonIdx > 0) {
+        label = trimmed.slice(0, colonIdx).trim();
+        key = trimmed.slice(colonIdx + 1).trim();
+      } else {
+        const spaceIdx = trimmed.indexOf(" ");
+        if (spaceIdx > 0) {
+          label = trimmed.slice(0, spaceIdx).trim();
+          key = trimmed.slice(spaceIdx + 1).trim();
+        } else {
+          key = trimmed;
+        }
+      }
+      if (!key) continue;
+      if (!label) label = `key-${parsed.length + 1}`;
+      parsed.push({ label, key });
+    }
+    return parsed;
+  }
+
+  async function handleBulkAdd() {
+    if (!provider) return;
+    const parsed = parseBulkLines(bulkText);
+    if (parsed.length === 0) return;
+    setBulkAdding(true);
+    try {
+      const res = await addByokKeys(provider.id, parsed.map((k) => ({ label: k.label, key: k.key, enabled: true })));
+      showSuccess(
+        res.skipped > 0
+          ? `Added ${res.added} key(s), skipped ${res.skipped} duplicate(s)`
+          : `Added ${res.added} key(s)`
+      );
+      setBulkText("");
+      setBulkOpen(false);
+      await mutate();
+    } catch (err) {
+      showError(err);
+    } finally {
+      setBulkAdding(false);
+    }
+  }
 
   async function removeKey(index: number) {
     const key = form.keys[index];
@@ -375,10 +429,37 @@ export default function ByokAccountList() {
       <Card className="border-[var(--border)]">
         <CardHeader className="flex flex-row items-center justify-between space-y-0">
           <CardTitle className="text-base">API Keys</CardTitle>
-          <Button variant="outline" size="sm" onClick={addKey}>
-            <Plus className="w-4 h-4 mr-2" /> Add Key
-          </Button>
+          <div className="flex items-center gap-2">
+            <Button variant="outline" size="sm" onClick={() => setBulkOpen((open) => !open)}>
+              <ListPlus className="w-4 h-4 mr-2" /> Bulk Add
+            </Button>
+            <Button variant="outline" size="sm" onClick={addKey}>
+              <Plus className="w-4 h-4 mr-2" /> Add Key
+            </Button>
+          </div>
         </CardHeader>
+        {bulkOpen && (
+          <div className="mx-6 mb-4 rounded-md border border-[var(--border)] bg-[var(--secondary)]/[0.06] p-3 space-y-2">
+            <textarea
+              value={bulkText}
+              onChange={(e) => setBulkText(e.target.value)}
+              placeholder={'main:sk-...\nbackup:sk-...\nsk-...'}
+              className="w-full h-28 rounded-md border border-[var(--border)] bg-[var(--background)] p-2 text-xs font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
+            />
+            <div className="flex items-center justify-between gap-2">
+              <p className="text-[10px] text-[var(--muted-foreground)]">
+                One key per line: <code className="bg-[var(--secondary)] px-1 rounded">label:key</code>, <code className="bg-[var(--secondary)] px-1 rounded">label key</code>, or just <code className="bg-[var(--secondary)] px-1 rounded">key</code>. Existing keys are skipped, never duplicated.
+              </p>
+              <div className="flex gap-1.5">
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => { setBulkText(""); setBulkOpen(false); }}>Cancel</Button>
+                <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleBulkAdd} disabled={bulkAdding || !bulkText.trim()}>
+                  {bulkAdding ? <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" /> : null}
+                  {bulkAdding ? "Adding..." : "Add Keys"}
+                </Button>
+              </div>
+            </div>
+          </div>
+        )}
         <CardContent className="p-0">
           <div className="overflow-x-auto">
             <table className="w-full">
