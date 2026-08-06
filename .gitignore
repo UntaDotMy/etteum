@@ -280,3 +280,6 @@ scripts/auth/ag_tokens.json
 # =============================================================================
 # .docker/
 # docker-compose.override.yml
+
+# stray empty artifact produced by a test run
+/file
