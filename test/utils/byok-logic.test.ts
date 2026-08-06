@@ -42,7 +42,7 @@ describe("parseBulkLines", () => {
 
   test("default label is treated as taken", () => {
     const out = parseBulkLines("sk-x", []);
-    expect(out[0].label).not.toBe(DEFAULT_KEY_LABEL);
+    expect(out[0]?.label).not.toBe(DEFAULT_KEY_LABEL);
   });
 
   test("label:key format is honored and lowercased", () => {
@@ -55,15 +55,15 @@ describe("parseBulkLines", () => {
 
   test("explicit label colliding with existing falls back to a free auto label", () => {
     const out = parseBulkLines("key-1:sk-other", ["key-1"]);
-    expect(out[0].label).toBe("key-2");
-    expect(out[0].key).toBe("sk-other");
+    expect(out[0]?.label).toBe("key-2");
+    expect(out[0]?.key).toBe("sk-other");
   });
 
   test("two identical explicit labels in one paste get distinct labels", () => {
     const out = parseBulkLines("dup:sk-a\ndup:sk-b");
-    expect(out[0].label).toBe("dup");
-    expect(out[1].label).not.toBe("dup"); // remapped to key-N
-    expect(out[1].key).toBe("sk-b");
+    expect(out[0]?.label).toBe("dup");
+    expect(out[1]?.label).not.toBe("dup"); // remapped to key-N
+    expect(out[1]?.key).toBe("sk-b");
   });
 
   test("skips blank lines and lines with no key", () => {

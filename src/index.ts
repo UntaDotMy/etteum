@@ -25,6 +25,7 @@ import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { autoRefreshScheduler } from "./auth/refresh-scheduler";
 import { db, client as sqliteClient } from "./db/index";
+import { markLiveDatabaseHeld } from "./lib/backup";
 import { apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { bootstrapFilterRules } from "./db/filter-bootstrap";
@@ -602,6 +603,11 @@ const server = Bun.serve({
   },
   websocket: websocketHandler,
 });
+
+// The server now holds the live DB open for its whole lifetime. Mark it so a
+// full-replace backup import refuses to swap the file out from under us (the
+// offline CLI import path never calls this and stays allowed).
+markLiveDatabaseHeld();
 
 console.log(`
 ╔══════════════════════════════════════════════════╗

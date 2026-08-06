@@ -221,6 +221,12 @@ export async function routeRequest(
     preferredAccountId?: number;
     /** Internal re-entry guard: combo/fusion expansions must not re-expand. */
     _skipComboExpansion?: boolean;
+    /**
+     * Optional out-param: every account id actually attempted is added to this
+     * set (in addition to the internal copy). Lets combo exclude the account
+     * that genuinely failed — not the liveness probe — on the next model.
+     */
+    attemptedAccountIdsOut?: Set<number>;
   }
 ): Promise<RouteResult> {
   // ── Combo expansion ──────────────────────────────────────────────────────────
@@ -391,7 +397,10 @@ export async function routeRequest(
         `No active accounts available for provider: ${providerName}`
       );
     }
-    if (account.id > 0) attemptedAccountIds.add(account.id);
+    if (account.id > 0) {
+      attemptedAccountIds.add(account.id);
+      options?.attemptedAccountIdsOut?.add(account.id);
+    }
 
     const startTime = Date.now();
     // For a successful STREAMING result we hand the live stream back to the

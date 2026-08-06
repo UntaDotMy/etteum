@@ -272,6 +272,17 @@ export function checkpointLiveDatabase(): void {
   }
 }
 
+/**
+ * True while this process holds the live DB open (i.e. the server is running).
+ * A full-replace import unlinks/renames the DB file; on POSIX that orphan-
+ * deletes the inode the live handle still writes to. The offline CLI import
+ * leaves this false, so it stays allowed there.
+ */
+let liveDbHeld = false;
+export function markLiveDatabaseHeld(): void {
+  liveDbHeld = true;
+}
+
 function countTables(dbPath: string): Record<string, number> {
   const counts: Record<string, number> = {};
   let db: Database | null = null;
@@ -774,6 +785,20 @@ export function applyBackupDir(packDir: string): ImportResult {
   const head = readFileSync(dbSrc).subarray(0, 16).toString("utf8");
   if (!head.startsWith("SQLite format 3")) {
     throw new Error("Backup database is not a valid SQLite file");
+  }
+
+  // Refuse a destructive full-replace while this process holds the DB open.
+  // unlink/rename on POSIX orphan-deletes the inode the live handle writes to;
+  // on Windows the file lock turns it into a confusing mid-import failure.
+  // The non-destructive alternative (merge) and the offline CLI import remain
+  // available.
+  if (liveDbHeld) {
+    throw new Error(
+      "Full database replace cannot run while the server is online — it would " +
+        "replace the database file out from under the live connection. " +
+        "Use mode=merge to append accounts without replacing the DB, or go offline: " +
+        "etteum stop → bun scripts/backup.ts import <zip> --yes → etteum start",
+    );
   }
 
   const root = projectRoot();

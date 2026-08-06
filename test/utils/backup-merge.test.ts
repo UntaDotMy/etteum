@@ -22,6 +22,8 @@ import {
   chooseMergeTokens,
   encryptionKeyFromEnvText,
   mergeAccountsFromPack,
+  applyBackupDir,
+  markLiveDatabaseHeld,
   oauthExpiresAtSec,
   BACKUP_FORMAT,
   BACKUP_VERSION,
@@ -523,6 +525,35 @@ describe("mergeAccountsFromPack", () => {
         rmSync(packDir3, { recursive: true, force: true });
       } catch {
         /* Windows may still hold a handle briefly */
+      }
+    }
+  });
+
+  test("full-replace import is refused while the live DB is held (running server)", () => {
+    process.env.ENCRYPTION_KEY = LIVE_KEY;
+    // This test file holds the live DB open via liveSqlite; marking it held
+    // simulates the running-server condition the guard protects against.
+    markLiveDatabaseHeld();
+    const dir = mkdtempSync(path.join(tmpdir(), "etteum-replace-guard-"));
+    writePack(
+      dir,
+      [
+        {
+          provider: markerProvider,
+          email: `replace-guard-${Date.now()}@example.com`,
+          password: encryptWithPassphrase("pw", PACK_KEY),
+          tokens: JSON.stringify({ refresh_token: "rt", auth_method: "oauth" }),
+        },
+      ],
+      PACK_KEY,
+    );
+    try {
+      expect(() => applyBackupDir(dir)).toThrow(/cannot run while the server is online/);
+    } finally {
+      try {
+        rmSync(dir, { recursive: true, force: true });
+      } catch {
+        /* ignore */
       }
     }
   });

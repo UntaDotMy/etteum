@@ -236,6 +236,11 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         const result = await routeRequest({ ...request, model: modelName }, request.stream ?? false, {
           excludeAccountIds: excludedAccounts,
           _skipComboExpansion: true,
+          // routeRequest re-selects its own account internally and does not
+          // mutate excludeAccountIds, so report the account it actually used.
+          // On failure that id lands in excludedAccounts below — the probe id
+          // (account.id) may be a different, innocent account.
+          attemptedAccountIdsOut: excludedAccounts,
         });
         broadcast({
           type: "combo_success",
@@ -243,7 +248,10 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         });
         return result;
       } catch (err: any) {
-        // Only now is the credential known-bad for the rest of this combo.
+        // Only now is the credential known-bad for the rest of this combo. The
+        // account routeRequest actually used was already added via
+        // attemptedAccountIdsOut; add the probe id too as a fallback in case
+        // routeRequest failed before selecting (its account is this probe).
         excludedAccounts.add(account.id);
         lastError = err?.message ?? String(err);
         lastErrorModel = modelSpec;
