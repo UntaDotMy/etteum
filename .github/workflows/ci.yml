@@ -37,6 +37,8 @@ jobs:
           test -f data/poolprox3.db
       - name: Run tests
         # Self-contained suite (own env vars + DI-mocked providers). Hard gate.
-        run: bun test
+        # --isolate gives each test file a fresh global so per-file DATABASE_PATH
+        # redirects and module state can't leak across files sharing a process.
+        run: bun test --isolate
       - name: Build dashboard
         run: bun run build
