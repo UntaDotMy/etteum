@@ -202,6 +202,11 @@ export async function refreshAlibabaModels(): Promise<void> {
   await alibaba.refreshModelsCache();
 }
 
+/** Refresh Grok's discovered model catalog from cli-chat-proxy /v1/models. */
+export async function refreshGrokModels(): Promise<void> {
+  await grok.refreshModelsCache();
+}
+
 /** F13: refresh dynamic compatible-node providers from the DB (call at boot + after node CRUD). */
 export async function refreshCompatibleNodes(): Promise<void> {
   await ensureCompatibleNodesLoaded();
