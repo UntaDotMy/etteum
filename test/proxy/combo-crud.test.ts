@@ -216,12 +216,11 @@ describe("deleteCombo", () => {
 // resolveCombo — combo-name parsing + enabled gating
 // ---------------------------------------------------------------------------
 describe("resolveCombo", () => {
-  test("returns null for a bare combo name (no slash → parseComboModel yields no combo)", async () => {
-    // A model with no "/" is treated as a plain model, not a combo reference.
-    // parseComboModel returns comboName=null, so resolveCombo short-circuits to
-    // null even if a combo with that exact name exists in the DB.
+  test("resolves a bare combo name (no slash) to its model chain", async () => {
+    // parseComboModel now returns the whole string as comboName for the bare
+    // form (documented: "combo-name" alone), so resolveCombo finds the chain.
     await createCombo(`${P}rc-bare`, ["a", "b"]);
-    expect(await resolveCombo(`${P}rc-bare`)).toBeNull();
+    expect(await resolveCombo(`${P}rc-bare`)).toEqual(["a", "b"]);
   });
 
   test("returns the model chain for a combo/alias string", async () => {
@@ -240,7 +239,7 @@ describe("resolveCombo", () => {
   });
 
   test("returns null for a model with no slash and no matching combo", async () => {
-    // No "/" means parseComboModel yields comboName=null — plain model, not a combo.
+    // No matching combo by that name → resolveCombo returns null (plain model).
     expect(await resolveCombo(`${P}rc-no-slash-nope`)).toBeNull();
   });
 });
@@ -262,16 +261,14 @@ describe("expandComboRequest", () => {
     expect(out).toBeNull();
   });
 
-  test("returns null for a bare combo name with no slash (parseComboModel gate)", async () => {
-    // The comment in combo.ts says `"combo-name" alone` should work, and
-    // expandComboRequest has explicit `alias || chain[0]` fallback code for the
-    // bare form — but parseComboModel returns comboName=null when there is no
-    // "/", so expandComboRequest returns null before that fallback can ever run.
-    // The bare-name branch is unreachable in the current code. This test pins
-    // the actual behavior (null); see suspected-bug note in notes.
+  test("expands a bare combo name (no slash) to the first chain model", async () => {
+    // Bare "combo-name" now resolves (parseComboModel returns the whole string
+    // as comboName); the empty alias falls back to chain[0] via alias || chain[0].
     await createCombo(`${P}ex-bare`, ["first", "second"]);
     const out = await expandComboRequest({ model: `${P}ex-bare`, messages: [] } as any);
-    expect(out).toBeNull();
+    expect(out?.expanded).toBe(true);
+    expect(out?.comboName).toBe(`${P}ex-bare`);
+    expect(out?.request.model).toBe("first");
   });
 
   test("expands combo/ with a trailing-slash empty alias to the first chain model", async () => {

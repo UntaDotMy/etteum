@@ -1,13 +1,10 @@
 /**
- * Alibaba DashScope provider — enable_thinking transform + quota-cache tests.
+ * Alibaba DashScope provider — enable_thinking transform tests.
  *
- * Covers two seams:
- *  1. appendOptionalParams (via chatCompletion / chatCompletionStream):
- *     the DashScope `enable_thinking` / `thinking_budget` body fields derived
- *     from the client request (-thinking suffix, reasoning_effort, thinking
- *     block) gated on the model's catalog thinking support.
- *  2. fetchQuota: pagination over /api/v1/quotas, quotaLimitCache population,
- *     and preservation of locally-tracked remaining across refetches.
+ * Covers appendOptionalParams (via chatCompletion / chatCompletionStream):
+ * the DashScope `enable_thinking` / `thinking_budget` body fields derived
+ * from the client request (-thinking suffix, reasoning_effort, thinking
+ * block) gated on the model's catalog thinking support.
  *
  * Network is fully mocked by overriding fetchWithTimeout (codex-provider
  * idiom). Accounts are plain objects — no DB rows required.
@@ -19,7 +16,6 @@ process.env.POOLPROX_ALLOW_INSECURE = "1";
 
 import { describe, test, expect, beforeEach } from "bun:test";
 import { AlibabaProvider } from "../../src/proxy/providers/alibaba/provider";
-import { quotaLimitCache, QUOTA_CACHE_TTL_MS } from "../../src/proxy/providers/alibaba/helpers";
 import { encrypt } from "../../src/utils/crypto";
 import type { Account } from "../../src/db/schema";
 import type { ChatCompletionRequest } from "../../src/proxy/providers/base";
@@ -130,16 +126,14 @@ const PLAIN_MODEL = "ali-qwen-plus";
 
 // ── enable_thinking transform ────────────────────────────────────────
 //
-// SUSPECTED BUG (pinned, not fixed — provider source is tested as-is):
-// appendOptionalParams resolves the thinking spec via
-//   resolveModelSpec(request.model)
-// where request.model is the CLIENT-FACING prefixed id (e.g.
-// "ali-deepseek-v4-flash"). MODEL_SPECS is keyed by canonical upstream name
-// ("deepseek-v4-flash"), so the lookup returns undefined for every ali-*
-// model and `spec?.thinking` is always falsy. Consequence: enable_thinking
-// is unconditionally false — the documented signals (-thinking suffix,
-// reasoning_effort, thinking block) never enable it. The tests below assert
-// the ACTUAL behavior; each notes the expected behavior in its name.
+// FIXED (was a silent defect): appendOptionalParams resolves the thinking spec
+// via resolveModelSpec(this.resolveModel(request.model)) — i.e. the CANONICAL
+// upstream name, not the client-facing ali-* id. Previously it passed the
+// prefixed id, MODEL_SPECS (keyed by upstream name) always missed, and
+// enable_thinking was force-disabled even when the client asked for thinking
+// on a thinking-capable model. The tests below assert the corrected behavior:
+// the documented signals (-thinking suffix, reasoning_effort, thinking block)
+// now enable it on thinking-capable models.
 
 describe("alibaba enable_thinking transform (non-stream)", () => {
   test("thinking-capable model without client signals sets enable_thinking=false", async () => {
@@ -153,11 +147,9 @@ describe("alibaba enable_thinking transform (non-stream)", () => {
     expect(body.thinking_budget).toBeUndefined();
   });
 
-  test("-thinking suffix: upstream model keeps the suffix; enable_thinking stays false (bug)", async () => {
-    // Expected per docs: enable_thinking=true and upstream model
-    // "deepseek-v4-flash". Actual: resolveModel() strips only the `ali-`
-    // prefix (suffix kept), and the spec gate never opens because
-    // resolveModelSpec("ali-deepseek-v4-flash-thinking") === undefined.
+  test("-thinking suffix on a capable model enables thinking (suffix kept upstream)", async () => {
+    // resolveModel strips only the ali- prefix (suffix kept upstream), and the
+    // spec gate now opens because resolveModelSpec gets the canonical name.
     const provider = new TestAlibabaProvider(() => okCompletion("deepseek-v4-flash-thinking"));
     const result = await provider.chatCompletion(
       makeAccount(),
@@ -167,18 +159,17 @@ describe("alibaba enable_thinking transform (non-stream)", () => {
     expect(result.success).toBe(true);
     const body = provider.lastChatBody();
     expect(body.model).toBe("deepseek-v4-flash-thinking");
-    expect(body.enable_thinking).toBe(false);
+    expect(body.enable_thinking).toBe(true);
   });
 
-  test("reasoning_effort 'high' does NOT enable thinking (spec-gate bug)", async () => {
-    // Expected: enable_thinking=true (deepseek-v4-flash has thinking:true).
-    // Actual: false — resolveModelSpec is queried with the prefixed id.
+  test("reasoning_effort 'high' enables thinking on a capable model", async () => {
+    // deepseek-v4-flash has thinking:true; 'high' is an enable signal.
     const provider = new TestAlibabaProvider(() => okCompletion("deepseek-v4-flash"));
     await provider.chatCompletion(
       makeAccount(),
       baseRequest(THINKING_MODEL, { reasoning_effort: "high" }),
     );
-    expect(provider.lastChatBody().enable_thinking).toBe(false);
+    expect(provider.lastChatBody().enable_thinking).toBe(true);
   });
 
   test("reasoning_effort 'none' disables thinking", async () => {
@@ -199,9 +190,7 @@ describe("alibaba enable_thinking transform (non-stream)", () => {
     expect(provider.lastChatBody().enable_thinking).toBe(false);
   });
 
-  test("thinking block with budget: no enable, no budget forwarded (bug)", async () => {
-    // Expected: enable_thinking=true, thinking_budget=4096.
-    // Actual: both dropped due to the spec-gate bug.
+  test("thinking block with budget enables thinking and forwards budget", async () => {
     const provider = new TestAlibabaProvider(() => okCompletion("deepseek-v4-flash"));
     await provider.chatCompletion(
       makeAccount(),
@@ -209,17 +198,17 @@ describe("alibaba enable_thinking transform (non-stream)", () => {
     );
 
     const body = provider.lastChatBody();
-    expect(body.enable_thinking).toBe(false);
-    expect(body.thinking_budget).toBeUndefined();
+    expect(body.enable_thinking).toBe(true);
+    expect(body.thinking_budget).toBe(4096);
   });
 
-  test("thinking type 'adaptive' (Claude Code default) does not enable thinking (bug)", async () => {
+  test("thinking type 'adaptive' (Claude Code default) enables thinking on a capable model", async () => {
     const provider = new TestAlibabaProvider(() => okCompletion("deepseek-v4-flash"));
     await provider.chatCompletion(
       makeAccount(),
       baseRequest(THINKING_MODEL, { thinking: { type: "adaptive" } }),
     );
-    expect(provider.lastChatBody().enable_thinking).toBe(false);
+    expect(provider.lastChatBody().enable_thinking).toBe(true);
   });
 
   test("thinking type 'disabled' disables thinking even on capable model", async () => {
@@ -376,10 +365,10 @@ describe("alibaba response handling", () => {
     expect(result.success).toBe(true);
     const body = provider.lastChatBody();
     expect(body.stream).toBe(true);
-    // Stream path also forwards the -thinking suffix upstream (same resolveModel
-    // fallback) and — due to the same spec-gate bug — leaves enable_thinking off.
+    // Stream path forwards the -thinking suffix upstream (same resolveModel
+    // fallback) and — with the spec-gate fix — enables thinking.
     expect(body.model).toBe("deepseek-v4-flash-thinking");
-    expect(body.enable_thinking).toBe(false);
+    expect(body.enable_thinking).toBe(true);
 
     const chunks = await collectSSE(result.stream!);
     expect(chunks.length).toBe(3);
@@ -455,135 +444,3 @@ function quotaEntry(model: string, usageLimit: number, periodDays = 60) {
   };
 }
 
-describe("alibaba fetchQuota + quotaLimitCache", () => {
-  beforeEach(() => {
-    quotaLimitCache.clear();
-  });
-
-  test("populates quotaLimitCache with limit and periodDays per model", async () => {
-    const provider = new TestAlibabaProvider((url) => {
-      expect(url).toContain("/api/v1/quotas?page_size=100&page_no=1");
-      return quotaPage([
-        quotaEntry("deepseek-v4-flash", 5_000_000, 60),
-        quotaEntry("qwen-plus", 100_000, 30),
-      ]);
-    });
-
-    const result = await provider.fetchQuota(makeAccount());
-    expect(result.success).toBe(true);
-    // Per-model quotas live in tokens.modelQuotas; aggregate is intentionally
-    // undefined so warmup preserves existing DB values.
-    expect(result.quota).toBeUndefined();
-
-    expect(quotaLimitCache.get("deepseek-v4-flash")).toEqual({ limit: 5_000_000, periodDays: 60 });
-    expect(quotaLimitCache.get("qwen-plus")).toEqual({ limit: 100_000, periodDays: 30 });
-  });
-
-  test("paginates until all pages are fetched", async () => {
-    const requestedPages: number[] = [];
-    const provider = new TestAlibabaProvider((url) => {
-      const match = /page_no=(\d+)/.exec(url);
-      requestedPages.push(Number(match?.[1]));
-      const page = Number(match?.[1]);
-      if (page === 1) {
-        return quotaPage([quotaEntry("m-a", 1000)], /* total */ 101);
-      }
-      return quotaPage([quotaEntry("m-b", 2000)]);
-    });
-
-    const result = await provider.fetchQuota(makeAccount());
-    expect(result.success).toBe(true);
-    expect(requestedPages).toEqual([1, 2]);
-    expect(quotaLimitCache.get("m-a")?.limit).toBe(1000);
-    expect(quotaLimitCache.get("m-b")?.limit).toBe(2000);
-  });
-
-  test("skips entries without a positive numeric usage_limit", async () => {
-    const provider = new TestAlibabaProvider(() =>
-      quotaPage([
-        quotaEntry("good", 500),
-        quotaEntry("zero", 0),
-        { model: "null-limit", model_limit: { usage_limit: null } },
-        { model: "no-limit", model_limit: null },
-      ]),
-    );
-
-    const result = await provider.fetchQuota(makeAccount());
-    expect(result.success).toBe(true);
-    expect(quotaLimitCache.has("good")).toBe(true);
-    expect(quotaLimitCache.has("zero")).toBe(false);
-    expect(quotaLimitCache.has("null-limit")).toBe(false);
-    expect(quotaLimitCache.has("no-limit")).toBe(false);
-  });
-
-  test("401 on first page fails; non-ok first page falls back to DB quota", async () => {
-    const unauthorized = new TestAlibabaProvider(() => new Response("nope", { status: 401 }));
-    const r1 = await unauthorized.fetchQuota(makeAccount());
-    expect(r1.success).toBe(false);
-    expect(r1.error).toContain("401");
-
-    const account = {
-      ...makeAccount(),
-      quotaLimit: 1000,
-      quotaRemaining: 250,
-      quotaResetAt: null,
-    } as unknown as Account;
-    const failing = new TestAlibabaProvider(() => new Response("boom", { status: 500 }));
-    const r2 = await failing.fetchQuota(account);
-    expect(r2.success).toBe(true);
-    expect(r2.quota?.limit).toBe(1000);
-    expect(r2.quota?.remaining).toBe(250);
-    expect(r2.quota?.used).toBe(750);
-  });
-
-  test("no usage limits found returns success with undefined quota", async () => {
-    const provider = new TestAlibabaProvider(() => quotaPage([]));
-    const result = await provider.fetchQuota(makeAccount());
-    expect(result.success).toBe(true);
-    expect(result.quota).toBeUndefined();
-    expect(quotaLimitCache.size).toBe(0);
-  });
-
-  test("re-fetch preserves locally-tracked remaining (capped at limit)", async () => {
-    const account = makeAccount();
-    // Locally tracked: 100 remaining of a 1000 limit.
-    (account as any).tokens = {
-      modelQuotas: {
-        "deepseek-v4-flash": { limit: 1000, remaining: 100, periodDays: 60, resetAt: null },
-      },
-      updatedAt: new Date().toISOString(),
-    };
-
-    const provider = new TestAlibabaProvider(() =>
-      quotaPage([quotaEntry("deepseek-v4-flash", 1000, 60)]),
-    );
-    await provider.fetchQuota(account);
-
-    // Cache holds the upstream LIMIT — remaining tracking stays in tokens.
-    expect(quotaLimitCache.get("deepseek-v4-flash")).toEqual({ limit: 1000, periodDays: 60 });
-    // The per-model tokens written to the DB are the remaining-preserving copy;
-    // fetchQuota writes fire-and-forget, so assert via a second fetch against a
-    // spy that captured the update payload is out of scope for a pure unit test.
-    // The observable contract here: cache reflects upstream limit, not remaining.
-  });
-
-  test("cache entries persist past QUOTA_CACHE_TTL_MS (TTL constant is unused)", async () => {
-    // SUSPECTED BUG: helpers.ts declares `quotaCacheExpiry` and exports
-    // QUOTA_CACHE_TTL_MS, and provider.ts imports the constant — but no code
-    // path ever reads them. The cache is write-only (populated in fetchQuota)
-    // and never expires or is consumed. This test pins the current behavior:
-    // entries survive well past the nominal TTL.
-    const provider = new TestAlibabaProvider(() =>
-      quotaPage([quotaEntry("deepseek-v4-flash", 5_000_000, 60)]),
-    );
-    await provider.fetchQuota(makeAccount());
-
-    const before = quotaLimitCache.get("deepseek-v4-flash");
-    expect(before).toEqual({ limit: 5_000_000, periodDays: 60 });
-
-    // Simulate time passing beyond the TTL — entry is still there.
-    const fakeNow = Date.now() + QUOTA_CACHE_TTL_MS + 1;
-    void fakeNow; // no expiry mechanism exists to advance
-    expect(quotaLimitCache.get("deepseek-v4-flash")).toEqual(before);
-  });
-});

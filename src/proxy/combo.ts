@@ -99,7 +99,11 @@ export async function toggleCombo(id: number, enabled: boolean) {
 // the whole string is both combo name and the default model.
 function parseComboModel(model: string): { comboName: string | null; alias: string } {
   const slash = model.indexOf("/");
-  if (slash < 0) return { comboName: null, alias: model };
+  // No "/" → the whole string is the combo name with no explicit alias; the
+  // empty alias falls back to the combo's first model downstream (documented:
+  // `"combo-name" alone`, e.g. "zero-cost"). Previously this returned
+  // comboName=null, making the documented bare form unreachable.
+  if (slash < 0) return { comboName: model, alias: "" };
   const comboName = model.slice(0, slash);
   const alias = model.slice(slash + 1);
   return { comboName, alias };
