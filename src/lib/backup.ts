@@ -219,7 +219,16 @@ export function chooseMergeTokens(
 function openStoredTokens(value: string | null | undefined, passphrase: string): string | null {
   if (value == null) return null;
   const stored = typeof value === "string" ? value : JSON.stringify(value);
-  return isGcm(stored) ? decryptWithPassphrase(stored, passphrase) : stored;
+  if (!isGcm(stored)) return stored;
+  // A row whose tokens were sealed under a different ENCRYPTION_KEY (e.g. a
+  // farm install re-keyed them) cannot be opened here. Skip it instead of
+  // throwing, or one undecryptable row aborts the whole merge — mirrors the
+  // tolerate-and-continue convention in reencryptSecret.
+  try {
+    return decryptWithPassphrase(stored, passphrase);
+  } catch {
+    return null;
+  }
 }
 
 /** Raw-SQL backup merge bypasses the ORM, so seal token JSON explicitly. */

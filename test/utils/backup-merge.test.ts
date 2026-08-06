@@ -468,4 +468,62 @@ describe("mergeAccountsFromPack", () => {
       }
     }
   });
+
+  test("merge skips live rows whose tokens are sealed under a different key", () => {
+    process.env.ENCRYPTION_KEY = LIVE_KEY;
+    const OTHER_KEY = "some-other-install-encryption-key-0123456789";
+    const badEmail = `merge-badkey-${Date.now()}@example.com`;
+    const goodEmail = `merge-goodkey-${Date.now()}@example.com`;
+    const packDir3 = mkdtempSync(path.join(tmpdir(), "etteum-merge-badkey-"));
+
+    // Live row sealed under a DIFFERENT key (as a re-keyed farm install leaves
+    // behind). openStoredTokens must skip it, not abort the whole merge.
+    const badSeed = liveSqlite
+      .query(
+        `INSERT INTO accounts (provider, email, password, status, enabled, tokens, priority, created_at, updated_at)
+         VALUES (?, ?, ?, 'active', 1, ?, 0, ?, ?) RETURNING id`,
+      )
+      .get(
+        markerProvider,
+        badEmail,
+        encryptWithPassphrase("pw", LIVE_KEY),
+        encryptWithPassphrase(JSON.stringify({ refresh_token: "foreign-rt", auth_method: "oauth" }), OTHER_KEY),
+        Math.floor(Date.now() / 1000),
+        Math.floor(Date.now() / 1000),
+      ) as { id: number };
+    createdIds.push(badSeed.id);
+
+    writePack(
+      packDir3,
+      [
+        {
+          provider: markerProvider,
+          email: goodEmail,
+          password: encryptWithPassphrase("pack-pw", PACK_KEY),
+          tokens: JSON.stringify({ refresh_token: "good-rt", auth_method: "oauth" }),
+        },
+      ],
+      PACK_KEY,
+    );
+
+    try {
+      const result = mergeAccountsFromPack(packDir3);
+      expect(result.ok).toBe(true);
+      // The good pack row still merges despite the undecryptable live row.
+      expect(result.inserted).toBe(1);
+      const row = liveSqlite
+        .query(`SELECT tokens FROM accounts WHERE provider = ? AND email = ?`)
+        .get(markerProvider, goodEmail) as { tokens: string };
+      createdIds.push(
+        (liveSqlite.query(`SELECT id FROM accounts WHERE email = ?`).get(goodEmail) as { id: number }).id,
+      );
+      expect(readEncryptedTokens(row.tokens).refresh_token).toBe("good-rt");
+    } finally {
+      try {
+        rmSync(packDir3, { recursive: true, force: true });
+      } catch {
+        /* Windows may still hold a handle briefly */
+      }
+    }
+  });
 });
