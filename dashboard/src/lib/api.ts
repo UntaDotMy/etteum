@@ -1436,3 +1436,10 @@ export async function fetchUpstreamModels(data: {
   });
 }
 
+/** Fetch the upstream model catalog for a saved BYOK provider using its stored key. */
+export async function fetchByokProviderModels(
+  id: number
+): Promise<{ models?: string[]; total?: number; error?: string; warning?: string }> {
+  return fetchApi(`/api/accounts/byok/${id}/fetch-models`, { method: "POST", body: JSON.stringify({}) });
+}
+

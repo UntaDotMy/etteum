@@ -4,10 +4,11 @@ import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
-import { ArrowLeft, Eye, EyeOff, FlaskConical, Key, ListPlus, Plus, RefreshCw, Save, Trash2, Zap } from "lucide-react";
+import { ArrowLeft, Download, Eye, EyeOff, FlaskConical, Key, ListPlus, Plus, RefreshCw, Save, Trash2, Zap } from "lucide-react";
 import {
   addByokKeys,
   deleteAccount,
+  fetchByokProviderModels,
   fetchByokProviders,
   revealByokKey,
   testByokProvider,
@@ -34,6 +35,7 @@ type KeyDraft = {
 };
 
 const MASK = "••••••••";
+const KEYS_PAGE_SIZE = 10;
 
 function emptyKey(index = 0): KeyDraft {
   return { label: index === 0 ? "default" : `key-${index + 1}`, key: "", enabled: true };
@@ -57,6 +59,9 @@ export default function ByokAccountList() {
   const [bulkAdding, setBulkAdding] = useState(false);
   const [bulkOpen, setBulkOpen] = useState(false);
   const [bulkText, setBulkText] = useState("");
+  const [showAllKeys, setShowAllKeys] = useState(false);
+  const [fetchingModels, setFetchingModels] = useState(false);
+  const [modelPicker, setModelPicker] = useState<{ options: string[]; selected: Set<string> } | null>(null);
   const [testingKey, setTestingKey] = useState<number | null>(null);
   const [revealingKey, setRevealingKey] = useState<string | null>(null);
   const [visibleSecrets, setVisibleSecrets] = useState<Set<string>>(new Set());
@@ -158,6 +163,12 @@ export default function ByokAccountList() {
 
   const models = useMemo(() => form.models.split(",").map((m) => m.trim()).filter(Boolean), [form.models]);
   const activeKeyCount = form.keys.filter((k) => k.enabled && k.status !== "error").length;
+  // Only cap the list when there is something worth collapsing.
+  const visibleKeys = useMemo(
+    () => (showAllKeys ? form.keys : form.keys.slice(0, KEYS_PAGE_SIZE)),
+    [form.keys, showAllKeys]
+  );
+  const hiddenKeyCount = form.keys.length - visibleKeys.length;
 
   function secretVisibilityId(key: KeyDraft, index: number) {
     return key.id ? `id-${key.id}` : `new-${index}`;
@@ -211,8 +222,22 @@ export default function ByokAccountList() {
   function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
 
   // Parse "label:key", "label key", or bare "key" lines from the bulk paste box.
+  // Bare keys auto-label from the first free key-N, counting existing labels,
+  // so repeat pastes never collide with key-1 and 409 the whole batch.
   function parseBulkLines(text: string): Array<{ label: string; key: string }> {
     const parsed: Array<{ label: string; key: string }> = [];
+    const taken = new Set<string>();
+    for (const k of provider?.keys || []) {
+      if (k.label) taken.add(k.label.toLowerCase());
+    }
+    taken.add("default"); // first manually-added key's label
+    let nextIndex = 1;
+    const nextFreeLabel = () => {
+      while (taken.has(`key-${nextIndex}`)) nextIndex++;
+      const label = `key-${nextIndex}`;
+      taken.add(label);
+      return label;
+    };
     for (const rawLine of text.split("\n")) {
       const trimmed = rawLine.trim();
       if (!trimmed) continue;
@@ -220,19 +245,27 @@ export default function ByokAccountList() {
       let key = "";
       const colonIdx = trimmed.indexOf(":");
       if (colonIdx > 0) {
-        label = trimmed.slice(0, colonIdx).trim();
+        label = trimmed.slice(0, colonIdx).trim().toLowerCase();
         key = trimmed.slice(colonIdx + 1).trim();
       } else {
         const spaceIdx = trimmed.indexOf(" ");
         if (spaceIdx > 0) {
-          label = trimmed.slice(0, spaceIdx).trim();
+          label = trimmed.slice(0, spaceIdx).trim().toLowerCase();
           key = trimmed.slice(spaceIdx + 1).trim();
         } else {
           key = trimmed;
         }
       }
       if (!key) continue;
-      if (!label) label = `key-${parsed.length + 1}`;
+      if (!label) {
+        label = nextFreeLabel();
+      } else if (taken.has(label)) {
+        // Explicit label already on the provider. A bare-key label would 409
+        // the batch, so fall back to a free auto label instead.
+        label = nextFreeLabel();
+      } else {
+        taken.add(label);
+      }
       parsed.push({ label, key });
     }
     return parsed;
@@ -258,6 +291,53 @@ export default function ByokAccountList() {
     } finally {
       setBulkAdding(false);
     }
+  }
+
+  // Pull the upstream model catalog using the provider's stored key, then offer
+  // only the models not already listed so adding never duplicates.
+  async function handleFetchModels() {
+    if (!provider) return;
+    setFetchingModels(true);
+    clearMessage();
+    try {
+      const res = await fetchByokProviderModels(provider.id);
+      if (res.error) {
+        showError(res.error);
+        return;
+      }
+      const existing = new Set(models.map((m) => m.toLowerCase()));
+      const fresh = (res.models || []).filter((m) => !existing.has(m.toLowerCase()));
+      if (fresh.length === 0) {
+        showSuccess(res.total ? `Already up to date, all ${res.total} upstream models are listed` : "No new models found upstream");
+        return;
+      }
+      setModelPicker({ options: fresh, selected: new Set(fresh) });
+    } catch (err) {
+      showError(err);
+    } finally {
+      setFetchingModels(false);
+    }
+  }
+
+  function toggleModelPick(model: string) {
+    setModelPicker((current) => {
+      if (!current) return current;
+      const selected = new Set(current.selected);
+      if (selected.has(model)) selected.delete(model);
+      else selected.add(model);
+      return { ...current, selected };
+    });
+  }
+
+  function addPickedModels() {
+    if (!modelPicker) return;
+    const picked = modelPicker.options.filter((m) => modelPicker.selected.has(m));
+    if (picked.length > 0) {
+      const merged = [...models, ...picked];
+      setForm((current) => ({ ...current, models: merged.join(", ") }));
+      showSuccess(`Added ${picked.length} model(s), save to apply`);
+    }
+    setModelPicker(null);
   }
 
   async function removeKey(index: number) {
@@ -419,9 +499,40 @@ export default function ByokAccountList() {
             </div>
           </div>
           <div className="space-y-1.5">
-            <label className="text-sm font-medium text-[var(--foreground)]">Models</label>
+            <div className="flex items-center justify-between gap-2">
+              <label className="text-sm font-medium text-[var(--foreground)]">Models</label>
+              <Button variant="outline" size="sm" className="h-7 text-xs" onClick={handleFetchModels} disabled={fetchingModels || !provider}>
+                {fetchingModels ? <RefreshCw className="w-3.5 h-3.5 mr-1 animate-spin" /> : <Download className="w-3.5 h-3.5 mr-1" />}
+                {fetchingModels ? "Fetching..." : "Fetch models"}
+              </Button>
+            </div>
             <textarea value={form.models} onChange={(e) => setForm({ ...form, models: e.target.value })} className="w-full h-24 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-sm font-mono text-[var(--foreground)]" placeholder="gpt-4o, claude-sonnet, llama-3" />
             <p className="text-xs text-[var(--muted-foreground)]">Comma-separated model IDs. Public model IDs become <span className="font-mono">{prefix || "prefix"}-model</span>.</p>
+            {modelPicker && (
+              <div className="rounded-md border border-[var(--border)] bg-[var(--secondary)]/[0.06] p-3 space-y-2">
+                <div className="flex items-center justify-between gap-2">
+                  <p className="text-xs font-medium text-[var(--foreground)]">{modelPicker.options.length} new model(s) upstream</p>
+                  <div className="flex gap-2">
+                    <button type="button" className="text-xs text-[var(--info)] hover:underline" onClick={() => setModelPicker((c) => c && { ...c, selected: new Set(c.options) })}>Select all</button>
+                    <button type="button" className="text-xs text-[var(--muted-foreground)] hover:underline" onClick={() => setModelPicker((c) => c && { ...c, selected: new Set() })}>None</button>
+                  </div>
+                </div>
+                <div className="max-h-44 overflow-y-auto rounded border border-[var(--border)] bg-[var(--background)]">
+                  {modelPicker.options.map((model) => (
+                    <label key={model} className="flex cursor-pointer items-center gap-2 border-b border-[var(--border)] px-2.5 py-1.5 text-xs font-mono text-[var(--foreground)] last:border-0 hover:bg-[var(--secondary)]/40">
+                      <input type="checkbox" checked={modelPicker.selected.has(model)} onChange={() => toggleModelPick(model)} className="accent-[var(--primary)]" />
+                      {model}
+                    </label>
+                  ))}
+                </div>
+                <div className="flex justify-end gap-1.5">
+                  <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setModelPicker(null)}>Cancel</Button>
+                  <Button variant="outline" size="sm" className="h-7 text-xs" onClick={addPickedModels} disabled={modelPicker.selected.size === 0}>
+                    Add {modelPicker.selected.size > 0 ? modelPicker.selected.size : ""} selected
+                  </Button>
+                </div>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
@@ -474,7 +585,7 @@ export default function ByokAccountList() {
                 </tr>
               </thead>
               <tbody>
-                {form.keys.map((key, index) => {
+                {visibleKeys.map((key, index) => {
                   const visibilityId = secretVisibilityId(key, index);
                   const secretVisible = visibleSecrets.has(visibilityId);
                   return (
@@ -531,6 +642,16 @@ export default function ByokAccountList() {
                 })}
               </tbody>
             </table>
+            {form.keys.length > KEYS_PAGE_SIZE && (
+              <div className="flex items-center justify-between gap-2 border-t border-[var(--border)] bg-[var(--secondary)]/[0.05] px-4 py-2">
+                <p className="text-xs text-[var(--muted-foreground)]">
+                  Showing {visibleKeys.length} of {form.keys.length} keys
+                </p>
+                <Button variant="ghost" size="sm" className="h-7 text-xs" onClick={() => setShowAllKeys((v) => !v)}>
+                  {showAllKeys ? "Show less" : `Show all ${form.keys.length}`}
+                </Button>
+              </div>
+            )}
           </div>
         </CardContent>
       </Card>
