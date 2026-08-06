@@ -336,10 +336,33 @@ managementRouter.post("/settings", async (c) => {
   }
   return c.json({ success: true });
 });
+// Secret-bearing fields redacted from settings reads: the read route is
+// pool-key-gated while writes are peer-admin-guarded, so a reader must not be
+// able to pull a stored credential (e.g. the OIDC clientSecret) back out.
+const SETTINGS_SECRET_FIELDS = new Set(["clientSecret", "client_secret", "secret", "clientSecretValue"]);
+
+export function redactSettingsValue(key: string, value: string): string {
+  if (key !== "oidc_config") return value;
+  try {
+    const parsed = JSON.parse(value) as Record<string, unknown>;
+    let changed = false;
+    for (const field of Object.keys(parsed)) {
+      if (SETTINGS_SECRET_FIELDS.has(field) && parsed[field]) {
+        parsed[field] = "***";
+        changed = true;
+      }
+    }
+    return changed ? JSON.stringify(parsed) : value;
+  } catch {
+    return value;
+  }
+}
+
 managementRouter.get("/settings/:key", async (c) => {
   const { settings } = await import("../db/schema");
-  const [row] = await db.select().from(settings).where(eq(settings.key, c.req.param("key")));
-  return c.json({ value: row?.value ?? null });
+  const key = c.req.param("key");
+  const [row] = await db.select().from(settings).where(eq(settings.key, key));
+  return c.json({ value: row?.value != null ? redactSettingsValue(key, row.value) : null });
 });
 
 // --- Media provider catalog (vendor list for the dashboard Media page) ---
