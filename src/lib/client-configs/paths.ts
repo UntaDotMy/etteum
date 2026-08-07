@@ -7,7 +7,10 @@ import * as os from "node:os";
 import { existsSync } from "node:fs";
 import type { ClientTarget } from "./types";
 
-const homeDir = os.homedir();
+// ETTEUM_HOME is a test/CI seam: os.homedir() ignores $HOME on Linux (it
+// reads the passwd entry), so tests cannot redirect the home dir through env
+// alone. Production never sets this; test harnesses point it at a temp dir.
+const homeDir = process.env.ETTEUM_HOME || os.homedir();
 
 /** Resolve ~ to the actual home directory on all platforms. */
 function home(...segments: string[]): string {
