@@ -207,6 +207,36 @@ export async function refreshGrokModels(): Promise<void> {
   await grok.refreshModelsCache();
 }
 
+/** Refresh Qoder's discovered model catalog from GET /algo/api/v2/model/list. */
+export async function refreshQoderModels(): Promise<void> {
+  await qoder.refreshModelsCache();
+}
+
+/** Refresh CodeBuddy's discovered model catalog from GET {base}/v2/models. */
+export async function refreshCodebuddyModels(): Promise<void> {
+  await codebuddy.refreshModelsCache();
+}
+
+/** Refresh CodeBuddy China's discovered model catalog from GET {base}/v2/models. */
+export async function refreshCodebuddyChinaModels(): Promise<void> {
+  await codebuddyChina.refreshModelsCache();
+}
+
+/** Refresh Codex's discovered model catalog from chatgpt.com /codex/models. */
+export async function refreshCodexModels(): Promise<void> {
+  await codex.refreshModelsCache();
+}
+
+/** Refresh Antigravity's discovered model catalog from fetchAvailableModels. */
+export async function refreshAntigravityModels(): Promise<void> {
+  await antigravity.refreshModelsCache();
+}
+
+/** Refresh YouMind's discovered model catalog from the anthropic /v1/models relay. */
+export async function refreshYoumindModels(): Promise<void> {
+  await youmind.refreshModelsCache();
+}
+
 /** F13: refresh dynamic compatible-node providers from the DB (call at boot + after node CRUD). */
 export async function refreshCompatibleNodes(): Promise<void> {
   await ensureCompatibleNodesLoaded();

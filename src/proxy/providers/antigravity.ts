@@ -27,6 +27,9 @@ import {
   type ProviderResult,
 } from "./base";
 import type { Account } from "../../db/schema";
+import { db } from "../../db/index";
+import { accounts } from "../../db/schema";
+import { eq, and } from "drizzle-orm";
 import { config } from "../../config";
 import { applyModelSpecs, resolveModelSpec } from "../model-specs";
 import { safeJsonParse } from "../../utils/safe-json";
@@ -230,8 +233,87 @@ export function extractGeminiParts(parts: any[]): { text: string; reasoning: str
 export class AntigravityProvider extends BaseProvider {
   name = "antigravity";
 
+  /**
+   * Live-discovered catalog from fetchAvailableModels, refreshed at boot
+   * (refreshAntigravityModels) and on a 6h TTL. Listed in /v1/models so the
+   * full upstream Gemini catalog is usable without manual additions. Additive:
+   * merged over the curated supportedModels (curated wins on id collision).
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private discoveryExpiry = 0;
+  private readonly DISCOVERY_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
   override ownsModel(model: string): boolean {
-    return model.toLowerCase().startsWith("ag-");
+    if (model.toLowerCase().startsWith("ag-")) return true;
+    return this.liveModelIds.has(model.toLowerCase());
+  }
+
+  /** Full list = curated (verified specs/credit rates) + live-discovered. */
+  override getModels(): ModelInfo[] {
+    if (this.liveModels.length === 0) return this.supportedModels;
+    const seen = new Set(this.supportedModels.map((m) => m.id));
+    const merged = [...this.supportedModels];
+    for (const m of this.liveModels) {
+      if (!seen.has(m.id)) { merged.push(m); seen.add(m.id); }
+    }
+    return merged;
+  }
+
+  /**
+   * Discover the full upstream Gemini catalog via fetchAvailableModels from the
+   * first active+enabled antigravity account. Additive: curated agModelMap ids
+   * win on collision (verified specs); only ag-<name> ids not already curated
+   * are appended. Never throws — on any failure the existing state is kept.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() < this.discoveryExpiry && this.liveModels.length > 0) return;
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "antigravity"), eq(accounts.enabled, true), eq(accounts.status, "active")));
+      const account = rows[0];
+      if (!account) return;
+
+      // Fresh bearer + bound projectId (same path the health check uses).
+      const { tokens } = await this.ensureAuth(account);
+      const resp = await this.fetchWithTimeout(AG_MODELS_URL, {
+        method: "POST",
+        headers: this.apiHeaders(tokens),
+        body: JSON.stringify({}),
+      }, config.providerQuotaTimeoutMs);
+      if (!resp.ok) return;
+      const data: any = await resp.json().catch(() => ({}));
+      const upstreamModels = parseModelsResponse(data);
+
+      const known = new Set(Object.keys(agModelMap));
+      const discovered: ModelInfo[] = [];
+      for (const upstream of upstreamModels) {
+        const id = `ag-${upstream}`;
+        if (known.has(id)) continue; // curated already covers it (verified spec)
+        const spec = resolveModelSpec(upstream); // fill real specs where known
+        discovered.push({
+          id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "antigravity",
+          context_window: spec?.contextWindow ?? 0,
+          max_output: spec?.maxOutput ?? 0,
+          thinking: spec?.thinking ?? false,
+          vision: spec?.vision ?? false,
+          creditUnit: "credit",
+          creditRate: 0.01 / 1000,
+          creditSource: "estimated",
+        });
+      }
+
+      this.liveModels = discovered;
+      this.liveModelIds = new Set(discovered.map((m) => m.id.toLowerCase()));
+      this.discoveryExpiry = Date.now() + this.DISCOVERY_TTL_MS;
+    } catch (e) {
+      console.error("[antigravity] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
   }
 
   supportedModels: ModelInfo[] = applyModelSpecs([

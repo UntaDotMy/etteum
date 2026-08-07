@@ -24,6 +24,13 @@ export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
 export const CODEX_TOKEN_URL = "https://auth.openai.com/oauth/token";
 export const CODEX_RESPONSES_URL = "https://chatgpt.com/backend-api/codex/responses";
 export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
+/**
+ * Live model catalog endpoint (the same one the Codex CLI queries). Returns
+ * `{ models: [...] }` (or `{ data: [...] }`) of the slugs this ChatGPT account
+ * may actually use. client_version mirrors the CLI (see makeRequest UA).
+ */
+export const CODEX_MODELS_URL =
+  "https://chatgpt.com/backend-api/codex/models?client_version=1.0.18";
 
 /**
  * Parse an upstream 429 reset hint into a Date / ms pair. Codex returns either

@@ -8,9 +8,12 @@ import {
   type ProviderResult,
 } from "../base";
 import type { Account } from "../../../db/schema";
+import { db } from "../../../db/index";
+import { accounts } from "../../../db/schema";
+import { eq, and } from "drizzle-orm";
 import { decrypt } from "../../../utils/crypto";
 import { normalizeMessagesToOpenAI } from "../../transforms/anthropic";
-import { applyModelSpecs } from "../../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
 import { getUpstreamNameOverride } from "../custom-models";
 import { safeJsonParse } from "../../../utils/safe-json";
 import {
@@ -42,7 +45,9 @@ export class YouMindProvider extends BaseProvider {
   override nativeFormat: "openai" | "anthropic" = "openai";
 
   override ownsModel(model: string): boolean {
-    return model.toLowerCase().startsWith("ym-");
+    if (model.toLowerCase().startsWith("ym-")) return true;
+    // Live-discovered catalog ids (auto-fetched from the anthropic /v1/models relay).
+    return this.liveModelIds.has(model.toLowerCase());
   }
 
   supportedModels: ModelInfo[] = applyModelSpecs(YM_MODELS.map((m) => ({
@@ -58,6 +63,95 @@ export class YouMindProvider extends BaseProvider {
     creditRate: m.creditRate,
     creditSource: "estimated" as const,
   })), (m) => m.id.replace(/^ym-/, ""));
+
+  /**
+   * Live-discovered catalog from GET /openapi/v1/chat/anthropic/v1/models,
+   * refreshed at boot (refreshYoumindModels) and on a 6h TTL. These are the
+   * upstream ids served under the `ym-` prefix; curated entries always win on
+   * conflicts (they carry verified specs + credit rates). Falls back to the
+   * curated supportedModels when empty/unreachable. Never throws.
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private catalogFetchedAt = 0;
+  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+  /** Full list = curated (verified specs/rates) + live-discovered upstream ids. */
+  override getModels(): ModelInfo[] {
+    if (this.liveModels.length === 0) return this.supportedModels;
+    const seen = new Set(this.supportedModels.map((m) => m.id.toLowerCase()));
+    const merged = [...this.supportedModels];
+    for (const m of this.liveModels) {
+      if (!seen.has(m.id.toLowerCase())) { merged.push(m); seen.add(m.id.toLowerCase()); }
+    }
+    return merged;
+  }
+
+  override getModelInfo(model: string): ModelInfo | undefined {
+    const normalized = model.toLowerCase();
+    const curated = this.supportedModels.find((m) => m.id.toLowerCase() === normalized);
+    if (curated) return curated;
+    return this.liveModels.find((m) => m.id.toLowerCase() === normalized);
+  }
+
+  /**
+   * Refresh the live model catalog from the first active+enabled youmind
+   * account's API key. Additive: curated supportedModels always win on id
+   * conflicts so verified specs never regress. Failures are non-fatal — the
+   * curated list remains served. Never throws.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() - this.catalogFetchedAt < YouMindProvider.CATALOG_TTL_MS && this.liveModels.length > 0) {
+      return; // fresh enough
+    }
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "youmind"), eq(accounts.enabled, true), eq(accounts.status, "active")))
+        .limit(1);
+      const account = rows[0];
+      if (!account) return; // no active account → keep curated fallback
+      const apiKey = this.getApiKey(account).trim();
+      if (!apiKey) return;
+
+      const res = await fetch(ANTHROPIC_MODELS_URL, {
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (!res.ok) return;
+      const data = (await res.json().catch(() => null)) as { data?: Array<{ id?: string }> } | null;
+      const upstreamModels = Array.isArray(data?.data) ? data.data : [];
+
+      const curated = new Set(this.supportedModels.map((m) => m.id.toLowerCase()));
+      const discovered: ModelInfo[] = [];
+      for (const m of upstreamModels) {
+        const upstream = typeof m?.id === "string" ? m.id.trim() : "";
+        if (!upstream) continue;
+        // Expose under the ym- prefix (skip if the upstream id is already prefixed).
+        const id = upstream.toLowerCase().startsWith("ym-") ? upstream : `ym-${upstream}`;
+        if (curated.has(id.toLowerCase())) continue; // curated already covers it (verified spec)
+        const spec = resolveModelSpec(upstream); // fill real specs where known
+        discovered.push({
+          id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "youmind",
+          context_window: spec?.contextWindow ?? 0,
+          max_output: spec?.maxOutput ?? 0,
+          thinking: spec?.thinking ?? /-thinking$/i.test(upstream),
+          vision: spec?.vision ?? false,
+          creditUnit: "token" as const,
+          creditRate: 0.009 / 1000, // fallback rate; curated models keep their real rate
+          creditSource: "estimated" as const,
+        });
+      }
+      this.liveModels = discovered;
+      this.liveModelIds = new Set(discovered.map((m) => m.id.toLowerCase()));
+      this.catalogFetchedAt = Date.now();
+    } catch (e) {
+      console.error("[youmind] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
+  }
 
   // ── Helpers ────────────────────────────────────────────────────────
 

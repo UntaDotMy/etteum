@@ -8,10 +8,13 @@ import {
   type ProviderResult,
 } from "../base";
 import type { Account } from "../../../db/schema";
+import { db } from "../../../db/index";
+import { accounts } from "../../../db/schema";
+import { eq, and } from "drizzle-orm";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { applyModelSpecs } from "../../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
 import { getUpstreamNameOverride } from "../custom-models";
 import {
   ACTIVITY_URL,
@@ -28,6 +31,7 @@ import {
   CUSTOM_PAD,
   JOB_TOKEN_URL,
   MODEL_CONFIGS,
+  MODEL_LIST_URL,
   QODER_MODELS,
   QOTA_USAGE_URL,
   S2C,
@@ -73,6 +77,8 @@ import type {
   QoderActivity,
   QoderActivitySnapshot,
   QoderModelDef,
+  QoderModelListEntry,
+  QoderModelListResponse,
   QoderTokens,
   SessionContext,
   ToolCallAcc,
@@ -81,9 +87,132 @@ import type {
 export class QoderProvider extends BaseProvider {
   name = "qoder";
 
+  /**
+   * Live-discovered catalog from GET /algo/api/v2/model/list (COSY-signed).
+   * Falls back to the curated QODER_MODELS when empty/unreachable. Refreshed
+   * at boot (refreshQoderModels) and on a TTL so new upstream models appear
+   * without manual additions. Curated entries always win on id collision.
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private catalogFetchedAt = 0;
+  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
   override ownsModel(model: string): boolean {
-    return model.toLowerCase().startsWith("qd-");
+    const m = model.toLowerCase();
+    if (m.startsWith("qd-")) return true;
+    // Live-discovered catalog ids (auto-fetched from /algo/api/v2/model/list).
+    if (this.liveModelIds.has(m)) return true;
+    return false;
   }
+
+  /** Full list = curated (with specs/credit rates) + live-discovered catalog. */
+  override getModels(): ModelInfo[] {
+    if (this.liveModels.length === 0) return this.supportedModels;
+    const seen = new Set(this.supportedModels.map((m) => m.id));
+    const merged = [...this.supportedModels];
+    for (const m of this.liveModels) {
+      if (!seen.has(m.id)) {
+        merged.push(m);
+        seen.add(m.id);
+      }
+    }
+    return merged;
+  }
+
+  /**
+   * Refresh the live model catalog from the first active+enabled qoder
+   * account via GET /algo/api/v2/model/list (COSY-signed GET — the same
+   * machinery as fetchActivityQuota). Additive: always union with the curated
+   * supportedModels so routing for known ids never regresses if the upstream
+   * list is partial. Never throws.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() - this.catalogFetchedAt < QoderProvider.CATALOG_TTL_MS && this.liveModels.length > 0) {
+      return; // fresh enough
+    }
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "qoder"), eq(accounts.enabled, true), eq(accounts.status, "active")))
+        .limit(1);
+      const account = rows[0];
+      if (!account) return; // no active account → keep curated fallback
+      const parsed = this.parseTokens(account);
+      if (!parsed || !hasQoderCredentials(parsed)) return;
+      const { tokens } = await this.ensureFreshAuth(parsed);
+      if (!tokens.securityOauthToken) return;
+
+      const entries = await this.fetchModelList(tokens);
+      if (!entries) {
+        // unreachable / bad response — keep what we have; bump freshness clock.
+        this.catalogFetchedAt = Date.now();
+        return;
+      }
+
+      // Dedupe against BOTH the curated proxy ids (qd-Qwen3.7-Max) and the
+      // curated upstream keys (qmodel_latest) — the upstream list speaks keys,
+      // so a curated model whose friendly id differs from its key would
+      // otherwise surface twice under /v1/models.
+      const curatedIds = new Set(this.supportedModels.map((m) => m.id));
+      const curatedKeys = new Set(QODER_MODELS.map((m) => m.upstream.toLowerCase()));
+      const live: ModelInfo[] = [];
+      for (const entry of entries) {
+        const upstream = typeof entry?.key === "string" ? entry.key.trim() : "";
+        if (!upstream) continue;
+        if (entry.enable === false) continue; // plan-gated / disabled upstream
+        if (curatedKeys.has(upstream.toLowerCase())) continue; // curated already covers it
+        const id = `qd-${upstream}`;
+        if (curatedIds.has(id)) continue;
+        const spec = resolveModelSpec(upstream);
+        live.push({
+          id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "qoder",
+          context_window: Number(entry.max_input_tokens) || spec?.contextWindow || 180_000,
+          max_output: Number(entry.max_output_tokens) || spec?.maxOutput || 65_536,
+          thinking: entry.is_reasoning === true || spec?.thinking === true,
+          vision: entry.is_vl === true || spec?.vision === true,
+          creditUnit: "credit",
+          creditRate: 0,
+          creditSource: "estimated",
+        });
+      }
+      this.liveModels = applyModelSpecs(live, (m) => QoderProvider.toCanonical(m.id));
+      this.liveModelIds = new Set(live.map((m) => m.id.toLowerCase()));
+      this.catalogFetchedAt = Date.now();
+    } catch (e) {
+      console.error("[qoder] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  /**
+   * Fetch the live model catalog from GET /algo/api/v2/model/list.
+   * Returns the parsed `chat` array, or null on any HTTP/parse failure.
+   */
+  private async fetchModelList(tokens: QoderTokens): Promise<QoderModelListEntry[] | null> {
+    try {
+      const resp = await bearerFetch(tokens, { url: MODEL_LIST_URL, method: "GET" });
+      if (!resp.ok) return null;
+      const data = (await resp.json().catch(() => null)) as QoderModelListResponse | null;
+      if (!data) return null;
+      // Defensive: observed shape is { code:0, data:{ chat:[...] } } but the
+      // reference (open-sse qoderModels.js) reads a top-level `chat` array.
+      const chat = Array.isArray((data as any).chat)
+        ? (data as any).chat
+        : Array.isArray((data.data as any)?.chat)
+          ? (data.data as any).chat
+          : Array.isArray(data.data)
+            ? data.data
+            : null;
+      return Array.isArray(chat) ? chat : null;
+    } catch {
+      return null;
+    }
+  }
+
 
   // Derive the canonical model name from the qoder id (qd-Qwen3.7-Max ->
   // qwen3.7-max) so specs resolve from the central registry (a model's

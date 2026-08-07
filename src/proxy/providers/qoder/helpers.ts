@@ -33,6 +33,12 @@ export const QOTA_USAGE_URL = "https://openapi.qoder.sh/api/v2/quota/usage";
 // COSY-signed GET. Returns per-model promo "free quota" buckets (e.g. qmodel_latest 200/day),
 // distinct from QOTA_USAGE_URL which reports the account-wide credit balance.
 export const ACTIVITY_URL = "https://openapi.qoder.sh/algo/api/v2/activity";
+// COSY-signed GET on the inference host. Returns the live model catalog as
+// { chat: [{ key, display_name, max_input_tokens, is_vl, is_reasoning,
+//   enable, ... }] } — same shape open-sse services/qoderModels.js consumes.
+// Sending a chat body whose model_config disagrees with this list silently
+// downgrades the model upstream, so discovery doubles as config validation.
+export const MODEL_LIST_URL = "https://api3.qoder.sh/algo/api/v2/model/list";
 
 // Business descriptors sent in body.business and Cosy-Business-* headers.
 // CLI uses product=cli, type=agent. Required for the server to attribute
@@ -504,6 +510,30 @@ export interface ActivityResponse {
   code?: number;
   msg?: string;
   data?: { activities?: QoderActivity[]; queryAt?: number };
+}
+
+/**
+ * One entry in GET /algo/api/v2/model/list's `chat` array — the live upstream
+ * model catalog. `key` is the server-side upstream model key (same as
+ * QoderModelDef.upstream, e.g. "qmodel_latest"); enable:false means the
+ * account/plan can't use the model (chat returns code:112 + pricing URL).
+ */
+export interface QoderModelListEntry {
+  key?: string;
+  display_name?: string;
+  max_input_tokens?: number;
+  max_output_tokens?: number;
+  is_vl?: boolean;
+  is_reasoning?: boolean;
+  enable?: boolean;
+  description?: string;
+}
+
+export interface QoderModelListResponse {
+  code?: number;
+  msg?: string;
+  data?: { chat?: QoderModelListEntry[] } | QoderModelListEntry[];
+  chat?: QoderModelListEntry[];
 }
 
 export async function exchangeJobToken(tokens: QoderTokens): Promise<JobTokenResponse> {
