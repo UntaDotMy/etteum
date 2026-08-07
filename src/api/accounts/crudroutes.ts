@@ -272,6 +272,8 @@ export function registerCrudRoutes(router: Hono): void {
       const created = inserted[0]!;
       pool.invalidate("grok");
       broadcast({ type: "account_created", data: { id: created.id, provider: "grok", email } });
+      const { refreshGrokModels } = await import("../../proxy/providers/registry");
+      void refreshGrokModels().catch(() => {});
       return c.json({ ...created, password: "***", tokens: "[set]" }, 201);
     }
 

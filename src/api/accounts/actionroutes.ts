@@ -559,6 +559,9 @@ export async function exchangeGrokInstantTokens(tokens: string[]): Promise<{
   pool.invalidate("grok" as ProviderName);
   if (success > 0) {
     broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
+    // Fresh account: refresh the live model catalog so new slugs route without a restart.
+    const { refreshGrokModels } = await import("../../proxy/providers/registry");
+    void refreshGrokModels().catch(() => {});
   }
 
   return {
@@ -640,6 +643,8 @@ export async function importGrokFarmAccounts(
   pool.invalidate("grok" as ProviderName);
   if (success > 0) {
     broadcast({ type: "accounts_updated", data: { provider: "grok", count: success } });
+    const { refreshGrokModels } = await import("../../proxy/providers/registry");
+    void refreshGrokModels().catch(() => {});
   }
   return { success, failed, errors: errors.length > 0 ? errors : undefined, ids };
 }
