@@ -206,11 +206,17 @@ export class AlibabaProvider extends BaseProvider {
         await this.decrementModelQuota(account, upstreamModel, result.creditsUsed);
       }
 
-      // Check if the upstream returned a quota-exhausted 403 and mark model exhausted.
-      if (!result.success && !result.banned && result.metadata?.errorText) {
+      // Check if the upstream returned a quota-exhausted 403. handleOpenAIResponse
+      // flags generic 403s as `banned`, but a quota-exhaustion body must NOT be a
+      // terminal ban — rewrite it to quotaExhausted so the router parks the account
+      // (self-reviving) instead of permanently banning it.
+      if (!result.success && result.metadata?.errorText) {
         const errText = result.metadata.errorText as string;
         if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
           this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
+          result.banned = false;
+          result.quotaExhausted = true;
+          result.error = `Free quota exhausted for "${upstreamModel}"`;
         }
       }
 
@@ -258,10 +264,15 @@ export class AlibabaProvider extends BaseProvider {
         if (errText.includes("AccessDenied.Unpurchased")) {
           return { success: false, error: `Model "${upstreamModel}" not activated/purchased` };
         }
-        // Free quota exhausted — mark this model as exhausted.
+        // Free quota exhausted — mark this model as exhausted and flag
+        // quotaExhausted (NOT rateLimited). Per-model: the router's alibaba
+        // branch invalidates the pool cache so this account is skipped for THIS
+        // model (it may still serve others), and the request rotates to a peer
+        // as a free hop instead of burning the attempt budget on a banned/rate-
+        // limited terminal mark.
         if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
           this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
-          return { success: false, error: `Free quota exhausted for "${upstreamModel}"`, rateLimited: true };
+          return { success: false, error: `Free quota exhausted for "${upstreamModel}"`, quotaExhausted: true };
         }
         return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true };
       }
@@ -711,8 +722,13 @@ export class AlibabaProvider extends BaseProvider {
     entry.remaining = 0;
     tokens[upstreamModel] = entry;
 
+    // Preserve the existing queryableModels list — rebuilding tokens without it
+    // would wipe the probe results and make the account look un-warmed (or
+    // re-selectable for the very model that just drained).
+    const existing = account.tokens as AlibabaQuotaTokens | null;
     const quotaTokens: AlibabaQuotaTokens = {
       modelQuotas: tokens,
+      queryableModels: existing?.queryableModels,
       updatedAt: new Date().toISOString(),
     };
 

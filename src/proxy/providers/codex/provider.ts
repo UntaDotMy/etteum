@@ -7,11 +7,15 @@ import {
   type ProviderResult,
 } from "../base";
 import type { Account } from "../../../db/schema";
+import { db } from "../../../db/index";
+import { accounts } from "../../../db/schema";
+import { eq, and } from "drizzle-orm";
 import { config } from "../../../config";
-import { applyModelSpecs } from "../../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
 import {
   CODEX_CLIENT_ID,
   CODEX_HOSTED_TOOL_TYPES,
+  CODEX_MODELS_URL,
   CODEX_PASSTHROUGH_TOOL_TYPES,
   CODEX_RESPONSES_URL,
   CODEX_SCOPE,
@@ -35,7 +39,10 @@ export class CodexProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    return m.startsWith("codex-") || m === "gpt-5-codex" || m === "gpt-5.5-xhigh";
+    if (m.startsWith("codex-") || m === "gpt-5-codex" || m === "gpt-5.5-xhigh") return true;
+    // Live-discovered catalog ids (auto-fetched from /codex/models).
+    if (this.liveModelIds.has(m)) return true;
+    return false;
   }
 
   // Supported models — matches the live-fetched Codex backend (2026-07-03).
@@ -57,6 +64,101 @@ export class CodexProvider extends BaseProvider {
     // ChatGPT-account limit, which is 272k per the live /codex/models fetch).
     return undefined;
   });
+
+  /**
+   * Live-discovered catalog from GET /codex/models (ChatGPT OAuth account).
+   * Falls back to the curated supportedModels when empty/unreachable. Refreshed
+   * at boot (refreshCodexModels) and on a TTL; keeps the served /v1/models list
+   * and routing fresh per the upstream instead of requiring manual additions.
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private catalogFetchedAt = 0;
+  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+  /**
+   * Refresh the live model catalog from the first active+enabled codex account.
+   * Additive: always union with the curated supportedModels so routing for known
+   * slugs never regresses if the upstream list is partial. Curated wins on id
+   * conflicts (its verified 272k context / credit rates beat the spec registry
+   * defaults). Never throws; keeps prior state on failure.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() - this.catalogFetchedAt < CodexProvider.CATALOG_TTL_MS && this.liveModels.length > 0) {
+      return; // fresh enough
+    }
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "codex"), eq(accounts.enabled, true), eq(accounts.status, "active")));
+      const account = rows.find((r) => this.getTokens(r)?.access_token);
+      if (!account) return; // no usable account → keep curated fallback
+
+      const tokens = this.getTokens(account);
+      const bearer = tokens?.access_token;
+      if (!bearer) return;
+
+      const headers: Record<string, string> = {
+        "Authorization": `Bearer ${bearer}`,
+        "Accept": "application/json",
+        "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+        "originator": "codex-cli",
+      };
+      if (tokens?.account_id) headers["chatgpt-account-id"] = tokens.account_id;
+
+      const response = await this.fetchWithTimeout(CODEX_MODELS_URL, { method: "GET", headers }, 15000);
+      if (!response.ok) {
+        // Unreachable / unauthorized — keep what we have; bump the freshness clock.
+        this.catalogFetchedAt = Date.now();
+        return;
+      }
+      const json = (await response.json().catch(() => null)) as
+        | { data?: Array<{ id?: string }>; models?: Array<{ id?: string }> | Record<string, unknown> }
+        | null;
+      if (!json) return;
+
+      // Normalize both shapes: OpenAI-style {data:[...]} and {models:[...] | {...}}.
+      const ids: string[] = [];
+      const push = (id: unknown) => {
+        if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+      };
+      if (Array.isArray(json.data)) for (const m of json.data) push(m?.id);
+      if (Array.isArray(json.models)) for (const m of json.models) push(m?.id);
+      else if (json.models && typeof json.models === "object") for (const k of Object.keys(json.models)) push(k);
+      if (ids.length === 0) return;
+
+      // Merge: curated first (wins on conflict), then live-only ids.
+      const merged = new Map<string, ModelInfo>(this.supportedModels.map((m) => [m.id, m]));
+      for (const id of ids) {
+        if (merged.has(id)) continue; // curated wins
+        const spec = resolveModelSpec(id);
+        merged.set(id, {
+          id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "codex",
+          context_window: spec?.contextWindow ?? 0,
+          max_output: spec?.maxOutput ?? 0,
+          thinking: spec?.thinking ?? false,
+          vision: spec?.vision ?? false,
+          creditUnit: "credit",
+          creditRate: 0.012 / 1000,
+          creditSource: "estimated",
+        });
+      }
+
+      this.liveModels = [...merged.values()];
+      this.liveModelIds = new Set(ids.map((s) => s.toLowerCase()));
+      this.catalogFetchedAt = Date.now();
+    } catch (e) {
+      console.error("[codex] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  override getModels(): ModelInfo[] {
+    return this.liveModels.length > 0 ? this.liveModels : this.supportedModels;
+  }
 
   override getModelInfo(model: string): ModelInfo | undefined {
     const normalized = model.toLowerCase();

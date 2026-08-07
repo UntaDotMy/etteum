@@ -9,6 +9,9 @@ import {
   type StreamChunk,
 } from "../base";
 import type { Account } from "../../../db/schema";
+import { db } from "../../../db/index";
+import { accounts } from "../../../db/schema";
+import { eq, and } from "drizzle-orm";
 import { config } from "../../../config";
 import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
 import { getUpstreamNameOverride } from "../custom-models";
@@ -29,7 +32,89 @@ export class CodeBuddyProvider extends BaseProvider {
   private static readonly SCHEMA_CACHE_MAX = 200;
 
   override ownsModel(model: string): boolean {
-    return model.toLowerCase().startsWith("cb-");
+    const m = model.toLowerCase();
+    if (m.startsWith("cb-")) return true;
+    // Live-discovered catalog ids (auto-fetched from GET {base}/v2/models).
+    if (this.liveModelIds.has(m)) return true;
+    return false;
+  }
+
+  /**
+   * Live-discovered catalog from GET {baseUrl}/v2/models, refreshed at boot
+   * (refreshCodebuddyModels) and on a TTL. Curated models always win on id
+   * collision; discovery is additive so new upstream models appear without
+   * manual additions. Never throws — on failure the curated list stays served.
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private catalogFetchedAt = 0;
+  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+  /**
+   * Refresh the live model catalog from the first active+enabled codebuddy
+   * account's API key. Never throws.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() - this.catalogFetchedAt < CodeBuddyProvider.CATALOG_TTL_MS && this.liveModels.length > 0) {
+      return; // fresh enough
+    }
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "codebuddy"), eq(accounts.enabled, true), eq(accounts.status, "active")))
+        .limit(1);
+      const account = rows[0];
+      if (!account) return; // no active account → keep curated fallback
+
+      const tokens = this.getTokens(account);
+      const apiKey = tokens ? tokens.api_key || tokens.access_token || tokens.session_token : null;
+      if (!apiKey) return;
+
+      const res = await fetch(`${this.baseUrl}/v2/models`, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${apiKey}` },
+      });
+      if (!res.ok) return;
+      const data: any = await res.json().catch(() => ({}));
+      const upstreamModels: any[] = Array.isArray(data?.data) ? data.data : [];
+      if (upstreamModels.length === 0) return;
+
+      // Curated wins: index by id so a discovered id never overrides a curated spec.
+      const curated = new Map(this.supportedModels.map((m) => [m.id, m]));
+      const merged = new Map<string, ModelInfo>(curated);
+      const liveIds = new Set<string>([...curated.keys()].map((s) => s.toLowerCase()));
+      for (const m of upstreamModels) {
+        const upstream = typeof m?.id === "string" ? m.id : null;
+        if (!upstream) continue;
+        const id = upstream.toLowerCase().startsWith("cb-") ? upstream : `cb-${upstream}`;
+        if (merged.has(id)) continue; // curated already covers it (with verified spec)
+        const spec = resolveModelSpec(CodeBuddyProvider.toCanonical(id));
+        merged.set(id, {
+          id,
+          object: "model",
+          created: Math.floor(Date.now() / 1000),
+          owned_by: "codebuddy",
+          context_window: spec?.contextWindow ?? 0,
+          max_output: spec?.maxOutput ?? 0,
+          thinking: spec?.thinking ?? false,
+          vision: spec?.vision ?? false,
+          creditUnit: "token" as const,
+          creditRate: 0.01 / 1000, // fallback rate; curated models keep their real rate
+          creditSource: "estimated" as const,
+        });
+        liveIds.add(id.toLowerCase());
+      }
+      this.liveModels = [...merged.values()];
+      this.liveModelIds = liveIds;
+      this.catalogFetchedAt = Date.now();
+    } catch (e) {
+      console.error("[codebuddy] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  override getModels(): ModelInfo[] {
+    return this.liveModels.length > 0 ? this.liveModels : this.supportedModels;
   }
 
   /** Resolve cb- prefixed model IDs to actual CodeBuddy API model names. */

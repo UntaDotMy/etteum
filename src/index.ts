@@ -31,7 +31,7 @@ import { eq } from "drizzle-orm";
 import { bootstrapFilterRules } from "./db/filter-bootstrap";
 import { bootstrapCompressionSettings } from "./db/compression-bootstrap";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
-import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshGrokModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
+import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshGrokModels, refreshQoderModels, refreshCodexModels, refreshAntigravityModels, refreshYoumindModels, refreshCodebuddyModels, refreshCodebuddyChinaModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
 import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
 import { disableMitm } from "./proxy/mitm/manager";
@@ -150,6 +150,66 @@ try {
   console.log("[Grok] Model catalog refreshed");
 } catch (e) {
   console.error("[Grok] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live Qoder model catalog (GET /algo/api/v2/model/list) from the
+// first active account so new qoder models appear without manual adds.
+try {
+  console.log("[Qoder] Discovering model catalog...");
+  await refreshQoderModels();
+  console.log("[Qoder] Model catalog refreshed");
+} catch (e) {
+  console.error("[Qoder] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live Codex model catalog (chatgpt.com /codex/models) from the
+// first active OAuth account so new codex models appear without manual adds.
+try {
+  console.log("[Codex] Discovering model catalog...");
+  await refreshCodexModels();
+  console.log("[Codex] Model catalog refreshed");
+} catch (e) {
+  console.error("[Codex] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live Antigravity model catalog (fetchAvailableModels) from the
+// first active OAuth account so new Gemini models appear without manual adds.
+try {
+  console.log("[Antigravity] Discovering model catalog...");
+  await refreshAntigravityModels();
+  console.log("[Antigravity] Model catalog refreshed");
+} catch (e) {
+  console.error("[Antigravity] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live YouMind model catalog (anthropic /v1/models relay) from the
+// first active account so new youmind models appear without manual adds.
+try {
+  console.log("[YouMind] Discovering model catalog...");
+  await refreshYoumindModels();
+  console.log("[YouMind] Model catalog refreshed");
+} catch (e) {
+  console.error("[YouMind] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live CodeBuddy model catalog (GET {base}/v2/models) from the
+// first active account so new codebuddy models appear without manual adds.
+try {
+  console.log("[CodeBuddy] Discovering model catalog...");
+  await refreshCodebuddyModels();
+  console.log("[CodeBuddy] Model catalog refreshed");
+} catch (e) {
+  console.error("[CodeBuddy] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live CodeBuddy China model catalog (GET {base}/v2/models) from
+// the first active account so new codebuddy-china models appear without manual adds.
+try {
+  console.log("[CodeBuddy China] Discovering model catalog...");
+  await refreshCodebuddyChinaModels();
+  console.log("[CodeBuddy China] Model catalog refreshed");
+} catch (e) {
+  console.error("[CodeBuddy China] Model discovery skipped:", e instanceof Error ? e.message : e);
 }
 
 // Start auto-warmup scheduler (reads settings from DB)
