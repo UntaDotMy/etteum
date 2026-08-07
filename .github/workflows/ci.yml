@@ -39,6 +39,12 @@ jobs:
         # Self-contained suite (own env vars + DI-mocked providers). Hard gate.
         # --isolate gives each test file a fresh global so per-file DATABASE_PATH
         # redirects and module state can't leak across files sharing a process.
+        # ENCRYPTION_KEY: crypto.ts refuses to encrypt without >= 16 chars and
+        # many suites (pool, byok, keys, backup) seed accounts via encrypt().
+        env:
+          ENCRYPTION_KEY: ci-test-encryption-key-32chars
+          API_KEY: ci-test-api-key
+          POOLPROX_ALLOW_INSECURE: "1"
         run: bun test --isolate
       - name: Build dashboard
         run: bun run build
