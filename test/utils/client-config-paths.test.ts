@@ -5,9 +5,12 @@
  *   - getAllConfigPaths
  *
  * paths.ts caches `os.homedir()` at module-import time and every public
- * function derives paths from it, so the suite redirects HOME/USERPROFILE to
- * a per-test mkdtemp dir and re-imports the module (with a cache-busting
- * query) per test. That keeps the user's real home directory untouched.
+ * function derives paths from it. os.homedir() consults different env vars
+ * per platform: on POSIX it prefers $HOME, on Windows it prefers
+ * USERPROFILE (falling back to HOMEDRIVE+HOMEPATH). The suite redirects all
+ * of them to a per-test mkdtemp dir and re-imports the module (with a
+ * cache-busting query) per test, so it passes on both the Windows dev box
+ * and Linux CI.
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
 import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from "node:fs";
@@ -18,9 +21,10 @@ import { CLIENT_META, type ClientTarget } from "../../src/lib/client-configs/typ
 type PathsModule = typeof import("../../src/lib/client-configs/paths");
 
 let home = "";
-let prevHome: string | undefined;
-let prevUserProfile: string | undefined;
+let saved: Record<string, string | undefined> = {};
 let importCounter = 0;
+
+const HOME_ENV_KEYS = ["HOME", "USERPROFILE", "HOMEDRIVE", "HOMEPATH"] as const;
 
 async function importPaths(): Promise<PathsModule> {
   // Query suffix defeats the ESM module cache so `homeDir` is re-captured
@@ -30,17 +34,23 @@ async function importPaths(): Promise<PathsModule> {
 
 beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "client-config-paths-"));
-  prevHome = process.env.HOME;
-  prevUserProfile = process.env.USERPROFILE;
+  saved = {};
+  for (const key of HOME_ENV_KEYS) {
+    saved[key] = process.env[key];
+  }
   process.env.HOME = home;
   process.env.USERPROFILE = home;
+  // HOMEDRIVE+HOMEPATH are the Windows fallback if USERPROFILE is ever unset;
+  // pin them so os.homedir() can never escape to the real profile.
+  process.env.HOMEDRIVE = "C:";
+  process.env.HOMEPATH = home.replace(/^[A-Za-z]:/, "");
 });
 
 afterEach(() => {
-  if (prevHome === undefined) delete process.env.HOME;
-  else process.env.HOME = prevHome;
-  if (prevUserProfile === undefined) delete process.env.USERPROFILE;
-  else process.env.USERPROFILE = prevUserProfile;
+  for (const key of HOME_ENV_KEYS) {
+    if (saved[key] === undefined) delete process.env[key];
+    else process.env[key] = saved[key];
+  }
   try {
     rmSync(home, { recursive: true, force: true });
   } catch {
