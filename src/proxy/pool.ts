@@ -314,11 +314,20 @@ class AccountPool {
       // Resolve model name (strip ali- prefix if present)
       const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
 
-      // Filter accounts that have this model in queryableModels + dispatch budget
+      // Filter accounts that have this model in queryableModels + still have
+      // per-model quota remaining. setModelQuotaToZero drains remaining to 0 on
+      // an upstream quota-exhausted 403; without this check the account is
+      // re-picked for the very model that just drained, looping the 429.
       const modelEligible = activeAccounts.filter((account) => {
-        const tokens = account.tokens as { queryableModels?: string[] } | null;
+        const tokens = account.tokens as {
+          queryableModels?: string[];
+          modelQuotas?: Record<string, { remaining: number }>;
+        } | null;
         if (!tokens?.queryableModels) return false;
-        return tokens.queryableModels.includes(upstreamModel);
+        if (!tokens.queryableModels.includes(upstreamModel)) return false;
+        const quota = tokens.modelQuotas?.[upstreamModel];
+        if (quota && Number.isFinite(quota.remaining) && quota.remaining <= 0) return false;
+        return true;
       });
       const eligibleAccounts = filterDispatchEligibleAccounts(
         modelEligible,
