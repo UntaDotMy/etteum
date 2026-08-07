@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
+import { clientHome } from "../paths";
 import type { ProxyConnectionInfo, ClientConfigResult } from "../types";
 import {
   readJsonObject,
@@ -13,11 +13,11 @@ import {
 } from "./utils";
 
 function getCodexAuthPath(): string {
-  return join(homedir(), ".codex", "auth.json");
+  return join(clientHome(), ".codex", "auth.json");
 }
 
 function getCodexConfigPath(): string {
-  return join(homedir(), ".codex", "config.toml");
+  return join(clientHome(), ".codex", "config.toml");
 }
 
 function upsertCodexConfig(content: string, info: ProxyConnectionInfo): string {

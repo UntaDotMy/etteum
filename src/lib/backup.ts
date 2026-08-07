@@ -241,8 +241,12 @@ function sealStoredTokens(value: string | null | undefined, passphrase: string):
 /** Tables dropped in essential mode (history only — not needed to run the same accounts). */
 const ESSENTIAL_DROP_TABLES = ["request_logs", "usage_summary", "image_studio_chats", "image_studio_results"];
 
+// ETTEUM_BACKUP_ROOT is a test/CI seam: the create path reads <root>/.env and
+// <root>/data/jwt-secret verbatim into the pack, and both are gitignored — so
+// on CI (or any checkout without local secrets) those reads see nothing.
+// Tests point this at a temp dir with seeded fixtures. Production never sets it.
 function projectRoot(): string {
-  return path.resolve(import.meta.dir, "../..");
+  return process.env.ETTEUM_BACKUP_ROOT || path.resolve(import.meta.dir, "../..");
 }
 
 function envPath(): string {

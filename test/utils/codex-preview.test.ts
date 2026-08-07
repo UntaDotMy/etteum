@@ -16,6 +16,7 @@ import type { ProxyConnectionInfo } from "../../src/lib/client-configs/types";
 let home = "";
 let prevHome: string | undefined;
 let prevUserProfile: string | undefined;
+let prevEtteumHome: string | undefined;
 
 function makeInfo(preview: boolean): ProxyConnectionInfo {
   return {
@@ -32,11 +33,16 @@ beforeEach(() => {
   home = mkdtempSync(join(tmpdir(), "codex-preview-"));
   prevHome = process.env.HOME;
   prevUserProfile = process.env.USERPROFILE;
+  prevEtteumHome = process.env.ETTEUM_HOME;
+  // codex.ts resolves its target dir through clientHome() (ETTEUM_HOME seam);
+  // HOME/USERPROFILE still redirect os.homedir() on platforms that honor them.
+  process.env.ETTEUM_HOME = home;
   process.env.HOME = home;
   process.env.USERPROFILE = home;
 });
 
 afterEach(() => {
+  if (prevEtteumHome === undefined) delete process.env.ETTEUM_HOME; else process.env.ETTEUM_HOME = prevEtteumHome;
   if (prevHome === undefined) delete process.env.HOME; else process.env.HOME = prevHome;
   if (prevUserProfile === undefined) delete process.env.USERPROFILE; else process.env.USERPROFILE = prevUserProfile;
   try { rmSync(home, { recursive: true, force: true }); } catch { /* ignore */ }

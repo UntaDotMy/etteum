@@ -10,11 +10,19 @@ import type { ClientTarget } from "./types";
 // ETTEUM_HOME is a test/CI seam: os.homedir() ignores $HOME on Linux (it
 // reads the passwd entry), so tests cannot redirect the home dir through env
 // alone. Production never sets this; test harnesses point it at a temp dir.
-const homeDir = process.env.ETTEUM_HOME || os.homedir();
+const homeDir = clientHome();
 
 /** Resolve ~ to the actual home directory on all platforms. */
 function home(...segments: string[]): string {
   return path.join(homeDir, ...segments);
+}
+
+/**
+ * Home dir for client-config generators (codex.ts and friends read it live
+ * per call so tests can redirect via ETTEUM_HOME after import).
+ */
+export function clientHome(): string {
+  return process.env.ETTEUM_HOME || os.homedir();
 }
 
 /**

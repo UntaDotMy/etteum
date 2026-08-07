@@ -8,8 +8,10 @@
  * below resolve. The real data/poolprox3.db is never touched.
  *
  * createBackupDir is always given an absolute temp outDir, so backupsRoot()
- * (repo data/backups) is never written. The repo .env is only READ (copied
- * into the temp pack), never mutated.
+ * (repo data/backups) is never written. The pack source dir (.env + jwt-secret,
+ * both gitignored — absent on CI) is faked via the ETTEUM_BACKUP_ROOT seam
+ * pointed at a temp dir with seeded fixtures, so the pack content assertions
+ * hold on any machine.
  */
 process.env.ENCRYPTION_KEY =
   "x9f2a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9";
@@ -40,6 +42,16 @@ import { Database } from "bun:sqlite";
 const tempRoot = mkdtempSync(path.join(tmpdir(), "backup-create-test-"));
 const tempDbPath = path.join(tempRoot, "live.db");
 process.env.DATABASE_PATH = tempDbPath;
+// Fake the pack source: <root>/.env and <root>/data/jwt-secret are gitignored
+// and absent on CI, so seed fixtures under a temp root and point the
+// ETTEUM_BACKUP_ROOT seam at it before src/lib/backup loads.
+const packSourceRoot = mkdtempSync(path.join(tmpdir(), "backup-create-src-"));
+const SEEDED_ENV_TEXT = "ENCRYPTION_KEY=ci-fixture-key-0123456789abcdef\nAPI_KEY=ci-fixture-api-key\n";
+writeFileSync(path.join(packSourceRoot, ".env"), SEEDED_ENV_TEXT, "utf8");
+mkdirSync(path.join(packSourceRoot, "data"), { recursive: true });
+const SEEDED_JWT = "ci-fixture-jwt-secret\n";
+writeFileSync(path.join(packSourceRoot, "data", "jwt-secret"), SEEDED_JWT, "utf8");
+process.env.ETTEUM_BACKUP_ROOT = packSourceRoot;
 const cache = (require as unknown as { cache: Record<string, unknown> }).cache;
 for (const key of Object.keys(cache)) {
   if (/[\\/](src[\\/]db|src[\\/]config|src[\\/]lib[\\/]backup)/.test(key)) {
@@ -144,6 +156,11 @@ afterAll(() => {
   } catch {
     /* ignore */
   }
+  try {
+    rmSync(packSourceRoot, { recursive: true, force: true });
+  } catch {
+    /* ignore */
+  }
 });
 
 describe("createBackupDir + snapshotDatabase", () => {
@@ -217,18 +234,13 @@ describe("createBackupDir + snapshotDatabase", () => {
     const files = manifest.files as Record<string, string>;
     expect(files.database).toBe("poolprox3.db");
     expect(files.env).toBe("env");
-    // The repo has a real data/jwt-secret; createBackupDir copies it into
-    // the pack and declares it in the manifest.
+    // The pack source has a seeded data/jwt-secret (ETTEUM_BACKUP_ROOT);
+    // createBackupDir copies it into the pack and declares it in the manifest.
     expect(summary.hasJwtSecret).toBe(true);
     expect(files.jwtSecret).toBe("jwt-secret");
     const packedSecret = path.join(outDir, "jwt-secret");
     expect(existsSync(packedSecret)).toBe(true);
-    expect(readFileSync(packedSecret, "utf8")).toBe(
-      readFileSync(
-        path.resolve(import.meta.dir, "../../data/jwt-secret"),
-        "utf8",
-      ),
-    );
+    expect(readFileSync(packedSecret, "utf8")).toBe(SEEDED_JWT);
 
     const meta = manifest.meta as Record<string, unknown>;
     expect(meta.databaseBytes).toBe(summary.databaseBytes);
@@ -248,13 +260,9 @@ describe("createBackupDir + snapshotDatabase", () => {
     const summary = createBackupDir("essential", outDir);
 
     const packed = readFileSync(path.join(outDir, "env"), "utf8");
-    // The repo .env exists (read-only source); envBytes matches its length.
-    const sourceEnv = readFileSync(
-      path.resolve(import.meta.dir, "../../.env"),
-      "utf8",
-    );
-    expect(packed).toBe(sourceEnv);
-    expect(summary.envBytes).toBe(Buffer.byteLength(sourceEnv, "utf8"));
+    // Source .env is the seeded fixture (ETTEUM_BACKUP_ROOT); envBytes matches.
+    expect(packed).toBe(SEEDED_ENV_TEXT);
+    expect(summary.envBytes).toBe(Buffer.byteLength(SEEDED_ENV_TEXT, "utf8"));
   });
 
   test("relative outDir resolves under the project root", () => {
