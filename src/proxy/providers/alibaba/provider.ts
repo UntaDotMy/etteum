@@ -21,8 +21,6 @@ import {
   DASHSCOPE_BASE,
   MODELS_URL,
   QUOTAS_URL,
-  QUOTA_CACHE_TTL_MS,
-  quotaLimitCache,
 } from "./helpers";
 import type {
   AlibabaQuotaTokens,
@@ -378,9 +376,6 @@ export class AlibabaProvider extends BaseProvider {
               periodDays,
               resetAt: resetAt.toISOString(),
             };
-
-            // Cache for healthCheck
-            quotaLimitCache.set(q.model, { limit, periodDays });
 
             if (limit > maxLimit) maxLimit = limit;
             if (periodDays > maxPeriod) maxPeriod = periodDays;
@@ -1007,7 +1002,11 @@ export class AlibabaProvider extends BaseProvider {
     // other than "disabled" (Claude Code defaults to "adaptive", which means
     // "model decides" — upstreams that support thinking should honor it).
     const actualModel = request.model.endsWith("-thinking") ? request.model.replace(/-thinking$/, "") : request.model;
-    const spec = resolveModelSpec(actualModel);
+    // resolveModelSpec is keyed by the canonical upstream name (no provider
+    // prefix), so resolve the client-facing ali-* id first — otherwise the
+    // lookup always misses and enable_thinking is force-disabled below even
+    // when the client asked for thinking on a thinking-capable model.
+    const spec = resolveModelSpec(this.resolveModel(actualModel));
     const effort = request.reasoning_effort;
     const thinkType = (request.thinking as any)?.type;
     const clientWantsThinking =

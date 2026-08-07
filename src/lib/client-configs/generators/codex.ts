@@ -1,6 +1,6 @@
 import { join } from "node:path";
-import { homedir } from "node:os";
 import { readFile } from "node:fs/promises";
+import { clientHome } from "../paths";
 import type { ProxyConnectionInfo, ClientConfigResult } from "../types";
 import {
   readJsonObject,
@@ -13,11 +13,11 @@ import {
 } from "./utils";
 
 function getCodexAuthPath(): string {
-  return join(homedir(), ".codex", "auth.json");
+  return join(clientHome(), ".codex", "auth.json");
 }
 
 function getCodexConfigPath(): string {
-  return join(homedir(), ".codex", "config.toml");
+  return join(clientHome(), ".codex", "config.toml");
 }
 
 function upsertCodexConfig(content: string, info: ProxyConnectionInfo): string {
@@ -43,12 +43,18 @@ export async function configureCodex(
   const authPath = getCodexAuthPath();
   const configPath = getCodexConfigPath();
   try {
-    const auth = await readJsonObject(authPath);
+    // Preview/dry-run: compute the would-be config without touching disk,
+    // matching the other generators (opencode.ts) that honor info.preview.
+    const auth = info.preview ? {} : await readJsonObject(authPath);
     auth.OPENAI_API_KEY = info.apiKey;
-    const authBackups = await writeJsonObject(authPath, auth);
+    const authBackups = info.preview ? [] : await writeJsonObject(authPath, auth);
 
-    const config = (await exists(configPath)) ? await readFile(configPath, "utf-8") : "";
-    const configBackups = await writeText(configPath, upsertCodexConfig(config, info));
+    const config = info.preview
+      ? ""
+      : (await exists(configPath))
+        ? await readFile(configPath, "utf-8")
+        : "";
+    const configBackups = info.preview ? [] : await writeText(configPath, upsertCodexConfig(config, info));
 
     return {
       success: true,

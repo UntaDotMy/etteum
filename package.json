@@ -23,7 +23,7 @@
     "upgrade:win": "powershell -ExecutionPolicy Bypass -File upgrade.ps1",
     "service:install": "bash service/install-service.sh",
     "service:install:win": "powershell -ExecutionPolicy Bypass -File service/install-service.ps1",
-    "test": "bun test"
+    "test": "bun test --isolate"
   },
   "dependencies": {
     "cbor-x": "^1.6.4",

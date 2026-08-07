@@ -124,9 +124,6 @@ export interface AlibabaQuotaTokens {
  * Map<upstream_model_name, { limit: number, periodDays: number }>
  */
 export type QuotaLimitEntry = { limit: number; periodDays: number };
-export const quotaLimitCache = new Map<string, QuotaLimitEntry>();
-let quotaCacheExpiry = 0;
-export const QUOTA_CACHE_TTL_MS = 60_000; // 1 minute
 
 /**
  * Alibaba DashScope Provider — API key based, OpenAI-compatible.

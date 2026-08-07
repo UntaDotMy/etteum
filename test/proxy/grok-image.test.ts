@@ -26,12 +26,18 @@ describe("Grok image_generation tool path", () => {
     expect(providers.grok.ownsModel(GROK_IMAGE_MODEL)).toBe(true);
   });
 
-  test("build body matches cli-chat-proxy responses + forced image_generation tool", () => {
+  test("build body matches cli-chat-proxy responses with image_generation tool, no tool_choice", () => {
     const body = buildGrokImageResponsesBody("a red fox in snow");
     expect(body.model).toBe(GROK_IMAGE_UPSTREAM_MODEL);
     expect(body.stream).toBe(false);
     expect(body.tools).toEqual([{ type: "image_generation" }]);
-    expect(body.tool_choice).toEqual({ type: "image_generation" });
+    // Verified live: the upstream rejects ANY tool_choice for the hosted
+    // image_generation tool ("did not match any variant of untagged enum
+    // ModelToolChoice" / "tool_choice was set but no tools were specified").
+    // The prompt's "Use the image_generation tool" drives generation instead.
+    expect("tool_choice" in body).toBe(false);
+    expect(body.reasoning).toEqual({ effort: "low" });
+    expect(body.max_output_tokens).toBe(1024);
     const input = body.input as Array<{ role: string; content: Array<{ type: string; text: string }> }>;
     expect(input[0]!.role).toBe("user");
     expect(input[0]!.content[0]!.type).toBe("input_text");

@@ -57,6 +57,9 @@ function defaults(): RetryBudgetConfig {
 }
 
 let cache: { value: RetryBudgetConfig; expiresAt: number } | null = null;
+/** Throttle for the settings-outage fallback warning (don't spam per request). */
+const WARN_THROTTLE_MS = 60_000;
+let lastWarnAt = 0;
 
 /** Read the current retry budget (settings → env → defaults), cached 5s. */
 export async function getRetryBudget(): Promise<RetryBudgetConfig> {
@@ -81,7 +84,18 @@ export async function getRetryBudget(): Promise<RetryBudgetConfig> {
     };
     cache = { value, expiresAt: now + CACHE_TTL_MS };
     return value;
-  } catch {
+  } catch (err) {
+    // Fail open to env/defaults so a settings-table outage never stops routing —
+    // but don't do it silently: an operator who tuned the retry budget deserves a
+    // signal that it's been reverted. Throttled so an outage doesn't spam per-request.
+    if (now - lastWarnAt >= WARN_THROTTLE_MS) {
+      lastWarnAt = now;
+      console.warn(
+        `[retry-config] settings read failed; falling back to env/defaults: ${
+          err instanceof Error ? err.message : String(err)
+        }`,
+      );
+    }
     return base;
   }
 }

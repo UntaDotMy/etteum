@@ -99,7 +99,11 @@ export async function toggleCombo(id: number, enabled: boolean) {
 // the whole string is both combo name and the default model.
 function parseComboModel(model: string): { comboName: string | null; alias: string } {
   const slash = model.indexOf("/");
-  if (slash < 0) return { comboName: null, alias: model };
+  // No "/" → the whole string is the combo name with no explicit alias; the
+  // empty alias falls back to the combo's first model downstream (documented:
+  // `"combo-name" alone`, e.g. "zero-cost"). Previously this returned
+  // comboName=null, making the documented bare form unreachable.
+  if (slash < 0) return { comboName: model, alias: "" };
   const comboName = model.slice(0, slash);
   const alias = model.slice(slash + 1);
   return { comboName, alias };
@@ -236,6 +240,11 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         const result = await routeRequest({ ...request, model: modelName }, request.stream ?? false, {
           excludeAccountIds: excludedAccounts,
           _skipComboExpansion: true,
+          // routeRequest re-selects its own account internally and does not
+          // mutate excludeAccountIds, so report the account it actually used.
+          // On failure that id lands in excludedAccounts below — the probe id
+          // (account.id) may be a different, innocent account.
+          attemptedAccountIdsOut: excludedAccounts,
         });
         broadcast({
           type: "combo_success",
@@ -243,7 +252,10 @@ async function routeComboFallback(opts: ComboFallbackOptions): Promise<RouteResu
         });
         return result;
       } catch (err: any) {
-        // Only now is the credential known-bad for the rest of this combo.
+        // Only now is the credential known-bad for the rest of this combo. The
+        // account routeRequest actually used was already added via
+        // attemptedAccountIdsOut; add the probe id too as a fallback in case
+        // routeRequest failed before selecting (its account is this probe).
         excludedAccounts.add(account.id);
         lastError = err?.message ?? String(err);
         lastErrorModel = modelSpec;

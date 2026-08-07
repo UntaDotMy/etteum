@@ -540,9 +540,17 @@ export function buildGrokImageResponsesBody(prompt: string): Record<string, unkn
       },
     ],
     tools: [{ type: "image_generation" }],
-    // Hosted-tool force (Responses wire). Free/X Basic still refuse with
-    // SuperGrok text instead of silently returning a text message.
-    tool_choice: { type: "image_generation" },
+    // Do NOT set tool_choice here. Verified live against cli-chat-proxy: the
+    // hosted image_generation tool object is accepted, but ANY tool_choice
+    // variant is rejected — the bare {type:"image_generation"} errored with
+    // "did not match any variant of untagged enum ModelToolChoice", and the
+    // string form errored with "tool_choice was set but no tools were
+    // specified" (the hosted tool isn't in the tool_choice enum). Omitting it
+    // returns HTTP 200; the prompt's "Use the image_generation tool" drives
+    // generation on entitled (SuperGrok) accounts, while free/X Basic still
+    // answer with a SuperGrok text refusal we surface.
+    reasoning: { effort: "low" },
+    max_output_tokens: 1024,
     stream: false,
   };
 }

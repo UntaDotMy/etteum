@@ -29,6 +29,9 @@ import {
   type ProviderHealthResult,
 } from "../base";
 import type { Account } from "../../../db/schema";
+import { db } from "../../../db/index";
+import { accounts } from "../../../db/schema";
+import { eq, and } from "drizzle-orm";
 import {
   GROK_ENDPOINTS,
   MODEL_TO_MODE,
@@ -58,6 +61,7 @@ import {
   isGrokFreeTierQuotaShape,
   probeOAuthChatLiveness,
   withDeadlineSignal,
+  fetchModelsCatalog,
   GROK_CHAT_PROBE_DEADLINE_MS,
   type GrokOAuthTokens,
   type GrokOAuthQuota,
@@ -318,6 +322,82 @@ export class GrokProvider extends BaseProvider {
   name = "grok";
   supportedModels = GROK_MODELS;
 
+  /**
+   * Live-discovered catalog from cli-chat-proxy /v1/models (ETag-cached).
+   * Falls back to the curated GROK_MODELS when empty/unreachable. Refreshed at
+   * boot (refreshGrokModels) and on a TTL; keeps the catalog fresh per the
+   * upstream instead of requiring manual additions.
+   */
+  private liveModels: ModelInfo[] = [];
+  private liveModelIds = new Set<string>();
+  private catalogEtag: string | undefined;
+  private catalogFetchedAt = 0;
+  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+
+  /**
+   * Refresh the live model catalog from the first active OAuth grok account.
+   * Additive: always union with the curated GROK_MODELS so routing for known
+   * slugs never regresses if the upstream list is partial. Never throws.
+   */
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() - this.catalogFetchedAt < GrokProvider.CATALOG_TTL_MS && this.liveModels.length > 0) {
+      return; // fresh enough
+    }
+    try {
+      const rows = await db
+        .select()
+        .from(accounts)
+        .where(and(eq(accounts.provider, "grok"), eq(accounts.enabled, true), eq(accounts.status, "active")));
+      const oauthAccount = rows.find((r) => isOAuthAccount(r));
+      if (!oauthAccount) return; // no active OAuth account → keep curated fallback
+
+      const bearer = await ensureFreshAccessToken(oauthAccount);
+      if (!bearer) return;
+
+      const result = await fetchModelsCatalog(bearer, this.catalogEtag);
+      if (result === null) {
+        // 304 / unreachable — keep what we have; just bump the freshness clock.
+        this.catalogFetchedAt = Date.now();
+        return;
+      }
+      if (result.etag) this.catalogEtag = result.etag;
+
+      const curated = new Map(GROK_MODELS.map((m) => [m.id, m]));
+      const merged = new Map<string, ModelInfo>(curated);
+      for (const [id, raw] of Object.entries(result.models)) {
+        const info = raw as Record<string, unknown>;
+        if (info?.supported_in_api === false || info?.hidden === true) continue;
+        const base = curated.get(id);
+        merged.set(id, {
+          id,
+          object: "model",
+          created: GROK_CREATED,
+          owned_by: "grok",
+          context_window: Number(info?.context_window) || base?.context_window || 131_072,
+          max_output: base?.max_output ?? 65_536,
+          thinking: info?.supports_reasoning_effort === true || base?.thinking === true,
+          vision: base?.vision ?? false,
+          creditUnit: "token",
+          creditRate: 1,
+          creditSource: "estimated",
+        });
+      }
+      // Always keep the tool-based image surface available.
+      const imageModel = curated.get(GROK_IMAGE_MODEL);
+      if (imageModel) merged.set(GROK_IMAGE_MODEL, imageModel);
+
+      this.liveModels = [...merged.values()];
+      this.liveModelIds = new Set([...merged.keys()].map((s) => s.toLowerCase()));
+      this.catalogFetchedAt = Date.now();
+    } catch (e) {
+      console.error("[grok] refreshModelsCache failed:", e instanceof Error ? e.message : e);
+    }
+  }
+
+  override getModels(): ModelInfo[] {
+    return this.liveModels.length > 0 ? this.liveModels : this.supportedModels;
+  }
+
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
     if (m === "grok-4.5" || m === "grok-4.5-reasoning" || m === "composer-2.5") return true;
@@ -330,6 +410,8 @@ export class GrokProvider extends BaseProvider {
       return true;
     }
     if (isGrokImageModel(m)) return true;
+    // Live-discovered catalog ids (auto-fetched from cli-chat-proxy /v1/models).
+    if (this.liveModelIds.has(m)) return true;
     return false;
   }
 

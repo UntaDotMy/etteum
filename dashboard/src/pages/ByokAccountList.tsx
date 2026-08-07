@@ -18,6 +18,7 @@ import {
   type ByokProvider,
 } from "@/lib/api";
 import { formatDateTimeID } from "@/lib/utils";
+import { freshUpstreamModels, mergeModels, paginateKeys, parseBulkLines } from "@/lib/byok-logic";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
 import { useWsEvent } from "@/hooks/useWebSocket";
@@ -165,7 +166,7 @@ export default function ByokAccountList() {
   const activeKeyCount = form.keys.filter((k) => k.enabled && k.status !== "error").length;
   // Only cap the list when there is something worth collapsing.
   const visibleKeys = useMemo(
-    () => (showAllKeys ? form.keys : form.keys.slice(0, KEYS_PAGE_SIZE)),
+    () => paginateKeys(form.keys, showAllKeys, KEYS_PAGE_SIZE),
     [form.keys, showAllKeys]
   );
   const hiddenKeyCount = form.keys.length - visibleKeys.length;
@@ -221,59 +222,9 @@ export default function ByokAccountList() {
   function showSuccess(text: string) { setMessage(text); setError(null); }
   function showError(err: unknown) { setError(err instanceof Error ? err.message : String(err)); clearMessage(); }
 
-  // Parse "label:key", "label key", or bare "key" lines from the bulk paste box.
-  // Bare keys auto-label from the first free key-N, counting existing labels,
-  // so repeat pastes never collide with key-1 and 409 the whole batch.
-  function parseBulkLines(text: string): Array<{ label: string; key: string }> {
-    const parsed: Array<{ label: string; key: string }> = [];
-    const taken = new Set<string>();
-    for (const k of provider?.keys || []) {
-      if (k.label) taken.add(k.label.toLowerCase());
-    }
-    taken.add("default"); // first manually-added key's label
-    let nextIndex = 1;
-    const nextFreeLabel = () => {
-      while (taken.has(`key-${nextIndex}`)) nextIndex++;
-      const label = `key-${nextIndex}`;
-      taken.add(label);
-      return label;
-    };
-    for (const rawLine of text.split("\n")) {
-      const trimmed = rawLine.trim();
-      if (!trimmed) continue;
-      let label = "";
-      let key = "";
-      const colonIdx = trimmed.indexOf(":");
-      if (colonIdx > 0) {
-        label = trimmed.slice(0, colonIdx).trim().toLowerCase();
-        key = trimmed.slice(colonIdx + 1).trim();
-      } else {
-        const spaceIdx = trimmed.indexOf(" ");
-        if (spaceIdx > 0) {
-          label = trimmed.slice(0, spaceIdx).trim().toLowerCase();
-          key = trimmed.slice(spaceIdx + 1).trim();
-        } else {
-          key = trimmed;
-        }
-      }
-      if (!key) continue;
-      if (!label) {
-        label = nextFreeLabel();
-      } else if (taken.has(label)) {
-        // Explicit label already on the provider. A bare-key label would 409
-        // the batch, so fall back to a free auto label instead.
-        label = nextFreeLabel();
-      } else {
-        taken.add(label);
-      }
-      parsed.push({ label, key });
-    }
-    return parsed;
-  }
-
   async function handleBulkAdd() {
     if (!provider) return;
-    const parsed = parseBulkLines(bulkText);
+    const parsed = parseBulkLines(bulkText, (provider.keys || []).map((k) => k.label));
     if (parsed.length === 0) return;
     setBulkAdding(true);
     try {
@@ -305,8 +256,7 @@ export default function ByokAccountList() {
         showError(res.error);
         return;
       }
-      const existing = new Set(models.map((m) => m.toLowerCase()));
-      const fresh = (res.models || []).filter((m) => !existing.has(m.toLowerCase()));
+      const fresh = freshUpstreamModels(res.models || [], models);
       if (fresh.length === 0) {
         showSuccess(res.total ? `Already up to date, all ${res.total} upstream models are listed` : "No new models found upstream");
         return;
@@ -333,8 +283,7 @@ export default function ByokAccountList() {
     if (!modelPicker) return;
     const picked = modelPicker.options.filter((m) => modelPicker.selected.has(m));
     if (picked.length > 0) {
-      const merged = [...models, ...picked];
-      setForm((current) => ({ ...current, models: merged.join(", ") }));
+      setForm((current) => ({ ...current, models: mergeModels(models, picked) }));
       showSuccess(`Added ${picked.length} model(s), save to apply`);
     }
     setModelPicker(null);

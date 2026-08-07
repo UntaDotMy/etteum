@@ -219,7 +219,16 @@ export function chooseMergeTokens(
 function openStoredTokens(value: string | null | undefined, passphrase: string): string | null {
   if (value == null) return null;
   const stored = typeof value === "string" ? value : JSON.stringify(value);
-  return isGcm(stored) ? decryptWithPassphrase(stored, passphrase) : stored;
+  if (!isGcm(stored)) return stored;
+  // A row whose tokens were sealed under a different ENCRYPTION_KEY (e.g. a
+  // farm install re-keyed them) cannot be opened here. Skip it instead of
+  // throwing, or one undecryptable row aborts the whole merge — mirrors the
+  // tolerate-and-continue convention in reencryptSecret.
+  try {
+    return decryptWithPassphrase(stored, passphrase);
+  } catch {
+    return null;
+  }
 }
 
 /** Raw-SQL backup merge bypasses the ORM, so seal token JSON explicitly. */
@@ -232,8 +241,12 @@ function sealStoredTokens(value: string | null | undefined, passphrase: string):
 /** Tables dropped in essential mode (history only — not needed to run the same accounts). */
 const ESSENTIAL_DROP_TABLES = ["request_logs", "usage_summary", "image_studio_chats", "image_studio_results"];
 
+// ETTEUM_BACKUP_ROOT is a test/CI seam: the create path reads <root>/.env and
+// <root>/data/jwt-secret verbatim into the pack, and both are gitignored — so
+// on CI (or any checkout without local secrets) those reads see nothing.
+// Tests point this at a temp dir with seeded fixtures. Production never sets it.
 function projectRoot(): string {
-  return path.resolve(import.meta.dir, "../..");
+  return process.env.ETTEUM_BACKUP_ROOT || path.resolve(import.meta.dir, "../..");
 }
 
 function envPath(): string {
@@ -261,6 +274,17 @@ export function checkpointLiveDatabase(): void {
   } catch {
     /* offline */
   }
+}
+
+/**
+ * True while this process holds the live DB open (i.e. the server is running).
+ * A full-replace import unlinks/renames the DB file; on POSIX that orphan-
+ * deletes the inode the live handle still writes to. The offline CLI import
+ * leaves this false, so it stays allowed there.
+ */
+let liveDbHeld = false;
+export function markLiveDatabaseHeld(): void {
+  liveDbHeld = true;
 }
 
 function countTables(dbPath: string): Record<string, number> {
@@ -765,6 +789,20 @@ export function applyBackupDir(packDir: string): ImportResult {
   const head = readFileSync(dbSrc).subarray(0, 16).toString("utf8");
   if (!head.startsWith("SQLite format 3")) {
     throw new Error("Backup database is not a valid SQLite file");
+  }
+
+  // Refuse a destructive full-replace while this process holds the DB open.
+  // unlink/rename on POSIX orphan-deletes the inode the live handle writes to;
+  // on Windows the file lock turns it into a confusing mid-import failure.
+  // The non-destructive alternative (merge) and the offline CLI import remain
+  // available.
+  if (liveDbHeld) {
+    throw new Error(
+      "Full database replace cannot run while the server is online — it would " +
+        "replace the database file out from under the live connection. " +
+        "Use mode=merge to append accounts without replacing the DB, or go offline: " +
+        "etteum stop → bun scripts/backup.ts import <zip> --yes → etteum start",
+    );
   }
 
   const root = projectRoot();

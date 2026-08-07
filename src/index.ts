@@ -25,12 +25,13 @@ import { autoWarmupScheduler } from "./auth/warmup-scheduler";
 import { warmupQueue } from "./auth/warmup-queue";
 import { autoRefreshScheduler } from "./auth/refresh-scheduler";
 import { db, client as sqliteClient } from "./db/index";
+import { markLiveDatabaseHeld } from "./lib/backup";
 import { apiKeys } from "./db/schema";
 import { eq } from "drizzle-orm";
 import { bootstrapFilterRules } from "./db/filter-bootstrap";
 import { bootstrapCompressionSettings } from "./db/compression-bootstrap";
 import { ensureModelMappingTable, seedModelMappings, loadModelMappingCache } from "./proxy/model-mapping";
-import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
+import { refreshByokModels, refreshGitlabDuoModels, refreshAlibabaModels, refreshGrokModels, refreshCompatibleNodes, refreshCustomModels } from "./proxy/providers/registry";
 import { setupLogRotation } from "./utils/log-rotation";
 import { recoverJobsOnBoot } from "./auth/automation/bulkImport";
 import { disableMitm } from "./proxy/mitm/manager";
@@ -139,6 +140,16 @@ try {
   console.log("[Alibaba] Model catalog refreshed");
 } catch (e) {
   console.error("[Alibaba] Model discovery skipped:", e instanceof Error ? e.message : e);
+}
+
+// Discover the live Grok model catalog (cli-chat-proxy /v1/models) from the
+// first active OAuth account so new grok models appear without manual adds.
+try {
+  console.log("[Grok] Discovering model catalog...");
+  await refreshGrokModels();
+  console.log("[Grok] Model catalog refreshed");
+} catch (e) {
+  console.error("[Grok] Model discovery skipped:", e instanceof Error ? e.message : e);
 }
 
 // Start auto-warmup scheduler (reads settings from DB)
@@ -602,6 +613,11 @@ const server = Bun.serve({
   },
   websocket: websocketHandler,
 });
+
+// The server now holds the live DB open for its whole lifetime. Mark it so a
+// full-replace backup import refuses to swap the file out from under us (the
+// offline CLI import path never calls this and stays allowed).
+markLiveDatabaseHeld();
 
 console.log(`
 ╔══════════════════════════════════════════════════╗
