@@ -1443,3 +1443,17 @@ export async function fetchByokProviderModels(
   return fetchApi(`/api/accounts/byok/${id}/fetch-models`, { method: "POST", body: JSON.stringify({}) });
 }
 
+/**
+ * Force-refresh a provider's live model catalog from its upstream (dashboard
+ * Models page "Fetch" button). Returns { success, provider } or { error }.
+ */
+export async function fetchProviderModels(
+  provider: string,
+  force = true
+): Promise<{ success?: boolean; provider?: string; error?: string }> {
+  return fetchApi("/api/models/fetch", {
+    method: "POST",
+    body: JSON.stringify({ provider, force }),
+  });
+}
+

@@ -258,6 +258,23 @@ export async function refreshCustomModels(): Promise<void> {
   await customModelsRegistry.refresh();
 }
 
+/**
+ * Force-refresh (or warm) a provider's live model catalog by name.
+ * Returns a status so the dashboard fetch button can report the outcome.
+ */
+export async function refreshProviderModels(name: string, force = true): Promise<{ ok: boolean; error?: string }> {
+  const provider = resolveProviderInstance(name);
+  if (!provider) return { ok: false, error: `Unknown provider: ${name}` };
+  const refresh = (provider as unknown as { refreshModelsCache?: (force?: boolean) => Promise<void> }).refreshModelsCache;
+  if (typeof refresh !== "function") return { ok: false, error: `${name} does not expose a model catalog` };
+  try {
+    await refresh.call(provider, force);
+    return { ok: true };
+  } catch (e) {
+    return { ok: false, error: e instanceof Error ? e.message : String(e) };
+  }
+}
+
 /** Get BYOK provider instance. */
 export function getByokProvider(): ByokProvider {
   return byok;

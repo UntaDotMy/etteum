@@ -3,11 +3,12 @@ import { Card, CardContent, CardHeader, CardTitle, CardDescription } from "@/com
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogDescription, DialogFooter } from "@/components/ui/dialog";
-import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, DollarSign, FlaskConical, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
+import { Cpu, Copy, Check, Search, Plus, Trash2, Pencil, Power, X, Save, RefreshCw, DollarSign, FlaskConical, Loader2, CheckCircle2, AlertCircle } from "lucide-react";
 import { useEffect, useState, useCallback } from "react";
 import {
   fetchModelsCatalog,
   fetchActiveModels,
+  fetchProviderModels,
   fetchCustomModels,
   saveCustomModel,
   deleteCustomModel,
@@ -125,6 +126,9 @@ export default function Models() {
   const [testing, setTesting] = useState<Record<string, { status: "loading" | "ok" | "fail"; error?: string }>>({});
   const { message: copiedModel, setMessage: setCopiedModel } = useTimedMessage<string>(null, 1500);
   const { message: statusMsg, setMessage: setStatusMsg } = useTimedMessage<string>(null, 3000);
+  // Live-catalog fetch: which provider's upstream catalog to force-refresh.
+  const [fetchProvider, setFetchProvider] = useState("alibaba");
+  const [fetching, setFetching] = useState(false);
 
   const reload = useCallback(async () => {
     // Catalog path attaches baseline + override pricing. /v1/models does not —
@@ -161,6 +165,24 @@ export default function Models() {
   // so cbc-hy3-preview's override lives under hy3-preview — both must match).
   const isCustom = (id: string) => !!(customMap[id] || customMap[toCanonicalModelName(id)]);
   const isDisabled = (provider: string, id: string) => !!disabledMap[`${provider}:${id}`];
+
+  /** Force-refresh a provider's live model catalog, then reload the table. */
+  async function handleFetchCatalog() {
+    if (fetching) return;
+    setFetching(true);
+    try {
+      const res = await fetchProviderModels(fetchProvider);
+      if (res.error) setStatusMsg(`Fetch failed: ${res.error}`);
+      else {
+        setStatusMsg(`${fetchProvider} catalog refreshed`);
+        await reload();
+      }
+    } catch (e) {
+      setStatusMsg(e instanceof Error ? e.message : "Fetch failed");
+    } finally {
+      setFetching(false);
+    }
+  }
 
   const providers = ["all", ...knownProviders];
 
@@ -330,6 +352,25 @@ export default function Models() {
             >
               Active only
             </button>
+            <div className="flex items-center gap-2 ml-3">
+              <select
+                value={fetchProvider}
+                onChange={(e) => setFetchProvider(e.target.value)}
+                className="h-8 rounded-md border border-input bg-background px-2 text-xs"
+                title="Provider whose live model catalog will be force-refreshed"
+              >
+                {knownProviders.map((p) => <option key={p} value={p}>{p}</option>)}
+              </select>
+              <button
+                onClick={handleFetchCatalog}
+                disabled={fetching}
+                className="h-8 px-3 inline-flex items-center gap-1.5 rounded-md text-xs font-medium transition-colors bg-[var(--secondary)] text-[var(--foreground)] border border-[var(--border)] hover:opacity-80 disabled:opacity-50"
+                title="Force-refresh the selected provider's live model catalog from its upstream"
+              >
+                <RefreshCw className={`w-3.5 h-3.5 ${fetching ? "animate-spin" : ""}`} />
+                Fetch
+              </button>
+            </div>
           </div>
         </CardContent>
       </Card>
