@@ -210,6 +210,8 @@ type ProviderModel = {
   label: string;
   /** Catalog flag: model supports a reasoning/thinking mode. */
   thinking?: boolean;
+  /** Reasoning-effort levels the model accepts, ascending (from the catalog). */
+  effortLevels?: string[];
 };
 
 const STORAGE_KEY = "etteum-chat-conversations";
@@ -277,7 +279,7 @@ async function ensurePoolApiKey(): Promise<string> {
   return "";
 }
 
-function mapModelRows(rows: Array<{ id?: string; owned_by?: string; thinking?: boolean } | string>): ProviderModel[] {
+function mapModelRows(rows: Array<{ id?: string; owned_by?: string; thinking?: boolean; effort_levels?: string[] } | string>): ProviderModel[] {
   return rows
     .map((m) => {
       const id = typeof m === "string" ? m : String(m.id || "");
@@ -286,12 +288,16 @@ function mapModelRows(rows: Array<{ id?: string; owned_by?: string; thinking?: b
       // otherwise derive from the id prefix (legacy path).
       const ownedBy = typeof m === "object" && typeof m.owned_by === "string" ? m.owned_by : "";
       const thinking = typeof m === "object" && typeof m.thinking === "boolean" ? m.thinking : undefined;
+      const effortLevels =
+        typeof m === "object" && Array.isArray(m.effort_levels) && m.effort_levels.length > 0
+          ? m.effort_levels.filter((x): x is string => typeof x === "string")
+          : undefined;
       const prefix = ownedBy
         ? ownedBy
         : id.includes("-")
           ? id.split("-")[0]!
           : "";
-      const model: ProviderModel = { id, provider: providerFromPrefix(prefix), label: id, thinking };
+      const model: ProviderModel = { id, provider: providerFromPrefix(prefix), label: id, thinking, effortLevels };
       return model;
     })
     .filter((m): m is ProviderModel => m != null);
@@ -508,7 +514,7 @@ export default function Chat() {
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
   // Reasoning effort for thinking-capable models. "off" = don't request thinking.
-  const [effort, setEffort] = useState<"off" | "low" | "medium" | "high">("medium");
+  const [effort, setEffort] = useState<string>("medium");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   /** When true, stream/output keeps the message list pinned to the bottom. */
@@ -569,8 +575,16 @@ export default function Chat() {
   }, [models, activeId, conversations]);
 
   const activeModel = active?.model || models[0]?.id || "";
+  const activeModelInfo = models.find((m) => m.id === activeModel);
   // Catalog says this model supports a reasoning/thinking mode.
-  const thinkingCapable = models.find((m) => m.id === activeModel)?.thinking === true;
+  const thinkingCapable = activeModelInfo?.thinking === true;
+  // Levels this model actually accepts (e.g. Kimi K3: low/high/max). Fall back to
+  // a generic ladder when the catalog doesn't declare tiers.
+  const effortLevels = activeModelInfo?.effortLevels?.length
+    ? activeModelInfo.effortLevels
+    : ["low", "medium", "high"];
+  // Keep the selected effort valid for the current model's ladder.
+  const validEffort = effortLevels.includes(effort) ? effort : effortLevels[effortLevels.length - 1]!;
 
   function updateConversation(id: string, updater: (c: Conversation) => Conversation) {
     setConversations((prev) => {
@@ -882,9 +896,9 @@ export default function Chat() {
         setStreamingThinking(update.thinking);
       },
       abort.signal,
-      // Only send an effort when the model supports thinking; otherwise omit it
-      // so non-thinking models aren't force-toggled by a stray param.
-      thinkingCapable && effort !== "off" ? effort : undefined,
+      // Only send an effort when the model supports thinking; clamp to the
+      // model's ladder so an out-of-range value is never sent.
+      thinkingCapable && effort !== "off" ? validEffort : undefined,
     );
 
     abortRef.current = null;
@@ -1140,9 +1154,22 @@ export default function Chat() {
         {thinkingCapable && (
           <div
             className="flex shrink-0 items-center overflow-hidden rounded-full border border-[var(--border)] bg-[var(--background)] text-[10px]"
-            title="Reasoning effort (thinking)"
+            title={`Reasoning effort — ${activeModelInfo?.effortLevels?.length ? "levels this model supports" : "generic"}`}
           >
-            {(["off", "low", "medium", "high"] as const).map((level) => (
+            <button
+              type="button"
+              onClick={() => setEffort("off")}
+              disabled={streaming}
+              className={cn(
+                "px-2 py-1 transition-colors disabled:opacity-50",
+                effort === "off"
+                  ? "bg-[color-mix(in_srgb,var(--primary)_14%,transparent)] text-[var(--primary)]"
+                  : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+              )}
+            >
+              No think
+            </button>
+            {effortLevels.map((level) => (
               <button
                 key={level}
                 type="button"
@@ -1150,12 +1177,12 @@ export default function Chat() {
                 disabled={streaming}
                 className={cn(
                   "px-2 py-1 capitalize transition-colors disabled:opacity-50",
-                  effort === level
+                  validEffort === level && effort !== "off"
                     ? "bg-[color-mix(in_srgb,var(--primary)_14%,transparent)] text-[var(--primary)]"
                     : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
                 )}
               >
-                {level === "off" ? "No think" : level}
+                {level}
               </button>
             ))}
           </div>
