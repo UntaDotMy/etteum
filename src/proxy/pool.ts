@@ -834,13 +834,18 @@ class AccountPool {
     const activeAccounts = await this.getActiveAccounts(provider);
     if (activeAccounts.length === 0) return [];
 
-    // For Alibaba, filter by queryable models
+    // why: rank by probe coverage instead of filtering. The old `?? false`
+    // filter hid un-probed accounts and shrank the fleet to a handful.
     if (provider === "alibaba") {
       const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
-      return activeAccounts.filter((account) => {
-        const tokens = account.tokens as { queryableModels?: string[] } | null;
-        return tokens?.queryableModels?.includes(upstreamModel) ?? false;
-      });
+      return activeAccounts
+        .map((account, index) => {
+          const tokens = account.tokens as { queryableModels?: string[] } | null;
+          const probed = tokens?.queryableModels?.includes(upstreamModel) ? 0 : 1;
+          return { account, index, probed };
+        })
+        .sort((a, b) => a.probed - b.probed || a.index - b.index)
+        .map(({ account }) => account);
     }
 
     return activeAccounts;
