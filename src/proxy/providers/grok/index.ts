@@ -903,6 +903,9 @@ export class GrokProvider extends BaseProvider {
     if (request.temperature != null) body.temperature = request.temperature;
     if (request.max_tokens != null) body.max_tokens = request.max_tokens;
     if ((request as any).tools) body.tools = (request as any).tools;
+    // why: console.x.ai chat-completions takes top-level reasoning_effort
+    // (low/medium/high). Without it Grok never emits reasoning_content.
+    body.reasoning_effort = resolveGrokReasoningEffort(request);
 
     const response = await fetch(GROK_ENDPOINTS.CONSOLE_CHAT, {
       method: "POST",
