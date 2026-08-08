@@ -51,6 +51,7 @@ import {
   exchangeJobToken,
   extractLatestUserImages,
   extractLatestUserPrompt,
+  friendlyIdForUpstream,
   generateMachineIdentity,
   generateOpenAIToolId,
   hasQoderCredentials,
@@ -58,6 +59,8 @@ import {
   md5Hex,
   normalizeImageBlock,
   normalizeQoderTokens,
+  qoderUpstreamKey,
+  resolveQoderModelConfig,
   normalizeToolCallId,
   openApiHeaders,
   parseSseLine,
@@ -100,7 +103,9 @@ export class QoderProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    if (m.startsWith("qd-")) return true;
+    // qd- is the current prefix; qd/ is the legacy discovery format older
+    // clients still send — both carry the upstream key after the separator.
+    if (m.startsWith("qd-") || m.startsWith("qd/")) return true;
     // Live-discovered catalog ids (auto-fetched from /algo/api/v2/model/list).
     if (this.liveModelIds.has(m)) return true;
     return false;
@@ -156,14 +161,18 @@ export class QoderProvider extends BaseProvider {
       // so a curated model whose friendly id differs from its key would
       // otherwise surface twice under /v1/models.
       const curatedIds = new Set(this.supportedModels.map((m) => m.id));
-      const curatedKeys = new Set(QODER_MODELS.map((m) => m.upstream.toLowerCase()));
+      const curatedKeys = new Set(
+        QODER_MODELS.map((m) => (m.upstream ?? m.id.slice(3)).toLowerCase()),
+      );
       const live: ModelInfo[] = [];
       for (const entry of entries) {
         const upstream = typeof entry?.key === "string" ? entry.key.trim() : "";
         if (!upstream) continue;
         if (entry.enable === false) continue; // plan-gated / disabled upstream
         if (curatedKeys.has(upstream.toLowerCase())) continue; // curated already covers it
-        const id = `qd-${upstream}`;
+        // Friendly id (kmodel_latest → qd-Kimi-K3) so specs/pricing resolve by
+        // canonical name; raw-key fallback for keys without a friendly mapping.
+        const id = friendlyIdForUpstream(upstream);
         if (curatedIds.has(id)) continue;
         const spec = resolveModelSpec(upstream);
         live.push({
@@ -420,10 +429,10 @@ export class QoderProvider extends BaseProvider {
     const body = buildChatBody(request, tokens);
     let resp: Response;
     try {
-      const cfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+      const cfg = resolveQoderModelConfig(request.model);
       // Honor the override for the x-model-key header too.
       const upstreamOverride = getUpstreamNameOverride(request.model);
-      const modelKey = upstreamOverride || cfg.upstream;
+      const modelKey = upstreamOverride || qoderUpstreamKey(cfg);
       const modelSource = body?.model_config?.source || "system";
       const extraHeaders = {
         "x-model-key": modelKey,
@@ -447,9 +456,9 @@ export class QoderProvider extends BaseProvider {
     } catch (e) {
       // Network failure on api2 — try api3 once.
       try {
-        const cfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+        const cfg = resolveQoderModelConfig(request.model);
         const upstreamOverride = getUpstreamNameOverride(request.model);
-        const modelKey = upstreamOverride || cfg.upstream;
+        const modelKey = upstreamOverride || qoderUpstreamKey(cfg);
         resp = await bearerFetch(tokens, {
           url: CHAT_URL_FALLBACK,
           body,
@@ -805,8 +814,7 @@ export class QoderProvider extends BaseProvider {
    * Used by the proxy to route per-request decrement to the correct counter.
    */
   isFreeModel(modelId: string): boolean {
-    const def = MODEL_CONFIGS[modelId];
-    return def?.upstream === "qmodel_latest";
+    return qoderUpstreamKey(resolveQoderModelConfig(modelId)) === "qmodel_latest";
   }
 
   /**
