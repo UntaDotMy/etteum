@@ -216,6 +216,9 @@ export function chatToCliResponsesBody(
     (request as any).thinking?.effort;
   if (effort && String(effort).toLowerCase() !== "none") {
     body.reasoning_effort = String(effort).toLowerCase();
+    // why: Responses endpoints hide reasoning unless a summary is requested.
+    // Verified live: reasoning ran but returned nothing until summary:"auto".
+    body.reasoning = { effort: String(effort).toLowerCase(), summary: "auto" };
   }
 
   if (request.temperature != null) body.temperature = request.temperature;
@@ -252,6 +255,8 @@ export function responsesSseToChatCompletionStream(
   const decoder = new TextDecoder();
   let buffer = "";
   let roleSent = false;
+  // True once any reasoning summary has been streamed (delta or completed item).
+  let reasoningEmitted = false;
   // tool_call index by item_id for streaming function args
   const toolIndexByItem = new Map<string, number>();
   let nextToolIndex = 0;
@@ -321,6 +326,7 @@ export function responsesSseToChatCompletionStream(
               typeof data.delta === "string"
             ) {
               ensureRole(controller);
+              reasoningEmitted = true;
               emit(controller, { reasoning_content: data.delta });
               continue;
             }
@@ -370,6 +376,25 @@ export function responsesSseToChatCompletionStream(
 
             // Completed — usage + finish
             if (type === "response.completed" || type === "response.failed") {
+              // Fallback: some surfaces only carry the summary in the final
+              // reasoning output item, not as deltas.
+              if (!reasoningEmitted) {
+                const output: any[] = Array.isArray(data.response?.output) ? data.response.output : [];
+                let summaryText = "";
+                for (const item of output) {
+                  if (item?.type === "reasoning" && Array.isArray(item.summary)) {
+                    for (const part of item.summary) {
+                      if (part?.type === "summary_text" && typeof part.text === "string") {
+                        summaryText += part.text;
+                      }
+                    }
+                  }
+                }
+                if (summaryText) {
+                  ensureRole(controller);
+                  emit(controller, { reasoning_content: summaryText });
+                }
+              }
               const usageRaw = data.response?.usage;
               let usageOut: Record<string, unknown> | undefined;
               if (usageRaw && typeof usageRaw === "object") {
