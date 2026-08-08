@@ -38,6 +38,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "qwen3.7-flash":          { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   // Qoder Cosy qmodel_preview (qd-Qwen3.8-Max-Preview) — same class as 3.7-max tier.
   "qwen3.8-max-preview":    { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
+  // Qwen3.8-Max (GA 2026-08): 2.4T MoE, 1M ctx, 131072 max output, thinking+vision.
+  "qwen3.8-max":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
   "qwen3.7-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: true,  vision: true },
   "qwen3.6-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
   "qwen3.5-plus":           { contextWindow: 1_000_000, maxOutput: 65_536, thinking: false, vision: true },
@@ -234,7 +236,9 @@ export function resolveModelSpec(canonicalName: string | undefined): ModelSpec |
   for (const c of candidates) {
     let spec = MODEL_SPECS[c];
     if (!spec) {
-      const dateless = c.replace(/-\d{4}-\d{2}-\d{2}.*$/, "");
+      // why: strip dated snapshot suffixes (-YYYY-MM-DD and -MMDD) so a dated
+      // variant like deepseek-v4-flash-0731 inherits its base model's spec.
+      const dateless = c.replace(/-\d{4}-\d{2}-\d{2}.*$/, "").replace(/-\d{4}$/, "");
       if (dateless !== c) spec = MODEL_SPECS[dateless];
     }
     if (spec) {

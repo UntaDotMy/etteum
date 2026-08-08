@@ -15,6 +15,7 @@ import { Plus, Upload, RefreshCw, Play, RotateCcw, Flame, ChevronDown, Loader2, 
 import { Progress } from "@/components/ui/progress";
 import { formatNumber } from "@/lib/utils";
 import { sumProviderFleetCredits, weeklyAverageRemaining } from "@/lib/provider-credits";
+import { formatAlibabaModelLabel } from "@/lib/alibaba-models";
 import { useWsEvent } from "@/hooks/useWebSocket";
 import {
   completeCodexOAuthCallbackUrl,
@@ -1365,21 +1366,17 @@ export default function Accounts() {
         fleetCount,
       } = sumProviderFleetCredits(rows);
 
-      // For alibaba, aggregate per-model quotas only from accounts that can query each model
+      // For alibaba, aggregate per-model quotas across every tracked model.
       let modelQuotasSum: Record<string, { limit: number; remaining: number; count: number }> | undefined;
       if (provider === "alibaba") {
         modelQuotasSum = {};
-        const KEY_MODELS = ["qwen3.7-max", "qwen3.7-plus", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "kimi-k2.7-code"];
         for (const a of activeRows) {
           const tokens = a.tokens as AlibabaQuotaTokens | null | undefined;
           if (!tokens?.modelQuotas) continue;
 
-          // Only count models that this account can actually query
-          const queryableModels = (tokens as any).queryableModels || [];
-          for (const key of KEY_MODELS) {
-            // Skip if account doesn't have this model in queryableModels
-            if (queryableModels.length > 0 && !queryableModels.includes(key)) continue;
-
+          // why: iterate every model in modelQuotas, not a hardcoded list. The
+          // probe tracks the full live catalog, so a fixed list hid new models.
+          for (const key of Object.keys(tokens.modelQuotas)) {
             const q = tokens.modelQuotas[key];
             if (!q) continue;
             if (!modelQuotasSum[key]) modelQuotasSum[key] = { limit: 0, remaining: 0, count: 0 };
@@ -1688,13 +1685,7 @@ export default function Accounts() {
                     const pct = q.limit > 0 ? (q.remaining / q.limit) * 100 : 0;
                     const exhausted = q.remaining <= 0;
                     const tone = exhausted ? "bg-[var(--error)]" : pct <= 10 ? "bg-[var(--error)]" : pct <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
-                    const label = model
-                      .replace("deepseek-v4-pro", "DS v4 Pro")
-                      .replace("deepseek-v4-flash", "DS v4 Flash")
-                      .replace("qwen3.7-max", "Qwen 3.7 Max")
-                      .replace("qwen3.7-plus", "Qwen 3.7+")
-                      .replace("glm-5.2", "GLM 5.2")
-                      .replace("kimi-k2.7-code", "Kimi K2.7");
+                    const label = formatAlibabaModelLabel(model);
                     return (
                       <div key={model} className="space-y-0">
                         <div className="flex items-center justify-between text-[10px]">

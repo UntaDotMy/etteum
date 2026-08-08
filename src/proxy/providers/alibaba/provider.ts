@@ -109,13 +109,15 @@ export class AlibabaProvider extends BaseProvider {
         const id = `ali-${upstream}`;
         if (known.has(id)) continue; // curated already covers it (with verified spec)
         const spec = resolveModelSpec(upstream); // fill real specs where known
+        // why: never emit 0 context/output. A discovered model with no registry
+        // entry falls back to a conservative floor so max_tokens clamps work.
         discovered.push({
           id,
           object: "model",
           created: Math.floor(Date.now() / 1000),
           owned_by: "alibaba",
-          context_window: spec?.contextWindow ?? 0,
-          max_output: spec?.maxOutput ?? 0,
+          context_window: spec?.contextWindow ?? 128_000,
+          max_output: spec?.maxOutput ?? 8_192,
           thinking: spec?.thinking ?? false,
           vision: spec?.vision ?? false,
           creditUnit: "token" as const,
