@@ -6,6 +6,7 @@ import { Badge } from "@/components/ui/badge";
 import { Input } from "@/components/ui/input";
 import { ArrowLeft, Search, Trash2, RefreshCw, RotateCcw, ExternalLink, ArrowUpDown, ArrowUp, ArrowDown, CheckCircle2, XCircle, Key, Copy } from "lucide-react";
 import { formatDateTimeID } from "@/lib/utils";
+import { formatAlibabaModelLabel } from "@/lib/alibaba-models";
 import { useTimedMessage } from "@/hooks/useTimedMessage";
 import { useApiCache } from "@/hooks/useApiCache";
 import { useWsEvent } from "@/hooks/useWebSocket";
@@ -521,21 +522,17 @@ function AlibabaQuotaCell({ tokens }: { tokens?: AlibabaQuotaTokens | null }) {
     return <span className="text-xs text-[var(--muted-foreground)]">No quota data</span>;
   }
 
-  // Only show the key probe models
-  const KEY_MODELS = ["qwen3.7-max", "qwen3.7-plus", "deepseek-v4-pro", "deepseek-v4-flash", "glm-5.2", "kimi-k2.7-code"];
-  const entries = KEY_MODELS
-    .map((model) => {
-      const q = quotas[model];
-      if (!q) return null;
-      return {
-        model,
-        limit: q.limit,
-        remaining: q.remaining,
-        pct: q.limit > 0 ? (q.remaining / q.limit) * 100 : 0,
-        exhausted: q.remaining <= 0,
-      };
-    })
-    .filter((e): e is NonNullable<typeof e> => e !== null);
+  // why: show every tracked model, not a hardcoded list. The probe records the
+  // full live catalog, so a fixed list hid new models and read "No quota data".
+  const entries = Object.entries(quotas)
+    .map(([model, q]) => ({
+      model,
+      limit: q.limit,
+      remaining: q.remaining,
+      pct: q.limit > 0 ? (q.remaining / q.limit) * 100 : 0,
+      exhausted: q.remaining <= 0,
+    }))
+    .sort((a, b) => b.limit - a.limit);
 
   if (entries.length === 0) {
     return <span className="text-xs text-[var(--muted-foreground)]">No quota data</span>;
@@ -551,13 +548,7 @@ function AlibabaQuotaCell({ tokens }: { tokens?: AlibabaQuotaTokens | null }) {
           : e.pct <= 40
           ? "bg-[var(--warning)]"
           : "bg-[var(--success)]";
-        const label = e.model
-          .replace("deepseek-v4-pro", "DS v4 Pro")
-          .replace("deepseek-v4-flash", "DS v4 Flash")
-          .replace("qwen3.7-max", "Qwen 3.7 Max")
-          .replace("qwen3.7-plus", "Qwen 3.7+")
-          .replace("glm-5.2", "GLM 5.2")
-          .replace("kimi-k2.7-code", "Kimi K2.7");
+        const label = formatAlibabaModelLabel(e.model);
         return (
           <div key={e.model} className="space-y-0">
             <div className="flex items-center justify-between text-[10px]">
