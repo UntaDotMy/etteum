@@ -411,8 +411,12 @@ export class AlibabaProvider extends BaseProvider {
 
       // Persist per-model quotas to account tokens for cross-session tracking.
       if (Object.keys(modelQuotas).length > 0) {
+        // Preserve queryableModels — the probe writes it and pool selection
+        // ranks on it; rebuilding the blob without it drops the probe state.
+        const existingTokensBlob = account.tokens as AlibabaQuotaTokens | null;
         const tokens: AlibabaQuotaTokens = {
           modelQuotas,
+          queryableModels: existingTokensBlob?.queryableModels,
           updatedAt: new Date().toISOString(),
         };
         // Fire-and-forget: save to DB, do NOT await (warmup already slow enough).
@@ -703,8 +707,13 @@ export class AlibabaProvider extends BaseProvider {
       entry.remaining = remaining;
       tokens[upstreamModel] = entry;
 
+      // Preserve queryableModels from the live row — rebuilding without it
+      // wipes probe results on every request, demoting the account to
+      // "un-probed" in the ranked pool selection.
+      const existing = (row?.tokens as AlibabaQuotaTokens | null) ?? null;
       const quotaTokens: AlibabaQuotaTokens = {
         modelQuotas: tokens,
+        queryableModels: existing?.queryableModels,
         updatedAt: new Date().toISOString(),
       };
 
