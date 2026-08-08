@@ -21,6 +21,8 @@ import {
   getCustomModelProvider,
   applyCustomModelsToList,
 } from "./custom-models";
+import { resolveModelSpec } from "../model-specs";
+import { toCanonicalModelName } from "../pricing";
 
 /**
  * Single source of truth for the provider set.
@@ -148,7 +150,14 @@ export function getAllModels(): ModelInfo[] {
     seen.add(m.id);
     return true;
   });
-  return applyCustomModelsToList(deduped);
+  const withCustom = applyCustomModelsToList(deduped);
+  // why: attach per-model reasoning-effort levels so the dashboard selector only
+  // offers levels the model accepts. Providers that set effort_levels win.
+  return withCustom.map((m) => {
+    if (m.effort_levels && m.effort_levels.length > 0) return m;
+    const levels = resolveModelSpec(toCanonicalModelName(m.id))?.effortLevels;
+    return levels && levels.length > 0 ? { ...m, effort_levels: levels } : m;
+  });
 }
 
 /**

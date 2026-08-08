@@ -22,6 +22,8 @@ export interface ModelSpec {
   /** Default thinking support for the base model (a -thinking variant is true). */
   thinking?: boolean;
   vision?: boolean;
+  /** Reasoning-effort levels the model accepts, ascending. Undefined = on/off thinking only. */
+  effortLevels?: string[];
 }
 
 /**
@@ -95,7 +97,8 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   // Kimi K3 flagship (July 2026) — 1M combined context (input+output ≤ 1_048_576).
   // Default max_completion_tokens is 131_072; hard max is 1_048_576 (remaining window).
   // openrouter.ai/moonshotai/kimi-k3 · platform.kimi.ai
-  "kimi-k3":                { contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true,  vision: true },
+  // Kimi K3 reasoning_effort: low / high / max (default max). No medium.
+  "kimi-k3":                { contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true,  vision: true, effortLevels: ["low", "high", "max"] },
 
   // ── MiniMax — platform.minimaxi.com (M3 is current flagship, June 2026) ──
   "minimax-m3":             { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: true },
@@ -131,28 +134,30 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "muse-spark-1.1":         { contextWindow: 1_048_576, maxOutput: 65_536,  thinking: true,  vision: true },
 
   // ── Claude (Anthropic) — docs.claude.com / platform.claude.com ──
-  "claude-fable-5":         { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-mythos-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-sonnet-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-opus-4.8":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-opus-4.7":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-opus-4.6":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-opus-4.5":        { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  "claude-sonnet-4.6":      { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "claude-sonnet-4.5":      { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  "claude-sonnet-4":        { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  "claude-haiku-4.5":       { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true },
+  // Effort ladder low/medium/high/xhigh/max (Opus 4.7 defaults to xhigh).
+  "claude-fable-5":         { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-mythos-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-sonnet-5":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-opus-4.8":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-opus-4.7":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-opus-4.6":        { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-opus-4.5":        { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high", "xhigh", "max"] },
+  "claude-sonnet-4.6":      { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "claude-sonnet-4.5":      { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "claude-sonnet-4":        { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "claude-haiku-4.5":       { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
 
   // ── OpenAI GPT — developers.openai.com ──
   "gpt-5.6-sol":            { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.6-terra":          { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.6-luna":           { contextWindow: 1_050_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.5-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.5":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.4-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.4":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.4-mini":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
-  "gpt-5.4-nano":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
+  // GPT-5.x reasoning_effort: minimal / low / medium / high / xhigh.
+  "gpt-5.5-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium", "high", "xhigh"] },
+  "gpt-5.5":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium", "high", "xhigh"] },
+  "gpt-5.4-pro":            { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium", "high", "xhigh"] },
+  "gpt-5.4":                { contextWindow: 1_000_000, maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium", "high", "xhigh"] },
+  "gpt-5.4-mini":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium", "high"] },
+  "gpt-5.4-nano":           { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true, effortLevels: ["minimal", "low", "medium"] },
   "gpt-5.3":                { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-5.2":                { contextWindow: 400_000,   maxOutput: 131_072, thinking: true,  vision: true },
   "gpt-4o":                 { contextWindow: 128_000,   maxOutput: 16_384,  thinking: false, vision: true },
@@ -171,8 +176,9 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
 
   // ── Grok (xAI) — docs.x.ai; proxy routes only grok-4.5* for OAuth, keep
   // chat-API cousins for pricing lookup when BYOK/other surfaces use them. ──
-  "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true },
+  // Grok reasoning_effort accepts low/medium/high only (provider clamps the rest).
+  "grok-4.5":               { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "grok-4.5-reasoning":     { contextWindow: 500_000,   maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
   // Cursor docs: 200k context for composer-2.5 (xAI API models page has no entry).
   "composer-2.5":           { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   // Composer 2.5 Fast (Grok Build) — same family; upstream id grok-composer-2.5-fast.
@@ -180,9 +186,9 @@ export const MODEL_SPECS: Record<string, ModelSpec> = {
   "composer-2.5-fast":      { contextWindow: 200_000,   maxOutput: 65_536,  thinking: true,  vision: false },
   // Image Studio / Chat — tool image_generation on cli-chat-proxy /v1/responses.
   "grok-image":             { contextWindow: 1_024,     maxOutput: 0,       thinking: false, vision: false },
-  "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-4.3-reasoning":     { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true },
-  "grok-4.3-heavy":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
+  "grok-4.3":               { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "grok-4.3-reasoning":     { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: true, effortLevels: ["low", "medium", "high"] },
+  "grok-4.3-heavy":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false, effortLevels: ["low", "medium", "high"] },
   "grok-4.20":              { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: false },
   "grok-4.20-fast":         { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: false, vision: false },
   "grok-4.20-reasoning":    { contextWindow: 1_000_000, maxOutput: 65_536,  thinking: true,  vision: false },
@@ -249,6 +255,7 @@ export function resolveModelSpec(canonicalName: string | undefined): ModelSpec |
           ? true
           : spec.thinking,
         vision: spec.vision,
+        effortLevels: spec.effortLevels,
       };
     }
   }
@@ -280,6 +287,7 @@ export function applyModelSpecs(
       max_output: spec.maxOutput,
       thinking: spec.thinking ?? m.thinking,
       vision: spec.vision ?? m.vision,
+      ...(spec.effortLevels ? { effort_levels: spec.effortLevels } : {}),
     };
   });
 }

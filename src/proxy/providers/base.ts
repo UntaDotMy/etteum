@@ -109,6 +109,8 @@ export interface ModelInfo {
   max_output?: number; // e.g. 64000
   thinking?: boolean; // supports -thinking suffix
   vision?: boolean; // supports image_url content blocks
+  /** Reasoning-effort levels this model accepts, ascending (drives the dashboard selector). */
+  effort_levels?: string[];
   creditUnit?: CreditUnit;
   creditRate?: number;
   creditSource?: CreditSource;

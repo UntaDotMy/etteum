@@ -6,7 +6,7 @@ describe("model-specs registry", () => {
   test("resolves verified specs for key models", () => {
     expect(resolveModelSpec("glm-5.2")).toEqual({ contextWindow: 1_000_000, maxOutput: 131_072, thinking: true, vision: true });
     expect(resolveModelSpec("kimi-k2.7-code")).toEqual({ contextWindow: 262_144, maxOutput: 98_304, thinking: false, vision: false });
-    expect(resolveModelSpec("kimi-k3")).toEqual({ contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true, vision: true });
+    expect(resolveModelSpec("kimi-k3")).toEqual({ contextWindow: 1_048_576, maxOutput: 1_048_576, thinking: true, vision: true, effortLevels: ["low", "high", "max"] });
     expect(resolveModelSpec("deepseek-v4-pro")?.maxOutput).toBe(384_000);
     expect(resolveModelSpec("qwen3.7-max")?.maxOutput).toBe(65_536);
     expect(resolveModelSpec("qwen-max")?.contextWindow).toBe(32_000); // was wrongly 1M
