@@ -165,6 +165,7 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   "qwen3.7-max-preview":          { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
   // Qoder Cosy qmodel_preview (qd-Qwen3.8-Max-Preview) — same rate class as 3.7-max until public SKU rates land.
   "qwen3.8-max-preview":          { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
+  "qwen3.8-max":                  { input: 1.20,  output: 6.00,  cached: 0.12,   reasoning: 6.00,  cacheCreation: 1.50  },
   "qwen3.7-plus":                 { input: 0.80,  output: 4.00,  cached: 0.08,   reasoning: 4.00,  cacheCreation: 1.00  },
   "qwen3.6-plus":                 { input: 0.80,  output: 4.00,  cached: 0.08,   reasoning: 4.00,  cacheCreation: 1.00  },
   "qwen3.5-plus":                 { input: 0.40,  output: 2.00,  cached: 0.04,   reasoning: 2.00,  cacheCreation: 0.50  },

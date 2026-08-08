@@ -18,7 +18,7 @@ import { getAllModels } from "../proxy/router";
 import { pool, type ProviderName } from "../proxy/pool";
 import { adminGuardFromPeer, peerIpFromHonoContext } from "../utils/security";
 import { invalidatePricingCache, getPricingForModel } from "../proxy/pricing";
-import { refreshCustomModels } from "../proxy/providers/registry";
+import { refreshCustomModels, refreshProviderModels } from "../proxy/providers/registry";
 import { routeRequest } from "../proxy/router";
 import type { ChatCompletionRequest } from "../proxy/providers/base";
 
@@ -138,6 +138,18 @@ managementRouter.get("/models/availability", async (c) => {
     }),
   );
   return c.json({ availability });
+});
+
+/**
+ * POST /api/models/fetch — force-refresh a provider's live model catalog.
+ * Body: { provider, force? }. Providers without a catalog return 400.
+ */
+managementRouter.post("/models/fetch", async (c) => {
+  const body = await c.req.json<{ provider?: string; force?: boolean }>().catch(() => null);
+  if (!body?.provider) return c.json({ error: "provider required" }, 400);
+  const result = await refreshProviderModels(body.provider, body.force !== false);
+  if (!result.ok) return c.json({ error: result.error }, 400);
+  return c.json({ success: true, provider: body.provider });
 });
 
 // --- Disabled models (per-provider persistence) ---

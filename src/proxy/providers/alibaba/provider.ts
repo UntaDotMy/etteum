@@ -87,8 +87,8 @@ export class AlibabaProvider extends BaseProvider {
    * Called on startup (via refreshAlibabaModels) and refreshes on a 6h TTL.
    * Failures are non-fatal — the curated list remains served.
    */
-  async refreshModelsCache(): Promise<void> {
-    if (Date.now() < this.discoveryExpiry && this.discoveredModels.length > 0) return;
+  async refreshModelsCache(force = false): Promise<void> {
+    if (!force && Date.now() < this.discoveryExpiry && this.discoveredModels.length > 0) return;
     try {
       const account = await this.pickHealthyAccount();
       if (!account) return;

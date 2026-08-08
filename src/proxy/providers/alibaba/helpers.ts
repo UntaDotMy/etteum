@@ -76,6 +76,7 @@ export const ALI_MODEL_MAP: Record<string, {
   "ali-qwen3.6-plus":         { upstream: "qwen3.6-plus",         context_window: 1000000,  max_output: 32768, thinking: false, vision: true,  creditRate: 0.003 },
   "ali-qwen3.7-max":          { upstream: "qwen3.7-max",          context_window: 1000000,  max_output: 32768, thinking: true,  vision: true,  creditRate: 0.006 },
   "ali-qwen3.7-plus":         { upstream: "qwen3.7-plus",         context_window: 1000000,  max_output: 32768, thinking: true,  vision: true,  creditRate: 0.004 },
+  "ali-qwen3.8-max":          { upstream: "qwen3.8-max",          context_window: 1000000,  max_output: 32768, thinking: true,  vision: true,  creditRate: 0.006 },
 
   // ── Coder models ─────────────────────────────────────────────────
   "ali-qwen-coder-plus":      { upstream: "qwen-coder-plus",      context_window: 1000000,  max_output: 8192,  thinking: false, vision: false, creditRate: 0.002 },

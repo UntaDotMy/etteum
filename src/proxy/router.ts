@@ -386,11 +386,24 @@ export async function routeRequest(
       // Retry-After) from "nothing configured/active" (actionable 503).
       const dep = await pool.getPoolDepletion(providerName).catch(() => null);
       if (dep && dep.enabled > 0 && (dep.exhausted > 0 || sawExhaustion)) {
+        // Alibaba: an untried model that no account has been probed for yet
+        // auto-queues warmup (pool.getNextAccountForModel) — surface a retry
+        // hint that reflects the probe cadence, not a 15m stale wait.
+        const alibabaProbing = providerName === "alibaba" && !sawExhaustion;
+        const retryHint = alibabaProbing
+          ? "Retry in ~30s."
+          : `Retry in ~${formatRetryAfter(
+              earliestExhaustedReset && earliestExhaustedReset.getTime() > Date.now()
+                ? earliestExhaustedReset.getTime() - Date.now()
+                : DEFAULT_EXHAUSTED_RETRY_AFTER_MS,
+            )}.`;
         throw buildPoolExhaustedError({
           providerName,
           exhaustedCount: Math.max(dep.exhausted, exhaustionHops) || null,
-          resetAt: earliestExhaustedReset ?? dep.earliestResetAt,
-          rawDetail: lastError || undefined,
+          resetAt: alibabaProbing
+            ? new Date(Date.now() + 30_000)
+            : (earliestExhaustedReset ?? dep.earliestResetAt),
+          rawDetail: `${lastError || ""} ${retryHint}`.trim() || undefined,
         });
       }
       throw new Error(
