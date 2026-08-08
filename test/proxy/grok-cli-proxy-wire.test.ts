@@ -57,6 +57,8 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     expect(body.stream).toBe(true);
     expect(body.instructions).toBe("Be brief.");
     expect(body.reasoning_effort).toBe("low");
+    // Responses endpoints hide reasoning unless a summary is requested.
+    expect(body.reasoning).toEqual({ effort: "low", summary: "auto" });
     expect(body.max_output_tokens).toBe(64);
     expect(Array.isArray(body.input)).toBe(true);
     const input = body.input as any[];
@@ -129,5 +131,41 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     }
     expect(text).toContain("reasoning_content");
     expect(text).toContain("think");
+  });
+
+  test("reasoning summary in completed output item is surfaced when no delta streamed", async () => {
+    const completed = {
+      type: "response.completed",
+      response: {
+        usage: { input_tokens: 1, output_tokens: 1, total_tokens: 2 },
+        output: [
+          { type: "reasoning", id: "rs_1", summary: [{ type: "summary_text", text: "computed 17*23=391" }] },
+          { type: "message", role: "assistant", content: [{ type: "output_text", text: "391" }] },
+        ],
+      },
+    };
+    const sse =
+      `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"391"}\n\n` +
+      `event: response.completed\ndata: ${JSON.stringify(completed)}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse));
+        c.close();
+      },
+    });
+    const out = responsesSseToChatCompletionStream(upstream, {
+      id: "x",
+      created: 1,
+      model: "grok-4.5",
+    });
+    const reader = out.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value);
+    }
+    expect(text).toContain("computed 17*23=391");
   });
 });
