@@ -11,7 +11,7 @@ import type { Account } from "../../../db/schema";
 import * as crypto from "node:crypto";
 import * as fs from "node:fs";
 import * as path from "node:path";
-import { applyModelSpecs } from "../../model-specs";
+import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
 import { getUpstreamNameOverride } from "../custom-models";
 
 // ============================================================================
@@ -645,7 +645,9 @@ export async function bearerFetch(tokens: QoderTokens, opts: BearerCallOptions):
 
 export interface QoderModelDef {
   id: string;           // proxy-facing ID (qd-*)
-  upstream: string;     // server-side model key
+  /** Server-side model key. Optional for live-discovered entries, where the
+   *  proxy id itself carries the key (`qd-<key>` — see friendlyIdForUpstream). */
+  upstream?: string;
   display_name: string;
   max_input_tokens: number;
   is_vl: boolean;
@@ -666,15 +668,26 @@ export const QODER_MODELS: QoderModelDef[] = [
   { id: "qd-Qwen3.7-Max",       upstream: "qmodel_latest", display_name: "Qwen3.7-Max",       max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.2 },
   // Qwen 3.8 preview — NOT qmodel_latest (that is 3.7). Hermes Free0 path uses qmodel_preview.
   { id: "qd-Qwen3.8-Max-Preview", upstream: "qmodel_preview", display_name: "Qwen3.8-Max-Preview", max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
-  { id: "qd-Qwen3.6-Plus",      upstream: "qmodel",        display_name: "Qwen3.6-Plus",      max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
   { id: "qd-DeepSeek-V4-Pro",   upstream: "dmodel",        display_name: "DeepSeek-V4-Pro",   max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.5 },
   { id: "qd-DeepSeek-V4-Flash", upstream: "dfmodel",       display_name: "DeepSeek-V4-Flash", max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.1 },
-  // GLM-5.1 registry: 198k context (not 180k).
-  { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 198000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
   // Kimi K3 → kmodel_latest (NOT bare kmodel). 1M context, thinking model.
   { id: "qd-Kimi-K3",           upstream: "kmodel_latest", display_name: "Kimi-K3",           max_input_tokens: 1048576, is_vl: true,  is_reasoning: true,  price_factor: 0.3 },
-  // Kimi K2.6 → bare kmodel (K2.x family). Registry 262144.
+  // Legacy alias — kmodel now serves Kimi K2.7 Code (live catalog 2026-08).
   { id: "qd-Kimi-K2.6",         upstream: "kmodel",        display_name: "Kimi-K2.6",         max_input_tokens: 262144, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
+  // Kimi K2.7 Code — docs.qoder.com/cli/model: long-context coding model,
+  // fast-mode only, no thinking toggle. Live key: kmodel (catalog 2026-08).
+  { id: "qd-Kimi-K2.7-Code",    upstream: "kmodel",        display_name: "Kimi-K2.7-Code",    max_input_tokens: 262144, is_vl: true,  is_reasoning: false, price_factor: 0.3 },
+  // Qwen3.8-Max — live key qmodel_38max (catalog 2026-08; docs: 2.4T MoE,
+  // thinking toggle). Distinct from qmodel_preview (the 3.8 preview bucket).
+  { id: "qd-Qwen3.8-Max",       upstream: "qmodel_38max",  display_name: "Qwen3.8-Max",       max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.2 },
+  // Qwen3.7-Plus — live key qmodel (catalog 2026-08).
+  { id: "qd-Qwen3.7-Plus",      upstream: "qmodel",        display_name: "Qwen3.7-Plus",      max_input_tokens: 1000000, is_vl: true,  is_reasoning: true,  price_factor: 0.2 },
+  // Legacy alias — qmodel now serves Qwen3.7-Plus (live catalog 2026-08).
+  { id: "qd-Qwen3.6-Plus",      upstream: "qmodel",        display_name: "Qwen3.6-Plus",      max_input_tokens: 1000000, is_vl: true,  is_reasoning: false, price_factor: 0.2 },
+  // GLM 5.2 — live key gm51model (catalog 2026-08).
+  { id: "qd-GLM-5.2",           upstream: "gm51model",     display_name: "GLM-5.2",           max_input_tokens: 198000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
+  // Legacy alias — gm51model now serves GLM 5.2 (live catalog 2026-08).
+  { id: "qd-GLM-5.1",           upstream: "gm51model",     display_name: "GLM-5.1",           max_input_tokens: 198000, is_vl: true,  is_reasoning: true,  price_factor: 0.6 },
   // MiniMax-M3 — current Qoder frontier name (docs.qoder.com/en/cli/model, 0.2x).
   // Cosy upstream key remains mmodel (pi-provider-qoder: minimax-m3 → mmodel;
   // minimax-m2.7 was the previous friendly alias for the same key).
@@ -686,6 +699,75 @@ export const QODER_MODELS: QoderModelDef[] = [
 export const MODEL_CONFIGS: Record<string, QoderModelDef> = Object.fromEntries(
   QODER_MODELS.map((m) => [m.id, m]),
 );
+
+/** Lowercased-id lookup so case variants (qd-kimi-k3, QD-AUTO) resolve like
+ *  the exact curated id. Live-discovered ids are already lowercase. */
+const MODEL_CONFIGS_BY_LOWER_ID: Record<string, QoderModelDef> = Object.fromEntries(
+  QODER_MODELS.map((m) => [m.id.toLowerCase(), m]),
+);
+
+/** Effective upstream key: explicit key, or the key embedded in a
+ *  live-discovered proxy id (`qd-<key>`). */
+export function qoderUpstreamKey(def: QoderModelDef): string {
+  return def.upstream ?? def.id.slice(3);
+}
+
+/**
+ * Resolve the model config for an incoming request.model.
+ *
+ * why: MODEL_CONFIGS is keyed by the exact curated id ("qd-Kimi-K3"), but
+ * requests arrive with any case the client chose. The old exact-match lookup
+ * silently fell back to QODER_MODELS[0] (qd-Auto) for variants like
+ * "qd-kimi-k3", "qd-Qwen3.7-max" — and for every live-discovered catalog id —
+ * so the request was dispatched to Auto instead of the model asked for.
+ */
+export function resolveQoderModelConfig(model: string): QoderModelDef {
+  const m = String(model ?? "").trim();
+  const exact = MODEL_CONFIGS[m];
+  if (exact) return exact;
+  const byLower = MODEL_CONFIGS_BY_LOWER_ID[m.toLowerCase()];
+  if (byLower) return byLower;
+  // Live-catalog ids (qd-<key> / legacy qd/<key>): synthesize a config from
+  // the embedded upstream key so dispatch never silently falls back to Auto.
+  const keyMatch = m.match(/^qd[-/]([\w.+-]+)$/i);
+  if (keyMatch) {
+    const key = keyMatch[1]!;
+    const spec = resolveModelSpec(key);
+    return {
+      id: m,
+      upstream: key,
+      display_name: key,
+      max_input_tokens: spec?.contextWindow ?? 180_000,
+      is_vl: spec?.vision === true,
+      is_reasoning: spec?.thinking === true,
+      price_factor: 0.3,
+    };
+  }
+  return QODER_MODELS[0]!;
+}
+
+/**
+ * Friendly proxy id for a live-discovered upstream key. Curated SKUs keep
+ * their display names (`qmodel_latest` → qd-Qwen3.7-Max); genuinely new keys
+ * get a readable id (`kmodel_latest` → qd-Kimi-K3) so model-specs/pricing
+ * resolve by canonical name instead of the raw key.
+ */
+const FRIENDLY_ID_BY_UPSTREAM: Record<string, string> = {
+  qmodel_latest: "qd-Qwen3.7-Max",
+  qmodel_preview: "qd-Qwen3.8-Max-Preview",
+  qmodel_38max: "qd-Qwen3.8-Max",
+  qmodel: "qd-Qwen3.7-Plus",
+  dmodel: "qd-DeepSeek-V4-Pro",
+  dfmodel: "qd-DeepSeek-V4-Flash",
+  gm51model: "qd-GLM-5.2",
+  kmodel_latest: "qd-Kimi-K3",
+  kmodel: "qd-Kimi-K2.7-Code",
+  mmodel: "qd-MiniMax-M3",
+};
+
+export function friendlyIdForUpstream(upstream: string): string {
+  return FRIENDLY_ID_BY_UPSTREAM[upstream.toLowerCase()] ?? `qd-${upstream}`;
+}
 
 let CACHED_TEMPLATE: any = null;
 export function loadTemplate(): any {
@@ -926,11 +1008,12 @@ export function deriveSessionId(messages: ChatCompletionRequest["messages"]): st
 export function buildChatBody(request: ChatCompletionRequest, tokens: QoderTokens): any {
   const prompt = extractLatestUserPrompt(request);
   const images = extractLatestUserImages(request);
-  const baseCfg = MODEL_CONFIGS[request.model] || QODER_MODELS[0]!;
+  const baseCfg = resolveQoderModelConfig(request.model);
   // Honor operator-set upstream-name override (catalog rename). Clone so we
   // never mutate the shared MODEL_CONFIGS entry.
   const upstreamOverride = getUpstreamNameOverride(request.model);
   const cfg = upstreamOverride ? { ...baseCfg, upstream: upstreamOverride } : baseCfg;
+  const upstreamKey = qoderUpstreamKey(cfg);
   const reqId = crypto.randomUUID();
   const chatRecordId = crypto.randomUUID();
   const sessionId = deriveSessionId(request.messages);
@@ -956,7 +1039,7 @@ export function buildChatBody(request: ChatCompletionRequest, tokens: QoderToken
   body.source = body.source ?? 1;
 
   if (!body.model_config) body.model_config = {};
-  body.model_config.key = cfg.upstream;
+  body.model_config.key = upstreamKey;
   body.model_config.display_name = cfg.display_name;
   body.model_config.is_vl = cfg.is_vl;
   body.model_config.is_reasoning = cfg.is_reasoning;
@@ -991,7 +1074,7 @@ export function buildChatBody(request: ChatCompletionRequest, tokens: QoderToken
     body.chat_context.extra.images = images;
   }
   if (!body.chat_context.extra.modelConfig) body.chat_context.extra.modelConfig = {};
-  body.chat_context.extra.modelConfig.key = cfg.upstream;
+  body.chat_context.extra.modelConfig.key = upstreamKey;
   body.chat_context.extra.modelConfig.is_reasoning = cfg.is_reasoning;
 
   // Set top-level image_urls (Qoder API also checks this field)
