@@ -208,6 +208,8 @@ type ProviderModel = {
   id: string;
   provider: string;
   label: string;
+  /** Catalog flag: model supports a reasoning/thinking mode. */
+  thinking?: boolean;
 };
 
 const STORAGE_KEY = "etteum-chat-conversations";
@@ -275,7 +277,7 @@ async function ensurePoolApiKey(): Promise<string> {
   return "";
 }
 
-function mapModelRows(rows: Array<{ id?: string; owned_by?: string } | string>): ProviderModel[] {
+function mapModelRows(rows: Array<{ id?: string; owned_by?: string; thinking?: boolean } | string>): ProviderModel[] {
   return rows
     .map((m) => {
       const id = typeof m === "string" ? m : String(m.id || "");
@@ -283,12 +285,14 @@ function mapModelRows(rows: Array<{ id?: string; owned_by?: string } | string>):
       // Prefer the catalog's owned_by (e.g. "commandcode") when present;
       // otherwise derive from the id prefix (legacy path).
       const ownedBy = typeof m === "object" && typeof m.owned_by === "string" ? m.owned_by : "";
+      const thinking = typeof m === "object" && typeof m.thinking === "boolean" ? m.thinking : undefined;
       const prefix = ownedBy
         ? ownedBy
         : id.includes("-")
           ? id.split("-")[0]!
           : "";
-      return { id, provider: providerFromPrefix(prefix), label: id };
+      const model: ProviderModel = { id, provider: providerFromPrefix(prefix), label: id, thinking };
+      return model;
     })
     .filter((m): m is ProviderModel => m != null);
 }
@@ -348,6 +352,7 @@ async function streamChat(
   model: string,
   onChunk: (update: StreamUpdate) => void,
   signal: AbortSignal,
+  reasoningEffort?: string,
 ): Promise<{ success: boolean; error?: string; content?: string; thinking?: string }> {
   try {
     const key = (await ensurePoolApiKey()) || getApiKey();
@@ -363,7 +368,14 @@ async function streamChat(
         "Content-Type": "application/json",
         Authorization: `Bearer ${key}`,
       },
-      body: JSON.stringify({ model, messages, stream: true }),
+      // reasoning_effort is the signal providers (e.g. Alibaba) use to enable
+      // thinking; omitting it lets the provider default to thinking off.
+      body: JSON.stringify({
+        model,
+        messages,
+        stream: true,
+        ...(reasoningEffort ? { reasoning_effort: reasoningEffort } : {}),
+      }),
       signal,
     });
 
@@ -495,6 +507,8 @@ export default function Chat() {
   const [showHistory, setShowHistory] = useState(true);
   const [attachments, setAttachments] = useState<ChatAttachment[]>([]);
   const [attachError, setAttachError] = useState<string | null>(null);
+  // Reasoning effort for thinking-capable models. "off" = don't request thinking.
+  const [effort, setEffort] = useState<"off" | "low" | "medium" | "high">("medium");
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesScrollRef = useRef<HTMLDivElement>(null);
   /** When true, stream/output keeps the message list pinned to the bottom. */
@@ -555,6 +569,8 @@ export default function Chat() {
   }, [models, activeId, conversations]);
 
   const activeModel = active?.model || models[0]?.id || "";
+  // Catalog says this model supports a reasoning/thinking mode.
+  const thinkingCapable = models.find((m) => m.id === activeModel)?.thinking === true;
 
   function updateConversation(id: string, updater: (c: Conversation) => Conversation) {
     setConversations((prev) => {
@@ -866,6 +882,9 @@ export default function Chat() {
         setStreamingThinking(update.thinking);
       },
       abort.signal,
+      // Only send an effort when the model supports thinking; otherwise omit it
+      // so non-thinking models aren't force-toggled by a stray param.
+      thinkingCapable && effort !== "off" ? effort : undefined,
     );
 
     abortRef.current = null;
@@ -1118,6 +1137,29 @@ export default function Chat() {
           className="max-h-36 min-h-[36px] flex-1 resize-none bg-transparent py-2 text-sm leading-5 text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none disabled:opacity-60"
         />
         {modelPicker}
+        {thinkingCapable && (
+          <div
+            className="flex shrink-0 items-center overflow-hidden rounded-full border border-[var(--border)] bg-[var(--background)] text-[10px]"
+            title="Reasoning effort (thinking)"
+          >
+            {(["off", "low", "medium", "high"] as const).map((level) => (
+              <button
+                key={level}
+                type="button"
+                onClick={() => setEffort(level)}
+                disabled={streaming}
+                className={cn(
+                  "px-2 py-1 capitalize transition-colors disabled:opacity-50",
+                  effort === level
+                    ? "bg-[color-mix(in_srgb,var(--primary)_14%,transparent)] text-[var(--primary)]"
+                    : "text-[var(--muted-foreground)] hover:text-[var(--foreground)]",
+                )}
+              >
+                {level === "off" ? "No think" : level}
+              </button>
+            ))}
+          </div>
+        )}
         <button
           type="button"
           disabled={streaming || !active || !!genKind}
