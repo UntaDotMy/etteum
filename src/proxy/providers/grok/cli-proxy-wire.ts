@@ -312,6 +312,11 @@ export function responsesSseToChatCompletionStream(
               continue;
             }
             const type = (data.type || eventName || "") as string;
+            // why: set GROK_DEBUG_SSE=1 to log every SSE event type cli-chat-proxy
+            // emits, so unknown event names are observable.
+            if (process.env.GROK_DEBUG_SSE) {
+              console.log(`[grok-sse] ${type}`);
+            }
 
             // Text content
             if (type === "response.output_text.delta" && typeof data.delta === "string") {
@@ -320,9 +325,11 @@ export function responsesSseToChatCompletionStream(
               continue;
             }
 
-            // Reasoning summary → reasoning_content (matches chat/completions shape)
+            // Reasoning → reasoning_content. Accept both documented event names:
+            // response.reasoning_text.delta (xAI) and reasoning_summary_text.delta.
             if (
-              type === "response.reasoning_summary_text.delta" &&
+              (type === "response.reasoning_summary_text.delta" ||
+                type === "response.reasoning_text.delta") &&
               typeof data.delta === "string"
             ) {
               ensureRole(controller);
