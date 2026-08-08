@@ -133,6 +133,33 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     expect(text).toContain("think");
   });
 
+  test("xAI response.reasoning_text.delta events also become reasoning_content", async () => {
+    const sse =
+      'event: response.reasoning_text.delta\ndata: {"type":"response.reasoning_text.delta","delta":"17*23"}\n\n' +
+      'event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n';
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse));
+        c.close();
+      },
+    });
+    const out = responsesSseToChatCompletionStream(upstream, {
+      id: "x",
+      created: 1,
+      model: "grok-4.5",
+    });
+    const reader = out.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value);
+    }
+    expect(text).toContain("reasoning_content");
+    expect(text).toContain("17*23");
+  });
+
   test("reasoning summary in completed output item is surfaced when no delta streamed", async () => {
     const completed = {
       type: "response.completed",
