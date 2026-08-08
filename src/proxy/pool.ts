@@ -306,7 +306,7 @@ class AccountPool {
     model: string,
     options: AccountSelectOptions = {},
   ): Promise<Account | null> {
-    // For Alibaba, filter by queryable models
+    // For Alibaba, rank by probe coverage + per-model quota (no hard drop).
     if (provider === "alibaba") {
       const activeAccounts = await this.getActiveAccounts(provider);
       if (activeAccounts.length === 0) return null;
@@ -314,45 +314,30 @@ class AccountPool {
       // Resolve model name (strip ali- prefix if present)
       const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
 
-      // Filter accounts that have this model in queryableModels + still have
-      // per-model quota remaining. setModelQuotaToZero drains remaining to 0 on
-      // an upstream quota-exhausted 403; without this check the account is
-      // re-picked for the very model that just drained, looping the 429.
-      const modelEligible = activeAccounts.filter((account) => {
-        const tokens = account.tokens as {
-          queryableModels?: string[];
-          modelQuotas?: Record<string, { remaining: number }>;
-        } | null;
-        if (!tokens?.queryableModels) return false;
-        if (!tokens.queryableModels.includes(upstreamModel)) return false;
-        const quota = tokens.modelQuotas?.[upstreamModel];
-        if (quota && Number.isFinite(quota.remaining) && quota.remaining <= 0) return false;
-        return true;
-      });
+      // why: rank probe-confirmed-and-funded first, un-probed next, drained
+      // last; never drop. Filtering hid un-probed accounts and capped the pool.
+      const ranked = activeAccounts
+        .map((account, index) => {
+          const tokens = account.tokens as {
+            queryableModels?: string[];
+            modelQuotas?: Record<string, { remaining: number }>;
+          } | null;
+          const probed = tokens?.queryableModels?.includes(upstreamModel) ?? false;
+          const quota = tokens?.modelQuotas?.[upstreamModel];
+          const hasQuota = !(quota && Number.isFinite(quota.remaining) && quota.remaining <= 0);
+          // tier 0 = probe-confirmed with quota, 1 = un-probed/unknown, 2 = drained
+          const tier = probed && hasQuota ? 0 : probed ? 2 : 1;
+          return { account, index, tier };
+        })
+        .sort((a, b) => a.tier - b.tier || a.index - b.index)
+        .map(({ account }) => account);
+
       const eligibleAccounts = filterDispatchEligibleAccounts(
-        modelEligible,
+        ranked,
         options.excludeAccountIds,
       );
 
-      if (eligibleAccounts.length === 0) {
-        // No eligible accounts - trigger auto-warmup to populate queryableModels
-        // This happens when accounts are newly created or warmup hasn't run yet
-        const needsWarmup = activeAccounts.filter((account) => {
-          const tokens = account.tokens as { queryableModels?: string[] } | null;
-          return !tokens?.queryableModels || tokens.queryableModels.length === 0;
-        });
-
-        if (needsWarmup.length > 0) {
-          // Import warmupQueue dynamically to avoid circular dependency
-          import("../auth/warmup-queue").then(({ warmupQueue }) => {
-            for (const account of needsWarmup.slice(0, 10)) { // Limit to first 10 to avoid overwhelming
-              warmupQueue.enqueue(account.id).catch(() => {});
-            }
-          }).catch(() => {});
-        }
-
-        return null;
-      }
+      if (eligibleAccounts.length === 0) return null;
 
       return this.pickFromEligible(provider, eligibleAccounts, options);
     }

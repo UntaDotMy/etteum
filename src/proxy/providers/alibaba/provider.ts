@@ -469,6 +469,7 @@ export class AlibabaProvider extends BaseProvider {
     const tokens = this.parseQuotaTokens(account.tokens);
     const modelKeys = Object.keys(tokens);
 
+    // Curated fallback used only when /api/v1/quotas returns nothing.
     const KEY_PROBE_MODELS = [
       "glm-5.2",
       "deepseek-v4-pro",
@@ -477,9 +478,12 @@ export class AlibabaProvider extends BaseProvider {
       "qwen3.7-plus",
       "kimi-k2.7-code",
     ];
-    const modelsToProbe = modelKeys.length > 0
-      ? modelKeys
-      : KEY_PROBE_MODELS;
+    // Probe the full live catalog from /api/v1/quotas so newly-released models
+    // (qwen3.8-max, deepseek-0731) get tracked; union keeps drained models.
+    const capKeys = Object.keys(quotaCaps);
+    const modelsToProbe = capKeys.length > 0
+      ? Array.from(new Set([...capKeys, ...modelKeys]))
+      : (modelKeys.length > 0 ? modelKeys : KEY_PROBE_MODELS);
 
     let anyAlive = false;
 

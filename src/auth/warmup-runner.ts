@@ -516,6 +516,33 @@ export function mapHealthToAccountUpdate(account: Account, health: ProviderHealt
     }
   }
 
+  // Alibaba: persist the probe's per-model data (modelQuotas + queryableModels)
+  // to `tokens`, which routing and the provider card read.
+  if (account.provider === "alibaba") {
+    const meta = (health.metadata as Record<string, unknown> | undefined) ?? {};
+    if (meta.modelQuotas && typeof meta.modelQuotas === "object") {
+      const existing = (account.tokens as Record<string, unknown> | null) ?? {};
+      const live = (existing.modelQuotas ?? {}) as Record<string, { remaining?: number }>;
+      const mergedQuotas: Record<string, unknown> = {};
+      for (const [model, q] of Object.entries(meta.modelQuotas as Record<string, unknown>)) {
+        const entry = q as Record<string, unknown>;
+        const liveRemaining = live[model]?.remaining;
+        // Never inflate remaining above the live per-request value; the probe
+        // resets it to the cap, which would undo decrementModelQuota tracking.
+        const remaining =
+          typeof liveRemaining === "number" && typeof entry.remaining === "number"
+            ? Math.min(entry.remaining, liveRemaining)
+            : entry.remaining;
+        mergedQuotas[model] = { ...entry, remaining };
+      }
+      update.tokens = {
+        modelQuotas: mergedQuotas,
+        queryableModels: Array.isArray(meta.queryableModels) ? meta.queryableModels : existing.queryableModels,
+        updatedAt: new Date().toISOString(),
+      };
+    }
+  }
+
   if (health.tokens) update.tokens = health.tokens;
   return update;
 }
