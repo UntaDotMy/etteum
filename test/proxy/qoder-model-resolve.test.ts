@@ -17,6 +17,8 @@ import {
   resolveQoderModelConfig,
   qoderUpstreamKey,
   friendlyIdForUpstream,
+  loadTemplate,
+  buildChatBody,
 } from "../../src/proxy/providers/qoder/helpers";
 
 describe("resolveQoderModelConfig", () => {
@@ -43,6 +45,35 @@ describe("resolveQoderModelConfig", () => {
 
   test("genuinely unknown id falls back to Auto", () => {
     expect(qoderUpstreamKey(resolveQoderModelConfig("not-a-model"))).toBe("auto");
+  });
+});
+
+describe("Cosy body carries the reference template", () => {
+  test("loadTemplate resolves qoder-baseprompt.json (not null)", () => {
+    const t = loadTemplate();
+    // Regression: after the providers/qoder/ modularization the __dirname
+    // lookup missed the file one level up and every body was a bare skeleton,
+    // degrading all models to Qwen upstream.
+    expect(t).not.toBeNull();
+    expect(t.model_config?.key).toBe("lite");
+    expect(Array.isArray(t.messages)).toBe(true);
+  });
+
+  test("buildChatBody embeds the requested upstream key in a full body", () => {
+    const body = buildChatBody(
+      { model: "qd-Kimi-K3", messages: [{ role: "user", content: "hi" }] } as any,
+      {} as any,
+    );
+    expect(body.model_config.key).toBe("kmodel_latest");
+    expect(body.model_config.is_reasoning).toBe(true);
+    expect(body.chat_context.extra.modelConfig.key).toBe("kmodel_latest");
+    // Reference template fields present (system prompt + toolset).
+    expect(body.session_type).toBe("qoder");
+    expect(body.agent_id).toBe("agent_common");
+    expect(body.business?.product).toBe("cli");
+    const sys = body.messages.find((m: any) => m?.role === "system");
+    expect(typeof sys?.content).toBe("string");
+    expect(sys.content.length).toBeGreaterThan(100);
   });
 });
 

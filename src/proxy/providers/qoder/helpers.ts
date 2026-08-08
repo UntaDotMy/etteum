@@ -770,18 +770,33 @@ export function friendlyIdForUpstream(upstream: string): string {
 }
 
 let CACHED_TEMPLATE: any = null;
+let TEMPLATE_WARNED = false;
 export function loadTemplate(): any {
   if (CACHED_TEMPLATE) return CACHED_TEMPLATE;
-  try {
-    const filePath = path.join(__dirname, "qoder-baseprompt.json");
-    let raw = fs.readFileSync(filePath, "utf8");
-    raw = raw.replace(/\{UUID[1-5]\}/g, () => crypto.randomUUID());
-    raw = raw.replace(/\{TIME1\}/g, String(Date.now()));
-    CACHED_TEMPLATE = JSON.parse(raw);
-  } catch (e) {
-    CACHED_TEMPLATE = null;
+  // The template lives one level up (providers/qoder-baseprompt.json) — it was
+  // never moved when this module went into providers/qoder/, so the __dirname
+  // lookup silently failed and every Cosy body was built from scratch (server
+  // degraded all models to Qwen). Check both locations so a future move works.
+  const candidates = [
+    path.join(__dirname, "qoder-baseprompt.json"),
+    path.join(__dirname, "..", "qoder-baseprompt.json"),
+  ];
+  for (const filePath of candidates) {
+    try {
+      let raw = fs.readFileSync(filePath, "utf8");
+      raw = raw.replace(/\{UUID[1-5]\}/g, () => crypto.randomUUID());
+      raw = raw.replace(/\{TIME1\}/g, String(Date.now()));
+      CACHED_TEMPLATE = JSON.parse(raw);
+      return CACHED_TEMPLATE;
+    } catch {
+      // try next candidate
+    }
   }
-  return CACHED_TEMPLATE;
+  if (!TEMPLATE_WARNED) {
+    TEMPLATE_WARNED = true;
+    console.warn("[qoder] qoder-baseprompt.json not found — Cosy body will lack the reference system prompt/tools");
+  }
+  return null;
 }
 
 export function extractLatestUserPrompt(request: ChatCompletionRequest): string {
