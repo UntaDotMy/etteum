@@ -112,9 +112,7 @@ describe("GET /api/settings serialization", () => {
     expect(typeof json.data[key]).toBe("string");
   });
 
-  test("a credential-shaped value seeded into settings IS served verbatim (documents leak surface)", async () => {
-    // The endpoint is a raw key/value dump with no redaction — this test pins
-    // that behavior so any future fix (masking) trips it loudly.
+  test("non-oidc settings are served verbatim (redaction targets oidc_config only)", async () => {
     const key = `${P}upstream_password`;
     const secret = "hunter2-super-secret";
     await db.insert(settings).values({ key, value: secret });
@@ -123,8 +121,20 @@ describe("GET /api/settings serialization", () => {
     const res = await app.request("/api/settings");
     expect(res.status).toBe(200);
     const json = (await res.json()) as { data: Record<string, string> };
-    // CURRENT behavior: full value returned. If a mask lands later this fails.
     expect(json.data[key]).toBe(secret);
+  });
+
+  test("oidc_config clientSecret is redacted in the full dump", async () => {
+    const stored = JSON.stringify({ enabled: true, issuer: "https://idp.example", clientId: "abc", clientSecret: "super-secret" });
+    await db.delete(settings).where(eq(settings.key, "oidc_config"));
+    await db.insert(settings).values({ key: "oidc_config", value: stored });
+    seededKeys.push("oidc_config");
+    const res = await app.request("/api/settings");
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { data: Record<string, string> };
+    const out = JSON.parse(json.data["oidc_config"] ?? "");
+    expect(out.clientSecret).toBe("***");
+    expect(out.clientId).toBe("abc");
   });
 });
 
@@ -158,6 +168,81 @@ describe("GET /api/settings/:key", () => {
     // Unless another suite persisted it, this key is DB-absent in our temp DB.
     expect([404, 200]).toContain(res.status); // tolerate prior seeding
     if (res.status === 404) expect(json.error).toBe("Setting not found");
+  });
+});
+
+describe("oidc_config secret redaction + round-trip", () => {
+  const OIDC = "oidc_config";
+  const stored = () =>
+    JSON.stringify({ enabled: true, issuer: "https://idp.example", clientId: "abc", clientSecret: "real-secret-123", scopes: ["openid"] });
+
+
+  // Tests share the temp DB — upsert so re-inserts never hit the PK constraint.
+  async function seedOidc() {
+    await db.delete(settings).where(eq(settings.key, OIDC));
+    await db.insert(settings).values({ key: OIDC, value: stored() });
+    seededKeys.push(OIDC);
+  }
+  test("GET /:key redacts clientSecret", async () => {
+    await seedOidc();
+    const res = await app.request(`/api/settings/${OIDC}`);
+    expect(res.status).toBe(200);
+    const json = (await res.json()) as { key: string; value: string };
+    const out = JSON.parse(json.value);
+    expect(out.clientSecret).toBe("***");
+    expect(out.clientId).toBe("abc");
+    expect(out.issuer).toBe("https://idp.example");
+  });
+
+  test("PUT /:key with redacted marker merges the stored secret back (no secret loss)", async () => {
+    await seedOidc();
+
+    // Simulate the dashboard: read (redacted) → save whole map back.
+    const redacted = JSON.stringify({ enabled: true, issuer: "https://new.example", clientId: "abc", clientSecret: "***", scopes: ["openid"] });
+    const put = await app.request(`/api/settings/${OIDC}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: redacted }),
+    });
+    expect(put.status).toBe(200);
+
+    const [row] = await db.select().from(settings).where(eq(settings.key, OIDC));
+    const persisted = JSON.parse(row!.value as string);
+    expect(persisted.clientSecret).toBe("real-secret-123"); // merged, not overwritten with "***"
+    expect(persisted.issuer).toBe("https://new.example");    // non-secret edits still apply
+  });
+
+  test("PUT /:key with a fresh secret writes it verbatim", async () => {
+    await seedOidc();
+    const fresh = JSON.stringify({ enabled: true, issuer: "https://idp.example", clientId: "abc", clientSecret: "rotated-456" });
+    const put = await app.request(`/api/settings/${OIDC}`, {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ value: fresh }),
+    });
+    expect(put.status).toBe(200);
+
+    const [row] = await db.select().from(settings).where(eq(settings.key, OIDC));
+    expect(JSON.parse(row!.value as string).clientSecret).toBe("rotated-456");
+  });
+
+  test("bulk PUT merges redacted oidc_config while updating other keys", async () => {
+    await seedOidc();
+    seededKeys.push(OIDC);
+
+    const redacted = JSON.stringify({ enabled: true, issuer: "https://idp.example", clientId: "abc", clientSecret: "***", scopes: ["openid"] });
+    const put = await app.request("/api/settings", {
+      method: "PUT",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ [OIDC]: redacted, [`${P}bulk-other`]: "yes" }),
+    });
+    expect(put.status).toBe(200);
+
+    const [row] = await db.select().from(settings).where(eq(settings.key, OIDC));
+    expect(JSON.parse(row!.value as string).clientSecret).toBe("real-secret-123");
+    const [other] = await db.select().from(settings).where(eq(settings.key, `${P}bulk-other`));
+    expect(other!.value).toBe("yes");
+    seededKeys.push(`${P}bulk-other`);
   });
 });
 

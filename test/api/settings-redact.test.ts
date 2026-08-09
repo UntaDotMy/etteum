@@ -1,8 +1,8 @@
 /**
- * The settings read route (management.ts GET /settings/:key) is pool-key-gated
- * while writes are peer-admin-guarded, so it must not hand a stored OIDC
- * clientSecret back to a reader. This pins the redaction behavior by importing
- * the real redactor the route uses.
+ * Every settings read route (proxy-settings.ts GET /api/settings[/:key], the
+ * full dump included) is pool-key-gated while writes are peer-admin-guarded,
+ * so it must not hand a stored OIDC clientSecret back to a reader. This pins
+ * the redaction behavior by importing the real redactor the routes use.
  */
 process.env.ENCRYPTION_KEY =
   "x9f2a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b9c8d7e6f5a4b3c2d1e0f9";

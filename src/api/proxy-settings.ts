@@ -12,6 +12,35 @@ import {
   DEFAULT_COMPRESSION_CONFIG,
 } from "../proxy/compression";
 import { invalidateRetryConfigCache, isRetrySettingKey } from "../proxy/retry-config";
+import { redactSettingsValue } from "./management";
+
+/** Redaction marker redactSettingsValue substitutes for secret fields. */
+const REDACTED_MARKER = "***";
+
+/**
+ * Round-trip guard: GET masks oidc_config secrets, and the Settings page PUTs
+ * the whole fetched map back on save. If the incoming value still carries the
+ * redaction marker, merge the stored secret back in — otherwise a save from
+ * the dashboard would overwrite the real clientSecret with "***".
+ */
+async function mergeRedactedSecrets(key: string, incoming: string): Promise<string> {
+  if (key !== "oidc_config" || typeof incoming !== "string") return incoming;
+  try {
+    const parsed = JSON.parse(incoming) as Record<string, unknown>;
+    if (!Object.values(parsed).some((v) => v === REDACTED_MARKER)) return incoming;
+    const [row] = await db.select().from(settings).where(eq(settings.key, key));
+    if (!row?.value) return incoming;
+    const stored = JSON.parse(row.value) as Record<string, unknown>;
+    for (const [field, v] of Object.entries(parsed)) {
+      if (v === REDACTED_MARKER && typeof stored[field] === "string" && stored[field] !== REDACTED_MARKER) {
+        parsed[field] = stored[field];
+      }
+    }
+    return JSON.stringify(parsed);
+  } catch {
+    return incoming;
+  }
+}
 
 function isProxyPoolSettingKey(key: string): boolean {
   return key === "proxy_pool_usage" || key === "proxy_pool_rotation";
@@ -38,7 +67,7 @@ proxySettingsRouter.get("/", async (c) => {
   for (const s of allSettings) {
     // settings.value is nullable; keep the key present (the defaults merge below
     // only fills keys that are ABSENT) but emit a string, as the type promises.
-    settingsMap[s.key] = s.value ?? "";
+    settingsMap[s.key] = redactSettingsValue(s.key, s.value ?? "");
   }
 
   // Merge backend defaults for any key not yet persisted in the DB.
@@ -92,12 +121,15 @@ proxySettingsRouter.get("/:key", async (c) => {
     .select()
     .from(settings)
     .where(eq(settings.key, key));
+  // Mask secret-bearing fields (oidc_config clientSecret) — mirrors the
+  // management read route's contract so the pool-key-gated read cannot pull
+  // a stored credential back out.
 
   if (!setting) {
     return c.json({ error: "Setting not found" }, 404);
   }
 
-  return c.json(setting);
+  return c.json({ ...setting, value: redactSettingsValue(setting.key, setting.value ?? "") });
 });
 
 /**
@@ -110,6 +142,7 @@ proxySettingsRouter.put("/:key", async (c) => {
   if (body.value === undefined) {
     return c.json({ error: "value is required" }, 400);
   }
+  body.value = await mergeRedactedSecrets(key, body.value);
 
   // Upsert
   const existing = await db
@@ -177,7 +210,8 @@ proxySettingsRouter.put("/", async (c) => {
   let proxyPoolTouched = false;
   let compressionTouched = false;
   let retryTouched = false;
-  for (const [key, value] of Object.entries(body)) {
+  for (const [key, rawValue] of Object.entries(body)) {
+    const value = await mergeRedactedSecrets(key, rawValue);
     const existing = await db
       .select()
       .from(settings)

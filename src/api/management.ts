@@ -370,12 +370,6 @@ export function redactSettingsValue(key: string, value: string): string {
   }
 }
 
-managementRouter.get("/settings/:key", async (c) => {
-  const { settings } = await import("../db/schema");
-  const key = c.req.param("key");
-  const [row] = await db.select().from(settings).where(eq(settings.key, key));
-  return c.json({ value: row?.value != null ? redactSettingsValue(key, row.value) : null });
-});
 
 // --- Media provider catalog (vendor list for the dashboard Media page) ---
 managementRouter.get("/media/catalog", async (c) => {
