@@ -56,7 +56,10 @@ const EXHAUSTION_WALK_MS = Math.max(
 /** Absolute cap on the scaled walk budget — the wall-clock deadline is the
  * real latency bound; this only stops a runaway DB from looping forever. */
 const EXHAUSTION_HOP_HARD_CAP = 5_000;
-
+/** Default Retry-After when no reset hint exists: parked accounts revive via
+ * the warmup re-probe (reset-due tick lead is 5 min), and 5 min also stays
+ * inside CLI retry budgets (Codex client maxDelayMs = 300000). */
+const DEFAULT_EXHAUSTED_RETRY_AFTER_MS = 5 * 60_000;
 /**
  * Scale the exhaustion-walk hop budget to the real pool. The flat env
  * default (25) made a 1k-account fleet fail after touching 2.5% of it. The
@@ -70,9 +73,6 @@ export function resolveExhaustionHopBudget(envBudget: number, poolEnabled: numbe
 }
 /** xAI free usage resets over a rolling 24-hour window (per the 429 body). */
 const GROK_FREE_USAGE_ROLLING_WINDOW_MS = 24 * 60 * 60 * 1000;
-/** Default Retry-After when no reset hint exists: matches the exhausted-probe
- * re-check cadence so a retry lands after the pool had a chance to revive. */
-const DEFAULT_EXHAUSTED_RETRY_AFTER_MS = 15 * 60_000;
 
 export interface PoolExhaustedError extends Error {
   quotaExhausted: true;
@@ -439,7 +439,11 @@ export async function routeRequest(
         });
       }
       throw new Error(
-        `No active accounts available for provider: ${providerName}`
+        dep
+          ? `No active accounts available for provider: ${providerName} ` +
+            `(enabled: ${dep.enabled}, active: ${dep.active}, exhausted: ${dep.exhausted}, ` +
+            `error: ${dep.error}, cooling down: ${dep.coolingDown})`
+          : `No active accounts available for provider: ${providerName}`,
       );
     }
     if (account.id > 0) {
@@ -527,11 +531,15 @@ export async function routeRequest(
           earliestExhaustedReset = resetHint;
         }
         if (providerName === "alibaba") {
-          // Alibaba: per-model exhaustion is already handled by the provider
-          // (setModelQuotaToZero called in chatCompletion). Just invalidate
-          // the pool cache so the next request picks a different account for
-          // this model.
           pool.invalidate(providerName);
+          // Fully drained (no tracked model has quota left) → PARK the row:
+          // status=exhausted removes it from dispatch entirely until warmup
+          // re-probes it healthy. Single-model drains stay active — the
+          // ledger gate in getNextAccountForModel keeps them out of THIS
+          // model's dispatch while they keep serving other models.
+          if (!isStaticAccount && result.metadata?.allModelsDrained === true) {
+            await pool.markExhausted(account.id);
+          }
           lastError = errText || "Quota exhausted for this model";
         } else {
           if (!isStaticAccount) {

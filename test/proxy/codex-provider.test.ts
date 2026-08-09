@@ -3,6 +3,7 @@ import type { Account } from "../../src/db/schema";
 import { CodexProvider } from "../../src/proxy/providers/codex";
 import { stripStoredItemReferences } from "../../src/proxy/providers/codex";
 import { openAIStreamToAnthropic } from "../../src/proxy/transforms/anthropic";
+import { __setCustomModelsForTest, resetCustomModelsRegistry } from "../../src/proxy/providers/custom-models";
 
 class TestCodexProvider extends CodexProvider {
   lastRequestBody: any;
@@ -445,5 +446,38 @@ describe("CodexProvider.refreshToken — session_import accounts", () => {
     expect(next.access_token).toBe("rotated-at");
     expect(next.method).toBe("refresh_token"); // method preserved across rotation
     expect(next.plan_type).toBe("team");       // plan hint preserved
+  });
+});
+
+// ── Custom-model upstream-name override in resolveModel ────────────────────
+
+describe("CodexProvider.resolveModel honors custom-model overrides", () => {
+  test("dashboard upstreamName override reaches the upstream request body", async () => {
+    __setCustomModelsForTest({
+      "codex-luna": { provider: "codex", upstreamName: "gpt-5.6-luna" },
+    });
+    try {
+      const provider = new TestCodexProvider(() =>
+        // 429 short-circuits probeLiveness before stream parsing.
+        Promise.resolve(new Response("rate limited", { status: 429 })));
+      const account = sessionAccount({ access_token: "at", account_id: "acct" });
+
+      const outcome = await provider.probeLiveness(account, "codex-luna");
+      expect(outcome).toBe("rate_limited");
+      // The upstream body must carry the OPERATOR-set upstream name.
+      expect(provider.lastRequestBody.model).toBe("gpt-5.6-luna");
+    } finally {
+      resetCustomModelsRegistry();
+    }
+  });
+
+  test("without an override the model map still applies", async () => {
+    const provider = new TestCodexProvider(() =>
+      Promise.resolve(new Response("rate limited", { status: 429 })));
+    const account = sessionAccount({ access_token: "at", account_id: "acct" });
+
+    const outcome = await provider.probeLiveness(account, "codex-gpt-5.3");
+    expect(outcome).toBe("rate_limited");
+    expect(provider.lastRequestBody.model).toBe("gpt-5.5"); // legacy alias remap
   });
 });

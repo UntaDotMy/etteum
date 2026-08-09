@@ -113,6 +113,55 @@ describe("alibaba tokens writers preserve queryableModels", () => {
   });
 });
 
+describe("setModelQuotaToZero parks drained accounts transactionally", () => {
+  test("zeroes an existing tracked model and reports fully drained", async () => {
+    writtenTokens = [];
+    txRowTokens = seededTokens(); // only qwen3.8-max tracked, remaining 400
+    const provider = new AlibabaProvider();
+    const account = makeAccount(seededTokens());
+
+    const res = await (provider as any).setModelQuotaToZero(account, "qwen3.8-max");
+
+    expect(res.allModelsDrained).toBe(true); // no other tracked model has quota
+    expect(writtenTokens.length).toBe(1);
+    const written = writtenTokens[0] as any;
+    expect(written.modelQuotas["qwen3.8-max"].remaining).toBe(0);
+    expect(written.queryableModels).toEqual(QUERYABLE); // probe results preserved
+  });
+
+  test("creates a ledger entry when the model was never tracked (no silent no-op)", async () => {
+    writtenTokens = [];
+    txRowTokens = seededTokens(); // ledger knows only qwen3.8-max
+    const provider = new AlibabaProvider();
+    const account = makeAccount(seededTokens());
+
+    const res = await (provider as any).setModelQuotaToZero(account, "glm-5.2");
+
+    // qwen3.8-max still has 400 → NOT fully drained → stays active for it.
+    expect(res.allModelsDrained).toBe(false);
+    const written = writtenTokens[0] as any;
+    expect(written.modelQuotas["glm-5.2"].remaining).toBe(0);
+    expect(written.queryableModels).toEqual(QUERYABLE);
+  });
+
+  test("fully drained only when EVERY tracked model is at zero", async () => {
+    writtenTokens = [];
+    txRowTokens = {
+      modelQuotas: {
+        "qwen3.8-max": { limit: 500, remaining: 0, periodDays: 60, resetAt: null },
+        "glm-5.2": { limit: 800, remaining: 120, periodDays: 60, resetAt: null },
+      },
+      queryableModels: QUERYABLE,
+      updatedAt: new Date().toISOString(),
+    };
+    const provider = new AlibabaProvider();
+    const account = makeAccount(txRowTokens);
+
+    const res = await (provider as any).setModelQuotaToZero(account, "glm-5.2");
+    expect(res.allModelsDrained).toBe(true);
+  });
+});
+
 /** Mocks the network: quotas endpoint returns one capped model. */
 class QuotaStubProvider extends AlibabaProvider {
   protected override async fetchWithTimeout(url: string): Promise<Response> {

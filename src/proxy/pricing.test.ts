@@ -57,7 +57,8 @@ describe("pricing calculateCost", () => {
   });
 
   test("counts reasoning tokens at reasoning rate", async () => {
-    // gpt-5: output 12.00, reasoning 18.00 per 1M
+    const p = MODEL_PRICING["gpt-5"];
+    if (!p) throw new Error("gpt-5 missing from MODEL_PRICING");
     const cost = await calculateCost("gpt-5", {
       promptTokens: 0,
       completionTokens: 1_000_000,
@@ -66,8 +67,9 @@ describe("pricing calculateCost", () => {
       cacheCreationTokens: 0,
       reasoningTokens: 1_000_000,
     });
-    // 1M output * 12.00/1M + 1M reasoning * 18.00/1M = 12 + 18 = 30
-    expect(cost).toBeCloseTo(30.0, 6);
+    // 1M output + 1M reasoning, each billed at its catalog rate. Expected is
+    // derived from the table so rate updates don't stale this mechanism test.
+    expect(cost).toBeCloseTo(p.output + p.reasoning, 6);
   });
 
   test("counts cache-creation tokens at cacheCreation rate", async () => {
@@ -127,6 +129,13 @@ describe("MODEL_PRICING baseline", () => {
     for (const [model, p] of Object.entries(MODEL_PRICING)) {
       expect(p.cached, `${model}: cached should be <= input`).toBeLessThanOrEqual(p.input);
     }
+  });
+
+  test("GPT-5.6 family pins the post-July-30 official OpenAI rates", () => {
+    // Verified against developers.openai.com/api/docs/pricing 2026-08-09.
+    expect(MODEL_PRICING["gpt-5.6-sol"]).toEqual({ input: 5.00, output: 30.00, cached: 0.50, reasoning: 30.00, cacheCreation: 6.25 });
+    expect(MODEL_PRICING["gpt-5.6-terra"]).toEqual({ input: 2.00, output: 12.00, cached: 0.20, reasoning: 12.00, cacheCreation: 2.50 });
+    expect(MODEL_PRICING["gpt-5.6-luna"]).toEqual({ input: 0.20, output: 1.20, cached: 0.02, reasoning: 1.20, cacheCreation: 0.25 });
   });
 });
 

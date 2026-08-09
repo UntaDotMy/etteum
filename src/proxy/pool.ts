@@ -74,26 +74,42 @@ export interface PoolDepletion {
   enabled: number;
   /** Enabled rows currently status=exhausted. */
   exhausted: number;
+  /** Enabled rows currently status=active. */
+  active: number;
+  /** Enabled rows currently status=error. */
+  error: number;
+  /** Active rows parked by a future cooldownUntil (invisible to dispatch). */
+  coolingDown: number;
   /** Earliest future quotaResetAt among exhausted enabled rows, if any. */
   earliestResetAt: Date | null;
 }
 
 /** Pure: fold account rows into a PoolDepletion (DB wrapper below). */
 export function summarizePoolDepletion(
-  rows: Array<{ status: string; quotaResetAt: Date | string | null }>,
+  rows: Array<{ status: string; quotaResetAt: Date | string | null; cooldownUntil?: Date | string | null }>,
   nowMs: number,
 ): PoolDepletion {
   let exhausted = 0;
+  let active = 0;
+  let error = 0;
+  let coolingDown = 0;
   let earliest: Date | null = null;
   for (const r of rows) {
-    if (r.status !== "exhausted") continue;
-    exhausted++;
-    const t = r.quotaResetAt ? new Date(r.quotaResetAt) : null;
-    if (t && !Number.isNaN(t.getTime()) && t.getTime() > nowMs && (!earliest || t < earliest)) {
-      earliest = t;
+    if (r.status === "exhausted") {
+      exhausted++;
+      const t = r.quotaResetAt ? new Date(r.quotaResetAt) : null;
+      if (t && !Number.isNaN(t.getTime()) && t.getTime() > nowMs && (!earliest || t < earliest)) {
+        earliest = t;
+      }
+    } else if (r.status === "active") {
+      active++;
+      const cd = r.cooldownUntil ? new Date(r.cooldownUntil) : null;
+      if (cd && !Number.isNaN(cd.getTime()) && cd.getTime() > nowMs) coolingDown++;
+    } else if (r.status === "error") {
+      error++;
     }
   }
-  return { enabled: rows.length, exhausted, earliestResetAt: earliest };
+  return { enabled: rows.length, exhausted, active, error, coolingDown, earliestResetAt: earliest };
 }
 
 // --- Routing resilience constants  ---
@@ -314,19 +330,28 @@ class AccountPool {
       // Resolve model name (strip ali- prefix if present)
       const upstreamModel = model.startsWith("ali-") ? model.slice(4) : model;
 
-      // why: rank probe-confirmed-and-funded first, un-probed next, drained
-      // last; never drop. Filtering hid un-probed accounts and capped the pool.
+      // Drop accounts PROVEN drained for THIS model: the upstream told us its
+      // free quota is gone (setModelQuotaToZero recorded remaining=0), so
+      // dispatching them again only re-pays a guaranteed 403. They stay
+      // active for other models and revive when warmup re-probes them
+      // healthy (the probe resets the ledger entry to the live cap).
+      // Un-probed accounts (no ledger entry) stay dispatchable — tier 1.
       const ranked = activeAccounts
+        .filter((account) => {
+          const quota = (
+            account.tokens as { modelQuotas?: Record<string, { remaining: number }> } | null
+          )?.modelQuotas?.[upstreamModel];
+          return !(quota && Number.isFinite(quota.remaining) && quota.remaining <= 0);
+        })
         .map((account, index) => {
           const tokens = account.tokens as {
             queryableModels?: string[];
             modelQuotas?: Record<string, { remaining: number }>;
           } | null;
           const probed = tokens?.queryableModels?.includes(upstreamModel) ?? false;
-          const quota = tokens?.modelQuotas?.[upstreamModel];
-          const hasQuota = !(quota && Number.isFinite(quota.remaining) && quota.remaining <= 0);
-          // tier 0 = probe-confirmed with quota, 1 = un-probed/unknown, 2 = drained
-          const tier = probed && hasQuota ? 0 : probed ? 2 : 1;
+          // tier 0 = probe-confirmed (and funded after the drain filter),
+          // 1 = un-probed/unknown
+          const tier = probed ? 0 : 1;
           return { account, index, tier };
         })
         .sort((a, b) => a.tier - b.tier || a.index - b.index)
@@ -945,7 +970,11 @@ class AccountPool {
    */
   async getPoolDepletion(provider: ProviderName): Promise<PoolDepletion> {
     const rows = await db
-      .select({ status: accounts.status, quotaResetAt: accounts.quotaResetAt })
+      .select({
+        status: accounts.status,
+        quotaResetAt: accounts.quotaResetAt,
+        cooldownUntil: accounts.cooldownUntil,
+      })
       .from(accounts)
       .where(and(eq(accounts.provider, provider), eq(accounts.enabled, true)));
     return summarizePoolDepletion(rows, Date.now());

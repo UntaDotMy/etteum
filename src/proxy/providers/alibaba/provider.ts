@@ -215,10 +215,12 @@ export class AlibabaProvider extends BaseProvider {
       if (!result.success && result.metadata?.errorText) {
         const errText = result.metadata.errorText as string;
         if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
-          this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
+          const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
+            .catch(() => ({ allModelsDrained: false }));
           result.banned = false;
           result.quotaExhausted = true;
           result.error = `Free quota exhausted for "${upstreamModel}"`;
+          result.metadata = { ...result.metadata, allModelsDrained };
         }
       }
 
@@ -273,8 +275,9 @@ export class AlibabaProvider extends BaseProvider {
         // as a free hop instead of burning the attempt budget on a banned/rate-
         // limited terminal mark.
         if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
-          this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
-          return { success: false, error: `Free quota exhausted for "${upstreamModel}"`, quotaExhausted: true };
+          const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
+            .catch(() => ({ allModelsDrained: false }));
+          return { success: false, error: `Free quota exhausted for "${upstreamModel}"`, quotaExhausted: true, metadata: { allModelsDrained } };
         }
         return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true };
       }
@@ -726,41 +729,51 @@ export class AlibabaProvider extends BaseProvider {
   }
 
   /**
-   * Set a model's remaining quota to 0 after a quota-exhausted response.
-   * Fire-and-forget; called from error handlers.
+   * Zero a model's remaining quota after a quota-exhausted response.
+   * Transactional (same pattern as decrementModelQuota): re-reads the live
+   * tokens row so concurrent decrements aren't clobbered, and CREATES the
+   * ledger entry when missing — otherwise the 403 is silently forgotten and
+   * the account is re-picked for the very model that just drained.
+   *
+   * Returns allModelsDrained: true when no tracked model has quota left —
+   * the router parks such accounts (status=exhausted) until warmup re-proves.
    */
-  private async setModelQuotaToZero(account: Account, upstreamModel: string): Promise<void> {
-    const tokens = this.parseQuotaTokens(account.tokens);
-    const entry = tokens[upstreamModel];
-    if (!entry) return;
+  private async setModelQuotaToZero(
+    account: Account,
+    upstreamModel: string,
+  ): Promise<{ allModelsDrained: boolean }> {
+    const allModelsDrained = await db.transaction(async (tx) => {
+      const [row] = await tx.select({ tokens: accounts.tokens })
+        .from(accounts)
+        .where(eq(accounts.id, account.id))
+        .limit(1);
+      const tokens = this.parseQuotaTokens(row?.tokens);
+      // Evidence gate: an account with NO ledger data is never parked on a
+      // single 403 — other models may still work, and the per-model gate in
+      // getNextAccountForModel already keeps this model out of its dispatch.
+      const hadLedgerData = Object.keys(tokens).length > 0;
+      const entry = tokens[upstreamModel] ?? { limit: 0, remaining: 0, periodDays: 60, resetAt: null };
+      entry.remaining = 0;
+      tokens[upstreamModel] = entry;
 
-    entry.remaining = 0;
-    tokens[upstreamModel] = entry;
+      // Preserve queryableModels from the live row — rebuilding without it
+      // wipes probe results (and would make the account look un-warmed).
+      const existing = (row?.tokens as AlibabaQuotaTokens | null) ?? null;
+      const quotaTokens: AlibabaQuotaTokens = {
+        modelQuotas: tokens,
+        queryableModels: existing?.queryableModels,
+        updatedAt: new Date().toISOString(),
+      };
 
-    // Preserve the existing queryableModels list — rebuilding tokens without it
-    // would wipe the probe results and make the account look un-warmed (or
-    // re-selectable for the very model that just drained).
-    const existing = account.tokens as AlibabaQuotaTokens | null;
-    const quotaTokens: AlibabaQuotaTokens = {
-      modelQuotas: tokens,
-      queryableModels: existing?.queryableModels,
-      updatedAt: new Date().toISOString(),
-    };
+      await tx.update(accounts)
+        .set({ tokens: quotaTokens as unknown })
+        .where(eq(accounts.id, account.id));
 
-    await db.update(accounts)
-      .set({ tokens: quotaTokens as unknown })
-      .where(eq(accounts.id, account.id));
+      return hadLedgerData && !Object.values(tokens).some((m) => m && m.remaining > 0);
+    });
+    return { allModelsDrained };
   }
 
-  /**
-   * Check if any tracked model still has remaining quota.
-   */
-  private hasAnyRemainingQuota(account: Account): boolean {
-    const tokens = this.parseQuotaTokens(account.tokens);
-    const keys = Object.keys(tokens);
-    if (keys.length === 0) return true; // no data yet, assume available
-    return keys.some((m) => tokens[m] && tokens[m].remaining > 0);
-  }
 
   // ── Response Handling ─────────────────────────────────────────────
 

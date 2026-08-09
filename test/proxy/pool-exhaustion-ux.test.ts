@@ -81,9 +81,11 @@ describe("buildPoolExhaustedError", () => {
     expect(err.message).toMatch(/Retry in ~/);
   });
 
-  test("defaults to 15min retry when no reset hint", () => {
+  test("defaults to 5min retry when no reset hint", () => {
+    // Parked accounts revive via the warmup re-probe; 5 min also stays inside
+    // CLI retry budgets (Codex client maxDelayMs = 300000).
     const err = buildPoolExhaustedError({ providerName: "codex" });
-    expect(err.retryAfterMs).toBe(15 * 60_000);
+    expect(err.retryAfterMs).toBe(5 * 60_000);
     expect(err.message).not.toContain("codex accounts failed"); // clean phrasing
     expect(err.message).toContain("codex");
   });
@@ -104,7 +106,7 @@ describe("buildPoolExhaustedError", () => {
       providerName: "grok",
       resetAt: new Date(Date.now() - 60_000),
     });
-    expect(err.retryAfterMs).toBe(15 * 60_000);
+    expect(err.retryAfterMs).toBe(5 * 60_000);
   });
 });
 
@@ -214,6 +216,9 @@ describe("summarizePoolDepletion", () => {
     );
     expect(dep.enabled).toBe(5);
     expect(dep.exhausted).toBe(3);
+    expect(dep.active).toBe(1);
+    expect(dep.error).toBe(1);
+    expect(dep.coolingDown).toBe(0);
     expect(dep.earliestResetAt?.getTime()).toBe(nowMs + 60_000);
   });
 
@@ -221,6 +226,20 @@ describe("summarizePoolDepletion", () => {
     const dep = summarizePoolDepletion([{ status: "active", quotaResetAt: null }], Date.now());
     expect(dep.exhausted).toBe(0);
     expect(dep.earliestResetAt).toBeNull();
+  });
+
+  test("counts active rows parked by a FUTURE cooldownUntil (invisible to dispatch)", () => {
+    const nowMs = Date.now();
+    const dep = summarizePoolDepletion(
+      [
+        { status: "active", quotaResetAt: null, cooldownUntil: new Date(nowMs + 45_000) },
+        { status: "active", quotaResetAt: null, cooldownUntil: new Date(nowMs - 1_000) }, // past — dispatchable
+        { status: "active", quotaResetAt: null },
+      ],
+      nowMs,
+    );
+    expect(dep.active).toBe(3);
+    expect(dep.coolingDown).toBe(1); // only the future cooldown hides a row
   });
 });
 

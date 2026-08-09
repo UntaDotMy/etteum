@@ -251,3 +251,103 @@ describe("pool.getNextAccount depleted skip + exclude", () => {
     expect(pick?.id).toBe(healthyId);
   });
 });
+
+// ── Alibaba per-model drain drop (quota-403 evidence) ───────────────────────
+
+describe("alibaba getNextAccountForModel drops per-model drained accounts", () => {
+  const MODEL = "qwen3.8-max";
+  const ALI_PROVIDER = "alibaba" as any;
+
+  async function insertAliRow(email: string, tokens: unknown): Promise<number> {
+    const [row] = await db
+      .insert(accounts)
+      .values({
+        provider: ALI_PROVIDER,
+        email,
+        password: encrypt("sk-test"),
+        status: "active",
+        enabled: true,
+        quotaLimit: 0,
+        quotaRemaining: 0,
+        tokens: tokens as never,
+      })
+      .returning({ id: accounts.id });
+    return row!.id;
+  }
+
+  beforeEach(async () => {
+    await db.delete(accounts).where(eq(accounts.provider, ALI_PROVIDER));
+    pool.invalidate(ALI_PROVIDER);
+  });
+
+  afterEach(async () => {
+    await db.delete(accounts).where(eq(accounts.provider, ALI_PROVIDER));
+    pool.invalidate(ALI_PROVIDER);
+  });
+
+  it("never re-dispatches an account proven drained for the requested model", async () => {
+    // Drained FOR THIS MODEL (ledger remaining=0) but healthy everywhere else.
+    await insertAliRow("drained-model@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1000, remaining: 0, periodDays: 60, resetAt: null } },
+      queryableModels: [MODEL],
+      updatedAt: new Date().toISOString(),
+    });
+    const funded = await insertAliRow("funded@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1000, remaining: 500, periodDays: 60, resetAt: null } },
+      queryableModels: [MODEL],
+      updatedAt: new Date().toISOString(),
+    });
+    pool.invalidate(ALI_PROVIDER);
+
+    // Repeat picks: the drained account must NEVER appear, even with sticky
+    // re-selection preferring index 0.
+    for (let i = 0; i < 5; i++) {
+      const pick = await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`);
+      expect(pick?.id).toBe(funded);
+    }
+  });
+
+  it("returns null when every account is drained for the model (fail fast, no 403 walk)", async () => {
+    await insertAliRow("d1@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1000, remaining: 0, periodDays: 60, resetAt: null } },
+      queryableModels: [MODEL],
+      updatedAt: new Date().toISOString(),
+    });
+    await insertAliRow("d2@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1000, remaining: 0, periodDays: 60, resetAt: null } },
+      queryableModels: [MODEL],
+      updatedAt: new Date().toISOString(),
+    });
+    pool.invalidate(ALI_PROVIDER);
+
+    const pick = await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`);
+    expect(pick).toBeNull();
+  });
+
+  it("un-probed accounts (no ledger entry) stay dispatchable", async () => {
+    const fresh = await insertAliRow("fresh@ali.test", {
+      modelQuotas: {},
+      queryableModels: [],
+      updatedAt: new Date().toISOString(),
+    });
+    pool.invalidate(ALI_PROVIDER);
+
+    const pick = await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`);
+    expect(pick?.id).toBe(fresh);
+  });
+
+  it("drain on one model does not block the account for other models", async () => {
+    const acct = await insertAliRow("partial@ali.test", {
+      modelQuotas: {
+        [MODEL]: { limit: 1000, remaining: 0, periodDays: 60, resetAt: null },
+        "glm-5.2": { limit: 2000, remaining: 900, periodDays: 60, resetAt: null },
+      },
+      queryableModels: [MODEL, "glm-5.2"],
+      updatedAt: new Date().toISOString(),
+    });
+    pool.invalidate(ALI_PROVIDER);
+
+    expect((await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`))?.id).toBeUndefined();
+    expect((await pool.getNextAccountForModel(ALI_PROVIDER, "ali-glm-5.2"))?.id).toBe(acct);
+  });
+});

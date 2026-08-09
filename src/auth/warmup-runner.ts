@@ -6,6 +6,8 @@ import { pool, type ProviderName } from "../proxy/pool";
 import { broadcast } from "../ws/index";
 import { addAuthLog } from "./logs";
 import type { ProviderHealthKind, ProviderHealthResult, ProviderQuotaSnapshot } from "../proxy/providers/base";
+import { refreshProviderModels } from "../proxy/providers/registry";
+import { coordinatedRefresh } from "./refresh-coordinator";
 
 type AccountStatus = "active" | "exhausted" | "error" | "pending" | string;
 
@@ -890,12 +892,45 @@ export async function warmupAccount(account: Account, signal?: AbortSignal): Pro
     };
   }
 
+  // Token self-heal: an auth failure usually means an expired access token.
+  // Providers with a refresh path (OAuth refresh_token, ChatGPT session
+  // cookie) can recover WITHOUT re-login — rotate via the coordinator
+  // (dedup + lock), persist the new tokens, then re-run the health check so
+  // warmup records the true post-refresh state instead of erroring the row.
+  if (health.kind === "session_expired" || health.kind === "auth_error") {
+    try {
+      const refreshed = await coordinatedRefresh(provider, account);
+      if (refreshed.success && refreshed.tokens) {
+        await pool.updateTokens(account.id, refreshed.tokens);
+        const healed = { ...account, tokens: refreshed.tokens } as Account;
+        const retry = await provider.healthCheck(healed, signal);
+        if (!signal?.aborted) {
+          Object.assign(health, retry);
+          // Probes below read account.tokens — keep them on the fresh bundle.
+          if (retry.kind === "healthy" || retry.kind === "exhausted") account = healed;
+        }
+      }
+    } catch {
+      /* best-effort — keep the original auth failure on any heal error */
+    }
+  }
+
   // Probes — each may mutate `health` in place.
   await runKiroOverageProbe(provider, account, health);
   const qoderProbe = await runQoderFalseExhaustionProbe(provider, account, health);
 
   // Drift detection runs against the (now possibly probe-adjusted) `health`.
   emitQoderDriftWarningIfAny(account, health);
+
+  // Catalog freshness: every warmup that reaches a LIVE account doubles as a
+  // chance to refresh that provider's model catalog (TTL-guarded inside each
+  // provider — a warmup pass costs at most one real fetch per provider). This
+  // is what keeps /v1/models + routing current with upstream releases instead
+  // of going stale until a server restart. Fire-and-forget: catalog I/O must
+  // never block or fail the warmup itself.
+  if (health.kind === "healthy" || health.kind === "exhausted") {
+    void refreshProviderModels(account.provider, false).catch(() => {});
+  }
 
   // Build the DB update (status/quota policy lives inside this).
   const update = mapHealthToAccountUpdate(account, health);

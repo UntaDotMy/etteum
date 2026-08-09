@@ -12,6 +12,7 @@ import { accounts } from "../../../db/schema";
 import { eq, and } from "drizzle-orm";
 import { config } from "../../../config";
 import { applyModelSpecs, resolveModelSpec } from "../../model-specs";
+import { getUpstreamNameOverride } from "../custom-models";
 import {
   CODEX_CLIENT_ID,
   CODEX_HOSTED_TOOL_TYPES,
@@ -206,6 +207,10 @@ export class CodexProvider extends BaseProvider {
   }
 
   private resolveModel(model: string): string {
+    // Operator-set upstream-name override (custom-model rename) wins, same as
+    // qoder/codebuddy/youmind — otherwise dashboard renames never reach codex.
+    const override = getUpstreamNameOverride(model);
+    if (override) return override;
     return codexModelMap[model.toLowerCase()] || model;
   }
 
