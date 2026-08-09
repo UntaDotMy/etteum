@@ -51,6 +51,9 @@ describe("refresh-coordinator isUnrecoverableRefreshError", () => {
     expect(isUnrecoverableRefreshError("refresh token invalid or revoked (invalid_grant)")).toBe(true);
     expect(isUnrecoverableRefreshError("No refresh token to renew OAuth access")).toBe(true);
     expect(isUnrecoverableRefreshError("wrong OAuth client (token not issued to this client_id)")).toBe(true);
+    // Dead ChatGPT web session cookie (session-imported codex accounts).
+    expect(isUnrecoverableRefreshError("session_expired: HTTP 401")).toBe(true);
+    expect(isUnrecoverableRefreshError("session_expired: no accessToken in session response")).toBe(true);
   });
 
   test("does not flag transient/unknown errors", () => {

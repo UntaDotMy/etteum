@@ -74,7 +74,10 @@ export function isUnrecoverableRefreshError(error: string | undefined): boolean 
     e.includes("refresh token invalid or revoked") ||
     e.includes("unrecoverable_refresh_error") ||
     e.includes("no refresh token to renew") ||
-    e.includes("wrong oauth client")
+    e.includes("wrong oauth client") ||
+    // ChatGPT web session cookie is dead (session-imported codex accounts) —
+    // retrying a revoked cookie every tick just burns the scheduler.
+    e.includes("session_expired")
   );
 }
 

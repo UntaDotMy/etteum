@@ -19,6 +19,8 @@ import {
   CODEX_PASSTHROUGH_TOOL_TYPES,
   CODEX_RESPONSES_URL,
   CODEX_SCOPE,
+  CODEX_SESSION_COOKIE,
+  CODEX_SESSION_URL,
   CODEX_TOKEN_URL,
   CODEX_USAGE_URL,
   SERVER_ID_PATTERN,
@@ -838,6 +840,13 @@ export class CodexProvider extends BaseProvider {
     const tokens = this.getTokens(account);
     if (!tokens?.refresh_token) return { success: false, error: "No refresh token" };
 
+    // Session-imported accounts store a ChatGPT next-auth SESSION COOKIE in
+    // refresh_token — the OAuth endpoint rejects it. Refresh via the web
+    // session endpoint, which mints a fresh ~1h accessToken per valid cookie.
+    if (tokens.method === "session_import") {
+      return this.refreshViaSessionCookie(tokens);
+    }
+
     try {
       const form = new URLSearchParams({
         grant_type: "refresh_token",
@@ -857,7 +866,7 @@ export class CodexProvider extends BaseProvider {
         return { success: false, error: `Refresh failed: HTTP ${response.status}: ${text.slice(0, 200)}` };
       }
 
-      const data = await response.json() as any;
+      const data = await response.json() as { access_token?: string; refresh_token?: string; id_token?: string; expires_in?: number };
       if (!data.access_token) return { success: false, error: "No access_token in refresh response" };
 
       const expiresIn = Number(data.expires_in) || 3600;
@@ -873,6 +882,77 @@ export class CodexProvider extends BaseProvider {
           email: tokens.email,
           account_id: tokens.account_id,
           method: tokens.method || "oauth_pkce",
+          plan_type: tokens.plan_type,
+        }),
+      };
+    } catch (e) {
+      return { success: false, error: e instanceof Error ? e.message : String(e) };
+    }
+  }
+
+  /** Session tokens expire in ~1h; refresh only when this close to expiry so
+   * the 60s scheduler tick doesn't hammer the session endpoint per account. */
+  private static readonly SESSION_REFRESH_LEAD_MS = 45 * 60 * 1000;
+
+  private async refreshViaSessionCookie(tokens: CodexTokens): Promise<{ success: boolean; tokens?: string; error?: string }> {
+    // Throttle: a still-fresh access token needs no network round-trip — the
+    // refresh scheduler calls this every tick inside its lead window.
+    const expSec = Number(tokens.expires_at);
+    if (
+      Number.isFinite(expSec) && expSec > 1_000_000_000 &&
+      expSec * 1000 - Date.now() > CodexProvider.SESSION_REFRESH_LEAD_MS
+    ) {
+      return { success: true, tokens: JSON.stringify(tokens) };
+    }
+
+    const cookie = tokens.refresh_token!;
+    try {
+      const res = await this.fetchWithTimeout(CODEX_SESSION_URL, {
+        headers: {
+          Cookie: `${CODEX_SESSION_COOKIE}=${cookie}`,
+          "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/136.0.0.0 Safari/537.36",
+        },
+      }, 15000);
+
+      if (res.status === 401 || res.status === 403) {
+        // Cookie dead — mark with the unrecoverable marker so the scheduler
+        // disables the row instead of retrying a dead cookie every tick.
+        return { success: false, error: `session_expired: HTTP ${res.status}` };
+      }
+      if (!res.ok) {
+        return { success: false, error: `Session refresh failed: HTTP ${res.status}` };
+      }
+
+      const data = await res.json().catch(() => null) as { accessToken?: unknown; user?: { email?: string } } | null;
+      const accessToken = typeof data?.accessToken === "string" ? data.accessToken : "";
+      if (!accessToken) {
+        return { success: false, error: "session_expired: no accessToken in session response" };
+      }
+
+      // Derive expires_at from the fresh JWT's exp claim.
+      let expiresAt = "";
+      const seg = accessToken.split(".")[1];
+      if (seg) {
+        try {
+          let b64 = seg.replace(/-/g, "+").replace(/_/g, "/");
+          while (b64.length % 4) b64 += "=";
+          const claims = JSON.parse(Buffer.from(b64, "base64").toString("utf-8")) as { exp?: unknown };
+          const exp = Number(claims.exp);
+          if (Number.isFinite(exp) && exp > 0) expiresAt = String(exp);
+        } catch { /* non-JWT access token — leave expiry unset */ }
+      }
+
+      return {
+        success: true,
+        tokens: JSON.stringify({
+          access_token: accessToken,
+          refresh_token: cookie, // the cookie survives; it rotates browser-side
+          id_token: tokens.id_token || "",
+          expires_at: expiresAt,
+          email: tokens.email || data?.user?.email || "",
+          account_id: tokens.account_id,
+          method: "session_import",
+          plan_type: tokens.plan_type,
         }),
       };
     } catch (e) {

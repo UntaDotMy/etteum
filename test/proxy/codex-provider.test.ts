@@ -12,7 +12,8 @@ class TestCodexProvider extends CodexProvider {
   }
 
   protected override async fetchWithTimeout(url: string, init: RequestInit): Promise<Response> {
-    this.lastRequestBody = JSON.parse(String(init.body || "{}"));
+    const body = String(init.body || "{}");
+    try { this.lastRequestBody = JSON.parse(body); } catch { /* form-encoded/other bodies */ }
     return this.responder(url, init);
   }
 }
@@ -316,5 +317,133 @@ describe("Codex request sanitization", () => {
     // Non-server content survives.
     expect(out.find((i: any) => i?.role === "user")).toBeDefined();
     expect(out).toContain("plain string");
+  });
+});
+
+// ── Session-cookie refresh (lissenly-style session accounts) ───────────────
+
+const b64url = (o: object) => Buffer.from(JSON.stringify(o)).toString("base64url");
+function fakeJwt(exp: number) {
+  return `${b64url({ alg: "none" })}.${b64url({ exp })}.sig`;
+}
+
+function sessionAccount(tokens: Record<string, unknown>): Account {
+  return { id: 7, provider: "codex", email: "sess@codex.local", tokens } as Account;
+}
+
+describe("CodexProvider.refreshToken — session_import accounts", () => {
+  test("session account refreshes via chatgpt.com/api/auth/session, not the OAuth endpoint", async () => {
+    const freshExp = Math.floor(Date.now() / 1000) + 3600;
+    const freshToken = fakeJwt(freshExp);
+    const calls: Array<{ url: string; cookie?: string }> = [];
+
+    const provider = new TestCodexProvider((url, init) => {
+      calls.push({ url, cookie: (init.headers as Record<string, string>)?.Cookie });
+      return Promise.resolve(new Response(JSON.stringify({
+        accessToken: freshToken,
+        user: { email: "sess@codex.local" },
+      }), { status: 200 }));
+    });
+
+    // Near expiry (within the 45-min session lead) → must hit the network.
+    const account = sessionAccount({
+      access_token: fakeJwt(Math.floor(Date.now() / 1000) + 60),
+      refresh_token: "session-cookie-value",
+      method: "session_import",
+      expires_at: String(Math.floor(Date.now() / 1000) + 60),
+      account_id: "acct-s",
+      plan_type: "plus",
+      email: "sess@codex.local",
+    });
+
+    const res = await provider.refreshToken(account);
+    expect(res.success).toBe(true);
+    expect(calls.length).toBe(1);
+    expect(calls[0]!.url).toBe("https://chatgpt.com/api/auth/session");
+    expect(calls[0]!.cookie).toBe("__Secure-next-auth.session-token=session-cookie-value");
+
+    const next = JSON.parse(res.tokens!) as Record<string, string>;
+    expect(next.access_token).toBe(freshToken);
+    expect(next.refresh_token).toBe("session-cookie-value"); // cookie preserved
+    expect(next.expires_at).toBe(String(freshExp));           // from fresh JWT exp
+    expect(next.method).toBe("session_import");
+    expect(next.plan_type).toBe("plus");                      // hints preserved
+    expect(next.account_id).toBe("acct-s");
+  });
+
+  test("still-fresh session token short-circuits without a network call", async () => {
+    let networkCalls = 0;
+    const provider = new TestCodexProvider(() => {
+      networkCalls++;
+      return Promise.resolve(new Response("{}", { status: 200 }));
+    });
+
+    const farFuture = Math.floor(Date.now() / 1000) + 50 * 60; // > 45-min lead
+    const account = sessionAccount({
+      access_token: fakeJwt(farFuture),
+      refresh_token: "cookie",
+      method: "session_import",
+      expires_at: String(farFuture),
+    });
+
+    const res = await provider.refreshToken(account);
+    expect(res.success).toBe(true);
+    expect(networkCalls).toBe(0); // throttled — scheduler ticks stay cheap
+  });
+
+  test("dead cookie (401) reports unrecoverable session_expired", async () => {
+    const provider = new TestCodexProvider(() =>
+      Promise.resolve(new Response("unauthorized", { status: 401 })));
+
+    const near = Math.floor(Date.now() / 1000) + 60;
+    const res = await provider.refreshToken(sessionAccount({
+      access_token: fakeJwt(near),
+      refresh_token: "dead-cookie",
+      method: "session_import",
+      expires_at: String(near),
+    }));
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("session_expired");
+  });
+
+  test("session endpoint without accessToken is treated as dead session", async () => {
+    const provider = new TestCodexProvider(() =>
+      Promise.resolve(new Response(JSON.stringify({ user: { email: "x" } }), { status: 200 })));
+
+    const near = Math.floor(Date.now() / 1000) + 60;
+    const res = await provider.refreshToken(sessionAccount({
+      access_token: fakeJwt(near),
+      refresh_token: "cookie-no-token",
+      method: "session_import",
+      expires_at: String(near),
+    }));
+
+    expect(res.success).toBe(false);
+    expect(res.error).toContain("session_expired");
+  });
+
+  test("OAuth accounts keep the auth.openai.com refresh path", async () => {
+    const calls: string[] = [];
+    const provider = new TestCodexProvider((url) => {
+      calls.push(url);
+      return Promise.resolve(new Response(JSON.stringify({
+        access_token: "rotated-at", refresh_token: "rotated-rt", id_token: "idt", expires_in: 3600,
+      }), { status: 200 }));
+    });
+
+    const res = await provider.refreshToken(sessionAccount({
+      access_token: "old-at",
+      refresh_token: "oauth-rt",
+      method: "refresh_token",
+      plan_type: "team",
+    }));
+
+    expect(res.success).toBe(true);
+    expect(calls[0]).toBe("https://auth.openai.com/oauth/token");
+    const next = JSON.parse(res.tokens!) as Record<string, string>;
+    expect(next.access_token).toBe("rotated-at");
+    expect(next.method).toBe("refresh_token"); // method preserved across rotation
+    expect(next.plan_type).toBe("team");       // plan hint preserved
   });
 });

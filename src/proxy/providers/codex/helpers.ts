@@ -17,7 +17,10 @@ export interface CodexTokens {
   expires_at?: string | number;
   email?: string;
   account_id?: string;
+  /** "access_token" | "refresh_token" | "session_import" | "oauth_pkce" */
   method?: string;
+  /** ChatGPT plan type (plus/pro/team) — preserved across refreshes. */
+  plan_type?: string;
 }
 
 export const CODEX_CLIENT_ID = "app_EMoamEEZ73f0CkXaXp7hrann";
@@ -31,6 +34,17 @@ export const CODEX_USAGE_URL = "https://chatgpt.com/backend-api/wham/usage";
  */
 export const CODEX_MODELS_URL =
   "https://chatgpt.com/backend-api/codex/models?client_version=1.0.18";
+
+/**
+ * ChatGPT web session endpoint. With a valid `__Secure-next-auth.session-token`
+ * cookie it returns a fresh web accessToken (~1h lifetime) — the refresh path
+ * for session-imported accounts, whose stored "refresh token" is a session
+ * cookie, not an OAuth refresh token.
+ */
+export const CODEX_SESSION_URL = "https://chatgpt.com/api/auth/session";
+
+/** Session cookie name chatgpt.com uses for next-auth sessions. */
+export const CODEX_SESSION_COOKIE = "__Secure-next-auth.session-token";
 
 /**
  * Parse an upstream 429 reset hint into a Date / ms pair. Codex returns either
@@ -59,6 +73,7 @@ export function parseRateLimitReset(headers: Headers, bodyText: string): { reset
   } catch { /* body wasn't JSON */ }
   return {};
 }
+
 export const CODEX_SCOPE = "openid profile email offline_access";
 
 // --- Codex request sanitization (1:1 with the reference codex executor) ---
