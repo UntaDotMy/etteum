@@ -62,10 +62,14 @@ describe("computeStatus", () => {
     expect(b.lastCheckedAt).toBe(a.lastCheckedAt);
   });
 
-  test("updateAvailable is true only when latest differs from current", () => {
+  test("updateAvailable reflects only commits pullable from origin (behind>0)", () => {
+    // Plain hash-difference was wrong: when LOCAL is ahead of origin
+    // (unpushed commits) the hashes differ but nothing is pullable.
     const s = computeStatus(true);
     if (s.currentCommit && s.latestCommit) {
-      expect(s.updateAvailable).toBe(s.currentCommit !== s.latestCommit);
+      const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out;
+      const behind = Number(git(["rev-list", "--count", `HEAD..origin/${branch}`]).out) || 0;
+      expect(s.updateAvailable).toBe(behind > 0);
     }
   });
 });
