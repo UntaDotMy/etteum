@@ -451,32 +451,33 @@ describe("alibaba unpurchased model classification", () => {
   const unpurchasedResponse = () =>
     new Response(unpurchasedBody, { status: 403, headers: { "Content-Type": "application/json" } });
 
-  test("stream 403 Unpurchased → invalid_model: prefix (router fail-fasts, no 503)", async () => {
+  test("stream 403 Unpurchased → skippable marker (router rotates to next account)", async () => {
     const provider = new TestAlibabaProvider(unpurchasedResponse);
     const result = await provider.chatCompletionStream(makeAccount(), baseRequest("ali-qwen3.8-max"));
     expect(result.success).toBe(false);
-    expect(result.error).toContain("invalid_model:");
+    // NO invalid_model: prefix — that would fail-fast the whole request on
+    // this one account instead of letting the router skip to a funded peer.
+    expect(result.error).not.toContain("invalid_model:");
     expect(result.error).toContain("qwen3.8-max");
     expect(result.metadata?.modelUnavailable).toBe(true);
     expect(result.banned).toBeUndefined(); // not a permanent ban
   });
 
-  test("non-stream 403 Unpurchased → invalid_model: prefix", async () => {
+  test("non-stream 403 Unpurchased → skippable marker", async () => {
     const provider = new TestAlibabaProvider(unpurchasedResponse);
     const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-qwen3.8-max"));
     expect(result.success).toBe(false);
-    expect(result.error).toContain("invalid_model:");
+    expect(result.error).not.toContain("invalid_model:");
     expect(result.error).toContain("qwen3.8-max");
     expect(result.metadata?.modelUnavailable).toBe(true);
   });
 
-  test("JSON-body Unpurchased code → invalid_model: prefix", async () => {
+  test("JSON-body Unpurchased code → skippable marker", async () => {
     const provider = new TestAlibabaProvider(unpurchasedResponse);
-    // Force the JSON-body branch (stream:false + 200 with error body is handled
-    // by handleOpenAIResponse — here the 403 body path already covers it).
     const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-qwen3.8-max"));
     expect(result.success).toBe(false);
-    expect(result.error).toContain("invalid_model:");
+    expect(result.error).not.toContain("invalid_model:");
+    expect(result.metadata?.modelUnavailable).toBe(true);
   });
 
   test("other 403 (banned) is NOT misclassified as model-unavailable", async () => {

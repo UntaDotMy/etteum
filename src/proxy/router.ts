@@ -372,6 +372,10 @@ export async function routeRequest(
   // untried account exists — bounded by hop count + wall-clock deadline.
   let exhaustionHops = 0;
   let sawExhaustion = false;
+  /** At least one account reported the model not-activated for it (alibaba).
+   * If EVERY account says that, surface invalid_model to the client instead
+   * of the generic 503 — but only after trying peers that might have it. */
+  let sawModelUnavailable = false;
   let earliestExhaustedReset: Date | null = null;
   const exhaustionWalkDeadline = Date.now() + EXHAUSTION_WALK_MS;
   // Hop budget: insurance against infinite loops, NOT the latency bound (the
@@ -565,6 +569,30 @@ export async function routeRequest(
           break;
         }
         continue; // Try next account — exhausted accounts are excluded from selection
+      }
+
+      // Model not activated on THIS account (alibaba AccessDenied.Unpurchased):
+      // a per-account entitlement miss, NOT a global model error. The account
+      // is dropped from this model's ledger (provider did it) and we rotate to
+      // the next account as a free hop — some accounts DO have the model.
+      if (result.metadata?.modelUnavailable === true) {
+        sawModelUnavailable = true;
+        pool.invalidate(providerName);
+        lastError = errText || `Model not activated/purchased on this account`;
+        // Free hop: same budget mechanics as quota exhaustion.
+        if (!hopBudgetResolved) {
+          hopBudgetResolved = true;
+          try {
+            const dep = await pool.getPoolDepletion(providerName);
+            exhaustionHopBudget = resolveExhaustionHopBudget(MAX_EXHAUSTION_HOPS, dep.enabled);
+          } catch { /* keep env budget */ }
+        }
+        exhaustionHops++;
+        if (isStaticAccount) attempt++;
+        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= exhaustionWalkDeadline) {
+          break;
+        }
+        continue;
       }
 
       // Handle rate limiting (429) — temporary, don't mark exhausted.
@@ -820,6 +848,16 @@ export async function routeRequest(
       resetAt: earliest ?? depAtExit?.earliestResetAt ?? null,
       rawDetail: lastError || undefined,
     });
+  }
+
+  // Every dispatch-eligible account reported the model not-activated for it
+  // (alibaba Unpurchased) with no other failure. Surface a clean client error
+  // instead of the generic 503 — the model genuinely isn't available on any
+  // configured account for this provider.
+  if (sawModelUnavailable && !sawOtherFailure && !sawExhaustion) {
+    throw new Error(
+      `invalid_model: Model "${compressedRequest.model}" not activated/purchased on any ${providerName} account`,
+    );
   }
 
   throw new Error(

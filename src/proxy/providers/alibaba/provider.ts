@@ -209,12 +209,13 @@ export class AlibabaProvider extends BaseProvider {
       }
 
       // Model not activated on THIS account — drop it from the account's
-      // queryableModels (dispatch skips it from now on) and rewrite the error
-      // as invalid_model: so the router fail-fasts with a 400 invalid_model
-      // instead of walking every account into a misleading 503.
+      // queryableModels (dispatch skips it from now on). NO invalid_model:
+      // prefix here — that would fail-fast the whole request on this one
+      // account instead of letting the router skip to a funded peer. The
+      // router surfaces invalid_model only when EVERY account lacks it.
       if (!result.success && result.metadata?.modelUnavailable === true) {
         await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
-        result.error = `invalid_model: Model "${upstreamModel}" not activated/purchased on this account`;
+        result.error = `Model "${upstreamModel}" not activated/purchased on this account`;
       }
 
       // Check if the upstream returned a quota-exhausted 403. handleOpenAIResponse
@@ -280,9 +281,13 @@ export class AlibabaProvider extends BaseProvider {
         // queryableModels so dispatch never re-tries it here.
         if (errText.includes("AccessDenied.Unpurchased")) {
           await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
+          // Per-account entitlement miss: mark skippable (no invalid_model:
+          // prefix — that would fail-fast the WHOLE request on this account).
+          // The router skips to the next account; only if EVERY account lacks
+          // the model does it surface invalid_model to the client.
           return {
             success: false,
-            error: `invalid_model: Model "${upstreamModel}" not activated/purchased on this account`,
+            error: `Model "${upstreamModel}" not activated/purchased on this account`,
             metadata: { modelUnavailable: true },
           };
         }
