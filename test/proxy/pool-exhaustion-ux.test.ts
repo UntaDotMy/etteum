@@ -8,7 +8,10 @@
  *  - token estimator per-tool overhead (OpenAI cookbook constants)
  */
 import { describe, test, expect, beforeEach, afterEach } from "bun:test";
-import { buildPoolExhaustedError } from "../../src/proxy/router";
+import {
+  buildPoolExhaustedError,
+  resolveExhaustionHopBudget,
+} from "../../src/proxy/router";
 import {
   pool,
   computeResetRevivePatch,
@@ -102,6 +105,48 @@ describe("buildPoolExhaustedError", () => {
       resetAt: new Date(Date.now() - 60_000),
     });
     expect(err.retryAfterMs).toBe(15 * 60_000);
+  });
+});
+
+describe("resolveExhaustionHopBudget scales to the real pool", () => {
+  test("a 1k pool gets the full 1k hop budget, not the flat 25", () => {
+    expect(resolveExhaustionHopBudget(25, 1000)).toBe(1000);
+  });
+  test("small pool keeps the env floor", () => {
+    expect(resolveExhaustionHopBudget(25, 10)).toBe(25);
+  });
+  test("empty pool falls back to the env budget", () => {
+    expect(resolveExhaustionHopBudget(25, 0)).toBe(25);
+  });
+  test("hard cap bounds absurd pool sizes", () => {
+    expect(resolveExhaustionHopBudget(25, 100_000)).toBe(5000);
+  });
+});
+
+describe("buildPoolExhaustedError count honesty", () => {
+  test("partial walk on a big pool says 'N of M', never 'All N'", () => {
+    const err = buildPoolExhaustedError({
+      providerName: "alibaba",
+      exhaustedCount: 25,
+      poolSize: 1000,
+    });
+    expect(err.message).toContain("25 of 1000 alibaba accounts");
+    expect(err.message).not.toContain("All 25");
+  });
+  test("whole-pool depletion says 'All N'", () => {
+    const err = buildPoolExhaustedError({
+      providerName: "alibaba",
+      exhaustedCount: 1000,
+      poolSize: 1000,
+    });
+    expect(err.message).toContain("All 1000 alibaba accounts");
+  });
+  test("no pool size known keeps legacy 'All N' phrasing", () => {
+    const err = buildPoolExhaustedError({
+      providerName: "grok",
+      exhaustedCount: 6,
+    });
+    expect(err.message).toContain("All 6 grok accounts");
   });
 });
 

@@ -41,8 +41,9 @@ export interface RouteResult {
  * Quota-exhaustion walk budget. Exhaustion hops are "free" — they do not
  * consume the account-attempt budget — because a quota 429 comes back fast
  * and the alternative is failing the request while healthy accounts sit
- * untried. Still bounded by hop count AND wall-clock so a whole fleet of
- * dead accounts cannot stall the client past the frontend timeout.
+ * untried. The hop budget is insurance against infinite loops ONLY — it is
+ * scaled to the real pool size (resolveExhaustionHopBudget); the wall-clock
+ * deadline is what actually bounds client latency.
  */
 const MAX_EXHAUSTION_HOPS = Math.max(
   1,
@@ -52,6 +53,21 @@ const EXHAUSTION_WALK_MS = Math.max(
   1_000,
   Number(process.env.POOLPROX_EXHAUSTION_WALK_MS) || 6_000,
 );
+/** Absolute cap on the scaled walk budget — the wall-clock deadline is the
+ * real latency bound; this only stops a runaway DB from looping forever. */
+const EXHAUSTION_HOP_HARD_CAP = 5_000;
+
+/**
+ * Scale the exhaustion-walk hop budget to the real pool. The flat env
+ * default (25) made a 1k-account fleet fail after touching 2.5% of it. The
+ * exclude set guarantees each hop tries a NEW account, so covering the whole
+ * enabled pool is sufficient — the walk then ends via the no-account path
+ * (typed 429 with real counts) or the wall-clock deadline, whichever first.
+ */
+export function resolveExhaustionHopBudget(envBudget: number, poolEnabled: number): number {
+  const scaled = Math.min(Math.max(0, poolEnabled), EXHAUSTION_HOP_HARD_CAP);
+  return Math.max(envBudget, scaled);
+}
 /** xAI free usage resets over a rolling 24-hour window (per the 429 body). */
 const GROK_FREE_USAGE_ROLLING_WINDOW_MS = 24 * 60 * 60 * 1000;
 /** Default Retry-After when no reset hint exists: matches the exhausted-probe
@@ -81,6 +97,8 @@ function formatRetryAfter(ms: number): string {
 export function buildPoolExhaustedError(args: {
   providerName: string;
   exhaustedCount?: number | null;
+  /** Total enabled accounts in the pool, when known — keeps the count honest. */
+  poolSize?: number | null;
   resetAt?: Date | null;
   rawDetail?: string;
 }): PoolExhaustedError {
@@ -89,10 +107,17 @@ export function buildPoolExhaustedError(args: {
     args.resetAt && args.resetAt.getTime() > nowMs
       ? args.resetAt.getTime() - nowMs
       : DEFAULT_EXHAUSTED_RETRY_AFTER_MS;
-  const count =
-    args.exhaustedCount && args.exhaustedCount > 0 ? `${args.exhaustedCount} ` : "";
+  // "All N" only when N really is the whole pool; a partial walk (deadline
+  // hit first) reports "N of M" so a 1k pool never gets "All 25 accounts".
+  const n = args.exhaustedCount && args.exhaustedCount > 0 ? args.exhaustedCount : null;
+  const prefix =
+    n === null
+      ? "All "
+      : args.poolSize && args.poolSize > n
+        ? `${n} of ${args.poolSize} `
+        : `All ${n} `;
   const err = new Error(
-    `All ${count}${args.providerName} accounts are quota-exhausted. Retry in ~${formatRetryAfter(retryAfterMs)}.`,
+    `${prefix}${args.providerName} accounts are quota-exhausted. Retry in ~${formatRetryAfter(retryAfterMs)}.`,
   ) as PoolExhaustedError;
   err.quotaExhausted = true;
   err.retryAfterMs = retryAfterMs;
@@ -349,6 +374,12 @@ export async function routeRequest(
   let sawExhaustion = false;
   let earliestExhaustedReset: Date | null = null;
   const exhaustionWalkDeadline = Date.now() + EXHAUSTION_WALK_MS;
+  // Hop budget: insurance against infinite loops, NOT the latency bound (the
+  // wall-clock deadline owns that). Resolved lazily on the first exhaustion
+  // hop so it scales to the real pool size — a flat 25 made a 1k-account
+  // fleet fail after touching 2.5% of it.
+  let exhaustionHopBudget = MAX_EXHAUSTION_HOPS;
+  let hopBudgetResolved = false;
   // Anything that is neither rate-limit nor quota-exhaustion (banned, auth,
   // transient, unknown) — keeps the typed-429 responses pure.
   let sawOtherFailure = false;
@@ -400,6 +431,7 @@ export async function routeRequest(
         throw buildPoolExhaustedError({
           providerName,
           exhaustedCount: Math.max(dep.exhausted, exhaustionHops) || null,
+          poolSize: dep.enabled,
           resetAt: alibabaProbing
             ? new Date(Date.now() + 30_000)
             : (earliestExhaustedReset ?? dep.earliestResetAt),
@@ -512,9 +544,16 @@ export async function routeRequest(
         // accounts exist. Bounded so a dead fleet can't stall the client.
         // Static single-credential nodes can't rotate — the exclusion set is
         // ignored for them, so a free hop would re-hit the same key; count it.
+        if (!hopBudgetResolved) {
+          hopBudgetResolved = true;
+          try {
+            const dep = await pool.getPoolDepletion(providerName);
+            exhaustionHopBudget = resolveExhaustionHopBudget(MAX_EXHAUSTION_HOPS, dep.enabled);
+          } catch { /* keep env budget */ }
+        }
         exhaustionHops++;
         if (isStaticAccount) attempt++;
-        if (exhaustionHops >= MAX_EXHAUSTION_HOPS || Date.now() >= exhaustionWalkDeadline) {
+        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= exhaustionWalkDeadline) {
           break;
         }
         continue; // Try next account — exhausted accounts are excluded from selection
@@ -762,10 +801,15 @@ export async function routeRequest(
       resetCandidates.length > 0
         ? new Date(Math.min(...resetCandidates.map((d) => d.getTime())))
         : null;
+    // Honest counts: exhaustionHops = accounts THIS request confirmed
+    // drained; dep.exhausted = rows already parked in the DB. max ≈ union —
+    // hopped accounts were DB-marked mid-walk for non-alibaba providers.
+    const depAtExit = await pool.getPoolDepletion(providerName).catch(() => null);
     throw buildPoolExhaustedError({
       providerName,
-      exhaustedCount: exhaustionHops || null,
-      resetAt: earliest,
+      exhaustedCount: Math.max(exhaustionHops, depAtExit?.exhausted ?? 0) || null,
+      poolSize: depAtExit ? depAtExit.enabled : null,
+      resetAt: earliest ?? depAtExit?.earliestResetAt ?? null,
       rawDetail: lastError || undefined,
     });
   }
