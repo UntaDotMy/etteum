@@ -77,7 +77,7 @@ export class CodexProvider extends BaseProvider {
   private liveModels: ModelInfo[] = [];
   private liveModelIds = new Set<string>();
   private catalogFetchedAt = 0;
-  private static readonly CATALOG_TTL_MS = 6 * 60 * 60 * 1000; // 6h
+  private static readonly CATALOG_TTL_MS = 30 * 60 * 1000; // 30 min — new models appear fast
 
   /**
    * Refresh the live model catalog from the first active+enabled codex account.
@@ -95,65 +95,68 @@ export class CodexProvider extends BaseProvider {
         .select()
         .from(accounts)
         .where(and(eq(accounts.provider, "codex"), eq(accounts.enabled, true), eq(accounts.status, "active")));
-      const account = rows.find((r) => this.getTokens(r)?.access_token);
-      if (!account) return; // no usable account → keep curated fallback
+      if (rows.length === 0) return; // no usable account → keep curated fallback
 
-      const tokens = this.getTokens(account);
-      const bearer = tokens?.access_token;
-      if (!bearer) return;
+      // Try every active account — the first one may have a dead/expired token
+      // (401); the catalog should still refresh from any healthy account.
+      for (const candidate of rows) {
+        const tokens = this.getTokens(candidate);
+        const bearer = tokens?.access_token;
+        if (!bearer) continue;
 
-      const headers: Record<string, string> = {
-        "Authorization": `Bearer ${bearer}`,
-        "Accept": "application/json",
-        "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
-        "originator": "codex-cli",
-      };
-      if (tokens?.account_id) headers["chatgpt-account-id"] = tokens.account_id;
+        const headers: Record<string, string> = {
+          "Authorization": `Bearer ${bearer}`,
+          "Accept": "application/json",
+          "User-Agent": "codex-cli/1.0.18 (macOS; arm64)",
+          "originator": "codex-cli",
+        };
+        if (tokens?.account_id) headers["chatgpt-account-id"] = tokens.account_id;
 
-      const response = await this.fetchWithTimeout(CODEX_MODELS_URL, { method: "GET", headers }, 15000);
-      if (!response.ok) {
-        // Unreachable / unauthorized — keep what we have; bump the freshness clock.
+        const response = await this.fetchWithTimeout(CODEX_MODELS_URL, { method: "GET", headers }, 15000);
+        if (!response.ok) continue; // try the next account
+        const json = (await response.json().catch(() => null)) as
+          | { data?: Array<{ id?: string }>; models?: Array<{ id?: string }> | Record<string, unknown> }
+          | null;
+        if (!json) continue;
+
+        // Normalize both shapes: OpenAI-style {data:[...]} and {models:[...] | {...}}.
+        const ids: string[] = [];
+        const push = (id: unknown) => {
+          if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
+        };
+        if (Array.isArray(json.data)) for (const m of json.data) push(m?.id);
+        if (Array.isArray(json.models)) for (const m of json.models) push(m?.id);
+        else if (json.models && typeof json.models === "object") for (const k of Object.keys(json.models)) push(k);
+        if (ids.length === 0) continue;
+
+        // Merge: curated first (wins on conflict), then live-only ids.
+        const merged = new Map<string, ModelInfo>(this.supportedModels.map((m) => [m.id, m]));
+        for (const id of ids) {
+          if (merged.has(id)) continue; // curated wins
+          const spec = resolveModelSpec(id);
+          merged.set(id, {
+            id,
+            object: "model",
+            created: Math.floor(Date.now() / 1000),
+            owned_by: "codex",
+            context_window: spec?.contextWindow ?? 0,
+            max_output: spec?.maxOutput ?? 0,
+            thinking: spec?.thinking ?? false,
+            vision: spec?.vision ?? false,
+            creditUnit: "credit",
+            creditRate: 0.012 / 1000,
+            creditSource: "estimated",
+          });
+        }
+
+        this.liveModels = [...merged.values()];
+        this.liveModelIds = new Set(ids.map((s) => s.toLowerCase()));
         this.catalogFetchedAt = Date.now();
         return;
       }
-      const json = (await response.json().catch(() => null)) as
-        | { data?: Array<{ id?: string }>; models?: Array<{ id?: string }> | Record<string, unknown> }
-        | null;
-      if (!json) return;
-
-      // Normalize both shapes: OpenAI-style {data:[...]} and {models:[...] | {...}}.
-      const ids: string[] = [];
-      const push = (id: unknown) => {
-        if (typeof id === "string" && id && !ids.includes(id)) ids.push(id);
-      };
-      if (Array.isArray(json.data)) for (const m of json.data) push(m?.id);
-      if (Array.isArray(json.models)) for (const m of json.models) push(m?.id);
-      else if (json.models && typeof json.models === "object") for (const k of Object.keys(json.models)) push(k);
-      if (ids.length === 0) return;
-
-      // Merge: curated first (wins on conflict), then live-only ids.
-      const merged = new Map<string, ModelInfo>(this.supportedModels.map((m) => [m.id, m]));
-      for (const id of ids) {
-        if (merged.has(id)) continue; // curated wins
-        const spec = resolveModelSpec(id);
-        merged.set(id, {
-          id,
-          object: "model",
-          created: Math.floor(Date.now() / 1000),
-          owned_by: "codex",
-          context_window: spec?.contextWindow ?? 0,
-          max_output: spec?.maxOutput ?? 0,
-          thinking: spec?.thinking ?? false,
-          vision: spec?.vision ?? false,
-          creditUnit: "credit",
-          creditRate: 0.012 / 1000,
-          creditSource: "estimated",
-        });
-      }
-
-      this.liveModels = [...merged.values()];
-      this.liveModelIds = new Set(ids.map((s) => s.toLowerCase()));
-      this.catalogFetchedAt = Date.now();
+      // Every active account failed — do NOT advance the freshness clock, so
+      // the next warmup/force-refresh retries instead of staying stale for a
+      // full TTL window.
     } catch (e) {
       console.error("[codex] refreshModelsCache failed:", e instanceof Error ? e.message : e);
     }

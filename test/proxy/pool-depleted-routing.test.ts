@@ -250,6 +250,57 @@ describe("pool.getNextAccount depleted skip + exclude", () => {
     });
     expect(pick?.id).toBe(healthyId);
   });
+
+  it("falls back to an active row parked in cooldown when nothing else exists (no lockout)", async () => {
+    // Single-account pool that just got rate-limited: cooldownUntil in the
+    // future. Without the fallback, the account is invisible to dispatch and
+    // the pool returns null → "No active accounts available" lockout.
+    const [row] = await db
+      .insert(accounts)
+      .values({
+        provider: TEST_PROVIDER,
+        email: "only-cooling@depleted.test",
+        password: encrypt("irrelevant"),
+        status: "active",
+        enabled: true,
+        quotaLimit: 100,
+        quotaRemaining: 50,
+        cooldownUntil: new Date(Date.now() + 60_000),
+      })
+      .returning({ id: accounts.id });
+    pool.invalidate(TEST_PROVIDER);
+
+    const pick = await pool.getNextAccount(TEST_PROVIDER);
+    expect(pick?.id).toBe(row!.id);
+  });
+
+  it("prefers a healthy peer over a cooling-down row", async () => {
+    const [cooling] = await db
+      .insert(accounts)
+      .values({
+        provider: TEST_PROVIDER,
+        email: "cooling@depleted.test",
+        password: encrypt("irrelevant"),
+        status: "active",
+        enabled: true,
+        quotaLimit: 100,
+        quotaRemaining: 50,
+        priority: 0,
+        cooldownUntil: new Date(Date.now() + 60_000),
+      })
+      .returning({ id: accounts.id });
+    const healthyId = await insertRow({
+      email: "healthy@depleted.test",
+      quotaLimit: 100,
+      quotaRemaining: 50,
+      priority: 5,
+    });
+    pool.invalidate(TEST_PROVIDER);
+
+    const pick = await pool.getNextAccount(TEST_PROVIDER);
+    expect(pick?.id).toBe(healthyId);
+    expect(pick?.id).not.toBe(cooling!.id);
+  });
 });
 
 // ── Alibaba per-model drain drop (quota-403 evidence) ───────────────────────

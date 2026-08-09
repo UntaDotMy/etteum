@@ -1,6 +1,6 @@
 import { db } from "../db/index";
 import { accounts, settings } from "../db/schema";
-import { eq, and, sql, or, isNull, isNotNull, lt, lte, asc, desc } from "drizzle-orm";
+import { eq, and, sql, or, isNull, isNotNull, lt, lte, gte, asc, desc } from "drizzle-orm";
 import type { Account } from "../db/schema";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
@@ -289,21 +289,38 @@ class AccountPool {
     // Dispatch filter is intentionally NOT applied here: a stale local
     // remaining=0 (e.g. commandcode's upstream-driven window) must not block
     // retrying the key — the live request re-validates it.
+    // Last-resort fallback when nothing is dispatch-eligible:
+    // 1. error-status rows (may self-heal) outside cooldown — existing behavior
+    // 2. ACTIVE rows parked by a FUTURE cooldown — without this, a single
+    //    rate-limited account becomes invisible to dispatch until the cooldown
+    //    expires (a hard lockout). Try the soonest-expiring cooldown first;
+    //    the live request re-probes and may self-heal (transient 429s clear on
+    //    success). Healthy peers always win, so multi-account pools are
+    //    unaffected.
     const fallback = await db
       .select()
       .from(accounts)
       .where(
         and(
           eq(accounts.provider, provider),
-          eq(accounts.status, "error"),
           eq(accounts.enabled, true),
           or(
-            isNull(accounts.cooldownUntil),
-            lt(accounts.cooldownUntil, new Date()),
+            and(
+              eq(accounts.status, "error"),
+              or(
+                isNull(accounts.cooldownUntil),
+                lt(accounts.cooldownUntil, new Date()),
+              ),
+            ),
+            and(
+              eq(accounts.status, "active"),
+              isNotNull(accounts.cooldownUntil),
+              gte(accounts.cooldownUntil, new Date()),
+            ),
           ),
         ),
       )
-      .orderBy(asc(accounts.priority), desc(accounts.lastUsedAt));
+      .orderBy(asc(accounts.priority), asc(accounts.cooldownUntil), desc(accounts.lastUsedAt));
     const eligibleFallback = options.excludeAccountIds?.size
       ? fallback.filter((a) => !options.excludeAccountIds!.has(a.id))
       : fallback;
