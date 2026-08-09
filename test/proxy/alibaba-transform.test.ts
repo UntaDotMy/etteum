@@ -444,3 +444,49 @@ function quotaEntry(model: string, usageLimit: number, periodDays = 60) {
   };
 }
 
+// ── AccessDenied.Unpurchased → invalid_model fail-fast ──────────────────────
+
+describe("alibaba unpurchased model classification", () => {
+  const unpurchasedBody = JSON.stringify({ error: { code: "AccessDenied.Unpurchased", message: "model not activated" } });
+  const unpurchasedResponse = () =>
+    new Response(unpurchasedBody, { status: 403, headers: { "Content-Type": "application/json" } });
+
+  test("stream 403 Unpurchased → invalid_model: prefix (router fail-fasts, no 503)", async () => {
+    const provider = new TestAlibabaProvider(unpurchasedResponse);
+    const result = await provider.chatCompletionStream(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("invalid_model:");
+    expect(result.error).toContain("qwen3.8-max");
+    expect(result.metadata?.modelUnavailable).toBe(true);
+    expect(result.banned).toBeUndefined(); // not a permanent ban
+  });
+
+  test("non-stream 403 Unpurchased → invalid_model: prefix", async () => {
+    const provider = new TestAlibabaProvider(unpurchasedResponse);
+    const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("invalid_model:");
+    expect(result.error).toContain("qwen3.8-max");
+    expect(result.metadata?.modelUnavailable).toBe(true);
+  });
+
+  test("JSON-body Unpurchased code → invalid_model: prefix", async () => {
+    const provider = new TestAlibabaProvider(unpurchasedResponse);
+    // Force the JSON-body branch (stream:false + 200 with error body is handled
+    // by handleOpenAIResponse — here the 403 body path already covers it).
+    const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.error).toContain("invalid_model:");
+  });
+
+  test("other 403 (banned) is NOT misclassified as model-unavailable", async () => {
+    const provider = new TestAlibabaProvider(() =>
+      new Response(JSON.stringify({ error: { message: "account restricted" } }), { status: 403 }));
+    const result = await provider.chatCompletionStream(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.banned).toBe(true);
+    expect(result.metadata?.modelUnavailable).not.toBe(true);
+  });
+});
+
+

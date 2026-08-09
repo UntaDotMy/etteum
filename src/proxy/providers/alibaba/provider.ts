@@ -208,6 +208,15 @@ export class AlibabaProvider extends BaseProvider {
         await this.decrementModelQuota(account, upstreamModel, result.creditsUsed);
       }
 
+      // Model not activated on THIS account — drop it from the account's
+      // queryableModels (dispatch skips it from now on) and rewrite the error
+      // as invalid_model: so the router fail-fasts with a 400 invalid_model
+      // instead of walking every account into a misleading 503.
+      if (!result.success && result.metadata?.modelUnavailable === true) {
+        await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
+        result.error = `invalid_model: Model "${upstreamModel}" not activated/purchased on this account`;
+      }
+
       // Check if the upstream returned a quota-exhausted 403. handleOpenAIResponse
       // flags generic 403s as `banned`, but a quota-exhaustion body must NOT be a
       // terminal ban — rewrite it to quotaExhausted so the router parks the account
@@ -264,9 +273,18 @@ export class AlibabaProvider extends BaseProvider {
       }
       if (response.status === 403) {
         const errText = await response.text().catch(() => "");
-        // AccessDenied.Unpurchased = model not activated yet
+        // AccessDenied.Unpurchased = this account does NOT have this model
+        // activated. Mirror grok's invalid_model: prefix so the router
+        // fail-fasts (400 invalid_model) instead of walking every account
+        // into a misleading 503. Also drop the model from this account's
+        // queryableModels so dispatch never re-tries it here.
         if (errText.includes("AccessDenied.Unpurchased")) {
-          return { success: false, error: `Model "${upstreamModel}" not activated/purchased` };
+          await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
+          return {
+            success: false,
+            error: `invalid_model: Model "${upstreamModel}" not activated/purchased on this account`,
+            metadata: { modelUnavailable: true },
+          };
         }
         // Free quota exhausted — mark this model as exhausted and flag
         // quotaExhausted (NOT rateLimited). Per-model: the router's alibaba
@@ -729,6 +747,25 @@ export class AlibabaProvider extends BaseProvider {
   }
 
   /**
+   * Remove a model from an account's queryableModels (the dispatch ledger).
+   * Called when a live request proves the account does NOT have the model
+   * activated (AccessDenied.Unpurchased). Dispatch then skips this account
+   * for that model; a later warmup probe re-adds it if upstream activates it.
+   */
+  private async dropModelFromQueryable(account: Account, upstreamModel: string): Promise<void> {
+    const existing = account.tokens as AlibabaQuotaTokens | null;
+    if (!existing?.queryableModels?.includes(upstreamModel)) return; // already absent
+    const quotaTokens: AlibabaQuotaTokens = {
+      modelQuotas: existing.modelQuotas,
+      queryableModels: existing.queryableModels.filter((m) => m !== upstreamModel),
+      updatedAt: new Date().toISOString(),
+    };
+    await db.update(accounts)
+      .set({ tokens: quotaTokens as unknown })
+      .where(eq(accounts.id, account.id));
+  }
+
+  /**
    * Zero a model's remaining quota after a quota-exhausted response.
    * Transactional (same pattern as decrementModelQuota): re-reads the live
    * tokens row so concurrent decrements aren't clobbered, and CREATES the
@@ -793,7 +830,9 @@ export class AlibabaProvider extends BaseProvider {
     if (response.status === 403) {
       const errText = await response.text().catch(() => "");
       if (errText.includes("AccessDenied.Unpurchased")) {
-        return { success: false, error: `Model "${upstreamModel}" not activated/purchased` };
+        // Caller (chatCompletion) drops the model from queryableModels +
+        // rewrites to the invalid_model: prefix (it has the account row).
+        return { success: false, error: `Model "${upstreamModel}" not activated/purchased`, metadata: { modelUnavailable: true } };
       }
       // Free quota exhausted detection is handled by the caller (chatCompletion)
       // since it has access to the account object.
@@ -820,7 +859,7 @@ export class AlibabaProvider extends BaseProvider {
     // Check for error in response body
     if (data.error) {
       if (data.error.code === "AccessDenied.Unpurchased") {
-        return { success: false, error: `Model "${upstreamModel}" not activated/purchased` };
+        return { success: false, error: `Model "${upstreamModel}" not activated/purchased`, metadata: { modelUnavailable: true } };
       }
       return { success: false, error: data.error.message || data.error.code || "Unknown upstream error" };
     }
