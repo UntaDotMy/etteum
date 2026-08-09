@@ -1,6 +1,6 @@
 import { Hono } from "hono";
 import { createHash, randomBytes } from "crypto";
-import { exchangeCodexAuthorizationCode, exchangeCodexRefreshTokens, importCodexAccessToken } from "./accounts";
+import { exchangeCodexAuthorizationCode, exchangeCodexRefreshTokens, importCodexAccessToken, importCodexSessions } from "./accounts";
 import {
   consumeCodexOAuthSession,
   createCodexOAuthSession,
@@ -239,6 +239,27 @@ oauthRouter.post("/codex/import-token", async (c) => {
 
     const connection = await importCodexAccessToken(body.accessToken, body.name);
     return c.json({ success: true, connection });
+  } catch (error) {
+    return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
+  }
+});
+
+/**
+ * POST /api/oauth/codex/import-session — bulk-import ChatGPT session JSON.
+ * Accepts the lissenly/9router shapes: a single ChatGPT Auth Session
+ * ({ accessToken, sessionToken?, user, account }), a 9router connection
+ * ({ accessToken, refreshToken, providerSpecificData }), a 9router backup
+ * ({ providerConnections: [...] }), or an array of any of those.
+ */
+oauthRouter.post("/codex/import-session", async (c) => {
+  try {
+    const body = await c.req.json();
+    const result = await importCodexSessions(body);
+    if (result.success === 0 && result.failed === 0) {
+      return c.json({ error: result.errors?.[0] || "No usable sessions found" }, 400);
+    }
+    // HTTP 200 = route succeeded; body carries the success/failed counts.
+    return c.json(result);
   } catch (error) {
     return c.json({ error: error instanceof Error ? error.message : String(error) }, 500);
   }

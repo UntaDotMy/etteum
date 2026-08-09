@@ -32,6 +32,7 @@ import {
   getCodexAuthorize,
   importAccounts,
   instantLoginTokens,
+  importCodexSessionJson,
   bulkTimeoutMs,
   loginAccounts,
   loginAllAccounts,
@@ -141,9 +142,11 @@ export default function Accounts() {
   const [instantTokens, setInstantTokens] = useState("");
   const [cookieValue, setCookieValue] = useState("");
   const [bulkText, setBulkText] = useState("");
-  const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey">("single");
+  const [addMode, setAddMode] = useState<"single" | "bulk" | "instant" | "pat" | "apikey" | "session">("single");
   const [bulkBrowserEngine, setBulkBrowserEngine] = useState("camoufox");
   const [bulkHeadless, setBulkHeadless] = useState(true);
+  const [codexSessionJson, setCodexSessionJson] = useState("");
+  const [codexSessionBusy, setCodexSessionBusy] = useState(false);
   const [bulkConcurrency, setBulkConcurrency] = useState(3);
   const [codexOauthBusy, setCodexOauthBusy] = useState(false);
   const [codexOauthAuthUrl, setCodexOauthAuthUrl] = useState("");
@@ -528,6 +531,30 @@ export default function Accounts() {
       await load();
     } catch (err) { showError(err); }
     finally { if (isGrok) setGrokBusy(false); }
+  }
+
+  async function handleCodexSessionImport() {
+    const raw = codexSessionJson.trim();
+    if (!raw) { showError(new Error("Paste ChatGPT session JSON")); return; }
+    let parsed: unknown;
+    try {
+      parsed = JSON.parse(raw);
+    } catch {
+      showError(new Error("Invalid JSON — paste a ChatGPT Auth Session, 9router connection, or 9router backup"));
+      return;
+    }
+    setCodexSessionBusy(true);
+    try {
+      const res = await importCodexSessionJson(parsed);
+      showSuccess(`Session import: ${res.success} success, ${res.failed} failed`);
+      if (res.failed > 0 && res.errors?.length) showError(new Error(res.errors.slice(0, 5).join("; ")));
+      if (res.success > 0) {
+        setCodexSessionJson("");
+        setAddDialogProvider(null);
+        await load();
+      }
+    } catch (err) { showError(err); }
+    finally { setCodexSessionBusy(false); }
   }
 
   async function handleCookieLogin() {
@@ -2447,6 +2474,9 @@ export default function Accounts() {
               {addDialogProvider === "codex" && <button onClick={() => handleSetCodexMode("pat")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "pat" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >OAuth Login</button>}
+              <button onClick={() => handleSetCodexMode("session")}
+                className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "session" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
+              >Session JSON</button>
               <button onClick={() => addDialogProvider === "codex" ? handleSetCodexMode("bulk") : setAddMode("bulk")}
                 className={`flex-1 rounded px-3 py-1.5 text-xs font-medium transition-colors ${addMode === "bulk" ? "bg-[var(--background)] text-[var(--foreground)] shadow-sm" : "text-[var(--muted-foreground)]"}`}
               >Bulk (Email|Pass)</button>
@@ -2888,6 +2918,30 @@ sk-ws-H.zzzzzzzz..."
               <div className="flex justify-end gap-2">
                 <Button variant="outline" onClick={() => setAddDialogProvider(null)}>Cancel</Button>
                 <Button onClick={handleInstantLogin}>Login Instant</Button>
+              </div>
+            </div>
+          )}
+
+          {/* Session JSON mode (Codex — lissenly/9router shapes) */}
+          {addMode === "session" && addDialogProvider === "codex" && (
+            <div className="space-y-4">
+              <div>
+                <label className="text-sm text-[var(--foreground)]">ChatGPT Session JSON</label>
+                <textarea
+                  value={codexSessionJson}
+                  onChange={(e) => setCodexSessionJson(e.target.value)}
+                  className="mt-1 w-full h-48 rounded-md border border-[var(--border)] bg-[var(--background)] p-3 text-xs font-mono text-[var(--foreground)] placeholder:text-[var(--muted-foreground)] focus:outline-none focus:ring-1 focus:ring-[var(--ring)] resize-none"
+                  placeholder={'{ "accessToken": "eyJ...", "sessionToken": "...", "user": { "email": "you@chatgpt.com" }, "account": { "id": "...", "planType": "plus" } }'}
+                />
+                <p className="mt-1 text-xs text-[var(--muted-foreground)]">
+                  Paste a ChatGPT Auth Session (lissenly style), a 9router connection, a 9router backup ({`{ providerConnections: [...] }`}), or an array of sessions. Email/account/plan are read from the JWT claims with the JSON fields as fallback.
+                </p>
+              </div>
+              <div className="flex justify-end gap-2">
+                <Button variant="outline" onClick={() => setAddDialogProvider(null)}>Cancel</Button>
+                <Button onClick={handleCodexSessionImport} disabled={codexSessionBusy || !codexSessionJson.trim()}>
+                  {codexSessionBusy ? "Importing..." : "Import Session"}
+                </Button>
               </div>
             </div>
           )}

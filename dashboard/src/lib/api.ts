@@ -1251,6 +1251,19 @@ export async function completeCodexOAuthCallbackUrl(callbackUrl: string) {
   return completeCodexOAuth({ code, state });
 }
 
+/** Bulk-import ChatGPT session JSON (lissenly / 9router shapes). */
+export async function importCodexSessionJson(raw: unknown): Promise<{
+  success: number;
+  failed: number;
+  errors?: string[];
+  imported: Array<{ email: string; plan: string | null }>;
+}> {
+  return fetchApi("/api/oauth/codex/import-session", {
+    method: "POST",
+    body: JSON.stringify(raw),
+  });
+}
+
 // BYOK (Bring Your Own Key) API functions
 export interface ByokKeyInfo {
   id?: number;

@@ -17,6 +17,8 @@ import {
   importCodexAccessToken,
   exchangeCodexAuthorizationCode,
   exchangeCodexRefreshTokens,
+  extractCodexSessionEntries,
+  importCodexSessions,
 } from "../../src/api/accounts/actionroutes";
 import { db } from "../../src/db/index";
 import { accounts } from "../../src/db/schema";
@@ -385,5 +387,143 @@ describe("exchangeCodexRefreshTokens", () => {
     expect(out.success).toBe(0);
     expect(out.failed).toBe(1);
     expect(out.errors![0]).toContain("no access_token");
+  });
+});
+
+// ── extractCodexSessionEntries (lissenly/9router shapes) ────────────────────
+
+describe("extractCodexSessionEntries", () => {
+  const jwt = makeJwt({ sub: "s" });
+
+  test("ChatGPT Auth Session shape", () => {
+    const entries = extractCodexSessionEntries({
+      accessToken: jwt,
+      sessionToken: "sess-cookie-token",
+      user: { email: "live@chatgpt.com" },
+      account: { id: "acct-1", planType: "plus" },
+    });
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toMatchObject({
+      accessToken: jwt,
+      refreshToken: "sess-cookie-token",
+      email: "live@chatgpt.com",
+      accountId: "acct-1",
+      planType: "plus",
+    });
+  });
+
+  test("9router connection shape (providerSpecificData)", () => {
+    const entries = extractCodexSessionEntries({
+      accessToken: jwt,
+      refreshToken: "rt-1",
+      provider: "codex",
+      email: "conn@9router.dev",
+      providerSpecificData: { chatgptAccountId: "acct-9", chatgptPlanType: "team" },
+    });
+    expect(entries.length).toBe(1);
+    expect(entries[0]).toMatchObject({
+      refreshToken: "rt-1",
+      email: "conn@9router.dev",
+      accountId: "acct-9",
+      planType: "team",
+    });
+  });
+
+  test("9router backup filters non-codex providerConnections", () => {
+    const entries = extractCodexSessionEntries({
+      providerConnections: [
+        { provider: "codex", accessToken: jwt, email: "a@cod.ex" },
+        { provider: "kiro", accessToken: jwt, email: "b@ki.ro" },
+        { provider: "codex", email: "c@cod.ex" }, // no token → dropped
+      ],
+    });
+    expect(entries.length).toBe(1);
+    expect(entries[0]!.email).toBe("a@cod.ex");
+  });
+
+  test("array of sessions", () => {
+    const entries = extractCodexSessionEntries([
+      { accessToken: jwt, user: { email: "one@x.y" } },
+      { accessToken: jwt, user: { email: "two@x.y" } },
+    ]);
+    expect(entries.length).toBe(2);
+  });
+
+  test("drops entries without accessToken and garbage input", () => {
+    expect(extractCodexSessionEntries({ user: { email: "no@token.here" } })).toEqual([]);
+    expect(extractCodexSessionEntries("not json")).toEqual([]);
+    expect(extractCodexSessionEntries(null)).toEqual([]);
+    expect(extractCodexSessionEntries([{}, null, 42])).toEqual([]);
+  });
+
+  test("refreshToken identical to accessToken is dropped", () => {
+    const entries = extractCodexSessionEntries({ accessToken: jwt, refreshToken: jwt });
+    expect(entries[0]!.refreshToken).toBeUndefined();
+  });
+});
+
+// ── importCodexSessions (bulk) ──────────────────────────────────────────────
+
+describe("importCodexSessions", () => {
+  test("imports a ChatGPT session with hints filling missing JWT claims", async () => {
+    const token = makeJwt({ sub: "opaque" }); // no email/account claims
+    const res = await importCodexSessions({
+      accessToken: token,
+      sessionToken: "sess-abc",
+      user: { email: "sess-import@example.com" },
+      account: { id: "acct-sess", planType: "plus" },
+    });
+    await trackEmail("sess-import@example.com");
+
+    expect(res.success).toBe(1);
+    expect(res.failed).toBe(0);
+    expect(res.imported[0]!.email).toBe("sess-import@example.com");
+    expect(res.imported[0]!.plan).toBe("plus");
+
+    // Tokens blob carries the session refresh + import method.
+    interface StoredCodexTokens {
+      access_token: string;
+      refresh_token?: string;
+      method?: string;
+      email?: string;
+      account_id?: string;
+    }
+    const [row] = await db.select({ tokens: accounts.tokens }).from(accounts)
+      .where(inArray(accounts.email, ["sess-import@example.com"]));
+    const tokens = row!.tokens as unknown as StoredCodexTokens; // encryptedJson round-trips the blob we wrote
+    expect(tokens.access_token).toBe(token);
+    expect(tokens.refresh_token).toBe("sess-abc");
+    expect(tokens.method).toBe("session_import");
+    expect(tokens.email).toBe("sess-import@example.com");
+    expect(tokens.account_id).toBe("acct-sess");
+  });
+
+  test("empty input → zero counts with an actionable error", async () => {
+    const res = await importCodexSessions({ providerConnections: [] });
+    expect(res.success).toBe(0);
+    expect(res.failed).toBe(0);
+    expect(res.errors?.[0]).toContain("No usable entries");
+  });
+
+  test("mixed batch imports complete tokens and counts every entry", async () => {
+    const good = makeJwt({
+      "https://api.openai.com/profile": { email: "mix-ok@example.com" },
+      "https://api.openai.com/auth": { chatgpt_account_id: "acct-mix" },
+    });
+    const bad = makeJwt({ sub: "opaque" });
+    // Bad token: no claims → usage fallback fetch throws (queued below) →
+    // email synthesizes from the token suffix; import still succeeds.
+    fetchQueue.push(() => {
+      throw new Error("offline");
+    });
+
+    const res = await importCodexSessions([{ accessToken: good }, { accessToken: bad }]);
+    await trackEmail("mix-ok@example.com");
+
+    expect(res.success).toBe(2);
+    expect(res.failed).toBe(0);
+    const emails = res.imported.map((i) => i.email);
+    expect(emails).toContain("mix-ok@example.com");
+    expect(emails.some((e) => e.endsWith("@token.local"))).toBe(true);
   });
 });

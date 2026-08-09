@@ -79,7 +79,11 @@ async function upsertCodexAccount(email: string, tokens: Record<string, unknown>
   return inserted[0]!.id;
 }
 
-export async function importCodexAccessToken(accessToken: string, name?: string) {
+export async function importCodexAccessToken(
+  accessToken: string,
+  name?: string,
+  hints?: { email?: string; accountId?: string; planType?: string; refreshToken?: string },
+) {
   const token = accessToken.trim();
   if (!token) {
     throw new Error("Access token is required");
@@ -89,11 +93,11 @@ export async function importCodexAccessToken(accessToken: string, name?: string)
   const authClaim = claims["https://api.openai.com/auth"];
   const profileClaim = claims["https://api.openai.com/profile"];
 
-  let email = String(profileClaim?.email || claims.email || claims.preferred_username || "");
+  let email = String(profileClaim?.email || claims.email || claims.preferred_username || "") || hints?.email || "";
   let accountId = String(
     authClaim?.chatgpt_account_id || authClaim?.account_id || authClaim?.user_id || claims.chatgpt_account_id || claims.account_id || ""
-  );
-  const planType = String(authClaim?.chatgpt_plan_type || claims.plan_type || "");
+  ) || hints?.accountId || "";
+  const planType = String(authClaim?.chatgpt_plan_type || claims.plan_type || "") || hints?.planType || "";
   const jwtExp = claims.exp ? Number(claims.exp) : null;
 
   if (!email || !accountId) {
@@ -118,12 +122,14 @@ export async function importCodexAccessToken(accessToken: string, name?: string)
 
   const newTokens = {
     access_token: token,
-    refresh_token: "",
+    // Session-import entries may carry a refreshToken; OAuth/access-token
+    // imports leave it empty (refresh path stays inert until a real one lands).
+    refresh_token: hints?.refreshToken || "",
     id_token: "",
     expires_at: jwtExp ? String(jwtExp) : "",
     email,
     account_id: accountId,
-    method: "access_token",
+    method: hints?.refreshToken ? "session_import" : "access_token",
     plan_type: planType,
   };
 
@@ -139,6 +145,156 @@ export async function importCodexAccessToken(accessToken: string, name?: string)
     workspace: accountId || null,
     plan: planType || null,
   };
+}
+
+/** One importable Codex session extracted from a pasted JSON shape. */
+export interface CodexSessionEntry {
+  accessToken: string;
+  refreshToken?: string;
+  email?: string;
+  accountId?: string;
+  planType?: string;
+}
+
+/**
+ * Raw contract for every accepted paste shape — ChatGPT Auth Session,
+ * 9router connection, 9router backup, or an array of them. Fields stay
+ * `unknown` until read; the boundary assertion below is the only cast.
+ */
+interface RawCodexSessionInput {
+  accessToken?: unknown;
+  refreshToken?: unknown;
+  /** ChatGPT Auth Session shape carries the refreshable cookie here. */
+  sessionToken?: unknown;
+  email?: unknown;
+  provider?: unknown;
+  providerSpecificData?: unknown;
+  user?: unknown;
+  account?: unknown;
+  providerConnections?: unknown[];
+  // Nested sub-contracts (read via asSessionObject).
+  chatgptAccountId?: unknown;
+  chatgptPlanType?: unknown;
+  id?: unknown;
+  planType?: unknown;
+}
+
+function asSessionObject(value: unknown): RawCodexSessionInput | undefined {
+  return value !== null && typeof value === "object" && !Array.isArray(value)
+    ? (value as RawCodexSessionInput) // parsed client JSON — contract type names the accepted fields
+    : undefined;
+}
+
+function strField(v: unknown): string | undefined {
+  return typeof v === "string" && v.length > 0 ? v : undefined;
+}
+
+/**
+ * Normalize pasted ChatGPT session JSON into importable entries. Accepts the
+ * three shapes the ecosystem emits:
+ *   1. ChatGPT Auth Session: { accessToken, sessionToken?, user:{email}, account:{id,planType} }
+ *   2. 9router connection:   { accessToken, refreshToken, email, provider:"codex", providerSpecificData:{chatgptAccountId,chatgptPlanType} }
+ *   3. 9router backup:       { providerConnections: [<connection>, ...] }
+ * plus a bare array of 1/2. Entries without an accessToken are dropped.
+ */
+export function extractCodexSessionEntries(input: unknown): CodexSessionEntry[] {
+  const backup = asSessionObject(input);
+  let list: unknown[];
+  if (Array.isArray(input)) {
+    list = input;
+  } else if (backup && Array.isArray(backup.providerConnections)) {
+    list = backup.providerConnections.filter((c) => {
+      const conn = asSessionObject(c);
+      return !conn || conn.provider === undefined || conn.provider === "codex";
+    });
+  } else {
+    list = [input];
+  }
+
+  const out: CodexSessionEntry[] = [];
+  for (const raw of list) {
+    const r = asSessionObject(raw);
+    if (!r) continue;
+    const accessToken = strField(typeof r.accessToken === "string" ? r.accessToken.trim() : undefined);
+    if (!accessToken) continue;
+
+    const specific = asSessionObject(r.providerSpecificData);
+    // ChatGPT Auth Session stores the refreshable token in `sessionToken`
+    // (lissenly maps it to refreshToken); 9router connections use refreshToken.
+    const rt =
+      typeof r.refreshToken === "string"
+        ? r.refreshToken
+        : typeof r.sessionToken === "string"
+          ? r.sessionToken
+          : "";
+    const refreshTokenRaw = strField(rt.trim());
+    const user = asSessionObject(r.user);
+    const account = asSessionObject(r.account);
+    out.push({
+      accessToken,
+      refreshToken: refreshTokenRaw && refreshTokenRaw !== accessToken ? refreshTokenRaw : undefined,
+      email: strField(r.email) ?? strField(user?.email),
+      accountId:
+        strField(specific?.chatgptAccountId) ??
+        strField(account?.id) ??
+        (typeof account?.id === "number" ? String(account.id) : undefined),
+      planType: strField(specific?.chatgptPlanType) ?? strField(account?.planType),
+    });
+  }
+  return out;
+}
+
+/**
+ * Bulk-import Codex accounts from pasted session JSON (lissenly/9router
+ * shapes). Each entry funnels through importCodexAccessToken so JWT claim
+ * extraction, usage fallback, and upsert stay on one code path.
+ */
+export async function importCodexSessions(
+  input: unknown,
+  opts?: { concurrency?: number },
+): Promise<{
+  success: number;
+  failed: number;
+  errors?: string[];
+  imported: Array<{ email: string; plan: string | null }>;
+}> {
+  const entries = extractCodexSessionEntries(input);
+  const imported: Array<{ email: string; plan: string | null }> = [];
+  if (entries.length === 0) {
+    return {
+      success: 0,
+      failed: 0,
+      errors: ["No usable entries — each session must carry an accessToken."],
+      imported,
+    };
+  }
+
+  let success = 0;
+  let failed = 0;
+  const errors: string[] = [];
+  const pushErr = (msg: string) => {
+    if (errors.length < 50) errors.push(msg);
+  };
+
+  await mapPool(entries, Math.max(1, opts?.concurrency ?? 4), async (entry, index) => {
+    try {
+      const conn = await importCodexAccessToken(entry.accessToken, entry.email, {
+        email: entry.email,
+        accountId: entry.accountId,
+        planType: entry.planType,
+        refreshToken: entry.refreshToken,
+      });
+      success++;
+      imported.push({ email: conn.email, plan: conn.plan });
+    } catch (err) {
+      pushErr(
+        `entry #${index + 1} (...${entry.accessToken.slice(-8)}): ${err instanceof Error ? err.message : String(err)}`,
+      );
+      failed++;
+    }
+  });
+
+  return { success, failed, errors: errors.length > 0 ? errors : undefined, imported };
 }
 
 export async function exchangeCodexAuthorizationCode(input: {
