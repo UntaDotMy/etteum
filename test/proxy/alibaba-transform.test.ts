@@ -527,4 +527,37 @@ describe("alibaba unpurchased model classification", () => {
   });
 });
 
+describe("alibaba arrearage (overdue payment) classification", () => {
+  const arrearageBody = JSON.stringify({
+    error: {
+      message:
+        "Access denied, please make sure your account is in good standing. For details, see: https://www.alibabacloud.com/help/en/model-studio/error-code#overdue-payment",
+      type: "Arrearage",
+      code: "Arrearage",
+    },
+  });
+
+  test("stream HTTP 400 Arrearage → banned (account-level, not free-quota)", async () => {
+    const provider = new TestAlibabaProvider(
+      () => new Response(arrearageBody, { status: 400, headers: { "Content-Type": "application/json" } }),
+    );
+    const result = await provider.chatCompletionStream(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.banned).toBe(true);
+    expect(result.quotaExhausted).not.toBe(true);
+    expect(result.metadata?.modelUnavailable).not.toBe(true);
+    expect(result.error?.toLowerCase()).toMatch(/arrearage|overdue/);
+  });
+
+  test("non-stream HTTP 400 Arrearage → banned", async () => {
+    const provider = new TestAlibabaProvider(
+      () => new Response(arrearageBody, { status: 400, headers: { "Content-Type": "application/json" } }),
+    );
+    const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-deepseek-v4-flash"));
+    expect(result.success).toBe(false);
+    expect(result.banned).toBe(true);
+    expect(result.error?.toLowerCase()).toMatch(/arrearage|overdue/);
+  });
+});
+
 

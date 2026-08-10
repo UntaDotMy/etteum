@@ -273,42 +273,61 @@ export class AlibabaProvider extends BaseProvider {
       if (response.status === 401) {
         return { success: false, error: "Invalid API key (401)" };
       }
-      if (response.status === 403) {
+      if (response.status === 403 || response.status === 400) {
         const errText = await response.text().catch(() => "");
-        // Free quota exhausted (various wordings / codes). Mark THIS model
-        // drained and rotate — do NOT ban the whole account.
-        if (this.isFreeQuotaExhaustedError(errText)) {
-          const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
-            .catch(() => ({ allModelsDrained: false }));
+        // Account-level arrearage (HTTP 400 type Arrearage) — ban the key.
+        if (this.isArrearageError(errText)) {
           return {
             success: false,
-            error: `Free quota exhausted for "${upstreamModel}"`,
-            quotaExhausted: true,
-            metadata: { allModelsDrained },
+            error: `Alibaba arrearage (overdue payment): ${errText.slice(0, 180)}`,
+            banned: true,
           };
         }
-        // AccessDenied.Unpurchased = this account cannot use this model right
-        // now (never activated OR free package gone). Drop from queryable +
-        // zero remaining so the dashboard stops showing "1M left", then rotate.
-        if (
-          errText.includes("AccessDenied.Unpurchased") ||
-          /not activated|not purchased|unpurchased/i.test(errText)
-        ) {
-          await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
-          await this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
-          return {
-            success: false,
-            error: `Model "${upstreamModel}" not activated/purchased on this account`,
-            metadata: { modelUnavailable: true },
-          };
+        if (response.status === 403) {
+          // Free quota exhausted (various wordings / codes). Mark THIS model
+          // drained and rotate — do NOT ban the whole account.
+          if (this.isFreeQuotaExhaustedError(errText)) {
+            const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
+              .catch(() => ({ allModelsDrained: false }));
+            return {
+              success: false,
+              error: `Free quota exhausted for "${upstreamModel}"`,
+              quotaExhausted: true,
+              metadata: { allModelsDrained },
+            };
+          }
+          // AccessDenied.Unpurchased = this account cannot use this model right
+          // now (never activated OR free package gone). Drop from queryable +
+          // zero remaining so the dashboard stops showing "1M left", then rotate.
+          if (
+            errText.includes("AccessDenied.Unpurchased") ||
+            /not activated|not purchased|unpurchased/i.test(errText)
+          ) {
+            await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
+            await this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
+            return {
+              success: false,
+              error: `Model "${upstreamModel}" not activated/purchased on this account`,
+              metadata: { modelUnavailable: true },
+            };
+          }
+          return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true };
         }
-        return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true };
+        // Non-arrearage 400 — surface body; router may free-hop or fail-fast.
+        return { success: false, error: `HTTP 400: ${errText.slice(0, 200)}` };
       }
       if (response.status === 429) {
         return { success: false, error: "Rate limited", rateLimited: true };
       }
       if (!response.ok || !response.body) {
         const text = await response.text().catch(() => "");
+        if (this.isArrearageError(text)) {
+          return {
+            success: false,
+            error: `Alibaba arrearage (overdue payment): ${text.slice(0, 180)}`,
+            banned: true,
+          };
+        }
         return { success: false, error: `HTTP ${response.status}: ${text.slice(0, 200)}` };
       }
 
@@ -565,33 +584,45 @@ export class AlibabaProvider extends BaseProvider {
         return { kind: "session_expired", success: false, error: "API key rejected (HTTP 401) during probe" };
       }
 
-      if (probeResp.status === 403) {
+      if (probeResp.status === 403 || probeResp.status === 400) {
         const errText = await probeResp.text().catch(() => "");
-        if (this.isFreeQuotaExhaustedError(errText)) {
-          const cap = quotaCaps[upstreamModel];
-          tokens[upstreamModel] = {
-            limit: cap || tokens[upstreamModel]?.limit || 1_000_000,
-            remaining: 0,
-            periodDays: tokens[upstreamModel]?.periodDays ?? 60,
-            resetAt: null,
+        // Arrearage is account-wide — park the key as banned so it leaves Active.
+        if (this.isArrearageError(errText)) {
+          return {
+            kind: "banned",
+            success: false,
+            error: `Alibaba arrearage (overdue payment): ${errText.slice(0, 180)}`,
           };
+        }
+        if (probeResp.status === 403) {
+          if (this.isFreeQuotaExhaustedError(errText)) {
+            const cap = quotaCaps[upstreamModel];
+            tokens[upstreamModel] = {
+              limit: cap || tokens[upstreamModel]?.limit || 1_000_000,
+              remaining: 0,
+              periodDays: tokens[upstreamModel]?.periodDays ?? 60,
+              resetAt: null,
+            };
+            continue;
+          }
+          if (
+            errText.includes("AccessDenied.Unpurchased") ||
+            /not activated|not purchased|unpurchased/i.test(errText)
+          ) {
+            // Not usable on this key — keep out of queryableModels and zero remaining.
+            const cap = quotaCaps[upstreamModel] || tokens[upstreamModel]?.limit || 1_000_000;
+            tokens[upstreamModel] = {
+              limit: cap,
+              remaining: 0,
+              periodDays: tokens[upstreamModel]?.periodDays ?? 60,
+              resetAt: null,
+            };
+            continue;
+          }
+          anyAlive = true;
           continue;
         }
-        if (
-          errText.includes("AccessDenied.Unpurchased") ||
-          /not activated|not purchased|unpurchased/i.test(errText)
-        ) {
-          // Not usable on this key — keep out of queryableModels and zero remaining.
-          const cap = quotaCaps[upstreamModel] || tokens[upstreamModel]?.limit || 1_000_000;
-          tokens[upstreamModel] = {
-            limit: cap,
-            remaining: 0,
-            periodDays: tokens[upstreamModel]?.periodDays ?? 60,
-            resetAt: null,
-          };
-          continue;
-        }
-        anyAlive = true;
+        // Non-arrearage 400 on probe — skip this model, keep checking peers.
         continue;
       }
 
@@ -612,6 +643,16 @@ export class AlibabaProvider extends BaseProvider {
             remaining: cap || 1_000_000,
             periodDays: 60,
             resetAt: null,
+          };
+        }
+      } else {
+        // Other non-OK (e.g. 5xx) — still check body for arrearage wording.
+        const errText = await probeResp.text().catch(() => "");
+        if (this.isArrearageError(errText)) {
+          return {
+            kind: "banned",
+            success: false,
+            error: `Alibaba arrearage (overdue payment): ${errText.slice(0, 180)}`,
           };
         }
       }
@@ -830,6 +871,23 @@ export class AlibabaProvider extends BaseProvider {
   }
 
   /**
+   * Account-level overdue / arrearage block (HTTP 400 type Arrearage).
+   * Not free-quota and not per-model Unpurchased — the whole key is unusable
+   * until Alibaba billing is settled. Must terminal-ban, not "all accounts failed"
+   * after three unlucky hops of still-Active dead keys.
+   */
+  private isArrearageError(errText: string): boolean {
+    const t = (errText || "").toLowerCase();
+    return (
+      t.includes("arrearage") ||
+      t.includes("overdue-payment") ||
+      t.includes("overdue payment") ||
+      (t.includes("good standing") && (t.includes("access denied") || t.includes("accessdenied"))) ||
+      (t.includes("access denied") && t.includes("account is in good standing"))
+    );
+  }
+
+  /**
    * Zero a model's remaining quota after a quota-exhausted response.
    * Transactional (same pattern as decrementModelQuota): re-reads the live
    * tokens row so concurrent decrements aren't clobbered, and CREATES the
@@ -891,8 +949,23 @@ export class AlibabaProvider extends BaseProvider {
     if (response.status === 401) {
       return { success: false, error: "Invalid API key (401)" };
     }
-    if (response.status === 403) {
+    if (response.status === 403 || response.status === 400) {
       const errText = await response.text().catch(() => "");
+      // Account-level overdue payment — terminal ban for this key.
+      if (this.isArrearageError(errText)) {
+        return {
+          success: false,
+          error: `Alibaba arrearage (overdue payment): ${errText.slice(0, 180)}`,
+          banned: true,
+        };
+      }
+      if (response.status === 400) {
+        return {
+          success: false,
+          error: `HTTP 400: ${errText.slice(0, 200)}`,
+          metadata: { errorText: errText },
+        };
+      }
       // Free-quota wording first — caller rewrites banned → quotaExhausted.
       if (this.isFreeQuotaExhaustedError(errText)) {
         return {

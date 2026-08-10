@@ -478,6 +478,6 @@ describe("CodexProvider.resolveModel honors custom-model overrides", () => {
 
     const outcome = await provider.probeLiveness(account, "codex-gpt-5.3");
     expect(outcome).toBe("rate_limited");
-    expect(provider.lastRequestBody.model).toBe("gpt-5.5"); // legacy alias remap
+    expect(provider.lastRequestBody.model).toBe("gpt-5.6-sol"); // legacy alias remap
   });
 });

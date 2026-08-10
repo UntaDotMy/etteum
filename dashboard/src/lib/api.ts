@@ -459,7 +459,8 @@ export function toCanonicalModelName(model: string | undefined | null): string {
   if (m === "deepseek-v3") m = "deepseek-chat";
   m = m.replace(/^gemini-3\.0-/, "gemini-3-");
   if (m === "claude-3.5-sonnet") m = "claude-3-5-sonnet-20241022";
-  if (m === "auto" || m === "auto-review") m = "gpt-5.5";
+  if (m === "auto") m = "gpt-5.6-sol";
+  if (m === "auto-review") m = "codex-auto-review";
   if (m === "ultimate") m = "claude-opus-4.8";
   else if (m === "performance") m = "claude-sonnet-4.6";
   else if (m === "efficient") m = "claude-haiku-4.5";
@@ -467,7 +468,7 @@ export function toCanonicalModelName(model: string | undefined | null): string {
   if (/^llama-3\.3-70b/.test(m) || m === "llama-v3p3-70b-instruct") m = "llama-3.3-70b-versatile";
   if (/^llama-3\.1-70b/.test(m) || /405b/.test(m)) m = "llama-3.1-70b-versatile";
   if (m === "qwen2p5-72b-instruct") m = "qwen-plus";
-  if (m === "default") m = "gpt-5.5";
+  if (m === "default") m = "gpt-5.6-sol";
   return m;
 }
 

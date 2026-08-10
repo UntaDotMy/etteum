@@ -364,7 +364,8 @@ export function toCanonicalModelName(model: string | undefined | null): string {
   // Cursor / OpenRouter dotted Claude id → catalog hyphen form.
   if (m === "claude-3.5-sonnet") m = "claude-3-5-sonnet-20241022";
   // Codex / Kiro / OpenRouter "auto" routers → mid-tier reference rates.
-  if (m === "auto" || m === "auto-review") m = "gpt-5.5";
+  if (m === "auto") m = "gpt-5.6-sol";
+  if (m === "auto-review") m = "codex-auto-review";
   // Qoder product tiers (not raw model SKUs) — map to closest public rates.
   if (m === "ultimate") m = "claude-opus-4.8";
   else if (m === "performance") m = "claude-sonnet-4.6";
