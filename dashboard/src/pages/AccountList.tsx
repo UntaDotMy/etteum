@@ -293,15 +293,19 @@ function CommandCodeQuotaCell({ limits, credits, fallbackRemaining, fallbackLimi
     );
   }
   const renderBar = (label: string, w: CmcWindowLimit) => {
-    const usedPct = w.cap > 0 ? Math.min(100, (w.used / w.cap) * 100) : 0;
-    const remainingPct = 100 - usedPct;
+    const remainingUsd = Math.max(0, Number(w.cap) - Number(w.used));
+    const remainingPct = w.cap > 0 ? Math.min(100, (remainingUsd / w.cap) * 100) : 0;
     const tone = remainingPct <= 10 ? "bg-[var(--error)]" : remainingPct <= 40 ? "bg-[var(--warning)]" : "bg-[var(--success)]";
     const resetIn = cmcResetInSeconds(w.resetAt);
     return (
       <div className="space-y-0.5">
         <div className="flex items-center justify-between text-[10px] text-[var(--muted-foreground)]">
           <span className="font-medium">{label}</span>
-          <span>${w.used.toFixed(2)}/${w.cap.toFixed(2)} · {w.exceeded ? <span className="text-[var(--error)]">EXCEEDED</span> : `${remainingPct.toFixed(0)}% left`}{resetIn ? ` · reset ${formatResetIn(resetIn)}` : ""}</span>
+          <span>
+            ${remainingUsd.toFixed(2)}/${Number(w.cap).toFixed(2)} left
+            {w.exceeded ? <span className="text-[var(--error)]"> · EXCEEDED</span> : ""}
+            {resetIn ? ` · reset ${formatResetIn(resetIn)}` : ""}
+          </span>
         </div>
         <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
           <div className={`h-full ${tone}`} style={{ width: `${remainingPct}%` }} />

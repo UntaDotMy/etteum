@@ -1912,6 +1912,8 @@ export default function Accounts() {
                 };
                 const fh = bar(w.fiveHourPct);
                 const wk = bar(w.weeklyPct);
+                const fhLeft = Math.max(0, w.fiveHourCap - w.fiveHourUsed);
+                const wkLeft = Math.max(0, w.weeklyCap - w.weeklyUsed);
                 return (
                   <div className="space-y-1.5">
                     <div className="flex justify-between text-xs">
@@ -1920,24 +1922,24 @@ export default function Accounts() {
                         <span className="text-[var(--foreground)]">${stat.commandCodeCreditBalance.toFixed(2)} credits</span>
                       )}
                     </div>
-                    {/* 5-hour window */}
+                    {/* 5-hour window — remaining/cap (same convention as other providers) */}
                     <div className="space-y-0">
                       <div className="flex items-center justify-between text-[10px]">
                         <span className="text-[var(--foreground)] font-medium">5-hour</span>
                         <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
-                          ${w.fiveHourUsed.toFixed(2)}/${w.fiveHourCap.toFixed(2)} · {fh.remaining.toFixed(0)}% left · resets {fmtReset(w.fiveHourResetAt)}
+                          ${fhLeft.toFixed(2)}/${w.fiveHourCap.toFixed(2)} left · {fh.remaining.toFixed(0)}% · resets {fmtReset(w.fiveHourResetAt)}
                         </span>
                       </div>
                       <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
                         <div className={`h-full ${fh.tone} transition-all`} style={{ width: `${Math.max(0, Math.min(100, fh.remaining))}%` }} />
                       </div>
                     </div>
-                    {/* Weekly window */}
+                    {/* Weekly window — remaining/cap */}
                     <div className="space-y-0">
                       <div className="flex items-center justify-between text-[10px]">
                         <span className="text-[var(--foreground)] font-medium">Weekly</span>
                         <span className="text-[var(--muted-foreground)] shrink-0 ml-2">
-                          ${w.weeklyUsed.toFixed(2)}/${w.weeklyCap.toFixed(2)} · {wk.remaining.toFixed(0)}% left · resets {fmtReset(w.weeklyResetAt)}
+                          ${wkLeft.toFixed(2)}/${w.weeklyCap.toFixed(2)} left · {wk.remaining.toFixed(0)}% · resets {fmtReset(w.weeklyResetAt)}
                         </span>
                       </div>
                       <div className="h-1.5 w-full rounded-full bg-[var(--secondary)] overflow-hidden">
