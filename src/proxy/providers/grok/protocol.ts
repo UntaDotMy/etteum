@@ -642,8 +642,14 @@ export function consoleChunkToEvents(chunk: any): FrameEvent[] {
     events.push({ type: "text", text: delta.content });
   }
 
-  if (delta.reasoning_content) {
-    events.push({ type: "reasoning", text: delta.reasoning_content });
+  // Console chat.completions may use reasoning_content, reasoning, or thinking.
+  const reasoningText =
+    (typeof delta.reasoning_content === "string" && delta.reasoning_content) ||
+    (typeof delta.reasoning === "string" && delta.reasoning) ||
+    (typeof delta.thinking === "string" && delta.thinking) ||
+    "";
+  if (reasoningText) {
+    events.push({ type: "reasoning", text: reasoningText });
   }
 
   if (delta.tool_calls) {

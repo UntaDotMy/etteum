@@ -210,15 +210,22 @@ export function chatToCliResponsesBody(
   };
   if (instructions) body.instructions = instructions;
 
-  const effort =
+  // Responses API: reasoning is always-on for grok-4.5 (cannot disable). We
+  // still send effort + summary so the surface streams a visible summary —
+  // without `summary`, many builds run reasoning but emit no client-visible
+  // text (only encrypted traces / empty summary arrays).
+  const effortRaw =
     opts?.reasoningEffort ||
     request.reasoning_effort ||
-    (request as any).thinking?.effort;
-  if (effort && String(effort).toLowerCase() !== "none") {
-    body.reasoning_effort = String(effort).toLowerCase();
+    (request as any).thinking?.effort ||
+    "high";
+  const effort = String(effortRaw).toLowerCase().trim();
+  if (effort && effort !== "none") {
+    // Chat Completions-style field still accepted by some proxy builds.
+    body.reasoning_effort = effort;
     // why: Responses endpoints hide reasoning unless a summary is requested.
     // Verified live: reasoning ran but returned nothing until summary:"auto".
-    body.reasoning = { effort: String(effort).toLowerCase(), summary: "auto" };
+    body.reasoning = { effort, summary: "auto" };
   }
 
   if (request.temperature != null) body.temperature = request.temperature;
@@ -235,6 +242,74 @@ export function chatToCliResponsesBody(
   }
 
   return body;
+}
+
+// ---------------------------------------------------------------------------
+// Reasoning text extraction (Responses SSE) — mirrors CodexProvider coverage
+// ---------------------------------------------------------------------------
+
+/** Flatten a summary/content part into plain text. */
+export function textFromReasoningPart(part: unknown): string {
+  if (!part) return "";
+  if (typeof part === "string") return part;
+  if (typeof part !== "object") return "";
+  const p = part as Record<string, unknown>;
+  if (typeof p.text === "string") return p.text;
+  if (typeof p.summary_text === "string") return p.summary_text;
+  if (typeof p.content === "string") return p.content;
+  if (Array.isArray(p.content)) {
+    return p.content.map((inner) => textFromReasoningPart(inner)).filter(Boolean).join("\n");
+  }
+  return "";
+}
+
+/** Full text from a reasoning output item (summary / content / text fields). */
+export function extractReasoningItemText(item: unknown): string {
+  if (!item || typeof item !== "object") return "";
+  const it = item as Record<string, unknown>;
+  if (it.type != null && it.type !== "reasoning") return "";
+  const bags = [it.summary, it.content, it.text, it.reasoning].flatMap((value) => {
+    if (Array.isArray(value)) return value;
+    return value == null ? [] : [value];
+  });
+  return bags.map((part) => textFromReasoningPart(part)).filter(Boolean).join("\n");
+}
+
+/**
+ * Streaming delta text for reasoning-related event types.
+ * xAI docs: response.reasoning_text.delta | response.reasoning_summary_text.delta
+ * Also accept response.reasoning.delta (OpenAI-compatible alias) and `text`.
+ */
+export function extractReasoningDelta(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const e = event as Record<string, unknown>;
+  const type = String(e.type || "");
+  if (
+    type === "response.reasoning_summary_text.delta" ||
+    type === "response.reasoning_text.delta" ||
+    type === "response.reasoning.delta"
+  ) {
+    if (typeof e.delta === "string") return e.delta;
+    if (typeof e.text === "string") return e.text;
+  }
+  return "";
+}
+
+/** Done-event full text (when deltas were skipped / empty). */
+export function extractReasoningDoneText(event: unknown): string {
+  if (!event || typeof event !== "object") return "";
+  const e = event as Record<string, unknown>;
+  const type = String(e.type || "");
+  if (
+    type === "response.reasoning_summary_text.done" ||
+    type === "response.reasoning_summary_part.done" ||
+    type === "response.reasoning_text.done"
+  ) {
+    if (typeof e.text === "string" && e.text) return e.text;
+    const fromPart = textFromReasoningPart(e.part);
+    if (fromPart) return fromPart;
+  }
+  return "";
 }
 
 /**
@@ -257,6 +332,8 @@ export function responsesSseToChatCompletionStream(
   let roleSent = false;
   // True once any reasoning summary has been streamed (delta or completed item).
   let reasoningEmitted = false;
+  // Per-output_index so we do not re-emit the same summary from done + completed.
+  const reasoningByOutput = new Map<number, string>();
   // tool_call index by item_id for streaming function args
   const toolIndexByItem = new Map<string, number>();
   let nextToolIndex = 0;
@@ -282,6 +359,18 @@ export function responsesSseToChatCompletionStream(
     if (roleSent) return;
     roleSent = true;
     emit(controller, { role: "assistant" });
+  };
+
+  const emitReasoning = (
+    controller: ReadableStreamDefaultController<Uint8Array>,
+    text: string,
+    outputIndex = 0,
+  ) => {
+    if (!text) return;
+    ensureRole(controller);
+    reasoningEmitted = true;
+    reasoningByOutput.set(outputIndex, `${reasoningByOutput.get(outputIndex) || ""}${text}`);
+    emit(controller, { reasoning_content: text });
   };
 
   return new ReadableStream<Uint8Array>({
@@ -325,40 +414,62 @@ export function responsesSseToChatCompletionStream(
               continue;
             }
 
-            // Reasoning → reasoning_content. Accept both documented event names:
-            // response.reasoning_text.delta (xAI) and reasoning_summary_text.delta.
-            if (
-              (type === "response.reasoning_summary_text.delta" ||
-                type === "response.reasoning_text.delta") &&
-              typeof data.delta === "string"
-            ) {
-              ensureRole(controller);
-              reasoningEmitted = true;
-              emit(controller, { reasoning_content: data.delta });
+            // Streaming reasoning deltas (xAI + OpenAI aliases)
+            const reasoningDelta = extractReasoningDelta(data);
+            if (reasoningDelta) {
+              emitReasoning(controller, reasoningDelta, Number(data.output_index ?? 0));
               continue;
             }
 
-            // Tool call start
-            if (type === "response.output_item.added" && data.item?.type === "function_call") {
-              ensureRole(controller);
-              const itemId = String(data.item.id || data.item.call_id || `fc_${nextToolIndex}`);
-              const idx = nextToolIndex++;
-              toolIndexByItem.set(itemId, idx);
-              if (data.item.call_id) toolIndexByItem.set(String(data.item.call_id), idx);
-              emit(controller, {
-                tool_calls: [
-                  {
-                    index: idx,
-                    id: data.item.call_id || itemId,
-                    type: "function",
-                    function: {
-                      name: data.item.name || "",
-                      arguments: typeof data.item.arguments === "string" ? data.item.arguments : "",
-                    },
-                  },
-                ],
-              });
+            // Done events with full summary text (when deltas were empty)
+            const doneText = extractReasoningDoneText(data);
+            if (doneText) {
+              const index = Number(data.output_index ?? 0);
+              if (!reasoningByOutput.get(index)) {
+                emitReasoning(controller, doneText, index);
+              }
               continue;
+            }
+
+            // Reasoning / tool items on added|done
+            if (type === "response.output_item.added" || type === "response.output_item.done") {
+              const item = data.item;
+              if (item?.type === "reasoning") {
+                const index = Number(data.output_index ?? 0);
+                const itemText = extractReasoningItemText(item);
+                if (itemText && !reasoningByOutput.get(index)) {
+                  emitReasoning(controller, itemText, index);
+                }
+                continue;
+              }
+              if (item?.type === "function_call") {
+                ensureRole(controller);
+                const itemId = String(item.id || item.call_id || `fc_${nextToolIndex}`);
+                let idx = toolIndexByItem.get(itemId);
+                if (idx == null && item.call_id) idx = toolIndexByItem.get(String(item.call_id));
+                if (idx == null) {
+                  idx = nextToolIndex++;
+                  toolIndexByItem.set(itemId, idx);
+                  if (item.call_id) toolIndexByItem.set(String(item.call_id), idx);
+                }
+                // Only emit start frame once (on added, or done if we never saw added).
+                if (type === "response.output_item.added" || !item.arguments) {
+                  emit(controller, {
+                    tool_calls: [
+                      {
+                        index: idx,
+                        id: item.call_id || itemId,
+                        type: "function",
+                        function: {
+                          name: item.name || "",
+                          arguments: typeof item.arguments === "string" ? item.arguments : "",
+                        },
+                      },
+                    ],
+                  });
+                }
+                continue;
+              }
             }
 
             // Tool call argument deltas
@@ -383,23 +494,18 @@ export function responsesSseToChatCompletionStream(
 
             // Completed — usage + finish
             if (type === "response.completed" || type === "response.failed") {
-              // Fallback: some surfaces only carry the summary in the final
-              // reasoning output item, not as deltas.
+              // Fallback: some surfaces only carry the summary on the final
+              // reasoning output item (no deltas, no output_item.done text).
               if (!reasoningEmitted) {
                 const output: any[] = Array.isArray(data.response?.output) ? data.response.output : [];
                 let summaryText = "";
                 for (const item of output) {
-                  if (item?.type === "reasoning" && Array.isArray(item.summary)) {
-                    for (const part of item.summary) {
-                      if (part?.type === "summary_text" && typeof part.text === "string") {
-                        summaryText += part.text;
-                      }
-                    }
+                  if (item?.type === "reasoning") {
+                    summaryText += extractReasoningItemText(item);
                   }
                 }
                 if (summaryText) {
-                  ensureRole(controller);
-                  emit(controller, { reasoning_content: summaryText });
+                  emitReasoning(controller, summaryText, 0);
                 }
               }
               const usageRaw = data.response?.usage;
