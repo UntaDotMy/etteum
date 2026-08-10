@@ -90,6 +90,7 @@ import {
 import {
   buildCliProxyHeaders,
   chatToCliResponsesBody,
+  extractReasoningItemText,
   responsesSseToChatCompletionStream,
 } from "./cli-proxy-wire";
 
@@ -711,6 +712,42 @@ export class GrokProvider extends BaseProvider {
       created,
       model: request.model,
       onUsage,
+      // Free Build often omits reasoning_* stream deltas; pull the stored
+      // Responses object where summary_text is attached (xAI docs pattern).
+      fetchStoredReasoning: async (responseId: string) => {
+        try {
+          const h = await buildCliProxyHeaders(bearer, {
+            modelOverride: upstreamModel,
+            accept: "application/json",
+            surface: "grok-shell",
+            identifier: "grok-build",
+          });
+          const r = await fetch(`${GROK_OAUTH.apiBaseUrl}/responses/${encodeURIComponent(responseId)}`, {
+            method: "GET",
+            headers: h,
+            signal: AbortSignal.timeout(12_000),
+          });
+          if (!r.ok) return null;
+          const j = (await r.json().catch(() => null)) as {
+            output?: unknown[];
+            response?: { output?: unknown[] };
+          } | null;
+          const output = Array.isArray(j?.output)
+            ? j!.output!
+            : Array.isArray(j?.response?.output)
+              ? j!.response!.output!
+              : [];
+          let text = "";
+          for (const item of output) {
+            if ((item as { type?: string })?.type === "reasoning") {
+              text += extractReasoningItemText(item);
+            }
+          }
+          return text.trim() ? text : null;
+        } catch {
+          return null;
+        }
+      },
     });
   }
 

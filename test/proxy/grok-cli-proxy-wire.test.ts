@@ -58,7 +58,8 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     expect(body.instructions).toBe("Be brief.");
     expect(body.reasoning_effort).toBe("low");
     // Responses endpoints hide reasoning unless a summary is requested.
-    expect(body.reasoning).toEqual({ effort: "low", summary: "auto" });
+    expect(body.reasoning).toEqual({ effort: "low", summary: "detailed" });
+    expect(body.store).toBe(true);
     expect(body.max_output_tokens).toBe(64);
     expect(Array.isArray(body.input)).toBe(true);
     const input = body.input as any[];
@@ -263,7 +264,7 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     expect(text).toContain("full summary without deltas");
   });
 
-  test("chatToCliResponsesBody always requests summary:auto for default high effort", () => {
+  test("chatToCliResponsesBody always requests detailed summary + store for default high effort", () => {
     const body = chatToCliResponsesBody(
       {
         model: "grok-4.5",
@@ -273,8 +274,56 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
       "grok-4.5",
       { stream: true },
     );
-    // No client effort → still force high + summary so the stream is visible.
+    // No client effort → still force high + detailed summary so the stream is visible.
     expect(body.reasoning_effort).toBe("high");
-    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+    expect(body.reasoning).toEqual({ effort: "high", summary: "detailed" });
+    expect(body.store).toBe(true);
+    expect(body.include).toEqual(["reasoning.encrypted_content"]);
+  });
+
+  test("fetchStoredReasoning is used when stream has no reasoning deltas", async () => {
+    const completed = {
+      type: "response.completed",
+      response: {
+        id: "resp_test_1",
+        usage: {
+          input_tokens: 10,
+          output_tokens: 50,
+          total_tokens: 60,
+          output_tokens_details: { reasoning_tokens: 40 },
+        },
+        output: [{ type: "message", role: "assistant", content: [{ type: "output_text", text: "4" }] }],
+      },
+    };
+    const sse =
+      `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"4"}\n\n` +
+      `event: response.completed\ndata: ${JSON.stringify(completed)}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse));
+        c.close();
+      },
+    });
+    let fetchedId = "";
+    const out = responsesSseToChatCompletionStream(upstream, {
+      id: "x",
+      created: 1,
+      model: "grok-4.5",
+      fetchStoredReasoning: async (rid) => {
+        fetchedId = rid;
+        return "retrieved summary from GET";
+      },
+    });
+    const reader = out.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value);
+    }
+    expect(fetchedId).toBe("resp_test_1");
+    expect(text).toContain("retrieved summary from GET");
+    expect(text).toContain("reasoning_content");
   });
 });

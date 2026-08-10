@@ -207,6 +207,9 @@ export function chatToCliResponsesBody(
     model: upstreamModel,
     input,
     stream,
+    // Store so we can GET /v1/responses/{id} after stream if summary deltas
+    // were omitted (common on free Build: reasoning runs, stream has no text).
+    store: true,
   };
   if (instructions) body.instructions = instructions;
 
@@ -221,11 +224,14 @@ export function chatToCliResponsesBody(
     "high";
   const effort = String(effortRaw).toLowerCase().trim();
   if (effort && effort !== "none") {
-    // Chat Completions-style field still accepted by some proxy builds.
+    // Prefer the Responses-native shape. Docs: summary is auto|concise|detailed;
+    // "detailed" is what the model is documented to return. Keep top-level
+    // reasoning_effort as a non-standard alias some proxy builds still read.
     body.reasoning_effort = effort;
-    // why: Responses endpoints hide reasoning unless a summary is requested.
-    // Verified live: reasoning ran but returned nothing until summary:"auto".
-    body.reasoning = { effort, summary: "auto" };
+    body.reasoning = { effort, summary: "detailed" };
+    // Encrypted traces unlock multi-turn continuity; also correlates with
+    // summary population on some Build builds (see xAI generate-text docs).
+    body.include = ["reasoning.encrypted_content"];
   }
 
   if (request.temperature != null) body.temperature = request.temperature;
@@ -323,6 +329,12 @@ export function responsesSseToChatCompletionStream(
     created: number;
     model: string;
     onUsage?: (usage: { prompt_tokens: number; completion_tokens: number }) => void;
+    /**
+     * When the stream finished with zero reasoning text, fetch the stored
+     * Responses object (GET /v1/responses/{id}) — xAI often only attaches the
+     * summary there (see docs response.output reasoning item).
+     */
+    fetchStoredReasoning?: (responseId: string) => Promise<string | null>;
   },
 ): ReadableStream<Uint8Array> {
   const reader = upstream.getReader();
@@ -494,14 +506,30 @@ export function responsesSseToChatCompletionStream(
 
             // Completed — usage + finish
             if (type === "response.completed" || type === "response.failed") {
-              // Fallback: some surfaces only carry the summary on the final
-              // reasoning output item (no deltas, no output_item.done text).
+              // Fallback 1: summary only on the final reasoning output item.
               if (!reasoningEmitted) {
                 const output: any[] = Array.isArray(data.response?.output) ? data.response.output : [];
                 let summaryText = "";
                 for (const item of output) {
                   if (item?.type === "reasoning") {
                     summaryText += extractReasoningItemText(item);
+                  }
+                }
+                // Fallback 2: free Build often streams only final text + keepalives
+                // while reasoning_tokens accrue. Retrieve the stored response —
+                // docs show summary_text on GET /v1/responses/{id} even when
+                // the stream never emitted reasoning_* deltas.
+                if (!summaryText && meta.fetchStoredReasoning) {
+                  const rid = String(
+                    data.response?.id || data.id || data.response_id || "",
+                  );
+                  if (rid) {
+                    try {
+                      const fetched = await meta.fetchStoredReasoning(rid);
+                      if (fetched) summaryText = fetched;
+                    } catch {
+                      /* best-effort */
+                    }
                   }
                 }
                 if (summaryText) {
@@ -515,13 +543,32 @@ export function responsesSseToChatCompletionStream(
                   Number(usageRaw.input_tokens ?? usageRaw.prompt_tokens ?? 0) || 0;
                 const completion =
                   Number(usageRaw.output_tokens ?? usageRaw.completion_tokens ?? 0) || 0;
+                const reasoningTok = Number(
+                  usageRaw.output_tokens_details?.reasoning_tokens ??
+                    usageRaw.completion_tokens_details?.reasoning_tokens ??
+                    0,
+                );
                 usageOut = {
                   prompt_tokens: prompt,
                   completion_tokens: completion,
                   total_tokens:
                     Number(usageRaw.total_tokens ?? prompt + completion) || prompt + completion,
                 };
+                if (reasoningTok > 0) {
+                  (usageOut as any).completion_tokens_details = {
+                    reasoning_tokens: reasoningTok,
+                  };
+                }
                 meta.onUsage?.({ prompt_tokens: prompt, completion_tokens: completion });
+                // Fallback 3: reasoning ran (tokens > 0) but no text was ever
+                // returned — surface a short note so the Thinking panel is not empty.
+                if (!reasoningEmitted && reasoningTok > 0) {
+                  emitReasoning(
+                    controller,
+                    `_(Grok used ${reasoningTok} reasoning tokens; the Build surface did not return a readable reasoning summary for this account.)_`,
+                    0,
+                  );
+                }
               }
               const finish =
                 type === "response.failed"
