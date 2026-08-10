@@ -488,6 +488,43 @@ describe("alibaba unpurchased model classification", () => {
     expect(result.banned).toBe(true);
     expect(result.metadata?.modelUnavailable).not.toBe(true);
   });
+
+  test("stream 403 free-quota exhausted → quotaExhausted (rotate, not ban)", async () => {
+    const provider = new TestAlibabaProvider(() =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "AllocationQuota.FreeTierOnly",
+            message: "Free quota has been exhausted for this model",
+          },
+        }),
+        { status: 403 },
+      ));
+    const result = await provider.chatCompletionStream(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.quotaExhausted).toBe(true);
+    expect(result.banned).toBeUndefined();
+    expect(result.metadata?.modelUnavailable).not.toBe(true);
+    expect(result.error).toContain("qwen3.8-max");
+  });
+
+  test("non-stream 403 free-quota exhausted → quotaExhausted rewrite", async () => {
+    const provider = new TestAlibabaProvider(() =>
+      new Response(
+        JSON.stringify({
+          error: {
+            code: "Throttling.AllocationQuota",
+            message: "The free quota has been exhausted",
+          },
+        }),
+        { status: 403 },
+      ));
+    const result = await provider.chatCompletion(makeAccount(), baseRequest("ali-qwen3.8-max"));
+    expect(result.success).toBe(false);
+    expect(result.quotaExhausted).toBe(true);
+    expect(result.banned).toBe(false);
+    expect(result.error).toContain("Free quota exhausted");
+  });
 });
 
 

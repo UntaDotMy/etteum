@@ -208,13 +208,14 @@ export class AlibabaProvider extends BaseProvider {
         await this.decrementModelQuota(account, upstreamModel, result.creditsUsed);
       }
 
-      // Model not activated on THIS account — drop it from the account's
-      // queryableModels (dispatch skips it from now on). NO invalid_model:
-      // prefix here — that would fail-fast the whole request on this one
-      // account instead of letting the router skip to a funded peer. The
-      // router surfaces invalid_model only when EVERY account lacks it.
+      // Model not activated on THIS account — drop from queryableModels and
+      // zero remaining so ghost "1M left" does not keep this key in the walk.
+      // NO invalid_model: prefix — that would fail-fast the whole request on
+      // this one account; the router only surfaces invalid_model when EVERY
+      // account lacks the model.
       if (!result.success && result.metadata?.modelUnavailable === true) {
         await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
+        await this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
         result.error = `Model "${upstreamModel}" not activated/purchased on this account`;
       }
 
@@ -224,7 +225,7 @@ export class AlibabaProvider extends BaseProvider {
       // (self-reviving) instead of permanently banning it.
       if (!result.success && result.metadata?.errorText) {
         const errText = result.metadata.errorText as string;
-        if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
+        if (this.isFreeQuotaExhaustedError(errText)) {
           const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
             .catch(() => ({ allModelsDrained: false }));
           result.banned = false;
@@ -274,33 +275,32 @@ export class AlibabaProvider extends BaseProvider {
       }
       if (response.status === 403) {
         const errText = await response.text().catch(() => "");
-        // AccessDenied.Unpurchased = this account does NOT have this model
-        // activated. Mirror grok's invalid_model: prefix so the router
-        // fail-fasts (400 invalid_model) instead of walking every account
-        // into a misleading 503. Also drop the model from this account's
-        // queryableModels so dispatch never re-tries it here.
-        if (errText.includes("AccessDenied.Unpurchased")) {
+        // Free quota exhausted (various wordings / codes). Mark THIS model
+        // drained and rotate — do NOT ban the whole account.
+        if (this.isFreeQuotaExhaustedError(errText)) {
+          const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
+            .catch(() => ({ allModelsDrained: false }));
+          return {
+            success: false,
+            error: `Free quota exhausted for "${upstreamModel}"`,
+            quotaExhausted: true,
+            metadata: { allModelsDrained },
+          };
+        }
+        // AccessDenied.Unpurchased = this account cannot use this model right
+        // now (never activated OR free package gone). Drop from queryable +
+        // zero remaining so the dashboard stops showing "1M left", then rotate.
+        if (
+          errText.includes("AccessDenied.Unpurchased") ||
+          /not activated|not purchased|unpurchased/i.test(errText)
+        ) {
           await this.dropModelFromQueryable(account, upstreamModel).catch(() => {});
-          // Per-account entitlement miss: mark skippable (no invalid_model:
-          // prefix — that would fail-fast the WHOLE request on this account).
-          // The router skips to the next account; only if EVERY account lacks
-          // the model does it surface invalid_model to the client.
+          await this.setModelQuotaToZero(account, upstreamModel).catch(() => {});
           return {
             success: false,
             error: `Model "${upstreamModel}" not activated/purchased on this account`,
             metadata: { modelUnavailable: true },
           };
-        }
-        // Free quota exhausted — mark this model as exhausted and flag
-        // quotaExhausted (NOT rateLimited). Per-model: the router's alibaba
-        // branch invalidates the pool cache so this account is skipped for THIS
-        // model (it may still serve others), and the request rotates to a peer
-        // as a free hop instead of burning the attempt budget on a banned/rate-
-        // limited terminal mark.
-        if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
-          const { allModelsDrained } = await this.setModelQuotaToZero(account, upstreamModel)
-            .catch(() => ({ allModelsDrained: false }));
-          return { success: false, error: `Free quota exhausted for "${upstreamModel}"`, quotaExhausted: true, metadata: { allModelsDrained } };
         }
         return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true };
       }
@@ -400,10 +400,12 @@ export class AlibabaProvider extends BaseProvider {
             const limit = ml.usage_limit;
             const periodDays = ml.usage_limit_period ?? 60;
 
-            // Preserve locally-tracked remaining, or initialize to full limit.
+            // Preserve locally-tracked remaining (including 0 = drained).
+            // Never re-inflate remaining from 0 → limit: that undoes
+            // setModelQuotaToZero and re-dispatches dead free-tier packages.
             const existing = existingTokens[q.model];
-            const remaining = existing && existing.remaining > 0
-              ? Math.min(existing.remaining, limit)
+            const remaining = existing
+              ? Math.min(Math.max(0, Number(existing.remaining) || 0), limit)
               : limit;
 
             const resetAt = new Date();
@@ -521,13 +523,17 @@ export class AlibabaProvider extends BaseProvider {
 
     // Probe ALL models in parallel with a global per-account timeout.
     // 457 accounts × 6 models = 2,742 probes. Sequential is way too slow.
+    // why: stream:true + enable_thinking:false — thinking models reject
+    // non-stream probes ("enable_thinking must be set to false for non-streaming"
+    // / stream-only errors) and would never enter queryableModels.
     const probeResults = await Promise.allSettled(
       modelsToProbe.map(async (upstreamModel) => {
         const body = {
           model: upstreamModel,
           messages: [{ role: "user", content: "Just reply 1" }],
-          stream: false,
+          stream: true,
           max_tokens: 1,
+          enable_thinking: false,
         };
 
         const probeResp = await this.fetchWithTimeout(CHAT_URL, {
@@ -535,6 +541,7 @@ export class AlibabaProvider extends BaseProvider {
           headers: {
             "Content-Type": "application/json",
             "Authorization": `Bearer ${apiKey}`,
+            "Accept": "text/event-stream",
           },
           body: JSON.stringify(body),
         }, 10_000);
@@ -560,28 +567,43 @@ export class AlibabaProvider extends BaseProvider {
 
       if (probeResp.status === 403) {
         const errText = await probeResp.text().catch(() => "");
-        if (errText.includes("quota has been exhausted") || errText.includes("free quota exhausted")) {
+        if (this.isFreeQuotaExhaustedError(errText)) {
           const cap = quotaCaps[upstreamModel];
           tokens[upstreamModel] = {
-            limit: cap || 1_000_000,
+            limit: cap || tokens[upstreamModel]?.limit || 1_000_000,
             remaining: 0,
-            periodDays: 60,
+            periodDays: tokens[upstreamModel]?.periodDays ?? 60,
             resetAt: null,
           };
           continue;
         }
-        if (errText.includes("AccessDenied.Unpurchased")) {
+        if (
+          errText.includes("AccessDenied.Unpurchased") ||
+          /not activated|not purchased|unpurchased/i.test(errText)
+        ) {
+          // Not usable on this key — keep out of queryableModels and zero remaining.
+          const cap = quotaCaps[upstreamModel] || tokens[upstreamModel]?.limit || 1_000_000;
+          tokens[upstreamModel] = {
+            limit: cap,
+            remaining: 0,
+            periodDays: tokens[upstreamModel]?.periodDays ?? 60,
+            resetAt: null,
+          };
           continue;
         }
         anyAlive = true;
         continue;
       }
 
+      // Stream probes return 200 with SSE body — drain so the socket is clean.
       if (probeResp.ok) {
+        await probeResp.text().catch(() => {});
         anyAlive = true;
         queryableModels.push(upstreamModel);
         const cap = quotaCaps[upstreamModel];
         const existing = tokens[upstreamModel];
+        // Successful probe proves the key can call the model. Reset remaining
+        // to the free-package cap (or keep a positive local counter if lower).
         if (existing && existing.remaining > 0) {
           if (cap) existing.limit = cap;
         } else {
@@ -756,18 +778,55 @@ export class AlibabaProvider extends BaseProvider {
    * Called when a live request proves the account does NOT have the model
    * activated (AccessDenied.Unpurchased). Dispatch then skips this account
    * for that model; a later warmup probe re-adds it if upstream activates it.
+   *
+   * Also zeros the modelQuotas remaining entry so the dashboard does not show
+   * "1M left" for a key that just 403'd Unpurchased / free-quota-denied.
    */
   private async dropModelFromQueryable(account: Account, upstreamModel: string): Promise<void> {
-    const existing = account.tokens as AlibabaQuotaTokens | null;
-    if (!existing?.queryableModels?.includes(upstreamModel)) return; // already absent
-    const quotaTokens: AlibabaQuotaTokens = {
-      modelQuotas: existing.modelQuotas,
-      queryableModels: existing.queryableModels.filter((m) => m !== upstreamModel),
-      updatedAt: new Date().toISOString(),
-    };
-    await db.update(accounts)
-      .set({ tokens: quotaTokens as unknown })
-      .where(eq(accounts.id, account.id));
+    await db.transaction(async (tx) => {
+      const [row] = await tx.select({ tokens: accounts.tokens })
+        .from(accounts)
+        .where(eq(accounts.id, account.id))
+        .limit(1);
+      const existing = (row?.tokens as AlibabaQuotaTokens | null) ?? null;
+      const modelQuotas = { ...(existing?.modelQuotas ?? {}) };
+      const prev = modelQuotas[upstreamModel];
+      if (prev) {
+        modelQuotas[upstreamModel] = { ...prev, remaining: 0 };
+      }
+      const qm = existing?.queryableModels;
+      const nextQm = Array.isArray(qm) ? qm.filter((m) => m !== upstreamModel) : qm;
+      // No-op if neither field changes.
+      if (
+        (!prev || prev.remaining === 0) &&
+        (!Array.isArray(qm) || !qm.includes(upstreamModel))
+      ) {
+        return;
+      }
+      const quotaTokens: AlibabaQuotaTokens = {
+        modelQuotas,
+        queryableModels: nextQm,
+        updatedAt: new Date().toISOString(),
+      };
+      await tx.update(accounts)
+        .set({ tokens: quotaTokens as unknown })
+        .where(eq(accounts.id, account.id));
+    });
+  }
+
+  /** True when a 403 body is free-quota / allocation exhaustion (not a ban). */
+  private isFreeQuotaExhaustedError(errText: string): boolean {
+    const t = (errText || "").toLowerCase();
+    return (
+      t.includes("quota has been exhausted") ||
+      t.includes("free quota exhausted") ||
+      t.includes("freetiersonly") ||
+      t.includes("allocationquota") ||
+      t.includes("throttling.allocation") ||
+      // Alibaba docs: free-quota-done often surfaces as Access denied wording.
+      (t.includes("access denied") && t.includes("free")) ||
+      (t.includes("accessdenied") && t.includes("free"))
+    );
   }
 
   /**
@@ -834,14 +893,32 @@ export class AlibabaProvider extends BaseProvider {
     }
     if (response.status === 403) {
       const errText = await response.text().catch(() => "");
-      if (errText.includes("AccessDenied.Unpurchased")) {
-        // Caller (chatCompletion) drops the model from queryableModels +
-        // rewrites to the invalid_model: prefix (it has the account row).
-        return { success: false, error: `Model "${upstreamModel}" not activated/purchased`, metadata: { modelUnavailable: true } };
+      // Free-quota wording first — caller rewrites banned → quotaExhausted.
+      if (this.isFreeQuotaExhaustedError(errText)) {
+        return {
+          success: false,
+          error: `Forbidden (403): ${errText.slice(0, 200)}`,
+          banned: true,
+          metadata: { errorText: errText },
+        };
       }
-      // Free quota exhausted detection is handled by the caller (chatCompletion)
-      // since it has access to the account object.
-      return { success: false, error: `Forbidden (403): ${errText.slice(0, 200)}`, banned: true, metadata: { errorText: errText } };
+      if (
+        errText.includes("AccessDenied.Unpurchased") ||
+        /not activated|not purchased|unpurchased/i.test(errText)
+      ) {
+        // Caller drops queryable + zeros remaining; router free-hops peers.
+        return {
+          success: false,
+          error: `Model "${upstreamModel}" not activated/purchased`,
+          metadata: { modelUnavailable: true },
+        };
+      }
+      return {
+        success: false,
+        error: `Forbidden (403): ${errText.slice(0, 200)}`,
+        banned: true,
+        metadata: { errorText: errText },
+      };
     }
     if (response.status === 429) {
       return { success: false, error: "Rate limited", rateLimited: true };
