@@ -50,7 +50,11 @@ export interface CommandCodeModelDef {
   max_output: number;
   thinking: boolean;
   vision: boolean;
-  /** USD per 1k tokens (mixed avg) — credit accounting. */
+  /**
+   * USD per token (mixed avg) for log estimates — same convention as CodeBuddy:
+   * `tokens * creditRate`. Values are (USD per 1k tokens) / 1000.
+   * Window meters themselves use /alpha/billing/credits (not this rate).
+   */
   creditRate: number;
 }
 
@@ -64,42 +68,42 @@ export const COMMANDCODE_MODELS: CommandCodeModelDef[] = [
   // Specs verified against the canonical model-specs registry (model-specs.ts)
   // and openrouter.ai 2026-07. The registry wins at list time (applyModelSpecs);
   // these values are the pre-apply fallback.
-  { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", context_window: 1_000_000, max_output: 384_000, thinking: true, vision: false, creditRate: 0.004 },
-  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", context_window: 1_000_000, max_output: 384_000, thinking: true, vision: false, creditRate: 0.001 },
-  { id: "moonshotai/Kimi-K3", name: "Kimi K3", context_window: 1_048_576, max_output: 1_048_576, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_window: 262_144, max_output: 98_304, thinking: true, vision: false, creditRate: 0.002 },
-  { id: "moonshotai/Kimi-K2.7-Code-Highspeed", name: "Kimi K2.7 Code Highspeed", context_window: 262_144, max_output: 98_304, thinking: true, vision: false, creditRate: 0.002 },
-  { id: "moonshotai/Kimi-K2.6", name: "Kimi K2.6", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_window: 164_000, max_output: 8_192, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "zai-org/GLM-5.2", name: "GLM 5.2", context_window: 1_000_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "zai-org/GLM-5.2-Fast", name: "GLM 5.2 Fast", context_window: 1_000_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.001 },
-  { id: "zai-org/GLM-5.1", name: "GLM 5.1", context_window: 198_000, max_output: 8_192, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "zai-org/GLM-5", name: "GLM 5", context_window: 200_000, max_output: 8_192, thinking: false, vision: false, creditRate: 0.002 },
-  { id: "MiniMaxAI/MiniMax-M3", name: "MiniMax M3", context_window: 1_000_000, max_output: 65_536, thinking: false, vision: true, creditRate: 0.002 },
-  { id: "MiniMaxAI/MiniMax-M2.7", name: "MiniMax M2.7", context_window: 1_000_000, max_output: 65_536, thinking: false, vision: true, creditRate: 0.002 },
-  { id: "MiniMaxAI/MiniMax-M2.5", name: "MiniMax M2.5", context_window: 196_000, max_output: 65_536, thinking: false, vision: false, creditRate: 0.002 },
-  { id: "xiaomi/mimo-v2.5-pro", name: "MiMo v2.5 Pro", context_window: 1_050_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "xiaomi/mimo-v2.5", name: "MiMo v2.5", context_window: 1_050_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.001 },
-  { id: "Qwen/Qwen3.6-Max-Preview", name: "Qwen 3.6 Max Preview", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 },
-  { id: "Qwen/Qwen3.6-Plus", name: "Qwen 3.6 Plus", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 },
-  { id: "Qwen/Qwen3.7-Plus", name: "Qwen 3.7 Plus", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "stepfun/Step-3.7-Flash", name: "Step 3.7 Flash", context_window: 262_144, max_output: 256_000, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "stepfun/Step-3.5-Flash", name: "Step 3.5 Flash", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "tencent/hy3-paid", name: "Tencent Hunyuan 3 Paid", context_window: 262_144, max_output: 128_000, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "google/gemini-3.6-flash", name: "Gemini 3.6 Flash", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "google/gemini-3.5-flash", name: "Gemini 3.5 Flash", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "google/gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.00025 },
-  { id: "google/gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.00025 },
-  { id: "sakana/fugu-ultra", name: "Sakana Fugu Ultra", context_window: 1_000_000, max_output: 128_000, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "NVIDIA Nemotron 3 Ultra", context_window: 512_288, max_output: 16_384, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "thinkingmachines/inkling", name: "Inkling", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 },
-  { id: "thinkingmachines/inkling-small", name: "Inkling Small", context_window: 524_288, max_output: 65_536, thinking: true, vision: true, creditRate: 0.001 },
+  { id: "deepseek/deepseek-v4-pro", name: "DeepSeek V4 Pro", context_window: 1_000_000, max_output: 384_000, thinking: true, vision: false, creditRate: 0.004 / 1000},
+  { id: "deepseek/deepseek-v4-flash", name: "DeepSeek V4 Flash", context_window: 1_000_000, max_output: 384_000, thinking: true, vision: false, creditRate: 0.001 / 1000},
+  { id: "moonshotai/Kimi-K3", name: "Kimi K3", context_window: 1_048_576, max_output: 1_048_576, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "moonshotai/Kimi-K2.7-Code", name: "Kimi K2.7 Code", context_window: 262_144, max_output: 98_304, thinking: true, vision: false, creditRate: 0.002 / 1000},
+  { id: "moonshotai/Kimi-K2.7-Code-Highspeed", name: "Kimi K2.7 Code Highspeed", context_window: 262_144, max_output: 98_304, thinking: true, vision: false, creditRate: 0.002 / 1000},
+  { id: "moonshotai/Kimi-K2.6", name: "Kimi K2.6", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "moonshotai/Kimi-K2.5", name: "Kimi K2.5", context_window: 164_000, max_output: 8_192, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "zai-org/GLM-5.2", name: "GLM 5.2", context_window: 1_000_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "zai-org/GLM-5.2-Fast", name: "GLM 5.2 Fast", context_window: 1_000_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.001 / 1000},
+  { id: "zai-org/GLM-5.1", name: "GLM 5.1", context_window: 198_000, max_output: 8_192, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "zai-org/GLM-5", name: "GLM 5", context_window: 200_000, max_output: 8_192, thinking: false, vision: false, creditRate: 0.002 / 1000},
+  { id: "MiniMaxAI/MiniMax-M3", name: "MiniMax M3", context_window: 1_000_000, max_output: 65_536, thinking: false, vision: true, creditRate: 0.002 / 1000},
+  { id: "MiniMaxAI/MiniMax-M2.7", name: "MiniMax M2.7", context_window: 1_000_000, max_output: 65_536, thinking: false, vision: true, creditRate: 0.002 / 1000},
+  { id: "MiniMaxAI/MiniMax-M2.5", name: "MiniMax M2.5", context_window: 196_000, max_output: 65_536, thinking: false, vision: false, creditRate: 0.002 / 1000},
+  { id: "xiaomi/mimo-v2.5-pro", name: "MiMo v2.5 Pro", context_window: 1_050_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "xiaomi/mimo-v2.5", name: "MiMo v2.5", context_window: 1_050_000, max_output: 131_072, thinking: true, vision: true, creditRate: 0.001 / 1000},
+  { id: "Qwen/Qwen3.6-Max-Preview", name: "Qwen 3.6 Max Preview", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 / 1000},
+  { id: "Qwen/Qwen3.6-Plus", name: "Qwen 3.6 Plus", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "Qwen/Qwen3.7-Max", name: "Qwen 3.7 Max", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 / 1000},
+  { id: "Qwen/Qwen3.7-Plus", name: "Qwen 3.7 Plus", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "Qwen/Qwen3.7-Flash", name: "Qwen 3.7 Flash", context_window: 1_000_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "stepfun/Step-3.7-Flash", name: "Step 3.7 Flash", context_window: 262_144, max_output: 256_000, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "stepfun/Step-3.5-Flash", name: "Step 3.5 Flash", context_window: 262_144, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "tencent/hy3-paid", name: "Tencent Hunyuan 3 Paid", context_window: 262_144, max_output: 128_000, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "google/gemini-3.6-flash", name: "Gemini 3.6 Flash", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "google/gemini-3.5-flash", name: "Gemini 3.5 Flash", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "google/gemini-3.5-flash-lite", name: "Gemini 3.5 Flash Lite", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.00025 / 1000},
+  { id: "google/gemini-3.1-flash-lite", name: "Gemini 3.1 Flash Lite", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.00025 / 1000},
+  { id: "sakana/fugu-ultra", name: "Sakana Fugu Ultra", context_window: 1_000_000, max_output: 128_000, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "nvidia/nemotron-3-ultra-550b-a55b", name: "NVIDIA Nemotron 3 Ultra", context_window: 512_288, max_output: 16_384, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "thinkingmachines/inkling", name: "Inkling", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.002 / 1000},
+  { id: "thinkingmachines/inkling-small", name: "Inkling Small", context_window: 524_288, max_output: 65_536, thinking: true, vision: true, creditRate: 0.001 / 1000},
   { id: "poolside/laguna-s-2.1-free", name: "Laguna S 2.1 Free", context_window: 1_048_576, max_output: 131_072, thinking: true, vision: true, creditRate: 0 },
   { id: "inclusionai/ling-3.0-flash-free", name: "Ling 3.0 Flash Free", context_window: 262_144, max_output: 32_768, thinking: true, vision: true, creditRate: 0 },
-  { id: "meta/muse-spark-1.1", name: "Muse Spark 1.1", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 },
-  { id: "xai/grok-4.5", name: "Grok 4.5", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 },
+  { id: "meta/muse-spark-1.1", name: "Muse Spark 1.1", context_window: 1_048_576, max_output: 65_536, thinking: true, vision: true, creditRate: 0.0005 / 1000},
+  { id: "xai/grok-4.5", name: "Grok 4.5", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditRate: 0.003 / 1000},
 ];
 
 export const COMMANDCODE_MODEL_BY_ID: Record<string, CommandCodeModelDef> = Object.fromEntries(
@@ -1047,17 +1051,20 @@ export async function refreshCommandCodeUsageAfterRequest(account: Account): Pro
     const { db } = await import("../../../db/index");
     const { accounts } = await import("../../../db/schema");
     const { eq } = await import("drizzle-orm");
-    const remaining = fh?.cap ? Math.max(0, Number(fh.cap) - Number(fh.used ?? 0)) : undefined;
-    // Upstream is the source of truth: if the 5-hour window is NOT exceeded,
-    // the key is usable — keep the account active even if the local debit
-    // counter briefly hit 0 (the local count double-counts the same request).
-    const status = fh && !fh.exceeded ? "active" : undefined;
+    const cap = fh?.cap != null ? Number(fh.cap) : undefined;
+    const used = Number(fh?.used ?? 0);
+    const remaining = cap != null && cap > 0 ? Math.max(0, cap - used) : undefined;
+    // Upstream window is the sole truth for status: exceeded → park, else active.
+    // (Local token debit is skipped for commandcode; this refresh owns remaining.)
+    const windowExceeded = Boolean(fh?.exceeded || wk?.exceeded);
+    const status = windowExceeded ? "exhausted" : "active";
     await db.update(accounts).set({
       metadata: meta,
-      quotaLimit: fh?.cap ? Number(fh.cap) : undefined,
-      quotaRemaining: remaining,
-      quotaResetAt: fh?.resetAt ? new Date(fh.resetAt) : undefined,
-      ...(status ? { status, errorMessage: null } : {}),
+      ...(cap != null && cap > 0 ? { quotaLimit: cap } : {}),
+      ...(remaining != null ? { quotaRemaining: remaining } : {}),
+      ...(fh?.resetAt ? { quotaResetAt: new Date(fh.resetAt) } : {}),
+      status,
+      errorMessage: windowExceeded ? "CommandCode usage window exceeded" : null,
       updatedAt: new Date(),
     }).where(eq(accounts.id, account.id));
 
@@ -1067,9 +1074,9 @@ export async function refreshCommandCodeUsageAfterRequest(account: Account): Pro
       data: {
         id: account.id,
         provider: "commandcode",
-        status: status ?? "active",
+        status,
         quotaRemaining: remaining,
-        quotaLimit: fh?.cap ? Number(fh.cap) : undefined,
+        quotaLimit: cap != null && cap > 0 ? cap : undefined,
       },
     });
   } catch {

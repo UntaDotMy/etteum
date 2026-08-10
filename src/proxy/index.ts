@@ -23,6 +23,7 @@ import {
 import { forcedSseToJson } from "./transforms/forced-sse-to-json";
 import { isBadUpstreamRequest, isInvalidModelError } from "./errors";
 import { confirmLedgerExhaustion } from "./ledger-exhaustion";
+import { shouldSkipLocalQuotaDebit } from "./quota-debit-policy";
 import { prepareLogBody } from "./logging";
 import { resolveModelAlias, normalizeModelId } from "./model-mapping";
 import { estimateRequestTokens } from "./compression";
@@ -843,13 +844,9 @@ function wrapStreamWithUsageFinalizer(
           if (isQoder && context.useFreeCounter && context.quotaBefore > 0) {
             quotaAfter = await pool.decrementFreeQuota(context.accountId, 1);
           } else if (!isQoder && context.quotaBefore > 0) {
-            // Grok weekly % (CLI GetGrokCreditsConfig, limit 0–100): server is
-            // source of truth — do not debit tokens onto a percent scale.
-            const skipGrokWeeklyDebit =
-              context.provider === "grok" &&
-              Number(context.quotaLimit ?? 0) > 0 &&
-              Number(context.quotaLimit) <= 100;
-            if (!skipGrokWeeklyDebit) {
+            // Upstream-owned windows (Grok weekly %, CommandCode 5h/weekly USD):
+            // do not debit token×rate onto remaining — refresh after request.
+            if (!shouldSkipLocalQuotaDebit(context.provider, context.quotaLimit)) {
               quotaAfter = await pool.decrementQuota(context.accountId, creditsUsed);
               // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when
               // spent — but confirm ledger-zero against upstream before parking
@@ -1206,11 +1203,8 @@ export async function handleChatCompletion(
         // Qoder /activity bucket charges 1 request per call regardless of token count.
         quotaAfter = await pool.decrementFreeQuota(account.id, 1);
       } else if (!isQoder && quotaBefore > 0) {
-        const skipGrokWeeklyDebit =
-          provider === "grok" &&
-          Number(account.quotaLimit ?? 0) > 0 &&
-          Number(account.quotaLimit) <= 100;
-        if (!skipGrokWeeklyDebit) {
+        // Upstream-owned windows (Grok weekly %, CommandCode 5h/weekly USD).
+        if (!shouldSkipLocalQuotaDebit(provider, account.quotaLimit)) {
           quotaAfter = await pool.decrementQuota(account.id, creditsUsed);
           // Absolute budgets (e.g. Grok free Build ~2M tokens): exclude when
           // spent — confirmed against upstream inside confirmLedgerExhaustion.

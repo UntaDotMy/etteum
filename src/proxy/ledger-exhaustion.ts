@@ -69,6 +69,9 @@ export async function confirmLedgerExhaustion(
   accountId: number,
 ): Promise<void> {
   if (!accountId || accountId <= 0) return;
+  // CommandCode: never park on local ledger zero. Token×rate is not USD-window
+  // scale; /alpha/billing/credits (refresh + warmup) owns remaining/status.
+  if (providerName === "commandcode") return;
   // Only Grok has a cheap authoritative credit probe today; every other
   // provider keeps the legacy park-on-zero behavior.
   if (providerName !== "grok") {

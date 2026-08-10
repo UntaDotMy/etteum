@@ -5,6 +5,7 @@ import type { Account } from "../db/schema";
 import { broadcast } from "../ws/index";
 import { config } from "../config";
 import { getProviderForModel, type ProviderName } from "./providers/registry";
+import { ignoresLocalRemainingForDispatch } from "./quota-debit-policy";
 
 export type { ProviderName };
 
@@ -28,6 +29,9 @@ export interface AccountSelectOptions {
  * limit<=0 or non-finite remaining → treat as unknown budget (still eligible).
  */
 export function isAccountEligibleForDispatch(account: Account): boolean {
+  // CommandCode (and any other upstream-window provider): local remaining is
+  // advisory — a stale 0 from historical over-debit must not block the key.
+  if (ignoresLocalRemainingForDispatch(account.provider)) return true;
   const limit = Number(account.quotaLimit);
   const remaining = Number(account.quotaRemaining);
   if (Number.isFinite(limit) && limit > 0 && Number.isFinite(remaining) && remaining <= 0) {

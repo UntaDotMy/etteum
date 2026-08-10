@@ -65,10 +65,25 @@ describe("computeStatus", () => {
   test("updateAvailable reflects only commits pullable from origin (behind>0)", () => {
     // Plain hash-difference was wrong: when LOCAL is ahead of origin
     // (unpushed commits) the hashes differ but nothing is pullable.
+    // Compare against the same default remote branch computeStatus uses
+    // (origin/HEAD → master/main) — NOT the current work branch. PR CI is
+    // often on a feature branch or detached HEAD; using HEAD's branch name
+    // made this assertion disagree with the implementation.
     const s = computeStatus(true);
     if (s.currentCommit && s.latestCommit) {
-      const branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).out;
-      const behind = Number(git(["rev-list", "--count", `HEAD..origin/${branch}`]).out) || 0;
+      const headRef = git(["symbolic-ref", "--quiet", "refs/remotes/origin/HEAD"]);
+      let base = "master";
+      if (headRef.ok && headRef.out.startsWith("refs/remotes/origin/")) {
+        base = headRef.out.slice("refs/remotes/origin/".length);
+      } else {
+        for (const cand of ["master", "main"] as const) {
+          if (git(["rev-parse", "--verify", `origin/${cand}`]).ok) {
+            base = cand;
+            break;
+          }
+        }
+      }
+      const behind = Number(git(["rev-list", "--count", `HEAD..origin/${base}`]).out) || 0;
       expect(s.updateAvailable).toBe(behind > 0);
     }
   });
