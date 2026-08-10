@@ -43,14 +43,16 @@ function fetchBranch(): string {
     _fetchBranch = r.out.slice("refs/remotes/origin/".length);
     return _fetchBranch;
   }
-  // origin/HEAD unset — fall back to whichever remote branch actually exists.
-  for (const cand of ["main", "master"]) {
+  // origin/HEAD unset — prefer master (this repo's default) then main.
+  // Preferring main first was wrong when both refs exist: a stale origin/main
+  // made every checkout report a bogus "update available".
+  for (const cand of ["master", "main"]) {
     if (git(["rev-parse", "--verify", `origin/${cand}`]).ok) {
       _fetchBranch = cand;
       return _fetchBranch;
     }
   }
-  _fetchBranch = "main"; // last resort; matches the historical default
+  _fetchBranch = "master";
   return _fetchBranch;
 }
 
