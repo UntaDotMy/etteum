@@ -287,11 +287,18 @@ function mapModelRows(rows: Array<{ id?: string; owned_by?: string; thinking?: b
       // Prefer the catalog's owned_by (e.g. "commandcode") when present;
       // otherwise derive from the id prefix (legacy path).
       const ownedBy = typeof m === "object" && typeof m.owned_by === "string" ? m.owned_by : "";
-      const thinking = typeof m === "object" && typeof m.thinking === "boolean" ? m.thinking : undefined;
+      let thinking = typeof m === "object" && typeof m.thinking === "boolean" ? m.thinking : undefined;
+      // Grok 4.x always reasons (xAI: cannot disable). Catalog/live lists sometimes
+      // omit `thinking: true` — still enable the effort selector + reasoning_effort.
+      if (thinking !== true && (ownedBy === "grok" || /^grok-4/i.test(id) || /composer-2\.5/i.test(id))) {
+        thinking = true;
+      }
       const effortLevels =
         typeof m === "object" && Array.isArray(m.effort_levels) && m.effort_levels.length > 0
           ? m.effort_levels.filter((x): x is string => typeof x === "string")
-          : undefined;
+          : thinking
+            ? ["low", "medium", "high"]
+            : undefined;
       const prefix = ownedBy
         ? ownedBy
         : id.includes("-")
@@ -907,10 +914,14 @@ export default function Chat() {
       const finalContent = (result.content ?? latestText) || "";
       const finalThinking = (result.thinking ?? latestThinking) || undefined;
       // Some Grok/reasoning streams fill reasoning only — still show something useful.
-      const displayContent = finalContent.trim()
+      // Prefer keeping reasoning in the Thinking panel when both exist; if the
+      // stream had only reasoning, surface it as content too so the bubble is not empty.
+      const hasContent = Boolean(finalContent.trim());
+      const hasThinking = Boolean(finalThinking?.trim());
+      const displayContent = hasContent
         ? finalContent
-        : finalThinking
-          ? finalThinking
+        : hasThinking
+          ? finalThinking!
           : "(empty response)";
       const media = extractMediaUrlsFromText(displayContent);
       updateConversation(conv.id, (c) => ({
@@ -920,7 +931,9 @@ export default function Chat() {
           {
             role: "assistant",
             content: displayContent,
-            ...(finalThinking && finalContent.trim() ? { thinking: finalThinking } : {}),
+            // Always persist thinking when we got a separate reasoning stream —
+            // including the reasoning-only case (still show ThinkingBlock).
+            ...(hasThinking ? { thinking: finalThinking } : {}),
             ...(media.length ? { media } : {}),
             id: generateId(),
             model,

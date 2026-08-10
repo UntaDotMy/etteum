@@ -286,13 +286,14 @@ const GROK_CREATED = 1_718_000_000;
 // creditRate 1 → creditsUsed = totalTokens so pool.decrementQuota tracks the
 // real remaining budget (the default 1/1000 left accounts almost full forever).
 const GROK_MODELS: ModelInfo[] = [
-  { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
-  { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  // effort_levels: Chat dashboard reasoning selector (low/medium/high).
+  { id: "grok-4.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, effort_levels: ["low", "medium", "high"], creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  { id: "grok-4.5-reasoning", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 500_000, max_output: 65_536, thinking: true, vision: true, effort_levels: ["low", "medium", "high"], creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Context 200k from Cursor model docs; vision not advertised for this SKU.
-  { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  { id: "composer-2.5", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, effort_levels: ["low", "medium", "high"], creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Composer 2.5 Fast — live probe: cli-chat-proxy accepts id "grok-composer-2.5-fast"
   // (not "composer-2.5-fast" / "groq-…"). Free-tier often 402 subscription; SuperGrok OK.
-  { id: "grok-composer-2.5-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, creditUnit: "token", creditRate: 1, creditSource: "estimated" },
+  { id: "grok-composer-2.5-fast", object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 200_000, max_output: 65_536, thinking: true, vision: false, effort_levels: ["low", "medium", "high"], creditUnit: "token", creditRate: 1, creditSource: "estimated" },
   // Image Studio / Chat media — tool-based gen on grok-4.5 Responses surface.
   { id: GROK_IMAGE_MODEL, object: "model", created: GROK_CREATED, owned_by: "grok", context_window: 1_024, max_output: 0, thinking: false, vision: false, creditUnit: "image", creditRate: 1, creditSource: "fixed" },
 ];
@@ -368,6 +369,13 @@ export class GrokProvider extends BaseProvider {
         const info = raw as Record<string, unknown>;
         if (info?.supported_in_api === false || info?.hidden === true) continue;
         const base = curated.get(id);
+        const thinking =
+          info?.supports_reasoning_effort === true ||
+          base?.thinking === true ||
+          // Free Build catalog often omits supports_reasoning_effort for grok-4.5
+          // even though reasoning is always-on (cannot disable per xAI docs).
+          /^grok-4/i.test(id) ||
+          /composer/i.test(id);
         merged.set(id, {
           id,
           object: "model",
@@ -375,8 +383,9 @@ export class GrokProvider extends BaseProvider {
           owned_by: "grok",
           context_window: Number(info?.context_window) || base?.context_window || 131_072,
           max_output: base?.max_output ?? 65_536,
-          thinking: info?.supports_reasoning_effort === true || base?.thinking === true,
+          thinking,
           vision: base?.vision ?? false,
+          effort_levels: base?.effort_levels ?? (thinking ? ["low", "medium", "high"] : undefined),
           creditUnit: "token",
           creditRate: 1,
           creditSource: "estimated",

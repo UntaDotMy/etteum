@@ -195,4 +195,86 @@ describe("cli-proxy wire (CLI 0.2.106 parity)", () => {
     }
     expect(text).toContain("computed 17*23=391");
   });
+
+  test("output_item.done reasoning summary is surfaced mid-stream (Codex-style path)", async () => {
+    const sse =
+      `event: response.output_item.done\ndata: ${JSON.stringify({
+        type: "response.output_item.done",
+        output_index: 0,
+        item: {
+          type: "reasoning",
+          id: "rs_1",
+          summary: [{ type: "summary_text", text: "I should calculate then answer." }],
+        },
+      })}\n\n` +
+      `event: response.output_text.delta\ndata: {"type":"response.output_text.delta","delta":"391"}\n\n` +
+      `event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse));
+        c.close();
+      },
+    });
+    const out = responsesSseToChatCompletionStream(upstream, {
+      id: "x",
+      created: 1,
+      model: "grok-4.5",
+    });
+    const reader = out.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value);
+    }
+    expect(text).toContain("reasoning_content");
+    expect(text).toContain("I should calculate then answer.");
+    expect(text).toContain('"content":"391"');
+  });
+
+  test("reasoning_summary_text.done fills in when deltas never arrived", async () => {
+    const sse =
+      `event: response.reasoning_summary_text.done\ndata: ${JSON.stringify({
+        type: "response.reasoning_summary_text.done",
+        output_index: 0,
+        text: "full summary without deltas",
+      })}\n\n` +
+      `event: response.completed\ndata: {"type":"response.completed","response":{"usage":{"input_tokens":1,"output_tokens":1,"total_tokens":2}}}\n\n`;
+    const upstream = new ReadableStream<Uint8Array>({
+      start(c) {
+        c.enqueue(new TextEncoder().encode(sse));
+        c.close();
+      },
+    });
+    const out = responsesSseToChatCompletionStream(upstream, {
+      id: "x",
+      created: 1,
+      model: "grok-4.5",
+    });
+    const reader = out.getReader();
+    const dec = new TextDecoder();
+    let text = "";
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      text += dec.decode(value);
+    }
+    expect(text).toContain("full summary without deltas");
+  });
+
+  test("chatToCliResponsesBody always requests summary:auto for default high effort", () => {
+    const body = chatToCliResponsesBody(
+      {
+        model: "grok-4.5",
+        messages: [{ role: "user", content: "hi" }],
+        stream: true,
+      },
+      "grok-4.5",
+      { stream: true },
+    );
+    // No client effort → still force high + summary so the stream is visible.
+    expect(body.reasoning_effort).toBe("high");
+    expect(body.reasoning).toEqual({ effort: "high", summary: "auto" });
+  });
 });
