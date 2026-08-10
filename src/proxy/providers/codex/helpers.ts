@@ -207,20 +207,32 @@ export function parseCodexUsage(data: any): CodexUsage {
 }
 
 // Model map: proxy-facing `codex-*` ids → real Codex backend slugs.
-// Fetched live 2026-07-03 from https://chatgpt.com/backend-api/codex/models
-// ?client_version=1.0.18 (the same endpoint the Codex CLI uses). The backend
-// currently exposes exactly FOUR slugs: gpt-5.5, gpt-5.4, gpt-5.4-mini,
-// codex-auto-review — all 272k context, all vision-capable, all supporting
-// reasoning levels low/medium/high/xhigh. Older slugs (gpt-5.3-codex, gpt-5.2,
-// gpt-5.5-xhigh as a *model*) no longer exist and 400 on ChatGPT accounts.
+// Source of truth for *curated* ids: learn.chatgpt.com/docs/models (Codex,
+// ChatGPT sign-in) as of 2026-08. Live GET /backend-api/codex/models can add
+// more; refreshModelsCache registers those dynamically via liveUpstreamMap.
 //
-// Note: "xhigh" is a REASONING LEVEL on gpt-5.5, not a separate model. Clients
-// that send `gpt-5.5-xhigh` are aliased to gpt-5.5 (the proxy sets reasoning
-// effort via the request, not the model name).
+// Current recommended family (CLI: `codex -m gpt-5.6-sol|terra|luna`):
+//   gpt-5.6-sol   — flagship (default for codex-auto / gpt-5.6)
+//   gpt-5.6-terra — balanced everyday (replaces most gpt-5.5 workflows)
+//   gpt-5.6-luna  — fast/cheap (replacement path for gpt-5.4-mini)
+// Still available until retirement: gpt-5.5, gpt-5.4, gpt-5.4-mini
+// (gpt-5.4 / gpt-5.4-mini retire 2026-08-31 for ChatGPT sign-in).
+//
+// Note: "xhigh" / "max" are REASONING LEVELS, not separate models. Clients that
+// send `gpt-5.5-xhigh` are aliased to the base slug; effort is set on the body.
 export const codexModelMap: Record<string, string> = {
-  // Default fallback — newest frontier model, verified working on ChatGPT accounts.
-  "codex-auto": "gpt-5.5",
-  // Real models (live-fetched).
+  // Default — official recommended model for Codex with ChatGPT sign-in.
+  "codex-auto": "gpt-5.6-sol",
+  // GPT-5.6 family (primary).
+  "codex-gpt-5.6-sol": "gpt-5.6-sol",
+  "gpt-5.6-sol": "gpt-5.6-sol",
+  "codex-gpt-5.6": "gpt-5.6-sol",
+  "gpt-5.6": "gpt-5.6-sol",
+  "codex-gpt-5.6-terra": "gpt-5.6-terra",
+  "gpt-5.6-terra": "gpt-5.6-terra",
+  "codex-gpt-5.6-luna": "gpt-5.6-luna",
+  "gpt-5.6-luna": "gpt-5.6-luna",
+  // Previous frontier (still listed on Codex models page).
   "codex-gpt-5.5": "gpt-5.5",
   "gpt-5.5": "gpt-5.5",
   "codex-gpt-5.4": "gpt-5.4",
@@ -228,16 +240,18 @@ export const codexModelMap: Record<string, string> = {
   "codex-gpt-5.4-mini": "gpt-5.4-mini",
   "gpt-5.4-mini": "gpt-5.4-mini",
   "codex-auto-review": "codex-auto-review",
-  // Legacy aliases — these slugs no longer exist upstream; remap to gpt-5.5 so
-  // old configs/clients keep working instead of 400ing.
+  // Research preview / niche.
+  "codex-gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
+  "gpt-5.3-codex-spark": "gpt-5.3-codex-spark",
+  // Legacy aliases — remapped so old configs do not 400 on retired slugs.
   "codex-gpt-5.5-xhigh": "gpt-5.5",
   "gpt-5.5-xhigh": "gpt-5.5",
-  "codex-gpt-5.3": "gpt-5.5",
-  "codex-gpt-5.3-codex": "gpt-5.5",
-  "gpt-5.3-codex": "gpt-5.5",
-  "codex-gpt-5.2": "gpt-5.5",
-  "gpt-5.2": "gpt-5.5",
-  "gpt-5-codex": "gpt-5.5",
+  "codex-gpt-5.3": "gpt-5.6-sol",
+  "codex-gpt-5.3-codex": "gpt-5.6-sol",
+  "gpt-5.3-codex": "gpt-5.6-sol",
+  "codex-gpt-5.2": "gpt-5.6-sol",
+  "gpt-5.2": "gpt-5.6-sol",
+  "gpt-5-codex": "gpt-5.6-sol",
 };
 
 export interface PendingToolCall {

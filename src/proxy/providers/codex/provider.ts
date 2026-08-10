@@ -42,29 +42,39 @@ export class CodexProvider extends BaseProvider {
 
   override ownsModel(model: string): boolean {
     const m = model.toLowerCase();
-    if (m.startsWith("codex-") || m === "gpt-5-codex" || m === "gpt-5.5-xhigh") return true;
+    if (
+      m.startsWith("codex-") ||
+      m === "gpt-5-codex" ||
+      m === "gpt-5.5-xhigh" ||
+      m.startsWith("gpt-5.6") ||
+      m.startsWith("gpt-5.5") ||
+      m.startsWith("gpt-5.4")
+    ) {
+      return true;
+    }
     // Live-discovered catalog ids (auto-fetched from /codex/models).
     if (this.liveModelIds.has(m)) return true;
+    if (this.liveUpstreamMap[m]) return true;
     return false;
   }
 
-  // Supported models — matches the live-fetched Codex backend (2026-07-03).
-  // 4 real slugs, all 272k context, vision-capable, reasoning low/med/high/xhigh.
-  // context_window verified upstream (was wrongly 200000 before).
+  // Curated catalog — GPT-5.6 Sol/Terra/Luna (learn.chatgpt.com/docs/models,
+  // 2026-08) plus still-supported 5.5/5.4 until retirement. Codex ChatGPT
+  // context is lower than the API-tier model-specs values; we pin 400k.
   supportedModels: ModelInfo[] = applyModelSpecs([
-    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
-    { id: "codex-gpt-5.4-mini", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.005 / 1000, creditSource: "estimated" },
-    { id: "codex-auto-review", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
-    // Legacy alias kept so existing configs referencing it still resolve via
-    // codexModelMap (→ gpt-5.5). Not advertised as a distinct model.
-    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 272000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
-  ], (m) => {
-    // Return undefined so applyModelSpecs does NOT override our verified
-    // 272k Codex context with the model-specs registry's API-tier value
-    // (gpt-5.5 there is 1M — that's the OpenAI API limit, not the Codex/
-    // ChatGPT-account limit, which is 272k per the live /codex/models fetch).
+    { id: "codex-auto", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.6-sol", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.015 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.6-terra", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.6-luna", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.004 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.5", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.4", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    { id: "codex-gpt-5.4-mini", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.005 / 1000, creditSource: "estimated" },
+    { id: "codex-auto-review", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.01 / 1000, creditSource: "estimated" },
+    // Legacy alias — resolves via codexModelMap; kept for old client configs.
+    { id: "codex-gpt-5.5-xhigh", object: "model", created: Date.now(), owned_by: "codex", context_window: 400000, max_output: 64000, thinking: true, vision: true, creditUnit: "credit", creditRate: 0.012 / 1000, creditSource: "estimated" },
+  ], (_m) => {
+    // Keep Codex ChatGPT context (400k) — do not adopt API-tier 1M from
+    // model-specs (that is the OpenAI Platform limit, not Codex OAuth).
     return undefined;
   });
 
@@ -76,6 +86,8 @@ export class CodexProvider extends BaseProvider {
    */
   private liveModels: ModelInfo[] = [];
   private liveModelIds = new Set<string>();
+  /** Live-only proxy id / bare slug → upstream slug for resolveModel. */
+  private liveUpstreamMap: Record<string, string> = {};
   private catalogFetchedAt = 0;
   private static readonly CATALOG_TTL_MS = 30 * 60 * 1000; // 30 min — new models appear fast
 
@@ -129,20 +141,37 @@ export class CodexProvider extends BaseProvider {
         else if (json.models && typeof json.models === "object") for (const k of Object.keys(json.models)) push(k);
         if (ids.length === 0) continue;
 
-        // Merge: curated first (wins on conflict), then live-only ids.
+        // Merge: curated first (wins on conflict), then live-only ids as
+        // `codex-<upstream>` so Chat/UI always sees the proxy prefix. Also
+        // register bare upstream slugs for ownsModel + resolveModel so a
+        // client that sends `gpt-5.6-sol` still routes correctly.
         const merged = new Map<string, ModelInfo>(this.supportedModels.map((m) => [m.id, m]));
-        for (const id of ids) {
-          if (merged.has(id)) continue; // curated wins
-          const spec = resolveModelSpec(id);
-          merged.set(id, {
-            id,
+        const liveIds = new Set<string>();
+        const liveMap: Record<string, string> = {};
+        for (const rawId of ids) {
+          const upstream = rawId.replace(/^codex-/i, "");
+          if (!upstream) continue;
+          const proxyId = `codex-${upstream}`;
+          liveIds.add(upstream.toLowerCase());
+          liveIds.add(proxyId.toLowerCase());
+          liveMap[proxyId.toLowerCase()] = upstream;
+          liveMap[upstream.toLowerCase()] = upstream;
+
+          if (merged.has(proxyId)) continue; // curated wins
+          // Skip bare duplicates when curated already owns the proxy form.
+          if (this.supportedModels.some((m) => codexModelMap[m.id] === upstream)) continue;
+
+          const spec = resolveModelSpec(upstream);
+          merged.set(proxyId, {
+            id: proxyId,
             object: "model",
             created: Math.floor(Date.now() / 1000),
             owned_by: "codex",
-            context_window: spec?.contextWindow ?? 0,
-            max_output: spec?.maxOutput ?? 0,
-            thinking: spec?.thinking ?? false,
-            vision: spec?.vision ?? false,
+            // Codex ChatGPT tier — do not advertise API 1M windows.
+            context_window: Math.min(spec?.contextWindow ?? 400_000, 400_000) || 400_000,
+            max_output: Math.min(spec?.maxOutput ?? 64_000, 64_000) || 64_000,
+            thinking: spec?.thinking ?? true,
+            vision: spec?.vision ?? true,
             creditUnit: "credit",
             creditRate: 0.012 / 1000,
             creditSource: "estimated",
@@ -150,7 +179,8 @@ export class CodexProvider extends BaseProvider {
         }
 
         this.liveModels = [...merged.values()];
-        this.liveModelIds = new Set(ids.map((s) => s.toLowerCase()));
+        this.liveModelIds = liveIds;
+        this.liveUpstreamMap = liveMap;
         this.catalogFetchedAt = Date.now();
         return;
       }
@@ -168,11 +198,25 @@ export class CodexProvider extends BaseProvider {
 
   override getModelInfo(model: string): ModelInfo | undefined {
     const normalized = model.toLowerCase();
-    // gpt-5.5-xhigh is an alias for codex-gpt-5.5 (xhigh is a reasoning level,
-    // not a separate model). codex-auto is the default → gpt-5.5.
-    if (normalized === "gpt-5.5-xhigh") return super.getModelInfo("codex-gpt-5.5");
-    if (normalized === "codex-auto") return super.getModelInfo("codex-gpt-5.5");
-    return super.getModelInfo(model);
+    // xhigh is a reasoning level, not a separate model.
+    if (normalized === "gpt-5.5-xhigh" || normalized === "codex-gpt-5.5-xhigh") {
+      return this.getModels().find((m) => m.id === "codex-gpt-5.5")
+        ?? this.supportedModels.find((m) => m.id === "codex-gpt-5.5");
+    }
+    // Default auto resolves to the current flagship entry for credit/UI metadata.
+    if (normalized === "codex-auto" || normalized === "gpt-5.6" || normalized === "codex-gpt-5.6") {
+      return this.getModels().find((m) => m.id === "codex-gpt-5.6-sol")
+        ?? this.supportedModels.find((m) => m.id === "codex-gpt-5.6-sol")
+        ?? this.supportedModels.find((m) => m.id === "codex-auto");
+    }
+    const fromLiveOrCurated = this.getModels().find((m) => m.id.toLowerCase() === normalized);
+    if (fromLiveOrCurated) return fromLiveOrCurated;
+    // Bare upstream slug → codex-prefixed catalog row.
+    if (!normalized.startsWith("codex-")) {
+      const prefixed = this.getModels().find((m) => m.id.toLowerCase() === `codex-${normalized}`);
+      if (prefixed) return prefixed;
+    }
+    return this.supportedModels.find((m) => m.id.toLowerCase() === normalized);
   }
 
   private getTokens(account: Account): CodexTokens | null {
@@ -214,7 +258,14 @@ export class CodexProvider extends BaseProvider {
     // qoder/codebuddy/youmind — otherwise dashboard renames never reach codex.
     const override = getUpstreamNameOverride(model);
     if (override) return override;
-    return codexModelMap[model.toLowerCase()] || model;
+    const key = model.toLowerCase();
+    // Curated map first, then live-discovered upstream slug, then strip
+    // codex- prefix. Never send `codex-*` upstream — ChatGPT returns 400.
+    return (
+      codexModelMap[key]
+      || this.liveUpstreamMap[key]
+      || (key.startsWith("codex-") ? key.slice("codex-".length) : key)
+    );
   }
 
   /**
@@ -302,8 +353,10 @@ export class CodexProvider extends BaseProvider {
 
   private normalizeReasoningEffort(effort: unknown): string | undefined {
     if (typeof effort !== "string") return undefined;
-    const normalized = effort.toLowerCase();
-    if (["minimal", "low", "medium", "high", "xhigh"].includes(normalized)) return normalized;
+    const normalized = effort.toLowerCase().replace(/[_\s]+/g, "");
+    // GPT-5.6 docs: low / medium / high / extra high / max (+ ultra is app-only).
+    if (normalized === "extrahigh" || normalized === "extra-high") return "xhigh";
+    if (["minimal", "low", "medium", "high", "xhigh", "max"].includes(normalized)) return normalized;
     return undefined;
   }
 

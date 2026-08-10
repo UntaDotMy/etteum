@@ -44,7 +44,8 @@ import type { Account } from "../../src/db/schema";
 
 // ── Harness ────────────────────────────────────────────────────────────────
 
-const CURATED_COUNT = 6; // codex-auto, codex-gpt-5.5, codex-gpt-5.4, codex-gpt-5.4-mini, codex-auto-review, codex-gpt-5.5-xhigh
+// codex-auto, 5.6-sol/terra/luna, 5.5, 5.4, 5.4-mini, auto-review, 5.5-xhigh
+const CURATED_COUNT = 9;
 
 function makeAccount(): Account {
   return {
@@ -100,15 +101,16 @@ describe("codex live catalog — getModels merge/dedupe", () => {
     const provider = new CodexProvider();
     const models = provider.getModels();
     expect(models.length).toBe(CURATED_COUNT);
+    expect(models.some((m) => m.id === "codex-gpt-5.6-sol")).toBe(true);
     expect(models.some((m) => m.id === "codex-gpt-5.5")).toBe(true);
     expect(models.some((m) => m.id === "codex-auto")).toBe(true);
   });
 
-  test("merges live ids after curated, deduped by id (curated wins)", async () => {
+  test("merges live ids after curated as codex-* prefix (curated wins)", async () => {
     mockAccounts = [makeAccount()];
-    // Upstream returns a slug that maps to a curated model plus brand-new ones.
+    // Upstream bare slug for a curated model + brand-new ones.
     const provider = new TestCodexProvider(() =>
-      modelsDataResponse(["gpt-5.5", "gpt-5.6", "gpt-5.6-mini"]),
+      modelsDataResponse(["gpt-5.5", "gpt-5.7", "gpt-5.7-mini"]),
     );
     await provider.refreshModelsCache(true);
 
@@ -116,23 +118,23 @@ describe("codex live catalog — getModels merge/dedupe", () => {
     const ids = models.map((m) => m.id);
     // Curated first
     expect(ids[0]).toBe("codex-auto");
-    // New live ids appended as-is
-    expect(ids).toContain("gpt-5.6");
-    expect(ids).toContain("gpt-5.6-mini");
-    // Total = curated + 2 new (gpt-5.5 is not a curated served id, so it is added too)
-    expect(models.length).toBe(CURATED_COUNT + 3);
-    // Dedupe: no id appears twice
+    // Live-only models stored with codex- prefix (never bare upstream in catalog)
+    expect(ids).toContain("codex-gpt-5.7");
+    expect(ids).toContain("codex-gpt-5.7-mini");
+    // gpt-5.5 is already covered by curated codex-gpt-5.5 — not duplicated
+    expect(ids.filter((i) => i === "codex-gpt-5.5").length).toBe(1);
+    expect(models.length).toBe(CURATED_COUNT + 2);
     expect(new Set(ids).size).toBe(ids.length);
   });
 
   test("does not duplicate a live id that exactly matches a curated served id", async () => {
     mockAccounts = [makeAccount()];
     // codex-auto is a curated served id; upstream listing it must not duplicate.
-    const provider = new TestCodexProvider(() => modelsDataResponse(["codex-auto", "gpt-5.6"]));
+    const provider = new TestCodexProvider(() => modelsDataResponse(["codex-auto", "gpt-5.7"]));
     await provider.refreshModelsCache(true);
     const ids = provider.getModels().map((m) => m.id);
     expect(ids.filter((i) => i === "codex-auto").length).toBe(1);
-    expect(ids).toContain("gpt-5.6");
+    expect(ids).toContain("codex-gpt-5.7");
     expect(provider.getModels().length).toBe(CURATED_COUNT + 1);
   });
 
@@ -140,50 +142,52 @@ describe("codex live catalog — getModels merge/dedupe", () => {
     mockAccounts = [makeAccount()];
     const provider = new TestCodexProvider(() => modelsListResponse(["gpt-5.7"]));
     await provider.refreshModelsCache(true);
-    expect(provider.getModels().some((m) => m.id === "gpt-5.7")).toBe(true);
+    expect(provider.getModels().some((m) => m.id === "codex-gpt-5.7")).toBe(true);
   });
 
-  test("curated spec is preserved on conflict (verified 272k context kept)", async () => {
+  test("curated spec is preserved on conflict (verified 400k context kept)", async () => {
     mockAccounts = [makeAccount()];
-    // gpt-5.5 maps (via codexModelMap) onto curated codex-gpt-5.5; even if the
-    // upstream lists a slug that collides with a curated id, curated wins.
+    // Upstream listing codex-gpt-5.5 must not overwrite curated context_window.
     const provider = new TestCodexProvider(() => modelsDataResponse(["codex-gpt-5.5"]));
     await provider.refreshModelsCache(true);
     const info = provider.getModels().find((m) => m.id === "codex-gpt-5.5");
-    expect(info?.context_window).toBe(272000);
+    expect(info?.context_window).toBe(400000);
     expect(info?.thinking).toBe(true);
   });
 
-  test("live-only discovered model uses resolveModelSpec defaults (0/false when unknown)", async () => {
+  test("live-only discovered model is catalogued as codex-* with safe defaults", async () => {
     mockAccounts = [makeAccount()];
     const provider = new TestCodexProvider(() => modelsDataResponse(["totally-unknown-model-xyz"]));
     await provider.refreshModelsCache(true);
-    const info = provider.getModels().find((m) => m.id === "totally-unknown-model-xyz");
+    const info = provider.getModels().find((m) => m.id === "codex-totally-unknown-model-xyz");
     expect(info).toBeDefined();
-    expect(info?.context_window).toBe(0);
-    expect(info?.thinking).toBe(false);
+    expect(info?.context_window).toBe(400000);
+    expect(info?.thinking).toBe(true);
   });
 });
 
 describe("codex live catalog — ownsModel", () => {
   test("preserves curated prefix + special-name ownership without any fetch", () => {
     const provider = new CodexProvider();
+    expect(provider.ownsModel("codex-gpt-5.6-sol")).toBe(true);
     expect(provider.ownsModel("codex-gpt-5.5")).toBe(true);
     expect(provider.ownsModel("codex-anything")).toBe(true); // codex- prefix
     expect(provider.ownsModel("gpt-5-codex")).toBe(true);
     expect(provider.ownsModel("gpt-5.5-xhigh")).toBe(true);
+    expect(provider.ownsModel("gpt-5.6-sol")).toBe(true); // bare 5.6 family
     expect(provider.ownsModel("grok-4")).toBe(false);
   });
 
   test("owns a bare live-only id after refresh (no codex- prefix)", async () => {
     mockAccounts = [makeAccount()];
-    const provider = new TestCodexProvider(() => modelsDataResponse(["gpt-5.6"]));
-    // Before refresh, a bare non-codex slug is not owned.
-    expect(provider.ownsModel("gpt-5.6")).toBe(false);
+    const provider = new TestCodexProvider(() => modelsDataResponse(["gpt-5.7-experimental"]));
+    // Before refresh, an unknown bare slug is not owned.
+    expect(provider.ownsModel("gpt-5.7-experimental")).toBe(false);
     await provider.refreshModelsCache(true);
-    expect(provider.ownsModel("gpt-5.6")).toBe(true);
+    expect(provider.ownsModel("gpt-5.7-experimental")).toBe(true);
+    expect(provider.ownsModel("codex-gpt-5.7-experimental")).toBe(true);
     // Case-insensitive
-    expect(provider.ownsModel("GPT-5.6")).toBe(true);
+    expect(provider.ownsModel("GPT-5.7-EXPERIMENTAL")).toBe(true);
   });
 });
 

@@ -190,7 +190,7 @@ describe("toCanonicalModelName — strip provider aliases", () => {
     expect(toCanonicalModelName("kp-opus-4.8")).toBe("claude-opus-4.8");
     expect(toCanonicalModelName("kp-sonnet-4.6")).toBe("claude-sonnet-4.6");
     // kp-auto is a router, not claude-auto
-    expect(toCanonicalModelName("kp-auto")).toBe("gpt-5.5");
+    expect(toCanonicalModelName("kp-auto")).toBe("gpt-5.6-sol");
   });
   test("lowercases and maps Qoder display names", () => {
     expect(toCanonicalModelName("qd-Qwen3.7-Max")).toBe("qwen3.7-max");
