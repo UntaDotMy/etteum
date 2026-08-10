@@ -84,3 +84,29 @@ describe("alibaba free-quota error classification (mirror of isFreeQuotaExhauste
     expect(isFreeQuotaExhaustedError("")).toBe(false);
   });
 });
+
+describe("alibaba arrearage classification (mirror of isArrearageError)", () => {
+  function isArrearageError(errText: string): boolean {
+    const t = (errText || "").toLowerCase();
+    return (
+      t.includes("arrearage") ||
+      t.includes("overdue-payment") ||
+      t.includes("overdue payment") ||
+      (t.includes("good standing") && (t.includes("access denied") || t.includes("accessdenied"))) ||
+      (t.includes("access denied") && t.includes("account is in good standing"))
+    );
+  }
+
+  test("matches DashScope overdue-payment / Arrearage body", () => {
+    const body =
+      'Access denied, please make sure your account is in good standing. For details, see: https://www.alibabacloud.com/help/en/model-studio/error-code#overdue-payment","type":"Arrearage';
+    expect(isArrearageError(body)).toBe(true);
+    expect(isArrearageError('{"type":"Arrearage","code":"Arrearage"}')).toBe(true);
+  });
+
+  test("does not misclassify free-quota or Unpurchased as arrearage", () => {
+    expect(isArrearageError("AccessDenied.Unpurchased")).toBe(false);
+    expect(isArrearageError("Free quota has been exhausted")).toBe(false);
+    expect(isArrearageError("account restricted")).toBe(false);
+  });
+});

@@ -663,6 +663,25 @@ export async function routeRequest(
         lastError = result.error || errText || "Account banned or restricted";
         allRateLimited = false;
         sawOtherFailure = true;
+        // Alibaba arrearage / standing bans are account-level but common in a
+        // large free-key fleet. Counting them against the ~3 accountAttempts
+        // budget fails the request while healthy peers never get tried. Free-
+        // hop under the same scaled budget + alibaba walk wall-clock as
+        // Unpurchased / free-quota drains.
+        if (providerName === "alibaba" && !isStaticAccount) {
+          if (!hopBudgetResolved) {
+            hopBudgetResolved = true;
+            try {
+              const dep = await pool.getPoolDepletion(providerName);
+              exhaustionHopBudget = resolveExhaustionHopBudget(MAX_EXHAUSTION_HOPS, dep.enabled);
+            } catch { /* keep env budget */ }
+          }
+          exhaustionHops++;
+          if (exhaustionHops >= exhaustionHopBudget || Date.now() >= alibabaModelWalkDeadline) {
+            break;
+          }
+          continue;
+        }
         attempt++;
         continue; // Try next account (excluded via attemptedAccountIds)
       }
