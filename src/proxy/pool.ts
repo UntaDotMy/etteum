@@ -357,6 +357,8 @@ class AccountPool {
       // active for other models and revive when warmup re-probes them
       // healthy (the probe resets the ledger entry to the live cap).
       // Un-probed accounts (no ledger entry) stay dispatchable — tier 1.
+      // Prefer probe-confirmed queryableModels (tier 0) so we do not burn the
+      // walk budget on keys that only have a quotas-API ghost remaining.
       const ranked = activeAccounts
         .filter((account) => {
           const quota = (
@@ -370,9 +372,16 @@ class AccountPool {
             modelQuotas?: Record<string, { remaining: number }>;
           } | null;
           const probed = tokens?.queryableModels?.includes(upstreamModel) ?? false;
-          // tier 0 = probe-confirmed (and funded after the drain filter),
-          // 1 = un-probed/unknown
-          const tier = probed ? 0 : 1;
+          const hasPositive =
+            Number(tokens?.modelQuotas?.[upstreamModel]?.remaining) > 0;
+          // tier 0 = probe-confirmed + funded
+          // tier 1 = probe-confirmed without a remaining counter (paid unlimited)
+          // tier 2 = un-probed with positive quotas-API remaining
+          // tier 3 = un-probed unknown
+          let tier = 3;
+          if (probed && hasPositive) tier = 0;
+          else if (probed) tier = 1;
+          else if (hasPositive) tier = 2;
           return { account, index, tier };
         })
         .sort((a, b) => a.tier - b.tier || a.index - b.index)

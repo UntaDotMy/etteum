@@ -53,6 +53,17 @@ const EXHAUSTION_WALK_MS = Math.max(
   1_000,
   Number(process.env.POOLPROX_EXHAUSTION_WALK_MS) || 6_000,
 );
+/**
+ * Alibaba free-hop walk (Unpurchased / per-model free-quota drain). Live probes
+ * show each DashScope 403 hop can take ~2–6s; the generic 6s exhaustion deadline
+ * ended after ONE hop and reported "not activated on any account" while peers
+ * with remaining free quota for that model were never tried. Bound by hop count
+ * (scaled to pool size) + this longer wall clock.
+ */
+const ALIBABA_MODEL_WALK_MS = Math.max(
+  EXHAUSTION_WALK_MS,
+  Number(process.env.POOLPROX_ALIBABA_WALK_MS) || 180_000,
+);
 /** Absolute cap on the scaled walk budget — the wall-clock deadline is the
  * real latency bound; this only stops a runaway DB from looping forever. */
 const EXHAUSTION_HOP_HARD_CAP = 5_000;
@@ -378,6 +389,8 @@ export async function routeRequest(
   let sawModelUnavailable = false;
   let earliestExhaustedReset: Date | null = null;
   const exhaustionWalkDeadline = Date.now() + EXHAUSTION_WALK_MS;
+  // Longer bound for alibaba per-model free hops (Unpurchased / free-quota).
+  const alibabaModelWalkDeadline = Date.now() + ALIBABA_MODEL_WALK_MS;
   // Hop budget: insurance against infinite loops, NOT the latency bound (the
   // wall-clock deadline owns that). Resolved lazily on the first exhaustion
   // hop so it scales to the real pool size — a flat 25 made a 1k-account
@@ -565,7 +578,11 @@ export async function routeRequest(
         }
         exhaustionHops++;
         if (isStaticAccount) attempt++;
-        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= exhaustionWalkDeadline) {
+        // Alibaba single-model free-quota drains use the longer walk bound —
+        // each hop is a real DashScope round-trip (often multi-second).
+        const walkDeadline =
+          providerName === "alibaba" ? alibabaModelWalkDeadline : exhaustionWalkDeadline;
+        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= walkDeadline) {
           break;
         }
         continue; // Try next account — exhausted accounts are excluded from selection
@@ -579,7 +596,9 @@ export async function routeRequest(
         sawModelUnavailable = true;
         pool.invalidate(providerName);
         lastError = errText || `Model not activated/purchased on this account`;
-        // Free hop: same budget mechanics as quota exhaustion.
+        // Free hop: hop budget scales to pool; wall clock uses the longer
+        // alibaba model walk (default 180s) so multi-second 403s don't stop
+        // after a single hop.
         if (!hopBudgetResolved) {
           hopBudgetResolved = true;
           try {
@@ -589,7 +608,7 @@ export async function routeRequest(
         }
         exhaustionHops++;
         if (isStaticAccount) attempt++;
-        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= exhaustionWalkDeadline) {
+        if (exhaustionHops >= exhaustionHopBudget || Date.now() >= alibabaModelWalkDeadline) {
           break;
         }
         continue;

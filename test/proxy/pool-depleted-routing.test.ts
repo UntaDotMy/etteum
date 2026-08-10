@@ -401,4 +401,24 @@ describe("alibaba getNextAccountForModel drops per-model drained accounts", () =
     expect((await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`))?.id).toBeUndefined();
     expect((await pool.getNextAccountForModel(ALI_PROVIDER, "ali-glm-5.2"))?.id).toBe(acct);
   });
+
+  it("prefers probe-confirmed + funded over quotas-API ghost remaining only", async () => {
+    // Ghost: quotas API says 1M left but warmup never proved the model works.
+    await insertAliRow("ghost@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1_000_000, remaining: 1_000_000, periodDays: 60, resetAt: null } },
+      queryableModels: [],
+      updatedAt: new Date().toISOString(),
+    });
+    const probed = await insertAliRow("probed@ali.test", {
+      modelQuotas: { [MODEL]: { limit: 1_000_000, remaining: 500_000, periodDays: 60, resetAt: null } },
+      queryableModels: [MODEL],
+      updatedAt: new Date().toISOString(),
+    });
+    pool.invalidate(ALI_PROVIDER);
+
+    for (let i = 0; i < 5; i++) {
+      const pick = await pool.getNextAccountForModel(ALI_PROVIDER, `ali-${MODEL}`);
+      expect(pick?.id).toBe(probed);
+    }
+  });
 });
